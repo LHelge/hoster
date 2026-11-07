@@ -1,16 +1,17 @@
 ---
 id: qq8
 title: "OCI registry client: token discovery and tag→digest resolution"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.339259844Z"
-updated: "2026-11-07T15:10:12.177492300Z"
+updated: "2026-11-07T23:20:45.280161461Z"
 tags:
   - registry
 depends_on:
   - p7a
   - rhq
 parent: "5ch"
+attempts: 1
 ---
 
 ## Summary

@@ -1,10 +1,10 @@
 ---
 id: wks
 title: "ProxyHttp implementation: routing, headers, strip_prefix, timeouts, streaming"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.241245548Z"
-updated: "2026-11-07T14:45:17.241245548Z"
+updated: "2026-11-07T23:20:19.660021013Z"
 tags:
   - proxy
 depends_on:
@@ -12,6 +12,7 @@ depends_on:
   - vhg
   - ngr
 parent: up4
+attempts: 1
 ---
 
 ## Summary
