@@ -81,3 +81,9 @@ interval = "5m"
 # The `aud` claim deploy webhook OIDC tokens must carry (ADR-0047).
 # Default: "https://<admin_host>".
 # audience = "https://hoster.example.com"
+
+[web]
+# The admin app listens on a 0600 Unix socket in state_dir (admin.sock) that the proxy forwards
+# the admin host to (ADR-0031). For local development only, serve it on a loopback TCP address
+# instead; it must be a loopback address.
+# dev_listen = "127.0.0.1:8080"

@@ -1,0 +1,66 @@
+/* hoster admin UI: a small hand-written stylesheet, no build step (ADR-0021). */
+:root {
+  --bg: #fafafa;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --accent: #0969da;
+  --info-bg: #ddf4ff;
+  --success-bg: #dafbe1;
+  --error-bg: #ffebe9;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --border: #3d444d;
+    --accent: #4493f8;
+    --info-bg: #0c2d6b;
+    --success-bg: #033a16;
+    --error-bg: #5d0f12;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+a { color: var(--accent); }
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+header .brand { font-weight: 600; color: var(--fg); text-decoration: none; }
+
+nav ul { display: flex; gap: 1rem; margin: 0; padding: 0; list-style: none; }
+nav a { text-decoration: none; }
+nav a[aria-current="page"] { font-weight: 600; color: var(--fg); }
+
+main { max-width: 64rem; margin: 0 auto; padding: 1rem; }
+
+#flash:empty { display: none; }
+.flash {
+  margin: 0 0 1rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.flash-info { background: var(--info-bg); }
+.flash-success { background: var(--success-bg); }
+.flash-error { background: var(--error-bg); }
+
+footer { padding: 1rem; color: var(--muted); font-size: 0.85em; text-align: center; }

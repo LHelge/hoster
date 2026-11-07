@@ -754,6 +754,7 @@ mod tests {
             proxy: Default::default(),
             poller: Default::default(),
             webhook: Default::default(),
+            web: Default::default(),
             credentials: Default::default(),
         }
     }

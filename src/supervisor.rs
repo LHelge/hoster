@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::store::Store;
+use crate::web::{Listen, WebApp, WebServer};
 
 /// One step of the startup sequence, in order (architecture §4 steps 1–9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,12 +377,14 @@ impl Supervisor {
     }
 }
 
-/// Everything the shutdown sequence stops: the root cancellation token and the proxy. Later
-/// tasks add the handles of the poller, the Axum app and the deploy tasks here.
+/// Everything the shutdown sequence stops: the root cancellation token, the Axum app and the
+/// proxy. Later tasks add the handles of the poller and the deploy tasks here.
 #[derive(Default)]
 struct Teardown {
     /// Root cancellation token; every orchestrator task gets a child of it (§3.3 #6).
     token: CancellationToken,
+    /// The admin app, started in phase 8.
+    web: Option<WebServer>,
     proxy: ProxyHandle,
 }
 
@@ -418,7 +421,11 @@ impl Teardown {
         match phase {
             // Cancelling the root token (done before the first phase) stops the poller and the
             // Axum app; the orchestrator refuses new commands once it is cancelled.
-            ShutdownPhase::StopIntake => Ok(()),
+            // A graceful stop lets in-flight admin requests finish.
+            ShutdownPhase::StopIntake => match self.web.as_mut() {
+                Some(web) => web.stop(mode == ShutdownMode::Graceful).await,
+                None => Ok(()),
+            },
             // Deploy tasks observe the token and stop at their next safe point (§5.4); in fast
             // mode they are not waited for.
             ShutdownPhase::SettleDeploys => Ok(()),
@@ -458,12 +465,14 @@ impl Startup for Supervisor {
                 self.runtime = Some(runtime);
                 Ok(())
             }
-            Phase::Certificates
-            | Phase::Reconcile
-            | Phase::RouteTable
-            | Phase::Proxy
-            | Phase::Services => {
+            Phase::Certificates | Phase::Reconcile | Phase::RouteTable | Phase::Proxy => {
                 tracing::info!(%phase, step = phase.number(), "not implemented yet, skipping");
+                Ok(())
+            }
+            Phase::Services => {
+                let listen = Listen::from(&self.config);
+                let web = WebApp::start(listen, self.teardown.token.child_token()).await?;
+                self.teardown.web = Some(web);
                 Ok(())
             }
             Phase::Ready => {

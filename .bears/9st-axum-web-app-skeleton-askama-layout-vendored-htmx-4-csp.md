@@ -1,10 +1,10 @@
 ---
 id: "9st"
 title: "Axum web app skeleton: Askama layout, vendored HTMX 4, CSP"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.218424594Z"
-updated: "2026-11-07T22:47:16.732090310Z"
+updated: "2026-11-07T22:57:51.527614642Z"
 tags:
   - web
 depends_on:

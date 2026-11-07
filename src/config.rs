@@ -18,7 +18,7 @@
 //! Every problem is reported with the offending key, all at once, as a [`ConfigError`].
 
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,8 @@ pub struct Config {
     pub poller: PollerConfig,
     #[serde(default)]
     pub webhook: WebhookConfig,
+    #[serde(default)]
+    pub web: WebConfig,
     /// Secret sources; never part of the file.
     #[serde(skip)]
     pub credentials: Credentials,
@@ -194,6 +196,15 @@ impl Default for PollerConfig {
 pub struct WebhookConfig {
     /// Expected OIDC `aud` claim; `https://<admin_host>` when unset.
     audience: Option<String>,
+}
+
+/// Admin web app settings (ADR-0021, ADR-0031).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WebConfig {
+    /// Serve the admin app on this loopback TCP address instead of the Unix socket in the state
+    /// directory. For local development only; must be a loopback address.
+    pub dev_listen: Option<SocketAddr>,
 }
 
 impl Config {
@@ -355,6 +366,14 @@ impl Config {
         {
             problems.push(Problem::new("webhook.audience", "must not be empty"));
         }
+        if let Some(addr) = self.web.dev_listen
+            && !addr.ip().is_loopback()
+        {
+            problems.push(Problem::new(
+                "web.dev_listen",
+                "must be a loopback address such as 127.0.0.1:8080 (development only)",
+            ));
+        }
         problems
     }
 }
@@ -384,6 +403,7 @@ impl EnvOverrides {
         "acme.contact",
         "acme.root_certificate",
         "webhook.audience",
+        "web.dev_listen",
     ];
 
     fn new() -> Self {
@@ -1094,6 +1114,27 @@ mod tests {
             let toml = format!("{MINIMAL}[webhook]\naudience = \"hoster-deploy\"\n");
             let config = load(jail, &toml).map_err(|e| e.to_string())?;
             assert_eq!(config.webhook_audience(), "hoster-deploy");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn web_dev_listen_must_be_loopback() {
+        Jail::expect_with(|jail| {
+            with_admin(jail);
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(config.web.dev_listen, None);
+
+            jail.set_env("HOSTER_WEB__DEV_LISTEN", "127.0.0.1:8080");
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(
+                config.web.dev_listen,
+                Some("127.0.0.1:8080".parse().unwrap())
+            );
+
+            jail.set_env("HOSTER_WEB__DEV_LISTEN", "0.0.0.0:8080");
+            let problems = invalid(load(jail, MINIMAL));
+            assert!(has_problem(&problems, "web.dev_listen"), "{problems:?}");
             Ok(())
         });
     }

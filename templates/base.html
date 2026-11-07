@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{% endblock %} · hoster</title>
+  <link rel="stylesheet" href="{{ layout.stylesheet() }}">
+  <script src="{{ layout.htmx() }}" defer></script>
+</head>
+<body>
+  <header>
+    <a class="brand" href="/">hoster</a>
+    <nav aria-label="Main">
+      <ul>
+        {%- for item in layout.nav() %}
+        <li><a href="{{ item.href }}"{% if item.current %} aria-current="page"{% endif %}>{{ item.label }}</a></li>
+        {%- endfor %}
+      </ul>
+    </nav>
+  </header>
+  <main>
+    <div id="flash" aria-live="polite">
+      {%- if let Some(flash) = layout.flash %}<p class="flash flash-{{ flash.kind }}" role="status">{{ flash.message }}</p>{% endif -%}
+    </div>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>hoster {{ layout.version() }}</footer>
+</body>
+</html>
