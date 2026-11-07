@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
+use super::upstream::UnixUpstream;
 use crate::config::Config;
 use crate::stack::{Host, Name, NormalizedPrefix, Stack};
 
@@ -39,20 +41,51 @@ impl fmt::Display for Owner {
 }
 
 /// Hosts no stack may claim, at any prefix (ADR-0031).
+///
+/// A reserved host may also carry the Unix socket hoster serves it from (the admin app);
+/// `RouteTable::build` then injects a `/` route to it. A host reserved without a socket is only
+/// kept out of the stacks' reach and is not routed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reserved {
-    hosts: BTreeMap<Host, &'static str>,
+    hosts: BTreeMap<Host, ReservedHost>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReservedHost {
+    purpose: &'static str,
+    upstream: Option<Arc<UnixUpstream>>,
 }
 
 impl Reserved {
-    /// Reserves `host` for `purpose`, e.g. "admin UI".
+    /// Reserves `host` for `purpose`, e.g. "admin UI", without routing it. Keeps a socket an
+    /// earlier [`with_unix_host`](Self::with_unix_host) gave the same host.
     pub fn with_host(mut self, host: Host, purpose: &'static str) -> Self {
-        self.hosts.insert(host, purpose);
+        let upstream = self.hosts.remove(&host).and_then(|h| h.upstream);
+        self.hosts.insert(host, ReservedHost { purpose, upstream });
+        self
+    }
+
+    /// Reserves `host` for `purpose` and routes every path on it to `upstream`.
+    pub fn with_unix_host(
+        mut self,
+        host: Host,
+        purpose: &'static str,
+        upstream: Arc<UnixUpstream>,
+    ) -> Self {
+        let upstream = Some(upstream);
+        self.hosts.insert(host, ReservedHost { purpose, upstream });
         self
     }
 
     fn owner(&self, host: &Host) -> Option<Owner> {
-        self.hosts.get(host).copied().map(Owner::Reserved)
+        self.hosts.get(host).map(|h| Owner::Reserved(h.purpose))
+    }
+
+    /// The reserved hosts served from a Unix socket, with their purpose.
+    pub(super) fn served(&self) -> impl Iterator<Item = (&Host, &'static str, &Arc<UnixUpstream>)> {
+        self.hosts
+            .iter()
+            .filter_map(|(host, h)| h.upstream.as_ref().map(|u| (host, h.purpose, u)))
     }
 }
 
