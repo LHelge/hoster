@@ -8,3 +8,6 @@
 # Local scratch
 *.swp
 .DS_Store
+
+# Per-slot build dirs used by parallel agent worktrees
+/target-*/
