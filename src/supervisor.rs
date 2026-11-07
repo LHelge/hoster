@@ -18,6 +18,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::store::Store;
 
 /// One step of the startup sequence, in order (architecture §4 steps 1–9).
@@ -319,6 +320,8 @@ pub struct Supervisor {
     config: Config,
     /// The state store, opened in startup step 2.
     store: Option<Store>,
+    /// The podman connection, made in startup step 4.
+    runtime: Option<PodmanRuntime>,
     teardown: Teardown,
 }
 
@@ -327,6 +330,7 @@ impl Supervisor {
         Supervisor {
             config,
             store: None,
+            runtime: None,
             teardown: Teardown::default(),
         }
     }
@@ -445,8 +449,16 @@ impl Startup for Supervisor {
                 self.store = Some(store);
                 Ok(())
             }
+            Phase::Podman => {
+                // Version negotiated and pinged; a missing socket fails fast, naming the path.
+                let socket = PodmanSocket::from_env(self.config.podman_socket.as_deref());
+                let runtime = PodmanRuntime::connect(&socket)
+                    .await
+                    .context("cannot connect to podman")?;
+                self.runtime = Some(runtime);
+                Ok(())
+            }
             Phase::Certificates
-            | Phase::Podman
             | Phase::Reconcile
             | Phase::RouteTable
             | Phase::Proxy

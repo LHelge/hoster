@@ -1,16 +1,17 @@
 ---
 id: g32
 title: Backup docs and `hoster backup db` snapshot command
-status: open
+status: in_progress
 priority: P3
 created: "2026-11-07T15:15:31.710389846Z"
-updated: "2026-11-07T15:15:31.710389846Z"
+updated: "2026-11-07T22:46:37.288762274Z"
 tags:
   - ops
   - docs
 depends_on:
   - h3a
 parent: ame
+attempts: 1
 ---
 
 ## Summary

@@ -21,6 +21,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::config::{Config, ConfigError, PortRange};
+use crate::runtime::PodmanSocket;
 
 /// First systemd release with user-scoped encrypted credentials (`systemd-creds --user`).
 const USER_CREDENTIALS_SYSTEMD: u32 = 256;
@@ -102,23 +103,12 @@ impl Doctor {
             uid,
             proc_sys: PathBuf::from("/proc/sys"),
             cgroup_root: PathBuf::from("/sys/fs/cgroup"),
-            sockets: Self::socket_candidates(runtime_dir.as_deref(), uid),
+            sockets: PodmanSocket::discover(runtime_dir.as_deref(), Some(uid))
+                .candidates()
+                .to_vec(),
             ports: PUBLIC_PORTS.to_vec(),
             commands: Box::new(commands),
         })
-    }
-
-    /// `$XDG_RUNTIME_DIR/podman/podman.sock`, then `/run/user/$UID/podman/podman.sock`
-    /// (bollard's order, docs/architecture.md §1.3), without duplicates.
-    fn socket_candidates(runtime_dir: Option<&Path>, uid: u32) -> Vec<PathBuf> {
-        let fallback = PathBuf::from(format!("/run/user/{uid}"));
-        let mut sockets: Vec<PathBuf> = runtime_dir
-            .into_iter()
-            .chain([fallback.as_path()])
-            .map(|dir| dir.join("podman").join("podman.sock"))
-            .collect();
-        sockets.dedup();
-        sockets
     }
 
     /// Runs every check. `config` is the result of loading the configuration; checks that need
@@ -133,7 +123,10 @@ impl Doctor {
                     "state_dir",
                     Self::with_config(config, |c| self.check_state_dir(&c.state_dir)),
                 ),
-                Check::required("podman_socket", self.check_podman_socket()),
+                Check::required(
+                    "podman_socket",
+                    self.check_podman_socket(config.ok().and_then(|c| c.podman_socket.as_deref())),
+                ),
                 Check::required("unprivileged_ports", self.check_unprivileged_port_start()),
                 Check::required("bind_ports", self.check_bind_ports()),
                 Check::required("linger", self.check_linger()),
@@ -233,15 +226,14 @@ impl Doctor {
         }
     }
 
-    /// The first podman socket that exists answers `GET /_ping` with 200.
-    fn check_podman_socket(&self) -> Outcome {
+    /// The first podman socket that exists answers `GET /_ping` with 200. `configured` is
+    /// `podman_socket` from hoster.toml; when set it is the only candidate, as for `hoster run`.
+    fn check_podman_socket(&self, configured: Option<&Path>) -> Outcome {
         let hint = "systemctl --user enable --now podman.socket (as the hoster user)";
-        let Some(socket) = self.sockets.iter().find(|s| s.exists()) else {
-            let tried: Vec<String> = self
-                .sockets
-                .iter()
-                .map(|s| s.display().to_string())
-                .collect();
+        let configured = configured.map(|path| vec![path.to_path_buf()]);
+        let sockets = configured.as_deref().unwrap_or(&self.sockets);
+        let Some(socket) = sockets.iter().find(|s| s.exists()) else {
+            let tried: Vec<String> = sockets.iter().map(|s| s.display().to_string()).collect();
             return Outcome::fail(format!("no socket at {}", tried.join(" or ")), hint);
         };
         match Ping::send(socket) {
@@ -756,6 +748,7 @@ mod tests {
             state_dir,
             admin_host: "hoster.example.com".parse().unwrap(),
             admin_github: "octocat".parse().unwrap(),
+            podman_socket: None,
             acme: Default::default(),
             upstream_ports: PortRange::try_from(ports).unwrap(),
             proxy: Default::default(),
@@ -782,25 +775,6 @@ mod tests {
         assert_eq!(status(fx.doctor.check_user()), "pass");
         fx.doctor.uid = 0;
         assert_eq!(status(fx.doctor.check_user()), "fail");
-    }
-
-    #[test]
-    fn socket_candidates_follow_bollard_order() {
-        let sockets = Doctor::socket_candidates(Some(Path::new("/run/user/1000")), 1000);
-        assert_eq!(
-            sockets,
-            [PathBuf::from("/run/user/1000/podman/podman.sock")]
-        );
-        let sockets = Doctor::socket_candidates(Some(Path::new("/tmp/rt")), 1000);
-        assert_eq!(
-            sockets,
-            [
-                PathBuf::from("/tmp/rt/podman/podman.sock"),
-                PathBuf::from("/run/user/1000/podman/podman.sock"),
-            ]
-        );
-        let sockets = Doctor::socket_candidates(None, 42);
-        assert_eq!(sockets, [PathBuf::from("/run/user/42/podman/podman.sock")]);
     }
 
     #[test]
@@ -850,13 +824,13 @@ mod tests {
     #[test]
     fn podman_socket_answers_ping() {
         let fx = Fixture::new();
-        let Outcome::Fail { detail, .. } = fx.doctor.check_podman_socket() else {
+        let Outcome::Fail { detail, .. } = fx.doctor.check_podman_socket(None) else {
             panic!("no socket must fail");
         };
         assert!(detail.contains("no socket at"));
 
         fx.podman(&fx.doctor.sockets[0], OK_PING);
-        assert_eq!(status(fx.doctor.check_podman_socket()), "pass");
+        assert_eq!(status(fx.doctor.check_podman_socket(None)), "pass");
     }
 
     #[test]
@@ -865,10 +839,27 @@ mod tests {
         let second = fx.dir.path().join("fallback/podman/podman.sock");
         fx.doctor.sockets.push(second.clone());
         fx.podman(&second, OK_PING);
-        let Outcome::Pass(detail) = fx.doctor.check_podman_socket() else {
+        let Outcome::Pass(detail) = fx.doctor.check_podman_socket(None) else {
             panic!("second candidate must pass");
         };
         assert!(detail.contains("fallback"));
+    }
+
+    #[test]
+    fn configured_podman_socket_replaces_discovery() {
+        let fx = Fixture::new();
+        fx.podman(&fx.doctor.sockets[0], OK_PING);
+        let configured = fx.dir.path().join("configured/podman.sock");
+        let Outcome::Fail { detail, .. } = fx.doctor.check_podman_socket(Some(&configured)) else {
+            panic!("a missing configured socket must fail even though discovery would pass");
+        };
+        assert!(detail.contains("configured/podman.sock"), "{detail}");
+
+        fx.podman(&configured, OK_PING);
+        let Outcome::Pass(detail) = fx.doctor.check_podman_socket(Some(&configured)) else {
+            panic!("configured socket must pass");
+        };
+        assert!(detail.contains("configured/podman.sock"), "{detail}");
     }
 
     #[test]
@@ -878,7 +869,7 @@ mod tests {
             &fx.doctor.sockets[0],
             "HTTP/1.1 500 Internal Server Error\r\n\r\n",
         );
-        let Outcome::Fail { detail, .. } = fx.doctor.check_podman_socket() else {
+        let Outcome::Fail { detail, .. } = fx.doctor.check_podman_socket(None) else {
             panic!("500 must fail");
         };
         assert!(detail.contains("500"));

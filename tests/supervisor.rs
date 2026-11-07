@@ -1,9 +1,9 @@
 //! Spawns the real `hoster run` binary and checks its signal handling, systemd notifications and
-//! exit codes. Every startup phase that needs podman or the network is still a stub, so this
-//! runs offline.
+//! exit codes. Podman is a [`FakePodman`] answering the startup handshake, and every phase that
+//! needs the network is still a stub, so this runs offline.
 
-use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixDatagram;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -14,7 +14,57 @@ use nix::unistd::Pid;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A scratch directory with a minimal valid hoster.toml, removed on drop.
+/// Just enough of podman's compat API for startup step 4: `/version` (used by version
+/// negotiation and the startup log) and `/_ping`, one request per connection.
+struct FakePodman;
+
+impl FakePodman {
+    const VERSION: &str = r#"{"Version":"6.1.4","ApiVersion":"1.44","MinAPIVersion":"1.24","Components":[{"Name":"Podman Engine","Version":"6.1.4"}]}"#;
+
+    /// Serves on `socket` from a background thread for the rest of the test process.
+    fn serve(socket: &Path) {
+        let listener = UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().map_while(Result::ok) {
+                Self::answer(stream);
+            }
+        });
+    }
+
+    fn answer(mut stream: UnixStream) {
+        let mut reader = BufReader::new(&stream);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).is_err() {
+            return;
+        }
+        // Skip the headers; these are bodiless GETs.
+        let mut header = String::new();
+        while reader.read_line(&mut header).is_ok_and(|n| n > 0) && header != "\r\n" {
+            header.clear();
+        }
+        let path = request_line.split_whitespace().nth(1).unwrap_or("");
+        let (content_type, body) = if path.ends_with("/_ping") {
+            ("text/plain", "OK")
+        } else if path.ends_with("/version") {
+            ("application/json", Self::VERSION)
+        } else {
+            ("text/plain", "")
+        };
+        let status = if body.is_empty() {
+            "404 Not Found"
+        } else {
+            "200 OK"
+        };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+    }
+}
+
+/// A scratch directory with a minimal valid hoster.toml and a [`FakePodman`], removed on drop.
 struct Sandbox {
     dir: PathBuf,
 }
@@ -24,6 +74,7 @@ impl Sandbox {
         let dir = std::env::temp_dir().join(format!("hoster-it-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        FakePodman::serve(&dir.join("podman.sock"));
         let state_dir = dir.join("state");
         std::fs::write(
             dir.join("hoster.toml"),
@@ -50,6 +101,7 @@ impl Sandbox {
             .env("HOME", &self.dir)
             .env("RUST_LOG", "info")
             .env("HOSTER_ADMIN_GITHUB", "octocat")
+            .env("HOSTER_PODMAN_SOCKET", self.path("podman.sock"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -180,4 +232,33 @@ fn startup_failure_exits_non_zero_with_a_clear_message() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error:"), "stderr: {stderr}");
     assert!(stderr.contains("HOSTER_ADMIN_GITHUB"), "stderr: {stderr}");
+}
+
+#[test]
+fn startup_connects_to_podman_and_logs_versions() {
+    let sandbox = Sandbox::new("podman");
+    let hoster = Hoster::spawn(sandbox.command());
+    hoster.wait_for_line("connected to podman");
+    hoster.wait_for_line("hoster is ready");
+    hoster.signal(Signal::SIGINT);
+    assert!(hoster.wait().success());
+}
+
+#[test]
+fn missing_podman_socket_fails_startup_and_points_at_doctor() {
+    let sandbox = Sandbox::new("nopodman");
+    let missing = sandbox.path("missing/podman.sock");
+    let output = sandbox
+        .command()
+        .env("HOSTER_PODMAN_SOCKET", &missing)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("step 4"), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&missing.display().to_string()),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("hoster doctor"), "stderr: {stderr}");
 }

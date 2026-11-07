@@ -1,10 +1,10 @@
 ---
 id: usu
 title: ContainerRuntime trait, bollard PodmanRuntime connect, fake runtime
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.172502566Z"
-updated: "2026-11-07T22:31:30.803119442Z"
+updated: "2026-11-07T22:47:57.699580509Z"
 tags:
   - runtime
 depends_on:

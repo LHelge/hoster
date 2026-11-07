@@ -12,8 +12,10 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.104"
+bollard = "0.21"
 clap = { version = "4.6.7", features = ["derive"] }
 figment = { version = "0.10.19", features = ["toml", "env"] }
+futures-util = "0.3.34"
 humantime = "2.4.0"
 humantime-serde = "1.1.1"
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "rcgen", "time"] }

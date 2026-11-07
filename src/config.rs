@@ -55,6 +55,11 @@ pub struct Config {
     pub admin_host: Hostname,
     /// The admin's GitHub handle, from `HOSTER_ADMIN_GITHUB` only.
     pub admin_github: GithubHandle,
+    /// The rootless podman API socket (ADR-0002, ADR-0023). Unset means the hoster user's own
+    /// socket: `$XDG_RUNTIME_DIR/podman/podman.sock`, then `/run/user/$UID/podman/podman.sock`
+    /// (never a rootful one; see `runtime::PodmanSocket`).
+    #[serde(default)]
+    pub podman_socket: Option<PathBuf>,
     #[serde(default)]
     pub acme: AcmeConfig,
     /// Loopback ports handed to routed services (ADR-0026).
@@ -283,6 +288,11 @@ impl Config {
         if !self.state_dir.is_absolute() {
             problems.push(Problem::new("state_dir", "must be an absolute path"));
         }
+        if let Some(socket) = &self.podman_socket
+            && !socket.is_absolute()
+        {
+            problems.push(Problem::new("podman_socket", "must be an absolute path"));
+        }
         if !self.acme.directory_url.starts_with("https://") {
             problems.push(Problem::new(
                 "acme.directory_url",
@@ -368,6 +378,7 @@ impl EnvOverrides {
     const STRING_KEYS: &[&str] = &[
         "state_dir",
         "admin_host",
+        "podman_socket",
         ADMIN_GITHUB_KEY,
         "acme.directory_url",
         "acme.contact",
@@ -1051,6 +1062,27 @@ mod tests {
                 has_problem(&problems, "acme.root_certificate"),
                 "{problems:?}"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn podman_socket_defaults_to_discovery_and_can_be_set() {
+        Jail::expect_with(|jail| {
+            with_admin(jail);
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(config.podman_socket, None);
+
+            jail.set_env("HOSTER_PODMAN_SOCKET", "/run/user/1000/podman/podman.sock");
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(
+                config.podman_socket.as_deref(),
+                Some(Path::new("/run/user/1000/podman/podman.sock"))
+            );
+
+            jail.set_env("HOSTER_PODMAN_SOCKET", "podman.sock");
+            let problems = invalid(load(jail, MINIMAL));
+            assert!(has_problem(&problems, "podman_socket"), "{problems:?}");
             Ok(())
         });
     }
