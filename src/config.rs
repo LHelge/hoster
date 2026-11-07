@@ -20,6 +20,7 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -772,6 +773,15 @@ impl TryFrom<RawPortRange> for PortRange {
 
     fn try_from(raw: RawPortRange) -> Result<Self, Self::Error> {
         let RawPortRange { first, last } = raw;
+        Self::try_from(first..=last)
+    }
+}
+
+impl TryFrom<RangeInclusive<u16>> for PortRange {
+    type Error = String;
+
+    fn try_from(ports: RangeInclusive<u16>) -> Result<Self, Self::Error> {
+        let (first, last) = ports.into_inner();
         if first < Self::MIN_PORT {
             return Err(format!(
                 "first port {first} is privileged; the range must lie within {}-65535",

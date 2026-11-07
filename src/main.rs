@@ -6,6 +6,7 @@
 
 mod acme;
 mod config;
+mod doctor;
 mod orchestrator;
 mod proxy;
 mod registry;
@@ -21,7 +22,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
+use crate::doctor::Doctor;
 
 /// Single-binary deployment orchestrator for one VPS.
 #[derive(Debug, Parser)]
@@ -37,29 +39,12 @@ struct Cli {
 }
 
 impl Cli {
-    /// Runs the selected command, loading the configuration where it needs one.
+    /// Runs the selected command with the configuration it names.
     async fn execute(self) -> anyhow::Result<()> {
         let config_path = self.config.clone();
         let command = Command::from(self);
         tracing::debug!(?command, "starting");
-        let load = || Config::load(config_path.as_deref());
-        match command {
-            Command::Run => {
-                let config = load()?;
-                tracing::info!(
-                    admin_host = %config.admin_host,
-                    state_dir = %config.state_dir.display(),
-                    upstream_ports = %config.upstream_ports,
-                    "configuration loaded"
-                );
-                command.execute().await
-            }
-            Command::Backup(_) => {
-                load()?;
-                command.execute().await
-            }
-            Command::Doctor => command.execute().await,
-        }
+        command.execute(Config::load(config_path.as_deref())).await
     }
 }
 
@@ -90,8 +75,13 @@ enum Command {
     /// Run the daemon: proxy, ACME, deploy engine, webhook receiver, poller and admin UI (default).
     #[default]
     Run,
-    /// Check that the host is set up correctly for hoster.
-    Doctor,
+    /// Check that the host is set up correctly for hoster (run as the hoster user, not root).
+    /// Exits non-zero when a required check fails.
+    Doctor {
+        /// Print the report as JSON on stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// Back up hoster's state.
     #[command(subcommand)]
     Backup(Backup),
@@ -104,11 +94,37 @@ enum Backup {
 }
 
 impl Command {
-    async fn execute(self) -> anyhow::Result<()> {
+    /// Runs the command. `config` is the outcome of loading the configuration: `doctor` reports
+    /// a failure as one of its findings, every other command needs it to have loaded.
+    async fn execute(self, config: Result<Config, ConfigError>) -> anyhow::Result<()> {
         match self {
-            Command::Run => anyhow::bail!("`hoster run` is not implemented yet"),
-            Command::Doctor => anyhow::bail!("`hoster doctor` is not implemented yet"),
+            Command::Run => {
+                let config = config?;
+                tracing::info!(
+                    admin_host = %config.admin_host,
+                    state_dir = %config.state_dir.display(),
+                    upstream_ports = %config.upstream_ports,
+                    "configuration loaded"
+                );
+                anyhow::bail!("`hoster run` is not implemented yet")
+            }
+            Command::Doctor { json } => {
+                let report = Doctor::from_env()?.diagnose(&config);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("{report}");
+                }
+                if !report.ok() {
+                    anyhow::bail!(
+                        "host is not ready for hoster: {} required check(s) failed",
+                        report.failures()
+                    );
+                }
+                Ok(())
+            }
             Command::Backup(Backup::Db) => {
+                config?;
                 anyhow::bail!("`hoster backup db` is not implemented yet")
             }
         }
@@ -153,7 +169,8 @@ mod tests {
 
     #[test]
     fn parses_doctor_and_backup_db() {
-        assert_eq!(parse(&["doctor"]), Command::Doctor);
+        assert_eq!(parse(&["doctor"]), Command::Doctor { json: false });
+        assert_eq!(parse(&["doctor", "--json"]), Command::Doctor { json: true });
         assert_eq!(parse(&["backup", "db"]), Command::Backup(Backup::Db));
     }
 
@@ -177,8 +194,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stub_commands_report_not_implemented() {
-        let err = Command::Doctor.execute().await.unwrap_err();
-        assert!(err.to_string().contains("not implemented"));
+    async fn daemon_commands_need_a_loaded_config() {
+        for command in [Command::Run, Command::Backup(Backup::Db)] {
+            let err = command
+                .execute(Err(ConfigError::NoConfigDir))
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("hoster.toml"), "{err}");
+        }
     }
 }

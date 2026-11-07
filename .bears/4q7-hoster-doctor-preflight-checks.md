@@ -1,10 +1,10 @@
 ---
 id: "4q7"
 title: "`hoster doctor` preflight checks"
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.161104548Z"
-updated: "2026-11-07T22:23:02.300043324Z"
+updated: "2026-11-07T22:31:56.777651674Z"
 tags:
   - core
   - ops
