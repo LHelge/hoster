@@ -1,10 +1,10 @@
 ---
 id: meu
 title: systemd unit, install docs and hardening
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.163730705Z"
-updated: "2026-11-07T14:45:17.163730705Z"
+updated: "2026-11-07T22:38:23.065807544Z"
 tags:
   - ops
   - docs
@@ -12,6 +12,7 @@ depends_on:
   - "4q7"
   - t94
 parent: "8xd"
+attempts: 1
 ---
 
 ## Summary

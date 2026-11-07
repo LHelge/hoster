@@ -1,16 +1,17 @@
 ---
 id: "4tj"
 title: Route normalization and cross-stack collision check
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.201012420Z"
-updated: "2026-11-07T14:45:17.201012420Z"
+updated: "2026-11-07T22:36:53.443749747Z"
 tags:
   - stack
   - routing
 depends_on:
   - "8eh"
 parent: ame
+attempts: 1
 ---
 
 ## Summary

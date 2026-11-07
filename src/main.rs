@@ -1,8 +1,9 @@
 //! hoster: a single-binary deployment orchestrator for one VPS (ADR-0001).
 //!
-//! `main` is the supervisor: it parses the command line and, for `run`, will own the startup and
-//! shutdown order (docs/architecture.md §4). Errors are `anyhow` at this edge; the modules below
-//! use their own `thiserror` types.
+//! `main` parses the command line, builds the orchestrator runtime and hands `run` to the
+//! [`Supervisor`](supervisor::Supervisor), which owns the startup and shutdown order
+//! (docs/architecture.md §4). Errors are `anyhow` at this edge; the modules below use their own
+//! `thiserror` types.
 
 mod acme;
 mod config;
@@ -14,8 +15,10 @@ mod routing;
 mod runtime;
 mod stack;
 mod store;
+mod supervisor;
 mod web;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -24,7 +27,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{Config, ConfigError};
 use crate::doctor::Doctor;
-use crate::store::Store;
+use crate::supervisor::Supervisor;
 
 /// Single-binary deployment orchestrator for one VPS.
 #[derive(Debug, Parser)]
@@ -50,7 +53,7 @@ impl Cli {
 }
 
 /// Logging to stderr (journald under systemd): compact text, filtered by `RUST_LOG`
-/// (default `info`).
+/// (default `info`), coloured only when stderr is a terminal.
 struct Tracing;
 
 impl Tracing {
@@ -59,6 +62,7 @@ impl Tracing {
         tracing_subscriber::fmt()
             .compact()
             .with_env_filter(filter)
+            .with_ansi(std::io::stderr().is_terminal())
             .with_writer(std::io::stderr)
             .init();
     }
@@ -99,19 +103,7 @@ impl Command {
     /// a failure as one of its findings, every other command needs it to have loaded.
     async fn execute(self, config: Result<Config, ConfigError>) -> anyhow::Result<()> {
         match self {
-            Command::Run => {
-                let config = config?;
-                tracing::info!(
-                    admin_host = %config.admin_host,
-                    state_dir = %config.state_dir.display(),
-                    upstream_ports = %config.upstream_ports,
-                    "configuration loaded"
-                );
-                // Startup step 2 (docs/architecture.md §4): open and migrate the state store.
-                let store = Store::open(&config.state_dir).await?;
-                tracing::info!(path = %store.path().display(), "state store ready");
-                anyhow::bail!("`hoster run` is not implemented yet")
-            }
+            Command::Run => Supervisor::new(config?).run().await,
             Command::Doctor { json } => {
                 let report = Doctor::from_env()?.diagnose(&config);
                 if json {
@@ -135,11 +127,26 @@ impl Command {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// The orchestrator runtime (architecture §3.1): multi-threaded, shared by the supervisor,
+/// orchestrator, deploy tasks, ACME, poller and web app. Pingora gets its own thread and runtimes.
+struct OrchestratorRuntime;
+
+impl OrchestratorRuntime {
+    fn build() -> std::io::Result<tokio::runtime::Runtime> {
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_name("hoster-orch")
+            .enable_all()
+            .build()
+    }
+}
+
+fn main() -> ExitCode {
     let cli = Cli::parse();
     Tracing::init();
-    match cli.execute().await {
+    let result = OrchestratorRuntime::build()
+        .map_err(|err| anyhow::Error::new(err).context("building the tokio runtime"))
+        .and_then(|runtime| runtime.block_on(cli.execute()));
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             // `{:#}` prints the cause chain on one line and never a backtrace.
