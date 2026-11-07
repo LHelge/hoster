@@ -76,3 +76,21 @@ and rejected:
 - It is a write-scoped token handed to another system.
 
 CI identity is better used to authenticate the webhook itself (OQ-29).
+
+## Verification status (2026-11-08)
+
+The registry client (`src/registry/client.rs`) resolves public images anonymously on both
+ghcr.io and Docker Hub (token realm discovered from `WWW-Authenticate`; Docker Hub's realm is
+`auth.docker.io`), checked by the gated live tests (`HOSTER_REGISTRY_LIVE_TESTS=1 cargo test live`).
+
+The two token-kind checks this ADR asks for need private packages and real tokens, so they were
+**not run during implementation** and remain open:
+
+- **Fine-grained PAT for ghcr pulls:** untested. The classic PAT stays the documented credential.
+- **GitHub App installation token (`packages: read`):** untested; still assumed unsupported, as in
+  the correction above.
+
+To run either check, set `HOSTER_REGISTRY_LIVE_TESTS=1`,
+`HOSTER_REGISTRY_LIVE_IMAGE=ghcr.io/<owner>/<private-image>:<tag>` and
+`HOSTER_REGISTRY_LIVE_CREDENTIAL=<username>:<token>`, then run
+`cargo test live::private_image_with_credential -- --nocapture`. Record the outcome here.

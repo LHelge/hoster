@@ -171,6 +171,19 @@ impl ImageRef {
             ..self
         })
     }
+
+    /// This image with `tag` instead of its own tag and without a digest: the reference the
+    /// poller resolves for a CI-built service that sets `track = "<tag>"` (ADR-0043).
+    pub fn with_tag(self, tag: &str) -> Result<Self, String> {
+        if !Self::is_valid_tag(tag) {
+            return Err(format!("invalid tag `{tag}`"));
+        }
+        Ok(Self {
+            tag: Some(tag.to_owned()),
+            digest: None,
+            ..self
+        })
+    }
 }
 
 /// An image reference that names its digest: the only kind hoster pulls or runs (ADR-0025).
@@ -300,6 +313,14 @@ mod tests {
                 .unwrap_err()
                 .contains("invalid digest")
         );
+    }
+
+    #[test]
+    fn with_tag_replaces_tag_and_drops_digest() {
+        let image: ImageRef = format!("ghcr.io/owner/app:v1@{DIGEST}").parse().unwrap();
+        let tracked = image.clone().with_tag("main").unwrap();
+        assert_eq!(tracked.to_string(), "ghcr.io/owner/app:main");
+        assert!(image.with_tag("-bad").is_err());
     }
 
     #[test]

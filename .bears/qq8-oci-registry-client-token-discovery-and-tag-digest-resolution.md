@@ -1,10 +1,10 @@
 ---
 id: qq8
 title: "OCI registry client: token discovery and tag→digest resolution"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.339259844Z"
-updated: "2026-11-07T23:20:45.280161461Z"
+updated: "2026-11-07T23:31:53.365184324Z"
 tags:
   - registry
 depends_on:

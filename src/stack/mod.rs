@@ -24,7 +24,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
-pub use image::{ImageRef, PinnedImage};
+pub use image::{Digest, ImageRef, PinnedImage};
 pub use route::{Host, NormalizedPrefix};
 
 /// Default upper bound for draining old upstreams (ADR-0017).

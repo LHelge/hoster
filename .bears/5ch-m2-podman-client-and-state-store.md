@@ -2,10 +2,10 @@
 id: "5ch"
 title: "M2: Podman client and state store"
 type: epic
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.134625134Z"
-updated: "2026-11-07T14:45:17.134625134Z"
+updated: "2026-11-07T23:31:53.365397769Z"
 ---
 
 ## Scope
