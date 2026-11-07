@@ -145,6 +145,8 @@ pub enum DeploymentState {
     Failed,
     Live,
     LiveWithWarnings,
+    /// A queued deployment replaced by a newer request for the same stack (ADR-0040).
+    Superseded,
 }
 
 impl DeploymentState {
@@ -152,7 +154,12 @@ impl DeploymentState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Noop | Self::Rejected | Self::Failed | Self::Live | Self::LiveWithWarnings
+            Self::Noop
+                | Self::Rejected
+                | Self::Failed
+                | Self::Live
+                | Self::LiveWithWarnings
+                | Self::Superseded
         )
     }
 }

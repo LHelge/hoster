@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO revision_images (revision_id, service, digest) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0bbed03ffa1ea5a05fc2ec9f9ef03e050eebcdb325bcfed5c2ddbea30df0661b"
+}

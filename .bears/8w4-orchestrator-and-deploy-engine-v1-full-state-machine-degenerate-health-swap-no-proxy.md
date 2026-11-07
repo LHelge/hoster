@@ -1,10 +1,10 @@
 ---
 id: "8w4"
 title: "Orchestrator and deploy engine v1: full state machine, degenerate health/swap, no proxy"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.204394447Z"
-updated: "2026-11-07T23:32:55.238448718Z"
+updated: "2026-11-07T23:53:10.504696499Z"
 tags:
   - orchestrator
 depends_on:

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT service, digest FROM revision_images WHERE revision_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "service",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "revision_images",
+            "name": "service"
+          }
+        }
+      },
+      {
+        "name": "digest",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "revision_images",
+            "name": "digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "c878a22a8024568271f539556ce2b259310f8c2861ec70a827f004db623e932a"
+}

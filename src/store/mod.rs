@@ -379,8 +379,20 @@ impl Store {
     // ---------------------------------------------------------------------------------------
 
     /// Records an applied stack file as the stack's next revision, creating the stack if it is
-    /// new.
+    /// new. The revision pins no images; see [`Store::add_pinned_revision`].
     pub async fn add_revision(&self, stack: &str, toml: &str) -> Result<StackRevision> {
+        self.add_pinned_revision(stack, toml, &DigestSet::new())
+            .await
+    }
+
+    /// Records an applied stack file as the stack's next revision together with the digests its
+    /// third-party images were resolved to (ADR-0025), creating the stack if it is new.
+    pub async fn add_pinned_revision(
+        &self,
+        stack: &str,
+        toml: &str,
+        images: &DigestSet,
+    ) -> Result<StackRevision> {
         let now = Timestamp::now();
         let hash = ContentHash::of(toml);
         let mut tx = self.begin().await?;
@@ -408,8 +420,31 @@ impl Store {
         )
         .fetch_one(&mut *tx)
         .await?;
+        for (service, digest) in images {
+            sqlx::query!(
+                "INSERT INTO revision_images (revision_id, service, digest) VALUES (?, ?, ?)",
+                revision.id,
+                service,
+                digest,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(revision)
+    }
+
+    /// The image digests a revision pins, by service (empty for an unknown revision).
+    pub async fn revision_images(&self, id: RevisionId) -> Result<DigestSet> {
+        Ok(sqlx::query!(
+            "SELECT service, digest FROM revision_images WHERE revision_id = ?",
+            id,
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| (row.service, row.digest))
+        .collect())
     }
 
     /// One stack, if it exists.
@@ -567,6 +602,38 @@ impl Store {
             .ok_or(StoreError::UnknownDeployment(id))?;
         tx.commit().await?;
         Ok(deployment)
+    }
+
+    /// Replaces a deployment's target digest set. A queued deployment's target is re-planned
+    /// when it starts (ADR-0040): services it does not name take whatever runs by then, and the
+    /// record must say what was actually deployed, because a rollback redeploys it (ADR-0041).
+    pub async fn set_target(&self, id: DeploymentId, target: &DigestSet) -> Result<()> {
+        let mut tx = self.begin().await?;
+        let done = sqlx::query!(
+            "UPDATE deployments SET updated_at = ? WHERE id = ?",
+            Timestamp::now(),
+            id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        if done.rows_affected() == 0 {
+            return Err(StoreError::UnknownDeployment(id));
+        }
+        sqlx::query!("DELETE FROM deployment_targets WHERE deployment_id = ?", id)
+            .execute(&mut *tx)
+            .await?;
+        for (service, digest) in target {
+            sqlx::query!(
+                "INSERT INTO deployment_targets (deployment_id, service, digest) VALUES (?, ?, ?)",
+                id,
+                service,
+                digest,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Takes the stack's next generation for a deployment (its `Validating` step, §5.1).

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE deployments SET updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bb4cbc9d01c0e6259f98f7af39052d3e0768fca8f54f7516c914b39dc1d08bde"
+}
