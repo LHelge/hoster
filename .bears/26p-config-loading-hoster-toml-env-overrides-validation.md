@@ -1,16 +1,17 @@
 ---
 id: "26p"
 title: "Config loading: hoster.toml, env overrides, validation"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.155672714Z"
-updated: "2026-11-07T14:45:17.155672714Z"
+updated: "2026-11-07T22:11:50.584516309Z"
 tags:
   - core
 depends_on:
   - mnu
   - t94
 parent: "8xd"
+attempts: 1
 ---
 
 ## Summary

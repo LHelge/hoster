@@ -1,16 +1,17 @@
 ---
 id: "4ah"
 title: "Release build and packaging: static binary, hoster release workflow, install artifact"
-status: open
+status: done
 priority: P2
 created: "2026-11-07T21:12:34.648755575Z"
-updated: "2026-11-07T21:12:34.648755575Z"
+updated: "2026-11-07T22:16:34.574540743Z"
 tags:
   - ci
   - ops
 depends_on:
   - mnu
 parent: "8xd"
+attempts: 1
 ---
 
 ## Summary

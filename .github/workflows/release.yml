@@ -1,0 +1,115 @@
+name: Release
+
+# Builds the static musl binary (ADR-0001) and publishes it with its checksum and the deploy/ files.
+#
+# - Push a `v*` tag (e.g. `v0.2.0`, matching `version` in Cargo.toml) to create a GitHub release.
+# - Run it by hand (workflow_dispatch) to build and check everything without publishing; the
+#   files are then attached to the workflow run as an artifact.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  build:
+    name: build, test, package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain and musl-tools
+        run: |
+          rustup toolchain install
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --locked
+
+      # ADR-0037: ring is the only crypto provider; aws-lc-rs must stay out of the tree.
+      - name: No aws-lc-rs in the dependency tree
+        run: scripts/check-no-aws-lc.sh
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Check binary is static
+        run: scripts/check-release-binary.sh "target/$TARGET/release/hoster"
+
+      # Release files, flat: the binary, SHA256SUMS, and whatever deploy/ holds (systemd unit,
+      # sysctl drop-in, example config). deploy/ is optional so the workflow works before it exists.
+      - name: Package
+        run: |
+          mkdir dist
+          cp "target/$TARGET/release/hoster" "dist/hoster-$TARGET"
+          if [ -d deploy ]; then
+            find deploy -type f -print0 | while IFS= read -r -d '' f; do
+              name=$(basename "$f")
+              if [ -e "dist/$name" ]; then
+                echo "::error::two files in deploy/ are named $name; release assets must be unique"
+                exit 1
+              fi
+              cp "$f" "dist/$name"
+            done
+          fi
+          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          # Fixed name: ref names can contain '/', which artifact names can't (workflow_dispatch on a
+          # branch such as task/4ah).
+          name: hoster-release
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub release
+    needs: build
+    # Only a tag push publishes; workflow_dispatch never does, even when started on a tag.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hoster-release
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A SemVer pre-release tag (v0.2.0-rc.1) becomes a GitHub pre-release.
+          prerelease=()
+          case "$GITHUB_REF_NAME" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${prerelease[@]}"

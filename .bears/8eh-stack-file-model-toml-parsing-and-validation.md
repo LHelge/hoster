@@ -1,16 +1,17 @@
 ---
 id: "8eh"
 title: Stack file model, TOML parsing and validation
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.197524343Z"
-updated: "2026-11-07T21:32:51.736635431Z"
+updated: "2026-11-07T22:11:50.656523930Z"
 tags:
   - stack
 depends_on:
   - mnu
   - hft
 parent: ame
+attempts: 1
 ---
 
 ## Summary

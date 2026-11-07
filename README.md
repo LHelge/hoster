@@ -18,7 +18,13 @@ cargo clippy --all-targets -- -D warnings     # lints
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same format, lint and test steps on every push and pull
-request.
+request, and checks that the static musl release build links statically.
+
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds the static
+`x86_64-unknown-linux-musl` binary and publishes it with `SHA256SUMS` and the `deploy/` files as a
+GitHub release. See [docs/install.md](docs/install.md).
 
 ## License
 

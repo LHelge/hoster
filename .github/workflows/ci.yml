@@ -52,3 +52,29 @@ jobs:
 
       - name: Check
         run: cargo +"$MSRV" check --all-targets --locked
+
+  static:
+    name: static musl release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml lists the musl target. musl-tools provides musl-gcc for the C parts of
+      # dependencies (ring, bundled libsqlite3).
+      - name: Install toolchain and musl-tools
+        run: |
+          rustup toolchain install
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ADR-0037: ring is the only crypto provider; aws-lc-rs must stay out of the tree.
+      - name: No aws-lc-rs in the dependency tree
+        run: scripts/check-no-aws-lc.sh
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Check binary is static
+        run: scripts/check-release-binary.sh target/x86_64-unknown-linux-musl/release/hoster
