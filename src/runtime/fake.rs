@@ -15,7 +15,7 @@ use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
     LogOptions, NetworkSpec, ObjectKind, Operation, RuntimeError,
 };
-use crate::stack::ImageRef;
+use crate::stack::PinnedImage;
 
 /// An in-memory container runtime with failure injection.
 #[derive(Debug, Default)]
@@ -127,7 +127,7 @@ impl FakeRuntime {
         self.lock().networks.values().cloned().collect()
     }
 
-    pub fn has_image(&self, image: &ImageRef) -> bool {
+    pub fn has_image(&self, image: &PinnedImage) -> bool {
         self.lock().images.contains(&image.to_string())
     }
 
@@ -187,7 +187,7 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
-    async fn pull_image(&self, image: &ImageRef) -> Result<(), RuntimeError> {
+    async fn pull_image(&self, image: &PinnedImage) -> Result<(), RuntimeError> {
         let mut state = self.lock();
         state.enter(Operation::PullImage)?;
         state.images.insert(image.to_string());
@@ -300,7 +300,7 @@ mod tests {
     use super::super::{Labels, LogStream, PortBinding, label};
     use super::*;
 
-    fn image() -> ImageRef {
+    fn image() -> PinnedImage {
         "ghcr.io/me/notes@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             .parse()
             .unwrap()

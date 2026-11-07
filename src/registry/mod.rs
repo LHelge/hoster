@@ -1,10 +1,11 @@
 //! Generic OCI registry client (token discovery, manifest `HEAD` for digests) and the
 //! edge-triggered digest poller (ADR-0005, ADR-0043).
+//!
+//! Also home to the registry credentials (ADR-0025): one credential per registry host, shared
+//! by podman pulls (`X-Registry-Auth`) and the registry client's token requests.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn module_is_wired_into_the_crate() {
-        assert!(module_path!().starts_with("hoster::registry"));
-    }
-}
+mod credentials;
+
+pub use credentials::{
+    Anonymous, CredentialError, FileCredentials, RegistryCredential, RegistryCredentials,
+};

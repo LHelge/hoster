@@ -1,16 +1,17 @@
 ---
 id: erg
 title: Certificate store on disk, CertMap and CertResolver (ResolvesServerCert)
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.257664513Z"
-updated: "2026-11-07T14:45:17.257664513Z"
+updated: "2026-11-07T23:09:09.043099074Z"
 tags:
   - tls
 depends_on:
   - vhg
   - xn6
 parent: "52q"
+attempts: 1
 ---
 
 ## Summary

@@ -10,6 +10,7 @@
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ProxyConfig};
 use crate::proxy::{Proxy, ProxyEvents, ProxyThread};
+use crate::registry::FileCredentials;
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::store::Store;
 use crate::web::{Listen, WebApp, WebServer};
@@ -509,7 +511,11 @@ impl Startup for Supervisor {
                 let socket = PodmanSocket::from_env(self.config.podman_socket.as_deref());
                 let runtime = PodmanRuntime::connect(&socket)
                     .await
-                    .context("cannot connect to podman")?;
+                    .context("cannot connect to podman")?
+                    // Until the secret store exists (ADR-0029): one 0600 file per registry host.
+                    .with_credentials(Arc::new(FileCredentials::in_state_dir(
+                        &self.config.state_dir,
+                    )));
                 self.runtime = Some(runtime);
                 Ok(())
             }

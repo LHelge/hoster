@@ -160,3 +160,161 @@ impl fmt::Display for ImageRef {
         Ok(())
     }
 }
+
+impl ImageRef {
+    /// This image pinned to `digest`, replacing any digest it already names. CI-built images
+    /// get theirs from the webhook or poller, tagged third-party images from the registry client
+    /// at stack apply (ADR-0025).
+    pub fn pin(self, digest: Digest) -> PinnedImage {
+        PinnedImage(Self {
+            digest: Some(digest),
+            ..self
+        })
+    }
+}
+
+/// An image reference that names its digest: the only kind hoster pulls or runs (ADR-0025).
+///
+/// Tag resolution happens before this exists, in the registry client at stack apply. A tag the
+/// reference also carries is kept for display ([`PinnedImage::tag`]) but plays no part in what
+/// is pulled: [`Display`](fmt::Display) prints the pull reference, `registry/repository@digest`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PinnedImage(ImageRef);
+
+impl PinnedImage {
+    pub fn registry(&self) -> &str {
+        self.0.registry()
+    }
+
+    pub fn repository(&self) -> &str {
+        self.0.repository()
+    }
+
+    /// The tag the stack file named alongside the digest, if any. Informational only.
+    pub fn tag(&self) -> Option<&str> {
+        self.0.tag()
+    }
+
+    pub fn digest(&self) -> &Digest {
+        self.0
+            .digest
+            .as_ref()
+            .expect("a PinnedImage always carries a digest")
+    }
+}
+
+impl TryFrom<ImageRef> for PinnedImage {
+    type Error = String;
+
+    fn try_from(image: ImageRef) -> Result<Self, Self::Error> {
+        if image.digest.is_none() {
+            return Err(format!(
+                "image `{image}` is not pinned by digest; resolve its tag first \
+                 (expected `registry/repository[:tag]@sha256:…`)"
+            ));
+        }
+        Ok(Self(image))
+    }
+}
+
+impl FromStr for PinnedImage {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<ImageRef>()?.try_into()
+    }
+}
+
+impl From<PinnedImage> for ImageRef {
+    fn from(image: PinnedImage) -> Self {
+        image.0
+    }
+}
+
+impl AsRef<ImageRef> for PinnedImage {
+    fn as_ref(&self) -> &ImageRef {
+        &self.0
+    }
+}
+
+/// The pull reference, `registry/repository@digest`, without the informational tag.
+impl fmt::Display for PinnedImage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/{}@{}",
+            self.registry(),
+            self.repository(),
+            self.digest()
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn tag_and_digest_pins_by_digest() {
+        let image: PinnedImage = format!("docker.io/library/nginx:1.27@{DIGEST}")
+            .parse()
+            .unwrap();
+        assert_eq!(image.registry(), "docker.io");
+        assert_eq!(image.repository(), "library/nginx");
+        assert_eq!(image.tag(), Some("1.27"));
+        assert_eq!(image.digest().as_ref(), DIGEST);
+        assert_eq!(
+            image.to_string(),
+            format!("docker.io/library/nginx@{DIGEST}")
+        );
+        let original = ImageRef::from(image);
+        assert_eq!(
+            original.to_string(),
+            format!("docker.io/library/nginx:1.27@{DIGEST}")
+        );
+    }
+
+    #[test]
+    fn digest_only_pins() {
+        let image: PinnedImage = format!("ghcr.io/acme/app@{DIGEST}").parse().unwrap();
+        assert_eq!(image.tag(), None);
+        assert_eq!(image.to_string(), format!("ghcr.io/acme/app@{DIGEST}"));
+        let ported: PinnedImage = format!("localhost:5000/app@{DIGEST}").parse().unwrap();
+        assert_eq!(ported.registry(), "localhost:5000");
+    }
+
+    #[test]
+    fn no_digest_is_rejected() {
+        for image in ["docker.io/library/nginx:1.27", "ghcr.io/acme/app"] {
+            let err = image.parse::<PinnedImage>().unwrap_err();
+            assert!(err.contains("not pinned by digest"), "{image}: {err}");
+            let parsed: ImageRef = image.parse().unwrap();
+            assert!(PinnedImage::try_from(parsed).is_err());
+        }
+        // Invalid references are still rejected for their own reasons.
+        assert!(
+            "docker.io/library/nginx@sha256:00"
+                .parse::<PinnedImage>()
+                .unwrap_err()
+                .contains("invalid digest")
+        );
+    }
+
+    #[test]
+    fn pin_replaces_any_digest() {
+        let other = format!("sha256:{}", "f".repeat(64));
+        let image: ImageRef = format!("docker.io/library/nginx:1.27@{DIGEST}")
+            .parse()
+            .unwrap();
+        let pinned = image.pin(other.parse().unwrap());
+        assert_eq!(pinned.digest().as_ref(), other);
+        assert_eq!(pinned.tag(), Some("1.27"));
+        let ci: ImageRef = "ghcr.io/acme/app".parse().unwrap();
+        assert_eq!(
+            ci.pin(DIGEST.parse().unwrap()).to_string(),
+            format!("ghcr.io/acme/app@{DIGEST}")
+        );
+    }
+}

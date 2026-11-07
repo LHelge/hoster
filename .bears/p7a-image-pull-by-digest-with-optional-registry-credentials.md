@@ -1,10 +1,10 @@
 ---
 id: p7a
 title: Image pull by digest with optional registry credentials
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.178714816Z"
-updated: "2026-11-07T23:00:25.642449578Z"
+updated: "2026-11-07T23:09:43.664256950Z"
 tags:
   - runtime
   - registry

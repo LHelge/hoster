@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use futures_util::stream::BoxStream;
 
-use crate::stack::ImageRef;
+use crate::registry::CredentialError;
+use crate::stack::PinnedImage;
 
 #[allow(
     unused_imports,
@@ -66,9 +67,15 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// Removes a network. Fails with [`RuntimeError::InUse`] while containers are attached.
     fn remove_network(&self, name: &str) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
-    /// Makes `image` available locally, pulling it if it is not present.
-    fn pull_image(&self, image: &ImageRef)
-    -> impl Future<Output = Result<(), RuntimeError>> + Send;
+    /// Makes `image` available locally, pulling it by digest (with the registry's credential,
+    /// if one is configured) unless it is already present. Returns once the pull is complete.
+    ///
+    /// Fails with [`RuntimeError::NotFound`] (kind [`ObjectKind::Image`]) when the registry has
+    /// no such digest, and [`RuntimeError::RegistryAuth`] when it refuses access.
+    fn pull_image(
+        &self,
+        image: &PinnedImage,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
     /// Creates (but does not start) a container. Fails with [`RuntimeError::Conflict`] when the
     /// name is taken, e.g. by a leftover of an interrupted deploy.
@@ -150,7 +157,7 @@ pub struct NetworkSpec {
 pub struct ContainerSpec {
     /// `hoster-<stack>-<service>-g<generation>`.
     pub name: String,
-    pub image: ImageRef,
+    pub image: PinnedImage,
     pub command: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub env: BTreeMap<String, String>,
@@ -360,6 +367,20 @@ pub enum RuntimeError {
     Conflict { kind: ObjectKind, name: String },
     #[error("{kind} {name} is in use")]
     InUse { kind: ObjectKind, name: String },
+    /// The registry refused the pull: missing, wrong or insufficient credentials. The message
+    /// is the registry's; credentials are never part of it.
+    #[error(
+        "{registry} refused to serve {image}: {message}; check the registry credential for \
+         {registry}"
+    )]
+    RegistryAuth {
+        registry: String,
+        image: String,
+        message: String,
+    },
+    /// The configured credential for a registry could not be read.
+    #[error("cannot use the registry credential: {message}")]
+    Credentials { registry: String, message: String },
     #[error("{operation} is not implemented yet")]
     Unsupported { operation: Operation },
     #[error("podman failed to {operation}: {message}")]
@@ -367,6 +388,15 @@ pub enum RuntimeError {
         operation: Operation,
         message: String,
     },
+}
+
+impl From<CredentialError> for RuntimeError {
+    fn from(err: CredentialError) -> Self {
+        Self::Credentials {
+            registry: err.registry().to_owned(),
+            message: err.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
