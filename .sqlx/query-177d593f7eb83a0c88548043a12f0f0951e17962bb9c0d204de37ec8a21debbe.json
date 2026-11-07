@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM oauth_logins WHERE state NOT IN\n                 (SELECT state FROM oauth_logins ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "177d593f7eb83a0c88548043a12f0f0951e17962bb9c0d204de37ec8a21debbe"
+}

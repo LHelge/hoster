@@ -7,7 +7,10 @@ use askama::Template;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
+use axum::Extension;
+
 use super::assets::Assets;
+use super::auth::Session;
 
 /// A section of the admin UI, as listed in the navigation bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,35 +70,67 @@ pub struct Flash {
     pub message: String,
 }
 
+/// The signed-in admin, as the header shows them.
+pub struct SignedIn {
+    pub login: String,
+    csrf_token: String,
+}
+
 /// What `base.html` needs from every page.
 pub struct Layout {
-    pub section: Section,
+    /// The current section; `None` on public pages (the login page), which show no navigation.
+    pub section: Option<Section>,
     pub flash: Option<Flash>,
+    pub user: Option<SignedIn>,
 }
 
 impl Layout {
-    pub fn new(section: Section) -> Self {
+    /// The layout of an admin page in `section`.
+    pub fn new(section: Section, session: &Session) -> Self {
         Layout {
-            section,
+            section: Some(section),
             flash: None,
+            user: Some(SignedIn {
+                login: session.login().to_owned(),
+                csrf_token: session.csrf_token().to_owned(),
+            }),
         }
     }
 
-    #[allow(dead_code, reason = "used by the pages that report outcomes")]
+    /// The layout of a page shown without a session.
+    pub fn public() -> Self {
+        Layout {
+            section: None,
+            flash: None,
+            user: None,
+        }
+    }
+
     pub fn with_flash(mut self, flash: Flash) -> Self {
         self.flash = Some(flash);
         self
     }
 
     pub fn nav(&self) -> Vec<NavItem> {
+        let Some(current) = self.section else {
+            return Vec::new();
+        };
         Section::ALL
             .into_iter()
             .map(|section| NavItem {
                 href: section.href(),
                 label: section,
-                current: section == self.section,
+                current: section == current,
             })
             .collect()
+    }
+
+    /// The `hx-headers` JSON that makes every HTMX request carry the session's CSRF token
+    /// (ADR-0031). The token is hex, so it needs no JSON escaping.
+    pub fn hx_headers(&self) -> Option<String> {
+        self.user
+            .as_ref()
+            .map(|user| format!(r#"{{"X-CSRF-Token": "{}"}}"#, user.csrf_token))
     }
 
     pub fn htmx(&self) -> String {
@@ -120,9 +155,9 @@ pub struct Dashboard {
 
 impl Dashboard {
     /// The `GET /` handler.
-    pub async fn show() -> Page<Dashboard> {
+    pub async fn show(Extension(session): Extension<Session>) -> Page<Dashboard> {
         Page(Dashboard {
-            layout: Layout::new(Section::Dashboard),
+            layout: Layout::new(Section::Dashboard, &session),
         })
     }
 }
@@ -146,14 +181,21 @@ impl<T: Template> IntoResponse for Page<T> {
 mod tests {
     use super::*;
 
+    fn layout() -> Layout {
+        Layout::new(Section::Dashboard, &Session::for_tests("octocat", "c0ffee"))
+    }
+
     #[test]
     fn base_layout_has_nav_flash_area_and_assets() {
-        let html = Dashboard {
-            layout: Layout::new(Section::Dashboard),
-        }
-        .render()
-        .unwrap();
+        let html = Dashboard { layout: layout() }.render().unwrap();
         assert!(html.contains(r#"<a href="/" aria-current="page">Dashboard</a>"#));
+        assert!(
+            html.contains(
+                r#"<body hx-headers:inherited="{&#34;X-CSRF-Token&#34;: &#34;c0ffee&#34;}">"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains(r#"hx-post="/auth/logout""#), "{html}");
         assert!(
             html.contains(r#"<div id="flash" aria-live="polite"></div>"#),
             "{html}"
@@ -169,7 +211,7 @@ mod tests {
     #[test]
     fn flash_messages_are_escaped() {
         let html = Dashboard {
-            layout: Layout::new(Section::Dashboard).with_flash(Flash {
+            layout: layout().with_flash(Flash {
                 kind: FlashKind::Error,
                 message: "<b>deploy failed</b>".into(),
             }),
@@ -181,5 +223,12 @@ mod tests {
             html.contains("&#60;b&#62;deploy failed&#60;/b&#62;"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn public_pages_have_no_navigation_or_csrf_headers() {
+        let layout = Layout::public();
+        assert!(layout.nav().is_empty());
+        assert_eq!(layout.hx_headers(), None);
     }
 }

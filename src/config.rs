@@ -202,12 +202,38 @@ pub struct WebhookConfig {
 }
 
 /// Admin web app settings (ADR-0021, ADR-0031).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WebConfig {
     /// Serve the admin app on this loopback TCP address instead of the Unix socket in the state
     /// directory. For local development only; must be a loopback address.
     pub dev_listen: Option<SocketAddr>,
+    /// File holding the GitHub OAuth App's client id. Unset: the `github_client_id` systemd
+    /// credential.
+    pub github_client_id_file: Option<PathBuf>,
+    /// 0600 file holding the GitHub OAuth App's client secret. Unset: the
+    /// `github_client_secret` systemd credential.
+    pub github_client_secret_file: Option<PathBuf>,
+    /// An admin session ends after this long without a request (and 12 h after login at the
+    /// latest).
+    #[serde(with = "humantime_serde")]
+    pub session_idle_timeout: Duration,
+}
+
+impl WebConfig {
+    /// The absolute session lifetime (ADR-0031); the idle timeout may not exceed it.
+    pub const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            dev_listen: None,
+            github_client_id_file: None,
+            github_client_secret_file: None,
+            session_idle_timeout: Duration::from_secs(60 * 60),
+        }
+    }
 }
 
 impl Config {
@@ -296,6 +322,16 @@ impl Config {
             .unwrap_or_else(|| format!("https://{}", self.admin_host))
     }
 
+    /// The origin browsers use for the admin app: `https://<admin_host>`, or
+    /// `http://<web.dev_listen>` in local development. OAuth callbacks and the CSRF origin
+    /// check use it.
+    pub fn admin_origin(&self) -> String {
+        match self.web.dev_listen {
+            Some(addr) => format!("http://{addr}"),
+            None => format!("https://{}", self.admin_host),
+        }
+    }
+
     /// Checks the rules serde cannot express; the types already enforce the rest.
     fn validate(&self) -> Vec<Problem> {
         let mut problems = Vec::new();
@@ -381,6 +417,26 @@ impl Config {
                 "must be a loopback address such as 127.0.0.1:8080 (development only)",
             ));
         }
+        for (key, file) in [
+            ("web.github_client_id_file", &self.web.github_client_id_file),
+            (
+                "web.github_client_secret_file",
+                &self.web.github_client_secret_file,
+            ),
+        ] {
+            if let Some(file) = file
+                && !file.is_absolute()
+            {
+                problems.push(Problem::new(key, "must be an absolute path"));
+            }
+        }
+        let idle = self.web.session_idle_timeout;
+        if idle.is_zero() || idle > WebConfig::SESSION_LIFETIME {
+            problems.push(Problem::new(
+                "web.session_idle_timeout",
+                "must be greater than zero and at most 12h (the absolute session lifetime)",
+            ));
+        }
         problems
     }
 }
@@ -411,6 +467,8 @@ impl EnvOverrides {
         "acme.root_certificate",
         "webhook.audience",
         "web.dev_listen",
+        "web.github_client_id_file",
+        "web.github_client_secret_file",
     ];
 
     fn new() -> Self {
@@ -474,7 +532,6 @@ pub enum ConfigError {
     #[error("invalid configuration:\n{0}")]
     Invalid(Problems),
     #[error("cannot read credential {name:?}")]
-    #[allow(dead_code, reason = "raised once secrets are read through Credentials")]
     Credential {
         name: String,
         #[source]
@@ -598,10 +655,6 @@ impl Credentials {
 
     /// Reads the credential `name`, without a trailing newline. `None` when there is no
     /// credentials directory or it holds no such credential.
-    #[allow(
-        dead_code,
-        reason = "used once the OAuth client and secret store read secrets"
-    )]
     pub fn read(&self, name: &str) -> Result<Option<String>, ConfigError> {
         let Some(dir) = &self.dir else {
             return Ok(None);
@@ -621,6 +674,42 @@ impl Credentials {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(credential_error(e)),
         }
+    }
+}
+
+impl Credentials {
+    /// Reads a secret from `file` when it is configured, else the credential `name`. `None`
+    /// when neither holds it. A configured file must exist and must not be accessible to group
+    /// or others (it is meant to be 0600).
+    pub fn read_or_file(
+        &self,
+        name: &str,
+        file: Option<&Path>,
+    ) -> Result<Option<String>, ConfigError> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let Some(file) = file else {
+            return self.read(name);
+        };
+        let credential_error = |source| ConfigError::Credential {
+            name: file.display().to_string(),
+            source,
+        };
+        let mode = std::fs::metadata(file)
+            .map_err(credential_error)?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(credential_error(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "mode {:o} lets other users read it; chmod 600 it",
+                    mode & 0o777
+                ),
+            )));
+        }
+        let value = std::fs::read_to_string(file).map_err(credential_error)?;
+        Ok(Some(value.trim_end_matches(['\n', '\r']).to_owned()))
     }
 }
 
@@ -695,7 +784,6 @@ pub struct GithubHandle(String);
 
 impl GithubHandle {
     /// Whether `login` names the same account; GitHub handles are case-insensitive.
-    #[allow(dead_code, reason = "used by the OAuth login check")]
     pub fn matches(&self, login: &str) -> bool {
         self.0.eq_ignore_ascii_case(login)
     }
@@ -849,6 +937,7 @@ impl TryFrom<RangeInclusive<u16>> for PortRange {
 mod tests {
     use super::*;
     use figment::Jail;
+    use std::os::unix::fs::PermissionsExt as _;
 
     const EXAMPLE: &str = include_str!("../deploy/hoster.example.toml");
     const MINIMAL: &str = "admin_host = \"hoster.example.com\"\n";
@@ -1145,6 +1234,62 @@ mod tests {
             assert!(has_problem(&problems, "web.dev_listen"), "{problems:?}");
             Ok(())
         });
+    }
+
+    #[test]
+    fn web_oauth_files_and_idle_timeout() {
+        Jail::expect_with(|jail| {
+            with_admin(jail);
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(config.web.session_idle_timeout, Duration::from_secs(3600));
+            assert_eq!(config.admin_origin(), "https://hoster.example.com");
+
+            jail.set_env("HOSTER_WEB__DEV_LISTEN", "127.0.0.1:8080");
+            jail.set_env("HOSTER_WEB__SESSION_IDLE_TIMEOUT", "30m");
+            jail.set_env("HOSTER_WEB__GITHUB_CLIENT_ID_FILE", "/etc/hoster/client-id");
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(config.web.session_idle_timeout, Duration::from_secs(1800));
+            assert_eq!(config.admin_origin(), "http://127.0.0.1:8080");
+            assert_eq!(
+                config.web.github_client_id_file.as_deref(),
+                Some(Path::new("/etc/hoster/client-id"))
+            );
+
+            jail.set_env("HOSTER_WEB__SESSION_IDLE_TIMEOUT", "13h");
+            jail.set_env("HOSTER_WEB__GITHUB_CLIENT_SECRET_FILE", "secret");
+            let problems = invalid(load(jail, MINIMAL));
+            assert!(
+                has_problem(&problems, "web.session_idle_timeout"),
+                "{problems:?}"
+            );
+            assert!(
+                has_problem(&problems, "web.github_client_secret_file"),
+                "{problems:?}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn secrets_are_read_from_a_private_file_before_the_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("secret");
+        std::fs::write(&file, "from-file\n").unwrap();
+        let creds = Credentials::default();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = creds.read_or_file("x", Some(&file)).unwrap_err();
+        assert!(format!("{err:#}").contains("secret"), "{err:#}");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            creds.read_or_file("x", Some(&file)).unwrap().as_deref(),
+            Some("from-file")
+        );
+        assert!(
+            creds
+                .read_or_file("x", Some(&dir.path().join("missing")))
+                .is_err()
+        );
+        assert_eq!(creds.read_or_file("x", None).unwrap(), None);
     }
 
     #[test]

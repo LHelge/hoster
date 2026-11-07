@@ -89,3 +89,13 @@ interval = "5m"
 # the admin host to (ADR-0031). For local development only, serve it on a loopback TCP address
 # instead; it must be a loopback address.
 # dev_listen = "127.0.0.1:8080"
+
+# GitHub OAuth App for the admin login (ADR-0021, ADR-0031). Create it with the callback URL
+# https://<admin_host>/auth/github/callback (http://<dev_listen>/auth/github/callback in
+# development). Its client id and secret are read from the systemd credentials
+# `github_client_id` and `github_client_secret` (LoadCredential= in the unit), or from these
+# files (absolute paths, mode 0600), which win when set.
+# github_client_id_file = "/home/hoster/.config/hoster/github_client_id"
+# github_client_secret_file = "/home/hoster/.config/hoster/github_client_secret"
+# An admin session ends after this long without a request, and 12h after login at the latest.
+session_idle_timeout = "1h"

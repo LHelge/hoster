@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO oauth_logins (state, pkce_verifier, created_at) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "17a86cd09f3cfeeabcf3b293d2ab4d8b190e98ebbe6eb6fbfcba3047d3671baa"
+}

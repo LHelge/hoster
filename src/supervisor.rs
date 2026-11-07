@@ -554,7 +554,13 @@ impl Startup for Supervisor {
             }
             Phase::Services => {
                 let listen = Listen::from(&self.config);
-                let web = WebApp::start(listen, self.teardown.token.child_token()).await?;
+                let store = self
+                    .store
+                    .clone()
+                    .context("the state store opens before the admin app")?;
+                let web = WebApp::from_config(&self.config, store)?
+                    .start(listen, self.teardown.token.child_token())
+                    .await?;
                 self.teardown.web = Some(web);
                 Ok(())
             }

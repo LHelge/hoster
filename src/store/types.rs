@@ -23,6 +23,24 @@ impl Timestamp {
     }
 }
 
+impl std::ops::Add<Duration> for Timestamp {
+    type Output = Timestamp;
+
+    fn add(self, rhs: Duration) -> Timestamp {
+        let millis = i64::try_from(rhs.as_millis()).unwrap_or(i64::MAX);
+        Timestamp(self.0.saturating_add(millis))
+    }
+}
+
+impl std::ops::Sub<Duration> for Timestamp {
+    type Output = Timestamp;
+
+    fn sub(self, rhs: Duration) -> Timestamp {
+        let millis = i64::try_from(rhs.as_millis()).unwrap_or(i64::MAX);
+        Timestamp(self.0.saturating_sub(millis))
+    }
+}
+
 impl From<SystemTime> for Timestamp {
     fn from(time: SystemTime) -> Self {
         let millis = match time.duration_since(UNIX_EPOCH) {
@@ -277,6 +295,22 @@ impl PortRequest {
             generation: self.generation,
         }
     }
+}
+
+/// A server-side admin session (ADR-0031). The cookie holds the token; the store keeps only
+/// `token_hash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecord {
+    /// SHA-256 (hex) of the cookie token.
+    pub token_hash: String,
+    /// The per-session CSRF token HTMX sends back in a header.
+    pub csrf_token: String,
+    pub github_login: String,
+    pub github_id: i64,
+    pub created_at: Timestamp,
+    pub last_seen_at: Timestamp,
+    /// The absolute expiry.
+    pub expires_at: Timestamp,
 }
 
 #[cfg(test)]

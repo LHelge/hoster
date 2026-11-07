@@ -176,6 +176,25 @@ Environment=HOSTER_ADMIN_GITHUB=octocat
 This writes `~/.config/systemd/user/hoster.service.d/override.conf` and reloads systemd. Other
 `HOSTER_*` overrides, `RUST_LOG` and a larger `TimeoutStopSec=` go into the same drop-in.
 
+### The GitHub OAuth App
+
+The admin UI logs in with GitHub OAuth (ADR-0021, ADR-0031). Create an OAuth App under GitHub
+→ Settings → Developer settings → OAuth Apps, with the callback URL
+`https://<admin_host>/auth/github/callback`. hoster requests no scopes; it only reads which
+account logged in. Store the client id and a client secret as 0600 files and hand them to hoster
+as systemd credentials, in the same drop-in:
+
+```ini
+[Service]
+LoadCredential=github_client_id:%h/.config/hoster/github_client_id
+LoadCredential=github_client_secret:%h/.config/hoster/github_client_secret
+```
+
+Alternatively, point `web.github_client_id_file` and `web.github_client_secret_file` in
+`hoster.toml` at the files. hoster refuses to start without both. Sessions last 12 hours at most
+and end after `web.session_idle_timeout` (default 1h) without a request; the header of every
+page has "Log out" and "Log out everywhere".
+
 ## Check and start
 
 `hoster doctor` checks the user, the configuration, the state directory, the podman socket, the

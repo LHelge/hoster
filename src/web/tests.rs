@@ -7,12 +7,20 @@ use http_body_util::BodyExt as _;
 use tower::ServiceExt as _;
 
 use super::*;
+use crate::web::auth::tests::TestApp;
 
 async fn get(path: &str) -> Response {
-    WebApp::router()
+    TestApp::new()
+        .await
+        .app
+        .router()
         .oneshot(Request::get(path).body(Body::empty()).unwrap())
         .await
         .unwrap()
+}
+
+async fn app() -> WebApp {
+    TestApp::new().await.app
 }
 
 async fn body(response: Response) -> String {
@@ -53,7 +61,9 @@ async fn every_response_carries_the_security_headers() {
 
 #[tokio::test]
 async fn dashboard_renders_the_layout() {
-    let response = get("/").await;
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let response = app.get("/", Some(&browser.cookie)).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(header(&response, "content-type").starts_with("text/html"));
     let html = body(response).await;
@@ -113,7 +123,9 @@ async fn serves_on_a_0600_unix_socket_until_cancelled() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(Listen::SOCKET_NAME);
     let token = CancellationToken::new();
-    let mut server = WebApp::start(Listen::Unix(path.clone()), token.child_token())
+    let mut server = app()
+        .await
+        .start(Listen::Unix(path.clone()), token.child_token())
         .await
         .unwrap();
 
@@ -141,11 +153,15 @@ async fn replaces_a_stale_socket_but_not_a_live_one() {
     let path = dir.path().join(Listen::SOCKET_NAME);
     // A socket file nobody accepts on, as left behind by a crash.
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
-    let mut server = WebApp::start(Listen::Unix(path.clone()), CancellationToken::new())
+    let mut server = app()
+        .await
+        .start(Listen::Unix(path.clone()), CancellationToken::new())
         .await
         .expect("a stale socket is replaced");
 
-    let err = WebApp::start(Listen::Unix(path.clone()), CancellationToken::new())
+    let err = app()
+        .await
+        .start(Listen::Unix(path.clone()), CancellationToken::new())
         .await
         .err()
         .expect("a live socket is not taken over");
@@ -166,7 +182,9 @@ async fn keeps_a_socket_it_cannot_probe() {
         // Running as root: permissions do not apply, so this case cannot be set up.
         return;
     }
-    let err = WebApp::start(Listen::Unix(path.clone()), CancellationToken::new())
+    let err = app()
+        .await
+        .start(Listen::Unix(path.clone()), CancellationToken::new())
         .await
         .err()
         .expect("a socket that cannot be probed is left alone");
@@ -180,7 +198,9 @@ async fn refuses_to_replace_a_regular_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(Listen::SOCKET_NAME);
     std::fs::write(&path, "not a socket").unwrap();
-    let err = WebApp::start(Listen::Unix(path.clone()), CancellationToken::new())
+    let err = app()
+        .await
+        .start(Listen::Unix(path.clone()), CancellationToken::new())
         .await
         .err()
         .expect("a regular file is left alone");
@@ -190,11 +210,13 @@ async fn refuses_to_replace_a_regular_file() {
 
 #[tokio::test]
 async fn serves_on_loopback_tcp_for_development() {
-    let mut server = WebApp::start(
-        Listen::Tcp("127.0.0.1:0".parse().unwrap()),
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let mut server = app()
+        .await
+        .start(
+            Listen::Tcp("127.0.0.1:0".parse().unwrap()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     server.stop(true).await.unwrap();
 }

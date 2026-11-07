@@ -3,6 +3,7 @@
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
 //! binds the [`Listen`] address and serves until the root cancellation token is cancelled.
+//! Every route sits behind [`Auth::guard`] (see `auth/`): sessions, CSRF and the admin check.
 //! Pingora reaches the app on a 0600 Unix socket in the state directory (ADR-0031); a loopback
 //! TCP listener (`web.dev_listen`) exists for local development only.
 //!
@@ -10,6 +11,7 @@
 //! are embedded and served from `/assets/` (see `assets.rs`), so the CSP needs no exceptions.
 
 mod assets;
+mod auth;
 mod pages;
 
 use std::fmt;
@@ -17,6 +19,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use axum::Router;
@@ -28,8 +31,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::store::Store;
 
 use self::assets::Assets;
+use self::auth::Auth;
 use self::pages::Dashboard;
 
 /// Where the admin app listens.
@@ -95,16 +100,32 @@ impl SecurityHeaders {
 }
 
 /// The admin web app.
-pub struct WebApp;
+#[derive(Clone)]
+pub struct WebApp {
+    auth: Arc<Auth>,
+}
 
 impl WebApp {
-    /// All routes, with the security headers applied.
-    pub fn router() -> Router {
+    /// The app for `config`, with sessions in `store` and the GitHub OAuth App's credentials
+    /// read from their files or systemd credentials. Fails when they are missing.
+    pub fn from_config(config: &Config, store: Store) -> anyhow::Result<Self> {
+        let auth = Auth::from_config(config, store).context("setting up the GitHub login")?;
+        Ok(WebApp::from(auth))
+    }
+
+    /// All routes, behind the authentication guard and with the security headers applied.
+    pub fn router(&self) -> Router {
         Router::new()
             .route("/", get(Dashboard::show))
             .route("/healthz", get(WebApp::healthz))
             .route("/assets/{file}", get(Assets::serve))
+            .merge(Auth::routes())
             .fallback(WebApp::not_found)
+            .layer(axum::middleware::from_fn_with_state(
+                self.auth.clone(),
+                Auth::guard,
+            ))
+            .with_state(self.auth.clone())
             .layer(axum::middleware::map_response(SecurityHeaders::apply))
     }
 
@@ -119,8 +140,12 @@ impl WebApp {
 
     /// Binds `listen` and serves [`WebApp::router`] in a background task until `token` is
     /// cancelled, then finishes in-flight requests (see [`WebServer::stop`]).
-    pub async fn start(listen: Listen, token: CancellationToken) -> anyhow::Result<WebServer> {
-        let router = WebApp::router();
+    pub async fn start(
+        self,
+        listen: Listen,
+        token: CancellationToken,
+    ) -> anyhow::Result<WebServer> {
+        let router = self.router();
         let shutdown = token.clone().cancelled_owned();
         let (task, socket) = match &listen {
             Listen::Unix(path) => {
@@ -153,6 +178,14 @@ impl WebApp {
             socket,
             token,
         })
+    }
+}
+
+impl From<Auth> for WebApp {
+    fn from(auth: Auth) -> Self {
+        WebApp {
+            auth: Arc::new(auth),
+        }
     }
 }
 

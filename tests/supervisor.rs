@@ -88,6 +88,11 @@ impl Sandbox {
             ),
         )
         .unwrap();
+        // The GitHub OAuth App's credentials, as systemd would provide them.
+        let credentials = dir.join("credentials");
+        std::fs::create_dir_all(&credentials).unwrap();
+        std::fs::write(credentials.join("github_client_id"), "test-client\n").unwrap();
+        std::fs::write(credentials.join("github_client_secret"), "test-secret\n").unwrap();
         let http = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -109,6 +114,7 @@ impl Sandbox {
             .env("HOME", &self.dir)
             .env("RUST_LOG", "info")
             .env("HOSTER_ADMIN_GITHUB", "octocat")
+            .env("CREDENTIALS_DIRECTORY", self.path("credentials"))
             .env("HOSTER_PODMAN_SOCKET", self.path("podman.sock"))
             .env("HOSTER_PROXY__HTTP_LISTEN", self.http.to_string())
             .env("HOSTER_PROXY__THREADS", "1")

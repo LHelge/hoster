@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="{{ layout.stylesheet() }}">
   <script src="{{ layout.htmx() }}" defer></script>
 </head>
-<body>
+<body{% if let Some(headers) = layout.hx_headers() %} hx-headers:inherited="{{ headers }}"{% endif %}>
   <header>
     <a class="brand" href="/">hoster</a>
     <nav aria-label="Main">
@@ -17,6 +17,13 @@
         {%- endfor %}
       </ul>
     </nav>
+    {%- if let Some(user) = layout.user %}
+    <div class="account">
+      <span class="login">{{ user.login }}</span>
+      <button type="button" hx-post="/auth/logout">Log out</button>
+      <button type="button" hx-post="/auth/logout-everywhere">Log out everywhere</button>
+    </div>
+    {%- endif %}
   </header>
   <main>
     <div id="flash" aria-live="polite">

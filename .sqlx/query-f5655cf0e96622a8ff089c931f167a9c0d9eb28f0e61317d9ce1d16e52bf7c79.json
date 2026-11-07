@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM oauth_logins WHERE state = ?\n               RETURNING pkce_verifier AS \"pkce_verifier!\", created_at AS \"created_at!: Timestamp\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "pkce_verifier!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "oauth_logins",
+            "name": "pkce_verifier"
+          }
+        }
+      },
+      {
+        "name": "created_at!: Timestamp",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "oauth_logins",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "f5655cf0e96622a8ff089c931f167a9c0d9eb28f0e61317d9ce1d16e52bf7c79"
+}

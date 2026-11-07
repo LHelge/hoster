@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT token_hash, csrf_token, github_login, github_id,\n                      created_at AS \"created_at: Timestamp\",\n                      last_seen_at AS \"last_seen_at: Timestamp\",\n                      expires_at AS \"expires_at: Timestamp\"\n               FROM sessions\n               WHERE token_hash = ? AND expires_at > ? AND last_seen_at > ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "token_hash",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sessions",
+            "name": "token_hash"
+          }
+        }
+      },
+      {
+        "name": "csrf_token",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sessions",
+            "name": "csrf_token"
+          }
+        }
+      },
+      {
+        "name": "github_login",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sessions",
+            "name": "github_login"
+          }
+        }
+      },
+      {
+        "name": "github_id",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sessions",
+            "name": "github_id"
+          }
+        }
+      },
+      {
+        "name": "created_at: Timestamp",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sessions",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "last_seen_at: Timestamp",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sessions",
+            "name": "last_seen_at"
+          }
+        }
+      },
+      {
+        "name": "expires_at: Timestamp",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sessions",
+            "name": "expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ff01b0d6bf546865d2ba5bde0d069952e13832fbc0049e43d6b8d74f125e0c37"
+}

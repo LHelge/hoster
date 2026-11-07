@@ -1,10 +1,10 @@
 ---
 id: tuv
 title: GitHub OAuth login, admin handle check, SQLite sessions, CSRF
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.222053187Z"
-updated: "2026-11-07T23:03:39.840274518Z"
+updated: "2026-11-07T23:26:59.761856464Z"
 tags:
   - web
   - security

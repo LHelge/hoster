@@ -33,6 +33,12 @@ ExecStart=/usr/local/bin/hoster run
 Environment=HOSTER_ADMIN_GITHUB=<your-github-handle>
 # Environment=RUST_LOG=hoster=debug
 
+# The GitHub OAuth App's client id and secret for the admin login (ADR-0031), as systemd
+# credentials (or set web.github_client_id_file / web.github_client_secret_file in hoster.toml).
+# Keep the files 0600; set these in the drop-in too:
+#   LoadCredential=github_client_id:%h/.config/hoster/github_client_id
+#   LoadCredential=github_client_secret:%h/.config/hoster/github_client_secret
+
 Restart=always
 RestartSec=2s
 # Startup reconciles containers and may pull images, which can take a while (architecture.md

@@ -50,6 +50,24 @@ nav ul { display: flex; gap: 1rem; margin: 0; padding: 0; list-style: none; }
 nav a { text-decoration: none; }
 nav a[aria-current="page"] { font-weight: 600; color: var(--fg); }
 
+header .account { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+header .account .login { color: var(--muted); }
+
+button, .button {
+  display: inline-block;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+button:hover, .button:hover { border-color: var(--accent); }
+
+.login-box { max-width: 28rem; margin: 3rem auto; text-align: center; }
+
 main { max-width: 64rem; margin: 0 auto; padding: 1rem; }
 
 #flash:empty { display: none; }

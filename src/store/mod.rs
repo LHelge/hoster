@@ -15,6 +15,7 @@
     reason = "the Store API is consumed by the orchestrator and web UI"
 )]
 
+mod sessions;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,7 +39,7 @@ use thiserror::Error;
 pub use types::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState,
     DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, RevisionId, ServicePointer,
-    Stack, StackRevision, Timestamp,
+    SessionRecord, Stack, StackRevision, Timestamp,
 };
 
 /// The embedded migrations from `migrations/`.
