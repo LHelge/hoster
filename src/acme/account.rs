@@ -6,14 +6,14 @@
 //! on the CA that issued it, so when the configured directory changes (say, from Let's Encrypt
 //! staging to production) a new account is created and replaces the file.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use instant_acme::{Account, AccountBuilder, AccountCredentials, NewAccount};
 use serde::Deserialize;
 
+use super::atomic::AtomicFile;
 use crate::config::AcmeConfig;
 
 /// Why the ACME account could not be loaded or created.
@@ -199,30 +199,9 @@ impl AccountStore {
         let json = serde_json::to_vec_pretty(credentials)
             .map_err(io::Error::from)
             .map_err(error)?;
-        let dir = self.path.parent().expect("account path has a parent");
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(error)?;
-
-        let tmp = self.path.with_extension("json.tmp");
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            file.write_all(&json)?;
-            file.sync_all()?;
-            fs::rename(&tmp, &self.path)?;
-            fs::File::open(dir)?.sync_all()
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result.map_err(error)
+        AtomicFile::new(&self.path, AtomicFile::PRIVATE)
+            .write(&json)
+            .map_err(error)
     }
 }
 

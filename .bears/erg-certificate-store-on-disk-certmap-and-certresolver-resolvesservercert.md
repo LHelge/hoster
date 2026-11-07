@@ -1,10 +1,10 @@
 ---
 id: erg
 title: Certificate store on disk, CertMap and CertResolver (ResolvesServerCert)
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.257664513Z"
-updated: "2026-11-07T23:09:09.043099074Z"
+updated: "2026-11-07T23:22:20.679288520Z"
 tags:
   - tls
 depends_on:

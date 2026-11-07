@@ -20,6 +20,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::acme::CertMap;
 use crate::config::{Config, ProxyConfig};
 use crate::proxy::{Proxy, ProxyEvents, ProxyThread};
 use crate::registry::FileCredentials;
@@ -371,6 +372,12 @@ pub struct Supervisor {
     config: Config,
     /// The state store, opened in startup step 2.
     store: Option<Store>,
+    /// The certificates served by SNI, loaded from disk in startup step 3.
+    #[allow(
+        dead_code,
+        reason = "handed to the :443 listener and the ACME task when they land"
+    )]
+    certs: Option<CertMap>,
     /// The podman connection, made in startup step 4.
     runtime: Option<PodmanRuntime>,
     teardown: Teardown,
@@ -381,6 +388,7 @@ impl Supervisor {
         Supervisor {
             config,
             store: None,
+            certs: None,
             runtime: None,
             teardown: Teardown::default(),
         }
@@ -520,7 +528,27 @@ impl Startup for Supervisor {
                 Ok(())
             }
             Phase::Proxy => self.teardown.proxy.start(&self.config.proxy).await,
-            Phase::Certificates | Phase::Reconcile | Phase::RouteTable => {
+            Phase::Certificates => {
+                let (certs, report) = CertMap::open(
+                    &self.config.state_dir,
+                    Some(self.config.acme.directory_url.clone()),
+                )?;
+                for host in &report.expired {
+                    // The ACME task issues these again once it starts (architecture §4 step 3).
+                    tracing::warn!(host, "certificate on disk has expired; not serving it");
+                }
+                tracing::info!(loaded = report.loaded.len(), "certificates loaded");
+                for (host, error) in report.invalid {
+                    tracing::warn!(
+                        host,
+                        error = format!("{:#}", anyhow::Error::from(error)),
+                        "ignoring unusable certificate on disk"
+                    );
+                }
+                self.certs = Some(certs);
+                Ok(())
+            }
+            Phase::Reconcile | Phase::RouteTable => {
                 tracing::info!(%phase, step = phase.number(), "not implemented yet, skipping");
                 Ok(())
             }

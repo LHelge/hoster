@@ -30,6 +30,15 @@ use tokio::sync::{broadcast, watch};
 
 use crate::config::ProxyConfig;
 
+#[allow(dead_code, reason = "installed on the :443 listener when it lands")]
+mod resolver;
+
+#[allow(
+    unused_imports,
+    reason = "installed on the :443 listener when it lands"
+)]
+pub use resolver::CertResolver;
+
 /// Why the proxy did not come up.
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
