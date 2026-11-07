@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT port AS \"port: u16\" FROM port_allocations",
+  "describe": {
+    "columns": [
+      {
+        "name": "port: u16",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "port_allocations",
+            "name": "port"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "48904a4ad032c9b99822db1c85c9f1f49295f6e73f0f4d77e8c425e52f7333a6"
+}

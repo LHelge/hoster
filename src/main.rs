@@ -9,6 +9,7 @@ mod acme;
 mod config;
 mod doctor;
 mod orchestrator;
+mod ports;
 mod proxy;
 mod registry;
 mod routing;

@@ -249,6 +249,28 @@ pub struct PortAllocation {
     pub generation: u32,
 }
 
+/// The container a loopback port is wanted for: a [`PortAllocation`] before its port is chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortRequest {
+    pub stack: String,
+    pub service: String,
+    pub container_port: u16,
+    pub generation: u32,
+}
+
+impl PortRequest {
+    /// The allocation of `port` to this container.
+    pub fn at(&self, port: u16) -> PortAllocation {
+        PortAllocation {
+            port,
+            stack: self.stack.clone(),
+            service: self.service.clone(),
+            container_port: self.container_port,
+            generation: self.generation,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

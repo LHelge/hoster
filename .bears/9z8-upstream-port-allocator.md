@@ -1,16 +1,17 @@
 ---
 id: "9z8"
 title: Upstream port allocator
-status: open
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.184860490Z"
-updated: "2026-11-07T14:45:17.184860490Z"
+updated: "2026-11-07T22:46:57.928395269Z"
 tags:
   - store
 depends_on:
   - h3a
   - pu4
 parent: "5ch"
+attempts: 1
 ---
 
 ## Summary

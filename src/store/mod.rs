@@ -17,7 +17,7 @@
 
 mod types;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, DirBuilder, OpenOptions, Permissions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -37,8 +37,8 @@ use thiserror::Error;
 )]
 pub use types::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState,
-    DigestSet, NewDeployment, PortAllocation, PortMap, RevisionId, ServicePointer, Stack,
-    StackRevision, Timestamp,
+    DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, RevisionId, ServicePointer,
+    Stack, StackRevision, Timestamp,
 };
 
 /// The embedded migrations from `migrations/`.
@@ -695,6 +695,79 @@ impl Store {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// kv key of the port allocator's cursor: the last port it handed out (ADR-0026).
+    const PORT_CURSOR_KEY: &str = "port_allocator.last";
+
+    /// Allocates a port in one write transaction, so concurrent claims never get the same port.
+    ///
+    /// `choose` is given the allocator cursor (the port last handed out, if any) and every
+    /// reserved port, and picks the port to reserve; the store records the allocation and moves
+    /// the cursor to it. Returns `None`, storing nothing, when `choose` finds no port. The
+    /// policy is the allocator's; the store only makes it atomic.
+    pub async fn claim_port(
+        &self,
+        request: &PortRequest,
+        choose: impl FnOnce(Option<u16>, &BTreeSet<u16>) -> Option<u16>,
+    ) -> Result<Option<PortAllocation>> {
+        let now = Timestamp::now();
+        let mut tx = self.begin().await?;
+        let exists =
+            sqlx::query_scalar!("SELECT 1 AS one FROM stacks WHERE name = ?", request.stack)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some();
+        if !exists {
+            return Err(StoreError::UnknownStack(request.stack.clone()));
+        }
+        let cursor =
+            sqlx::query_scalar!("SELECT value FROM kv WHERE key = ?", Self::PORT_CURSOR_KEY)
+                .fetch_optional(&mut *tx)
+                .await?
+                .and_then(|value| value.parse::<u16>().ok());
+        let taken: BTreeSet<u16> =
+            sqlx::query_scalar!(r#"SELECT port AS "port: u16" FROM port_allocations"#)
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .collect();
+        let Some(port) = choose(cursor, &taken) else {
+            return Ok(None);
+        };
+        let allocation = request.at(port);
+        let inserted = sqlx::query!(
+            "INSERT INTO port_allocations
+                 (port, stack, service, container_port, generation, allocated_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            allocation.port,
+            allocation.stack,
+            allocation.service,
+            allocation.container_port,
+            allocation.generation,
+            now,
+        )
+        .execute(&mut *tx)
+        .await;
+        match inserted {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                return Err(StoreError::PortTaken(port));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let value = port.to_string();
+        sqlx::query!(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            Self::PORT_CURSOR_KEY,
+            value,
+            now,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(allocation))
     }
 
     /// Releases a port. Returns whether it was reserved.
