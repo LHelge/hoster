@@ -1,0 +1,350 @@
+# Open questions
+
+Status: all resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+
+Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
+a pointer to the ADR that resolved it. New open questions are added here with options and a
+recommendation, and moved into an ADR once decided.
+
+Index:
+
+| # | Topic | Blocks milestone |
+|---|---|---|
+| [OQ-01](#oq-01-state-store) | ~~State store~~ **Resolved → ADR-0022 (SQLite via sqlx)** | — |
+| [OQ-02](#oq-02-secrets-and-env-injection) | ~~Secrets and env injection~~ **Resolved → ADR-0029** | — |
+| [OQ-03](#oq-03-persistent-volumes-and-backups) | ~~Persistent volumes and backups~~ **Resolved → ADR-0030** | — |
+| [OQ-04](#oq-04-log-access) | ~~Log access~~ **Resolved → ADR-0044** | — |
+| [OQ-05](#oq-05-admin-ui-exposure-sessions-and-identity-remaining-details) | ~~Admin UI exposure, sessions, identity (remaining details after ADR-0021)~~ **Resolved → ADR-0031** | — |
+| [OQ-06](#oq-06-private-ghcr-pull-credentials) | ~~Private ghcr pull credentials~~ **Resolved → ADR-0025** | — |
+| [OQ-07](#oq-07-health-checks-and-resource-limits) | ~~Health checks and resource limits~~ **Resolved → ADR-0038** | — |
+| [OQ-08](#oq-08-rollback) | ~~Rollback~~ **Resolved → ADR-0041** | — |
+| [OQ-09](#oq-09-systemd-setup-and-binding-80443) | ~~systemd setup and binding 80/443~~ **Resolved → ADR-0023** | — |
+| [OQ-10](#oq-10-where-stack-definitions-live) | ~~Where stack definitions live~~ **Resolved → ADR-0027** | — |
+| [OQ-11](#oq-11-webhook-exposure-payload-and-secret-scoping) | ~~Webhook exposure, payload, secret scoping~~ **Resolved → ADR-0042** | — |
+| [OQ-12](#oq-12-webhook-replay-protection) | ~~Webhook replay protection~~ **Resolved → ADR-0042** | — |
+| [OQ-13](#oq-13-poller-semantics) | ~~Poller semantics~~ **Resolved → ADR-0043** | — |
+| [OQ-14](#oq-14-update-strategy-for-services-that-cannot-run-twice) | ~~Update strategy for services that can't run twice~~ **Resolved → ADR-0039** | — |
+| [OQ-15](#oq-15-deploy-concurrency-and-coalescing) | ~~Deploy concurrency and coalescing~~ **Resolved → ADR-0040** | — |
+| [OQ-16](#oq-16-certificate-issuance-vs-route-activation) | ~~Certificate issuance vs route activation~~ **Resolved → ADR-0036** | — |
+| [OQ-17](#oq-17-who-restarts-containers-after-a-reboot-or-crash) | ~~Who restarts containers after reboot/crash~~ **Resolved → ADR-0028** | — |
+| [OQ-18](#oq-18-restarting-and-upgrading-hoster-itself) | ~~Restarting/upgrading hoster itself~~ **Resolved → ADR-0034** | — |
+| [OQ-19](#oq-19-unknown-hosts-snihost-mismatch-default-certificate) | ~~Unknown hosts, SNI/Host mismatch, default cert~~ **Resolved → ADR-0032** | — |
+| [OQ-20](#oq-20-upstream-port-allocation) | ~~Upstream port allocation~~ **Resolved → ADR-0026** | — |
+| [OQ-21](#oq-21-rustls-crypto-provider) | ~~rustls crypto provider~~ **Resolved → ADR-0037** | — |
+| [OQ-22](#oq-22-protocol-support) | ~~Protocol support (h2, WebSocket, gRPC)~~ **Resolved → ADR-0033** | — |
+| [OQ-23](#oq-23-cross-stack-communication) | ~~Cross-stack communication~~ **Resolved → ADR-0046** | — |
+| [OQ-24](#oq-24-image-and-container-garbage-collection) | ~~Image/container garbage collection~~ **Resolved → ADR-0041** | — |
+| [OQ-25](#oq-25-third-party-non-ghcr-images) | ~~Third-party (non-ghcr) images~~ **Resolved → ADR-0025** | — |
+| [OQ-26](#oq-26-metrics-and-alerting) | ~~Metrics and alerting~~ **Resolved → ADR-0045** | — |
+| [OQ-27](#oq-27-hoster-configuration-file) | ~~hoster's own configuration~~ **Resolved → ADR-0024** | — |
+| [OQ-28](#oq-28-provisional-details-assumed-in-architecturemd) | ~~Provisional details assumed in architecture.md~~ **Resolved → ADR-0035** | — |
+| [OQ-29](#oq-29-github-actions-oidc-instead-of-hmac-for-the-deploy-webhook) | ~~GitHub Actions OIDC instead of HMAC for the deploy webhook~~ **Resolved → ADR-0047** | — |
+| [OQ-30](#oq-30-mixed-stop-firststart-first-ordering-and-atomic-stack-commit) | ~~Mixed stop-first/start-first ordering and atomic stack commit~~ **Resolved → ADR-0048** | — |
+| [OQ-31](#oq-31-local-admin-path-break-glass) | ~~Local admin path (break-glass CLI over a second Unix socket)~~ **Resolved → ADR-0031 reaffirmed, no local path in v1** | — |
+| [OQ-32](#oq-32-when-an-applied-but-not-redeployed-revision-takes-effect) | ~~When an applied-but-not-redeployed revision takes effect~~ **Resolved → ADR-0049 (apply always redeploys)** | — |
+| [OQ-33](#oq-33-orchestrator-actor-or-shared-handle) | ~~Orchestrator: actor + Command enum, or shared handle with async methods~~ **Resolved → ADR-0050 (handle)** | — |
+| [OQ-34](#oq-34-poller-bootstrap-advisory-dns-check-health-default-path-port-host-redirects) | ~~Poller bootstrap, advisory DNS check, health default path, `PORT` injection, host redirects~~ **Resolved → ADR-0051** | — |
+
+---
+
+## OQ-01: State store
+
+**Resolved 2026-11-07 → [ADR-0022](adr/0022-sqlite-via-sqlx-state-store.md): SQLite through sqlx.**
+The original options were rusqlite, redb, JSON files and labels-only. Podman labels remain a
+secondary source for reconciliation, and certificates stay as files (ADR-0016).
+
+## OQ-02: Secrets and env injection
+
+**Resolved 2026-11-07 → [ADR-0029](adr/0029-secret-store-and-config-aware-idempotency.md): Encrypted secret store in SQLite, injected as env; idempotency on digest + config hash.**
+
+## OQ-03: Persistent volumes and backups
+
+**Resolved 2026-11-07 → [ADR-0030](adr/0030-named-volumes-and-documented-backups.md): Named podman volumes kept on stack removal; backups documented with a hoster backup db command.**
+
+## OQ-04: Log access
+
+**Resolved 2026-11-07 → [ADR-0044](adr/0044-container-logs-streamed-to-ui.md): Container logs kept by podman and streamed live into the web UI.**
+
+## OQ-05: Admin UI exposure, sessions and identity (remaining details)
+
+**Resolved 2026-11-07 → [ADR-0031](adr/0031-admin-ui-exposure-identity-sessions.md): Admin UI on a reserved host via Unix socket; GitHub handle compared; SQLite sessions with CSRF tokens; no break-glass.**
+
+## OQ-06: Private ghcr pull credentials
+
+**Resolved 2026-11-07 → [ADR-0025](adr/0025-registry-credentials-and-image-references.md): Classic PAT with read:packages for ghcr, per-registry credentials in the secret store.**
+
+## OQ-07: Health checks and resource limits
+
+**Resolved 2026-11-07 → [ADR-0038](adr/0038-host-driven-health-probes-no-limits-v1.md): hoster-driven HTTP/TCP health probes; no resource limits in v1.**
+
+## OQ-08: Rollback
+
+**Resolved 2026-11-07 → [ADR-0041](adr/0041-rollback-and-garbage-collection.md): Rollback by redeploying a previous deployment; keep the last 3 successful images.**
+
+## OQ-09: systemd setup and binding 80/443
+
+**Resolved 2026-11-07 → [ADR-0023](adr/0023-systemd-user-service-with-linger.md): hoster runs as a systemd user service with linger and net.ipv4.ip_unprivileged_port_start=80.**
+
+## OQ-10: Where stack definitions live
+
+**Resolved 2026-11-07 → [ADR-0027](adr/0027-stacks-applied-via-ui-webhooks-carry-digests.md): Stack files applied through the web UI; webhooks carry only image digests.**
+
+## OQ-11: Webhook exposure, payload and secret scoping
+
+**Resolved 2026-11-07 → [ADR-0042](adr/0042-webhook-endpoint-payload-and-replay.md) (endpoint and multi-service payload) and [ADR-0047](adr/0047-oidc-authenticated-deploy-webhook.md) (authentication: GitHub Actions OIDC, no shared secrets).**
+
+## OQ-12: Webhook replay protection
+
+**Resolved 2026-11-07 → [ADR-0047](adr/0047-oidc-authenticated-deploy-webhook.md): single-use `jti` plus token expiry; the ±5 min timestamp window of ADR-0042 is superseded.**
+
+## OQ-13: Poller semantics
+
+**Resolved 2026-11-07 → [ADR-0043](adr/0043-edge-triggered-poller.md): Poller deploys only when a tracked tag's digest changes.**
+
+## OQ-14: Update strategy for services that cannot run twice
+
+**Resolved 2026-11-07 → [ADR-0039](adr/0039-per-service-update-strategy.md): Per-service update = start-first (default) or stop-first.**
+
+## OQ-15: Deploy concurrency and coalescing
+
+**Resolved 2026-11-07 → [ADR-0040](adr/0040-deploy-concurrency-and-coalescing.md): One active deployment per stack; queue keeps only the newest target.**
+
+## OQ-16: Certificate issuance vs route activation
+
+**Resolved 2026-11-07 → [ADR-0036](adr/0036-certificates-issued-at-apply-non-blocking.md): Certificates requested at stack apply after a DNS check; deploys never wait.**
+
+## OQ-17: Who restarts containers after a reboot or crash
+
+**Resolved 2026-11-07 → [ADR-0028](adr/0028-hoster-reconciles-container-restarts.md): hoster reconciles and restarts containers itself; podman restart policy off.**
+
+## OQ-18: Restarting and upgrading hoster itself
+
+**Resolved 2026-11-07 → [ADR-0034](adr/0034-hoster-restarts-accept-gap.md): Accept a short ingress gap on hoster restart; spike systemd socket activation later.**
+
+## OQ-19: Unknown hosts, SNI/Host mismatch, default certificate
+
+**Resolved 2026-11-07 → [ADR-0032](adr/0032-proxy-edge-behaviour.md): Strict edge: no default cert, 421 on Host/SNI mismatch, 404 for unknown hosts on HTTP.**
+
+## OQ-20: Upstream port allocation
+
+**Resolved 2026-11-07 → [ADR-0026](adr/0026-upstream-port-allocation.md): Round-robin port allocation over a configured range (default 20000-29999), persisted in SQLite.**
+
+## OQ-21: rustls crypto provider
+
+**Resolved 2026-11-07 → [ADR-0037](adr/0037-ring-crypto-provider-everywhere.md): ring crypto provider everywhere.**
+
+## OQ-22: Protocol support
+
+**Resolved 2026-11-07 → [ADR-0033](adr/0033-protocol-support-v1.md): v1 protocols: h1+h2 downstream, WebSockets, h1 upstream (h2c later).**
+
+## OQ-23: Cross-stack communication
+
+**Resolved 2026-11-07 → [ADR-0046](adr/0046-no-cross-stack-networking.md): No direct cross-stack networking in v1.**
+
+## OQ-24: Image and container garbage collection
+
+**Resolved 2026-11-07 → [ADR-0041](adr/0041-rollback-and-garbage-collection.md): Rollback by redeploying a previous deployment; keep the last 3 successful images.**
+
+## OQ-25: Third-party (non-ghcr) images
+
+**Resolved 2026-11-07 → [ADR-0025](adr/0025-registry-credentials-and-image-references.md): Any registry; third-party tags resolved to a digest at stack apply.**
+
+## OQ-26: Metrics and alerting
+
+**Resolved 2026-11-07 → [ADR-0045](adr/0045-observability-in-ui-only.md): Observability in the web UI only; no metrics endpoint or alerting in v1.**
+
+## OQ-27: hoster configuration file
+
+**Resolved 2026-11-07 → [ADR-0024](adr/0024-config-toml-with-env-overrides.md): Config is ~/.config/hoster/hoster.toml with HOSTER_* env overrides; secrets kept in separate files or credentials.**
+
+## OQ-28: Provisional details assumed in architecture.md
+
+**Resolved 2026-11-07 → [ADR-0035](adr/0035-confirmed-implementation-details.md): Confirmed implementation details from architecture.md.**
+
+## OQ-29: GitHub Actions OIDC instead of HMAC for the deploy webhook
+
+**Resolved 2026-11-07 → [ADR-0047](adr/0047-oidc-authenticated-deploy-webhook.md): Deploy webhook authenticated with GitHub Actions OIDC tokens only.**
+
+---
+
+## OQ-30: Mixed stop-first/start-first ordering and atomic stack commit
+
+**Resolved 2026-11-07 → [ADR-0048](adr/0048-atomic-stack-commit-mixed-update-strategies.md): option B. Start-first services start and pass health first, stop-first services are replaced in a `Replacing` step, then one swap and one transaction commit the whole stack.**
+
+<details><summary>Original discussion</summary>
+
+**Problem.** ADR-0039 says that in one deployment "stop-first services go first, then start-first
+services", each following its own sequence. A stop-first service therefore commits (old stopped,
+new swapped in, old removed) before the start-first services have passed their health checks. If a
+start-first service then fails, the deployment ends `Failed` with the stop-first services at the
+new generation and the rest at the old one. Nothing in architecture §5 describes that outcome, and
+"redeploy the previous deployment" is the only way back.
+
+**Options.**
+
+- **A. Keep ADR-0039's order and define the outcome.** Document that stop-first services commit
+  independently, record the deployment as `Failed (partially applied)` and list which services
+  moved. Simple, but the stack's deployment is no longer one atomic unit.
+- **B. Reverse the order so the whole stack commits in one swap** *(recommended)*:
+  1. start and health-check every changed start-first service (no swap yet)
+  2. for each changed stop-first service: publish `Unavailable` for its routes, stop old, start
+     new, health-check
+  3. one RouteTable publish and one transaction writing all per-service pointers
+  4. drain and remove old containers
+  
+  The stop-first gap is the same length as before. A failure anywhere before step 3 leads to a
+  clean `Aborting`: restart the stopped stop-first containers, remove all new containers, restore
+  routes. Peak resource use is the same as ADR-0017 already accepts.
+- **C. Reject deployments that change both kinds at once.** Explicit, but forces two deploys for
+  the common "bump storage and api together" case.
+
+**Recommendation:** B. It makes "a deployment is one atomic change to a stack" true for every
+stack shape and removes a state that would otherwise need its own recovery story.
+
+</details>
+
+## OQ-31: Local admin path (break-glass)
+
+**Resolved 2026-11-07 → option A: [ADR-0031](adr/0031-admin-ui-exposure-identity-sessions.md) stands.** No local socket or CLI in v1; during a GitHub outage the operator waits or works on the host directly. The owner accepted that a GitHub outage blocks deploys and rollbacks. Revisit after v1 if it bites. The dev-only loopback listener in `9st` is unaffected.
+
+<details><summary>Original discussion</summary>
+
+**Problem.** ADR-0031 says: if GitHub login is unavailable, use SSH, files and the DB directly.
+A GitHub outage normally takes Actions and OAuth down together, so during one neither the webhook
+nor the UI can deploy or roll back, and "the DB directly" means hand-editing SQLite while hoster
+runs. ADR-0021 rejected a CLI as *the* admin interface; it did not rule one out as a supplement.
+The Axum app already listens on a Unix socket for Pingora, so the cost of a local path is small.
+
+**Options.**
+
+- **A. No break-glass (status quo, ADR-0031).**
+- **B. A second, local-only Unix socket plus CLI subcommands** *(recommended)*. Axum listens on
+  `admin.sock` (for Pingora, session-authenticated) and `local.sock` (0600, no session: file
+  permissions are the authentication, the same model as the podman socket). `hoster apply <file>`,
+  `hoster deploy <stack> <svc>=<digest>…`, `hoster rollback <stack> <deployment>` and
+  `hoster status` talk to `local.sock` over HTTP and reuse the UI handlers. Side benefits: M3 is
+  usable and testable before the proxy and TLS exist; the e2e test (`4nb`) drives hoster without a
+  browser; scripted/GitOps-style applies become possible without weakening ADR-0027 (the file is
+  still applied by someone with shell access, not by CI).
+- **C. One-time login link minted by a CLI.** Rejected in ADR-0031 as a credential-minting path;
+  it also still needs the UI to be reachable.
+
+**Recommendation:** B. It is a few hundred lines, reuses existing handlers, and turns the only
+"edit the database by hand" procedure in the design into ordinary commands.
+
+</details>
+
+## OQ-32: When an applied-but-not-redeployed revision takes effect
+
+**Resolved 2026-11-07 → [ADR-0049](adr/0049-apply-always-redeploys.md): option C. Applying a revision or changing a secret redeploys the affected services on confirmation; there is no staged apply, so the running config always equals the active revision outside a failed deployment.**
+
+<details><summary>Original discussion</summary>
+
+**Problem.** spec.md §6 and ADR-0029 promise that "config changes redeploy only when you confirm
+them in the UI" and "nothing redeploys silently in the background". But the idempotency key is
+(image digest, config hash), and a webhook is a no-op only when *both* are unchanged. After an
+"apply" without "redeploy", a webhook carrying the digest that is already running (a CI re-run,
+or a release that only changed another service) has a different config hash and therefore
+deploys the pending revision. The two statements cannot both be true; the behaviour must be one or
+the other.
+
+**Options.**
+
+- **A. Apply makes the revision active; the next deploy of any kind uses it** *(recommended)*.
+  "Apply" = this is now the desired config; "apply & redeploy" = and do it now. A later webhook,
+  poller or manual deploy for the stack builds its containers from the active revision, whatever
+  changed. The UI shows "revision N applied, M services pending redeploy" so the state is visible.
+  spec.md §6 is reworded to "config changes take effect at the next deploy of the stack, or
+  immediately if you choose apply & redeploy".
+- **B. Two pointers: applied revision and deployed revision; webhooks pin to the deployed one.**
+  Keeps the promise literally, but a webhook then starts containers from a revision the admin has
+  already replaced, which is surprising in the other direction, and every deploy has to carry a
+  revision id.
+- **C. Apply always redeploys.** Removes the distinction; the admin loses the ability to stage a
+  config change for the next release.
+
+**Recommendation:** A. It is what the (digest, config hash) key already implies, and "the next
+release picks up the config you applied" is the behaviour most operators expect.
+
+</details>
+
+## OQ-33: Orchestrator: actor, or shared handle?
+
+**Resolved 2026-11-07 → [ADR-0050](adr/0050-orchestrator-handle-with-async-methods.md): option B. `Arc<Orchestrator>` with async methods and one internal lock; deploy tasks call `transition()`. The `Command`/`DeployEvent`/`oneshot` channels are gone.**
+
+<details><summary>Original discussion</summary>
+
+**Problem.** architecture.md models the orchestrator as an actor: a single task reading a bounded
+`mpsc<Command>`, replying through `oneshot`s, with deploy tasks reporting back over a second
+channel. Every operation then exists three times: as an enum variant, as a reply type, and as the
+handler arm. No ADR fixes this shape. ADR-0008 settles channels + ArcSwap for the *proxy*
+boundary, and ADR-0035 #1 settles only that the orchestrator (not a deploy task) performs the
+swap. CLAUDE.md asks for behaviour on types and traits.
+
+**Options.**
+
+- **A. Actor + Command enum (as documented).** Explicit serialization point; easy to log every
+  command; natural back-pressure. Costs the triplication above and makes every call site async
+  message plumbing.
+- **B. `Orchestrator` handle with async methods** *(recommended)*. `Arc<Orchestrator>` holding
+  `Mutex<DesiredState>` (short critical sections only), per-stack deploy slots
+  (`HashMap<StackId, ActiveDeploy>` behind the same lock), the `ArcSwap<RouteTable>` writer, and
+  the store. Axum handlers, the webhook, the poller and the reconciler call
+  `orchestrator.deploy(..).await` etc. and get typed results directly. Deploy tasks are spawned by
+  the handle and call back into it (`orchestrator.transition(id, event)`), which keeps the single
+  writer: only methods on `Orchestrator` touch desired state or publish routes. Tests construct
+  the struct with a `FakeRuntime` and call methods; no channels to drive.
+- **C. Hybrid.** Handle for queries and deploy requests, a channel only for deploy-task events.
+  Probably the shape B converges on anyway for the task → orchestrator direction.
+
+**Recommendation:** B. Same invariants, less code, and the API is the type's methods rather than
+an enum mirrored by a reply enum. If B is chosen, "orchestrator actor" in the docs becomes
+"orchestrator".
+
+</details>
+
+## OQ-34: Poller bootstrap, advisory DNS check, health default path, `PORT`, host redirects
+
+**Resolved 2026-11-07 → [ADR-0051](adr/0051-poller-bootstrap-advisory-dns-health-default-port.md).** 1: deploy on first sighting if the service never ran. 2: advisory DNS check, own addresses from the admin host (override `acme.public_addresses`). 3: default health path is `/healthz` (Kubernetes convention; declare `health` otherwise). 4: `PORT` injected for single-port routed services. 5: host redirects **not** in v1.
+
+<details><summary>Original discussion</summary>
+
+**1. Poller first sighting (ADR-0043).** A tag's first observed digest is recorded without
+deploying, so a freshly applied stack with `track = "main"` and no digest yet is never deployed
+by the poller; the first deploy must come from a webhook or the UI.
+*Recommendation:* on first sighting, deploy if the service has never run; otherwise record only.
+Rollback protection is unaffected because a rolled-back service has run.
+
+**2. DNS check before issuance (ADR-0036).** The check compares A/AAAA records with "this
+server's" addresses, which nothing defines. Behind a proxying CDN (Cloudflare orange-cloud) the
+records point at the CDN while HTTP-01 still succeeds through it, so a hard gate defers forever.
+*Recommendation:* hoster's own addresses are the A/AAAA records of the admin host, resolved at
+startup (it must point at the VPS anyway), overridable by `acme.public_addresses` in config. The
+check becomes advisory: a mismatch is shown in the UI as the likely cause and issuance is still
+attempted under the normal backoff. Rate-limit cost is bounded by the backoff (5 min → 24 h).
+
+**3. Default health probe path (ADR-0038).** `GET /` on the first route's port 404s for a service
+mounted under a preserved prefix (`/api` without `strip_prefix`).
+*Recommendation:* default path = the first route's prefix (`/api`) when the prefix is preserved,
+`/` when it is stripped or the route is at the root. Expected status stays 2xx–3xx.
+
+**4. `PORT` convenience (stack-format §2.2, §2.3).** The app's listen port is fixed by the image
+and named in the route's `port`; hoster maps a loopback port onto it, so the app never needs to be
+told anything. Many 12-factor images nevertheless read `PORT`, which today means writing both
+`env = { PORT = "8080" }` and `port = 8080`.
+*Recommendation:* for a routed service with exactly one distinct container port, inject
+`PORT=<that port>` unless `env` already defines `PORT`. Generic convention, not an app-specific
+feature (ADR-0018). Document next to `port` that the app must bind `0.0.0.0`/`::`, not
+`127.0.0.1`, because rootless port forwarding cannot reach a loopback-bound listener.
+
+**5. Host redirects (ADR-0032 edge table).** `example.com` and `www.example.com` to the same
+service works with two routes, but there is no way to say "send www to the apex". HTTP → HTTPS is
+already handled by the :80 service (308).
+*Recommendation:* a stack-level `[[redirects]]` entry, `{ from = "www.example.com", to =
+"https://example.com", status = 308 }`, that owns `(from, /)` in the collision check like a route,
+gets a certificate like a route, and makes the :443 proxy answer a redirect preserving path and
+query. Served from the `RouteTable` as a fourth `Target::Redirect { to, status }`, so it costs no
+new mechanism. `status` defaults to 308; 307 allowed. No path rewriting beyond prepending `to`.
+
+</details>
+

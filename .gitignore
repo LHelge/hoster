@@ -1,0 +1,10 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Per-machine Claude Code settings (project-level .mcp.json is committed)
+.claude/settings.local.json
+
+# Local scratch
+*.swp
+.DS_Store
