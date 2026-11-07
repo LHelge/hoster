@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use arc_swap::ArcSwap;
 use pingora::server::ShutdownSignal;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
@@ -24,6 +25,7 @@ use crate::acme::CertMap;
 use crate::config::{Config, ProxyConfig};
 use crate::proxy::{Proxy, ProxyEvents, ProxyThread};
 use crate::registry::FileCredentials;
+use crate::routing::RouteTable;
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::store::Store;
 use crate::web::{Listen, WebApp, WebServer};
@@ -275,9 +277,13 @@ impl ProxyHandle {
     const JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
     /// Spawns the Pingora thread and waits until its listeners accept connections.
-    async fn start(&mut self, config: &ProxyConfig) -> anyhow::Result<()> {
+    async fn start(
+        &mut self,
+        config: &ProxyConfig,
+        routes: Arc<ArcSwap<RouteTable>>,
+    ) -> anyhow::Result<()> {
         let ProxyThread { thread, events } =
-            Proxy::new(config).spawn(self.shutdown_tx.subscribe())?;
+            Proxy::new(config, routes).spawn(self.shutdown_tx.subscribe())?;
         self.thread = Some(thread);
         let events = self.events.insert(events);
         events.ready(PROXY_READY_TIMEOUT).await?;
@@ -380,6 +386,9 @@ pub struct Supervisor {
     certs: Option<CertMap>,
     /// The podman connection, made in startup step 4.
     runtime: Option<PodmanRuntime>,
+    /// The route table the proxy reads (architecture §3.2); empty until the orchestrator
+    /// publishes one.
+    routes: Arc<ArcSwap<RouteTable>>,
     teardown: Teardown,
 }
 
@@ -390,6 +399,7 @@ impl Supervisor {
             store: None,
             certs: None,
             runtime: None,
+            routes: Arc::default(),
             teardown: Teardown::default(),
         }
     }
@@ -527,7 +537,10 @@ impl Startup for Supervisor {
                 self.runtime = Some(runtime);
                 Ok(())
             }
-            Phase::Proxy => self.teardown.proxy.start(&self.config.proxy).await,
+            Phase::Proxy => {
+                let routes = Arc::clone(&self.routes);
+                self.teardown.proxy.start(&self.config.proxy, routes).await
+            }
             Phase::Certificates => {
                 let (certs, report) = CertMap::open(
                     &self.config.state_dir,

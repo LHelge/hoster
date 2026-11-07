@@ -12,23 +12,31 @@
 //!
 //! `Server::run_forever` (which calls `process::exit`) and daemon mode are never used.
 //!
-//! For now the only service is a plain-HTTP listener answering 404 to everything; the real
-//! `:80` and `:443` services replace it.
+//! The proxy itself is [`RoutingProxy`]: routing against the published
+//! `ArcSwap<RouteTable>`, the forwarding headers of ADR-0010 and per-route timeouts (ADR-0011).
+//! For now it serves the plain-HTTP listener; the `:443` TLS listener takes it over and `:80`
+//! becomes the ACME challenge and redirect service in a later task. With an empty route table
+//! (nothing publishes one yet) it answers 404 to everything.
+
+mod router;
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use pingora::apps::http_app::ServeHttp;
-use pingora::protocols::http::ServerSession;
+use pingora::proxy::http_proxy_service_with_name;
 use pingora::server::configuration::ServerConf;
 use pingora::server::{ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch};
-use pingora::services::listening::Service;
 use tokio::sync::{broadcast, watch};
 
+use self::router::RoutingProxy;
 use crate::config::ProxyConfig;
+use crate::routing::RouteTable;
 
 #[allow(dead_code, reason = "installed on the :443 listener when it lands")]
 mod resolver;
@@ -83,22 +91,6 @@ impl ShutdownSignalWatch for ChannelShutdownWatch {
     }
 }
 
-/// The temporary plain-HTTP app: 404 for every request until the real proxy exists.
-struct NotFound;
-
-#[async_trait]
-impl ServeHttp for NotFound {
-    async fn response(&self, _session: &mut ServerSession) -> http::Response<Vec<u8>> {
-        let body = b"404 Not Found\n".to_vec();
-        http::Response::builder()
-            .status(http::StatusCode::NOT_FOUND)
-            .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .header(http::header::CONTENT_LENGTH, body.len())
-            .body(body)
-            .expect("static response is valid")
-    }
-}
-
 /// A configured, not yet running Pingora server.
 pub struct Proxy {
     server: Server,
@@ -106,8 +98,9 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    /// Builds the server and its services from `config`.
-    pub fn new(config: &ProxyConfig) -> Self {
+    /// Builds the server and its services from `config`, routing by whatever table `routes`
+    /// holds at the time of each request.
+    pub fn new(config: &ProxyConfig, routes: Arc<ArcSwap<RouteTable>>) -> Self {
         let conf = ServerConf {
             daemon: false,
             threads: config.threads.get(),
@@ -116,7 +109,11 @@ impl Proxy {
             ..ServerConf::default()
         };
         let mut server = Server::new_with_opt_and_conf(None, conf);
-        let mut http = Service::new("hoster http".to_owned(), NotFound);
+        let mut http = http_proxy_service_with_name(
+            &server.configuration,
+            RoutingProxy::new(routes, config.timeouts),
+            "hoster http",
+        );
         http.add_tcp(&config.http_listen.to_string());
         server.add_service(http);
         Proxy {
@@ -237,7 +234,10 @@ impl ProxyEvents {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests;
+
+#[cfg(test)]
+mod thread_tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::num::NonZeroUsize;
@@ -308,7 +308,8 @@ mod tests {
     async fn serves_404_and_stops_on_the_channel() {
         let addr = free_port();
         let (tx, rx) = watch::channel(None);
-        let ProxyThread { thread, mut events } = Proxy::new(&config(addr)).spawn(rx).unwrap();
+        let ProxyThread { thread, mut events } =
+            Proxy::new(&config(addr), Arc::default()).spawn(rx).unwrap();
         events.ready(Duration::from_secs(10)).await.unwrap();
 
         let response = tokio::task::spawn_blocking(move || get(addr))
@@ -375,7 +376,10 @@ mod tests {
         let busy = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = busy.local_addr().unwrap();
         let (_tx, rx) = watch::channel(None);
-        let err = Proxy::new(&config(addr)).spawn(rx).err().unwrap();
+        let err = Proxy::new(&config(addr), Arc::default())
+            .spawn(rx)
+            .err()
+            .unwrap();
         assert!(matches!(err, ProxyError::Bind { .. }), "{err}");
         assert!(err.to_string().contains(&addr.to_string()), "{err}");
     }
