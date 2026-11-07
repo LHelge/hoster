@@ -1,0 +1,89 @@
+# hoster as a systemd *user* service (ADR-0001, ADR-0023). See docs/install.md.
+#
+# Install as ~hoster/.config/systemd/user/hoster.service, then as the hoster user:
+#   systemctl --user daemon-reload
+#   systemctl --user edit hoster        # set HOSTER_ADMIN_GITHUB in a drop-in (see below)
+#   systemctl --user enable --now hoster
+# The hoster user needs linger (`loginctl enable-linger hoster`) so this starts at boot without
+# a login.
+#
+# Logs: `journalctl --user -u hoster` as hoster, or `journalctl _SYSTEMD_USER_UNIT=hoster.service`
+# as root.
+
+[Unit]
+Description=hoster deployment orchestrator
+Documentation=https://github.com/LHelge/hoster/blob/main/docs/install.md
+# The rootless podman API socket of this same user (ADR-0002). Requires= stops hoster when the
+# socket goes away; After= makes the socket listen before hoster connects to it.
+Requires=podman.socket
+After=podman.socket
+
+[Service]
+# hoster sends READY=1 once the proxy is listening and the deploy engine runs
+# (docs/architecture.md section 4). Only the main process may notify.
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/bin/hoster run
+
+# The admin's GitHub handle (ADR-0021). It is read from the environment only. Override it in a
+# drop-in (`systemctl --user edit hoster`) so an upgraded unit file does not reset it:
+#   [Service]
+#   Environment=HOSTER_ADMIN_GITHUB=octocat
+# The placeholder below is not a valid handle, so hoster refuses to start until it is set.
+Environment=HOSTER_ADMIN_GITHUB=<your-github-handle>
+# Environment=RUST_LOG=hoster=debug
+
+Restart=always
+RestartSec=2s
+# Startup reconciles containers and may pull images, which can take a while (architecture.md
+# section 4, steps 4-5).
+TimeoutStartSec=5min
+# On SIGTERM hoster drains the proxy for proxy.grace_period (default 10s) and then waits
+# proxy.graceful_shutdown_timeout (default 5s) for Pingora's runtimes. TimeoutStopSec must stay
+# above their sum plus the time to persist in-flight deploys; raise it with the two settings.
+TimeoutStopSec=45s
+# hoster is one process; app containers belong to podman/conmon in podman's own cgroup, so
+# stopping hoster never stops them (ADR-0034).
+KillMode=mixed
+
+# ---- Hardening (best-effort, ADR-0023) ----
+# A user manager has no privileges, so only directives it can apply as the hoster user work
+# here. Filesystem and kernel protections are set up in a user namespace (systemd implies
+# PrivateUsers= for them in user units). docs/install.md lists what is not available.
+NoNewPrivileges=yes
+# Made explicit: a user namespace that maps only hoster's own uid/gid (and root). The process
+# has no capabilities on the host anyway; the empty bounding set also drops them inside the
+# namespace.
+PrivateUsers=yes
+CapabilityBoundingSet=
+UMask=0077
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+KeyringMode=private
+ProtectSystem=strict
+ProtectHome=read-only
+# The state directory (state_dir, default $XDG_DATA_HOME/hoster), and the configuration
+# directory, where hoster generates the secret-store key file on first start (ADR-0029). Both
+# must exist before the first start; change this line too if state_dir is moved.
+ReadWritePaths=%h/.local/share/hoster %h/.config/hoster
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Unix sockets (podman API, admin socket, sd_notify) and TCP over IPv4/IPv6.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

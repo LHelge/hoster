@@ -2,10 +2,10 @@
 id: "8xd"
 title: "M1: Binary skeleton and systemd unit"
 type: epic
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.131876866Z"
-updated: "2026-11-07T14:45:17.131876866Z"
+updated: "2026-11-07T22:50:04.195482112Z"
 ---
 
 ## Scope

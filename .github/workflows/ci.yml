@@ -33,6 +33,17 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
+  systemd:
+    name: systemd unit and sysctl drop-in
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # systemd-analyze verify on deploy/systemd/hoster.service (ADR-0023); prints the security
+      # exposure report as well.
+      - name: Check deploy/ systemd files
+        run: scripts/check-systemd-units.sh --security
+
   sqlx:
     name: sqlx offline metadata is up to date
     runs-on: ubuntu-latest

@@ -1,15 +1,16 @@
 ---
 id: vhg
 title: Run Pingora Server on a dedicated thread with channel-driven shutdown
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.237378955Z"
-updated: "2026-11-07T14:45:17.237378955Z"
+updated: "2026-11-07T22:49:37.956558205Z"
 tags:
   - proxy
 depends_on:
   - hyt
 parent: up4
+attempts: 1
 ---
 
 ## Summary
