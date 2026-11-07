@@ -1,15 +1,16 @@
 ---
 id: hyt
 title: "Supervisor: runtime, signals, cancellation and sd_notify"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.158461669Z"
-updated: "2026-11-07T14:45:17.158461669Z"
+updated: "2026-11-07T22:29:45.474847799Z"
 tags:
   - core
 depends_on:
   - "26p"
 parent: "8xd"
+attempts: 1
 ---
 
 ## Summary

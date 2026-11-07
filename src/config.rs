@@ -85,6 +85,9 @@ pub struct AcmeConfig {
     /// hoster's public addresses for the advisory DNS check. Empty means "resolve the admin
     /// host's A/AAAA records" (ADR-0051).
     pub public_addresses: Vec<IpAddr>,
+    /// Extra root certificate (PEM) to trust for the ACME directory instead of the platform
+    /// roots, for test CAs such as Pebble. Unset for Let's Encrypt.
+    pub root_certificate: Option<PathBuf>,
 }
 
 impl Default for AcmeConfig {
@@ -93,6 +96,7 @@ impl Default for AcmeConfig {
             directory_url: DEFAULT_ACME_DIRECTORY.to_owned(),
             contact: None,
             public_addresses: Vec::new(),
+            root_certificate: None,
         }
     }
 }
@@ -284,6 +288,14 @@ impl Config {
                 "must be an https:// URL",
             ));
         }
+        if let Some(root) = &self.acme.root_certificate {
+            if !root.is_absolute() {
+                problems.push(Problem::new(
+                    "acme.root_certificate",
+                    "must be an absolute path",
+                ));
+            }
+        }
         if let Some(contact) = &self.acme.contact {
             let valid = contact
                 .split_once('@')
@@ -358,6 +370,7 @@ impl EnvOverrides {
         ADMIN_GITHUB_KEY,
         "acme.directory_url",
         "acme.contact",
+        "acme.root_certificate",
         "webhook.audience",
     ];
 
@@ -1020,10 +1033,14 @@ mod tests {
     fn several_problems_are_reported_together() {
         Jail::expect_with(|jail| {
             with_admin(jail);
-            let toml = "admin_host = \"hoster.example.com\"\n[acme]\ndirectory_url = \"http://insecure\"\ncontact = \"mailto:me\"\n";
+            let toml = "admin_host = \"hoster.example.com\"\n[acme]\ndirectory_url = \"http://insecure\"\ncontact = \"mailto:me\"\nroot_certificate = \"pebble.pem\"\n";
             let problems = invalid(load(jail, toml));
             assert!(has_problem(&problems, "acme.directory_url"), "{problems:?}");
             assert!(has_problem(&problems, "acme.contact"), "{problems:?}");
+            assert!(
+                has_problem(&problems, "acme.root_certificate"),
+                "{problems:?}"
+            );
             Ok(())
         });
     }

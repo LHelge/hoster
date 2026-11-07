@@ -1,10 +1,10 @@
 ---
 id: hez
 title: ACME account management with instant-acme
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.266340654Z"
-updated: "2026-11-07T22:23:37.138839092Z"
+updated: "2026-11-07T22:30:24.588495124Z"
 tags:
   - tls
   - acme

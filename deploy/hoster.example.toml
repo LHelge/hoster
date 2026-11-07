@@ -40,6 +40,9 @@ contact = "admin@example.com"
 # hoster's public IP addresses for the advisory DNS check on app hosts (ADR-0051).
 # Empty: resolve the admin host's A/AAAA records at startup and hourly.
 public_addresses = []
+# Root certificate (PEM) to trust for the ACME directory instead of the system roots. Only for
+# test CAs such as Pebble (directory_url = "https://localhost:14000/dir"); leave unset otherwise.
+# root_certificate = "/path/to/pebble.minica.pem"
 
 # Loopback ports handed out round-robin to routed services (ADR-0026). Inclusive, within
 # 1024-65535, at least 16 ports, and best kept clear of net.ipv4.ip_local_port_range.
