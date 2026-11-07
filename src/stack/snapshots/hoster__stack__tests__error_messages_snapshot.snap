@@ -1,0 +1,27 @@
+---
+source: src/stack/tests.rs
+expression: parse(source).unwrap_err().to_string()
+---
+invalid stack file (22 errors):
+  line 1, column 11: version: unsupported version 2; this hoster supports version 1
+  line 2, column 8: name: invalid name `Bad_Name`: must start with a lowercase letter and contain only lowercase letters, digits and `-`, at most 31 characters
+  line 3, column 17: drain_timeout: invalid duration `a while`: expected number at 0; expected e.g. "500ms", "30s" or "5m"
+  line 6, column 17: deploy.repository_id: must be a positive integer (GitHub's numeric repository id)
+  line 7, column 9: deploy.refs[0]: ref pattern `main` must start with `refs/`, e.g. "refs/tags/v*"
+  line 10, column 9: services.api.image: invalid image `nginx`: must name its registry, e.g. `docker.io/library/nginx:1.27`
+  line 12, column 16: services.api.stop_timeout: invalid duration `10`: time unit needed, for example 10sec or 10ms; expected e.g. "500ms", "30s" or "5m"
+  line 13, column 8: services.api.user: invalid user `::`: expected `uid[:gid]`
+  line 16, column 14: services.api.env.bad-name: invalid environment variable name `bad-name`
+  line 22, column 8: services.api.volumes.data: invalid mount path `relative`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 25, column 8: services.api.routes[0].host: invalid host `API.example.com.`: must not end with a dot
+  line 26, column 10: services.api.routes[0].prefix: invalid prefix `/api/`: must not end with `/`
+  line 27, column 8: services.api.routes[0].port: invalid port 0: must be 1-65535
+  line 28, column 21: services.api.routes[0].timeouts.read: must be greater than zero
+  line 31, column 8: services.api.routes[1].host: invalid host `example.com:443`: must not include a port
+  line 32, column 10: services.api.routes[1].prefix: invalid prefix `/a/../b`: must not contain `.` or `..` segments
+  line 36, column 9: services.worker.image: third-party image `docker.io/library/redis` needs a tag or digest (`repo:tag`, `repo:tag@sha256:…` or `repo@sha256:…`); only CI-built ghcr.io images may omit both
+  line 38, column 1: services.worker.health: `health` is not allowed on a service without routes; such services are healthy after running for 5 s
+  line 50, column 17: services.web.health.http.path: invalid health path `health`: must start with `/`
+  line 50, column 34: services.web.health.http.port: health port 9090 is not the container port of any route of this service; probes run against the route's loopback port
+  line 50, column 56: services.web.health.http.expect_status: invalid status `200-299`: expected a class like "2xx" or a code
+  line 51, column 17: services.web.health.healthy_after: must be a positive integer

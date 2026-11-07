@@ -1,16 +1,17 @@
 ---
 id: "4q7"
 title: "`hoster doctor` preflight checks"
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-07T14:45:17.161104548Z"
-updated: "2026-11-07T21:12:34.669057181Z"
+updated: "2026-11-07T22:23:02.300043324Z"
 tags:
   - core
   - ops
 depends_on:
   - "26p"
 parent: "8xd"
+attempts: 1
 ---
 
 ## Summary

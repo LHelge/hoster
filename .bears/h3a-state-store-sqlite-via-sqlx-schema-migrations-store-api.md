@@ -1,15 +1,16 @@
 ---
 id: h3a
 title: "State store: SQLite via sqlx — schema, migrations, Store API"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.181698219Z"
-updated: "2026-11-07T14:45:17.181698219Z"
+updated: "2026-11-07T22:23:02.490589275Z"
 tags:
   - store
 depends_on:
   - "26p"
 parent: "5ch"
+attempts: 1
 ---
 
 ## Summary

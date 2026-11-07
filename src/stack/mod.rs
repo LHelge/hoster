@@ -1,11 +1,231 @@
 //! Stack file model, parsing and validation (ADR-0006, `docs/stack-format.md`).
 //!
 //! Pure: no I/O beyond the input text, so it carries most of the unit tests.
+//!
+//! The public surface is [`Stack::parse`] (or [`str::parse`]) and the validated model it returns.
+//! Parsing happens in two passes: strict serde deserialization with `deny_unknown_fields` into
+//! private span-carrying types, then semantic validation that collects *every* problem instead
+//! of stopping at the first. Each [`Diagnostic`] names the TOML line/column and the field path.
+//!
+//! Checks that need other stacks or hoster's configuration (route collisions, ADR-0012; the
+//! reserved admin host) are not done here; they live with the routing table.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn module_is_wired_into_the_crate() {
-        assert!(module_path!().starts_with("hoster::stack"));
+// The orchestrator and web UI that consume the model land in later tasks.
+#![allow(dead_code)]
+
+mod diagnostic;
+mod image;
+mod raw;
+mod route;
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::str::FromStr;
+use std::time::Duration;
+
+pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
+pub use image::ImageRef;
+pub use route::{Host, NormalizedPrefix};
+
+/// Default upper bound for draining old upstreams (ADR-0017).
+pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default SIGTERM → SIGKILL grace period.
+pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default HTTP health check path for routed services (ADR-0051).
+pub const DEFAULT_HEALTH_PATH: &str = "/healthz";
+/// The only schema version this hoster understands.
+pub const SUPPORTED_VERSION: i64 = 1;
+
+/// A validated stack definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stack {
+    pub name: Name,
+    pub drain_timeout: Duration,
+    /// Who may deploy through the webhook (ADR-0047); `None` means UI-only deploys.
+    pub deploy: Option<DeployAuth>,
+    /// At least one service, keyed by service name (also its DNS alias on the stack network).
+    pub services: BTreeMap<Name, Service>,
+}
+
+/// The result of a successful parse: the stack plus non-fatal warnings to show the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedStack {
+    pub stack: Stack,
+    pub warnings: Vec<Diagnostic>,
+}
+
+impl Stack {
+    /// Parses and validates a stack file. On failure, every problem found is reported.
+    pub fn parse(source: &str) -> Result<ParsedStack, StackError> {
+        raw::RawStack::parse(source)
     }
 }
+
+/// Parses and validates, discarding warnings. Use [`Stack::parse`] to show them.
+impl FromStr for Stack {
+    type Err = StackError;
+
+    fn from_str(source: &str) -> Result<Self, Self::Err> {
+        Stack::parse(source).map(|parsed| parsed.stack)
+    }
+}
+
+/// A stack or service name: `^[a-z][a-z0-9-]{0,30}$`. Used in podman object names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Name(String);
+
+impl FromStr for Name {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut chars = s.chars();
+        let valid = s.len() <= 31
+            && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if valid {
+            Ok(Self(s.to_owned()))
+        } else {
+            Err(format!(
+                "invalid name `{s}`: must start with a lowercase letter and contain only \
+                 lowercase letters, digits and `-`, at most 31 characters"
+            ))
+        }
+    }
+}
+
+impl AsRef<str> for Name {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Name {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Webhook deploy authorization, matched against GitHub Actions OIDC claims (ADR-0047).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployAuth {
+    pub repository_id: u64,
+    /// Glob patterns over the token's `ref`; empty means any ref.
+    pub refs: Vec<String>,
+    pub environment: Option<String>,
+    pub job_workflow_ref: Option<String>,
+}
+
+/// One container of a stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Service {
+    pub image: ImageRef,
+    /// Tag the ghcr poller watches (ADR-0043). Only set for CI-built ghcr images.
+    pub track: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub entrypoint: Option<Vec<String>>,
+    pub env: BTreeMap<String, String>,
+    /// Env var name → secret name `<stack>/<name>` in the secret store (ADR-0029).
+    pub secrets: BTreeMap<String, String>,
+    /// Volume name → absolute mount path (ADR-0030).
+    pub volumes: BTreeMap<String, String>,
+    /// Declared health check. `None` means the defaults of ADR-0038/ADR-0051 apply.
+    pub health: Option<HealthCheck>,
+    pub update: UpdateStrategy,
+    pub stop_timeout: Duration,
+    /// `uid[:gid]` inside the container.
+    pub user: Option<String>,
+    pub read_only: bool,
+    pub routes: Vec<Route>,
+}
+
+/// How a service is replaced on deploy (ADR-0039).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateStrategy {
+    #[default]
+    StartFirst,
+    StopFirst,
+}
+
+/// A (host, prefix) → container port mapping (ADR-0007, ADR-0009, ADR-0010).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    pub host: Host,
+    pub prefix: NormalizedPrefix,
+    pub strip_prefix: bool,
+    /// Container port the app listens on.
+    pub port: u16,
+    pub timeouts: RouteTimeouts,
+}
+
+/// Per-route proxy timeouts (ADR-0011); `None` means hoster's default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RouteTimeouts {
+    pub connect: Option<Duration>,
+    pub read: Option<Duration>,
+    pub write: Option<Duration>,
+    pub idle: Option<Duration>,
+}
+
+/// A declared health check (ADR-0038). Unset timings mean hoster's defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthCheck {
+    pub probe: Probe,
+    pub interval: Option<Duration>,
+    pub timeout: Option<Duration>,
+    pub healthy_after: Option<u32>,
+    pub start_period: Option<Duration>,
+}
+
+/// What a health check probes, on the allocated loopback port of a container port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    Http {
+        path: String,
+        port: u16,
+        expect_status: ExpectStatus,
+    },
+    Tcp {
+        port: u16,
+    },
+}
+
+/// Which HTTP status codes count as healthy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExpectStatus {
+    /// 2xx–3xx, the default (ADR-0051).
+    #[default]
+    SuccessOrRedirect,
+    /// One status class, written `"2xx"`.
+    Class(u8),
+    /// One exact status, written `"204"`.
+    Exact(u16),
+}
+
+impl ExpectStatus {
+    pub fn matches(self, status: u16) -> bool {
+        match self {
+            ExpectStatus::SuccessOrRedirect => (200..400).contains(&status),
+            ExpectStatus::Class(class) => status / 100 == u16::from(class),
+            ExpectStatus::Exact(expected) => status == expected,
+        }
+    }
+}
+
+impl FromStr for ExpectStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let err = || format!("invalid status `{s}`: expected a class like \"2xx\" or a code");
+        match s.as_bytes() {
+            [d @ b'1'..=b'5', b'x', b'x'] => Ok(ExpectStatus::Class(d - b'0')),
+            _ => match s.parse::<u16>() {
+                Ok(code) if (100..600).contains(&code) => Ok(ExpectStatus::Exact(code)),
+                _ => Err(err()),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

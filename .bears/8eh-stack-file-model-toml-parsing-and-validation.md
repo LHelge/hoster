@@ -1,10 +1,10 @@
 ---
 id: "8eh"
 title: Stack file model, TOML parsing and validation
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.197524343Z"
-updated: "2026-11-07T22:11:50.656523930Z"
+updated: "2026-11-07T22:24:04.033701704Z"
 tags:
   - stack
 depends_on:
