@@ -1,16 +1,17 @@
 ---
 id: whw
 title: "RouteTable: structure, longest-segment-prefix matching, build from desired state"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.233547428Z"
-updated: "2026-11-07T21:32:51.727668772Z"
+updated: "2026-11-07T22:53:51.616402209Z"
 tags:
   - routing
 depends_on:
   - "4tj"
   - hft
 parent: up4
+attempts: 1
 ---
 
 ## Summary

@@ -70,6 +70,18 @@ pub enum StoreError {
         #[source]
         source: MigrateError,
     },
+    #[error("no state database at {} (is state_dir right?)", .0.display())]
+    Missing(PathBuf),
+    #[error("{} already exists; choose a new snapshot file", .0.display())]
+    SnapshotExists(PathBuf),
+    #[error("the snapshot path {} is not valid UTF-8", .0.display())]
+    SnapshotPath(PathBuf),
+    #[error("cannot write a snapshot to {}", path.display())]
+    Snapshot {
+        path: PathBuf,
+        #[source]
+        source: sqlx::Error,
+    },
     #[error("stack {0:?} does not exist")]
     UnknownStack(String),
     #[error("deployment {0} does not exist")]
@@ -131,6 +143,159 @@ impl Store {
                 source,
             })?;
         Ok(store)
+    }
+
+    /// Opens the existing database under `state_dir` read-only, without creating or migrating
+    /// it, for [`Store::snapshot`] next to a running hoster.
+    pub async fn open_read_only(state_dir: &Path) -> Result<Self> {
+        let path = state_dir.join(Self::FILE_NAME);
+        if !path.is_file() {
+            return Err(StoreError::Missing(path));
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .read_only(true)
+            .busy_timeout(Self::BUSY_TIMEOUT);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|source| StoreError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(Self { pool, path })
+    }
+
+    /// Writes a consistent snapshot of the database to `dest` with `VACUUM INTO` (ADR-0030).
+    /// Safe while hoster runs: the snapshot is one read transaction, so it sees every committed
+    /// write before it and none after.
+    ///
+    /// The snapshot is written 0600 to a temporary file next to `dest`, checked with
+    /// `PRAGMA integrity_check` and then moved into place, so `dest` only ever appears
+    /// complete. An existing `dest` is never overwritten, even one created while the snapshot
+    /// is being written.
+    pub async fn snapshot(&self, dest: &Path) -> Result<()> {
+        if fs::symlink_metadata(dest).is_ok() {
+            return Err(StoreError::SnapshotExists(dest.to_owned()));
+        }
+        let tmp = Self::snapshot_tmp_path(dest).map_err(|source| StoreError::Io {
+            path: dest.to_owned(),
+            source,
+        })?;
+        let tmp_str = tmp
+            .to_str()
+            .ok_or_else(|| StoreError::SnapshotPath(dest.to_owned()))?
+            .to_owned();
+        // `VACUUM INTO` accepts an empty file; creating it first fixes its mode at 0600.
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|source| StoreError::Io {
+                path: tmp.clone(),
+                source,
+            })?;
+        let result = self.write_snapshot(&tmp, &tmp_str, dest).await;
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
+    }
+
+    async fn write_snapshot(&self, tmp: &Path, tmp_str: &str, dest: &Path) -> Result<()> {
+        let snapshot_err = |source| StoreError::Snapshot {
+            path: dest.to_owned(),
+            source,
+        };
+        sqlx::query("VACUUM INTO ?")
+            .bind(tmp_str)
+            .execute(&self.pool)
+            .await
+            .map_err(snapshot_err)?;
+        Self::verify_snapshot(tmp, dest).await?;
+        let io_err = |source| StoreError::Io {
+            path: dest.to_owned(),
+            source,
+        };
+        OpenOptions::new()
+            .read(true)
+            .open(tmp)
+            .and_then(|f| f.sync_all())
+            .map_err(io_err)?;
+        Self::publish_snapshot(tmp, dest)?;
+        // Persist the rename. `parent()` of a bare file name is "", meaning the current dir.
+        let dir = match dest.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .map_err(io_err)
+    }
+
+    /// Runs `PRAGMA integrity_check` on a freshly written snapshot.
+    async fn verify_snapshot(tmp: &Path, dest: &Path) -> Result<()> {
+        let options = SqliteConnectOptions::new().filename(tmp).read_only(true);
+        let mut conn = sqlx::ConnectOptions::connect(&options)
+            .await
+            .map_err(|source| StoreError::Snapshot {
+                path: dest.to_owned(),
+                source,
+            })?;
+        let report: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_all(&mut conn)
+            .await
+            .map_err(|source| StoreError::Snapshot {
+                path: dest.to_owned(),
+                source,
+            })?;
+        let _ = sqlx::Connection::close(conn).await;
+        match report.as_slice() {
+            [ok] if ok == "ok" => Ok(()),
+            _ => Err(StoreError::Corrupt {
+                path: dest.to_owned(),
+                report: report.join("; "),
+            }),
+        }
+    }
+
+    /// Moves the finished snapshot `tmp` to `dest` without ever replacing an existing `dest`.
+    ///
+    /// `rename` silently replaces its target, so the snapshot is hard-linked into place (which
+    /// fails atomically if `dest` exists) and the temporary name removed. Only on a filesystem
+    /// without hard links does it fall back to check-then-rename.
+    fn publish_snapshot(tmp: &Path, dest: &Path) -> Result<()> {
+        let io_err = |source| StoreError::Io {
+            path: dest.to_owned(),
+            source,
+        };
+        match fs::hard_link(tmp, dest) {
+            Ok(()) => {
+                // `dest` is complete; a leftover hidden temp name is not worth failing over.
+                let _ = fs::remove_file(tmp);
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                Err(StoreError::SnapshotExists(dest.to_owned()))
+            }
+            Err(_) if fs::symlink_metadata(dest).is_ok() => {
+                Err(StoreError::SnapshotExists(dest.to_owned()))
+            }
+            Err(_) => fs::rename(tmp, dest).map_err(io_err),
+        }
+    }
+
+    /// `<dir>/.<name>.tmp-<pid>`: hidden, in the same directory so moving it into place is
+    /// atomic. The path is absolute: with URI filenames enabled (as sqlx does), SQLite would
+    /// parse a relative path beginning with `file:` as a URI in `VACUUM INTO`.
+    fn snapshot_tmp_path(dest: &Path) -> io::Result<PathBuf> {
+        let dest = std::path::absolute(dest)?;
+        let mut name = std::ffi::OsString::from(".");
+        name.push(dest.file_name().unwrap_or_else(|| "snapshot".as_ref()));
+        name.push(format!(".tmp-{}", std::process::id()));
+        Ok(dest.with_file_name(name))
     }
 
     /// Path of the database file.

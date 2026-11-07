@@ -539,3 +539,168 @@ async fn concurrent_writers_do_not_conflict() {
         task.await.unwrap();
     }
 }
+
+async fn integrity(path: &Path) -> Vec<String> {
+    let options = SqliteConnectOptions::new().filename(path).read_only(true);
+    let mut conn = sqlx::ConnectOptions::connect(&options).await.unwrap();
+    sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap()
+}
+
+/// `hoster backup db` (ADR-0030): snapshots taken from a second, read-only handle while the
+/// daemon's store keeps writing open cleanly and pass `PRAGMA integrity_check`; a snapshot
+/// restored as `hoster.db` opens as a store with the data in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_while_writing_is_consistent_and_restorable() {
+    let (dir, store) = open().await;
+    let state = dir.path().join("state");
+    store.add_revision("app", "x").await.unwrap();
+    store.kv_set("before", "1").await.unwrap();
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let writer = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            let mut started = Some(started_tx);
+            for i in 0..300 {
+                store
+                    .kv_set(&format!("k{}", i % 10), &i.to_string())
+                    .await
+                    .unwrap();
+                if i % 50 == 0 {
+                    store.add_revision("app", &format!("v{i}")).await.unwrap();
+                }
+                if i == 20 {
+                    let _ = started.take().unwrap().send(());
+                }
+            }
+        })
+    };
+
+    // Snapshot only once the writer is under way, and keep going while it writes.
+    let backup = Store::open_read_only(&state).await.unwrap();
+    started_rx.await.unwrap();
+    let mut snapshots = Vec::new();
+    let mut during_writes = 0;
+    while snapshots.len() < 5 || (!writer.is_finished() && snapshots.len() < 50) {
+        let dest = dir.path().join(format!("snap-{}.db", snapshots.len()));
+        let writing = !writer.is_finished();
+        backup.snapshot(&dest).await.unwrap();
+        during_writes += usize::from(writing && !writer.is_finished());
+        snapshots.push(dest);
+    }
+    writer.await.unwrap();
+    backup.close().await;
+    assert!(during_writes > 0, "no snapshot overlapped the writes");
+
+    for snap in &snapshots {
+        assert_eq!(integrity(snap).await, ["ok"], "{}", snap.display());
+        assert_eq!(mode(snap), 0o600);
+    }
+    // No temporary files are left behind.
+    let leftovers: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // Restore: the snapshot becomes `hoster.db` of a fresh state dir.
+    let restored = dir.path().join("restored");
+    fs::create_dir(&restored).unwrap();
+    fs::copy(snapshots.last().unwrap(), restored.join(Store::FILE_NAME)).unwrap();
+    let store = Store::open(&restored).await.unwrap();
+    assert_eq!(store.kv_get("before").await.unwrap().as_deref(), Some("1"));
+    assert!(store.latest_revision("app").await.unwrap().is_some());
+}
+
+/// With hoster stopped (no `-wal` file) the read-only handle still snapshots, and the snapshot
+/// is a self-contained rollback-journal file.
+#[tokio::test]
+async fn snapshot_of_a_stopped_database() {
+    let (dir, store) = open().await;
+    let state = dir.path().join("state");
+    store.kv_set("a", "1").await.unwrap();
+    store.close().await;
+    assert!(!state.join("hoster.db-wal").exists());
+
+    let backup = Store::open_read_only(&state).await.unwrap();
+    let dest = dir.path().join("snap.db");
+    backup.snapshot(&dest).await.unwrap();
+    backup.close().await;
+
+    assert_eq!(integrity(&dest).await, ["ok"]);
+    // Header bytes 18/19 are the file format versions: 1 is rollback journal, 2 is WAL.
+    let header = fs::read(&dest).unwrap();
+    assert_eq!(header[18..20], [1, 1]);
+    let restored = dir.path().join("restored");
+    fs::create_dir(&restored).unwrap();
+    fs::copy(&dest, restored.join(Store::FILE_NAME)).unwrap();
+    let store = Store::open(&restored).await.unwrap();
+    assert_eq!(store.kv_get("a").await.unwrap().as_deref(), Some("1"));
+}
+
+#[tokio::test]
+async fn snapshot_refuses_to_overwrite_and_needs_an_existing_database() {
+    let (dir, store) = open().await;
+    let dest = dir.path().join("snap.db");
+    fs::write(&dest, "keep me").unwrap();
+    let err = store.snapshot(&dest).await.unwrap_err();
+    assert!(matches!(err, StoreError::SnapshotExists(_)), "{err}");
+    assert_eq!(fs::read_to_string(&dest).unwrap(), "keep me");
+
+    let err = Store::open_read_only(&dir.path().join("nowhere"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Missing(_)), "{err}");
+}
+
+/// A target that appears while the snapshot is being written is not replaced either.
+#[test]
+fn publishing_a_snapshot_never_replaces_the_target() {
+    let dir = TempDir::new().unwrap();
+    let tmp = dir.path().join(".snap.db.tmp-1");
+    let dest = dir.path().join("snap.db");
+    fs::write(&tmp, "snapshot").unwrap();
+    fs::write(&dest, "keep me").unwrap();
+    let err = Store::publish_snapshot(&tmp, &dest).unwrap_err();
+    assert!(matches!(err, StoreError::SnapshotExists(_)), "{err}");
+    assert_eq!(fs::read_to_string(&dest).unwrap(), "keep me");
+
+    fs::remove_file(&dest).unwrap();
+    Store::publish_snapshot(&tmp, &dest).unwrap();
+    assert_eq!(fs::read_to_string(&dest).unwrap(), "snapshot");
+    assert!(!tmp.exists());
+}
+
+/// The temporary file is absolute, so SQLite never reads a relative `file:...` target as a URI.
+#[test]
+fn snapshot_temp_path_is_hidden_absolute_and_beside_the_target() {
+    let tmp = Store::snapshot_tmp_path(Path::new("file:backups/snap.db")).unwrap();
+    assert!(tmp.is_absolute(), "{}", tmp.display());
+    assert!(tmp.parent().unwrap().ends_with("file:backups"));
+    let name = tmp.file_name().unwrap().to_str().unwrap();
+    assert_eq!(name, format!(".snap.db.tmp-{}", std::process::id()));
+}
+
+/// When `VACUUM INTO` itself fails, the temporary file it was given is removed again.
+#[tokio::test]
+async fn failed_snapshot_leaves_nothing_behind() {
+    let (dir, store) = open().await;
+    let dest = dir.path().join("missing-dir").join("snap.db");
+    assert!(store.snapshot(&dest).await.is_err());
+    assert!(!dest.exists());
+
+    store.close().await;
+    let dest = dir.path().join("snap.db");
+    let err = store.snapshot(&dest).await.unwrap_err();
+    assert!(matches!(err, StoreError::Snapshot { .. }), "{err}");
+    let left: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|name| name != "state")
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}

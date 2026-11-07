@@ -28,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{Config, ConfigError};
 use crate::doctor::Doctor;
+use crate::store::Store;
 use crate::supervisor::Supervisor;
 
 /// Single-binary deployment orchestrator for one VPS.
@@ -95,8 +96,13 @@ enum Command {
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum Backup {
-    /// Write a consistent snapshot of the SQLite state store.
-    Db,
+    /// Write a consistent snapshot of the SQLite state store, safe while hoster runs
+    /// (`VACUUM INTO`). Back up the secret-store key separately; see docs/backup.md.
+    Db {
+        /// The snapshot file to create; it must not exist yet.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
 }
 
 impl Command {
@@ -120,9 +126,17 @@ impl Command {
                 }
                 Ok(())
             }
-            Command::Backup(Backup::Db) => {
-                config?;
-                anyhow::bail!("`hoster backup db` is not implemented yet")
+            Command::Backup(Backup::Db { file }) => {
+                let store = Store::open_read_only(&config?.state_dir).await?;
+                let result = store.snapshot(&file).await;
+                store.close().await;
+                result?;
+                println!(
+                    "wrote a snapshot of {} to {}",
+                    store.path().display(),
+                    file.display()
+                );
+                Ok(())
             }
         }
     }
@@ -183,7 +197,13 @@ mod tests {
     fn parses_doctor_and_backup_db() {
         assert_eq!(parse(&["doctor"]), Command::Doctor { json: false });
         assert_eq!(parse(&["doctor", "--json"]), Command::Doctor { json: true });
-        assert_eq!(parse(&["backup", "db"]), Command::Backup(Backup::Db));
+        assert_eq!(
+            parse(&["backup", "db", "/tmp/snap.db"]),
+            Command::Backup(Backup::Db {
+                file: "/tmp/snap.db".into()
+            })
+        );
+        assert!(Cli::try_parse_from(["hoster", "backup", "db"]).is_err());
     }
 
     #[test]
@@ -207,7 +227,10 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_commands_need_a_loaded_config() {
-        for command in [Command::Run, Command::Backup(Backup::Db)] {
+        let backup = Command::Backup(Backup::Db {
+            file: "snap.db".into(),
+        });
+        for command in [Command::Run, backup] {
             let err = command
                 .execute(Err(ConfigError::NoConfigDir))
                 .await
