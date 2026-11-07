@@ -1,10 +1,10 @@
 ---
 id: "4tj"
 title: Route normalization and cross-stack collision check
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.201012420Z"
-updated: "2026-11-07T22:36:53.443749747Z"
+updated: "2026-11-07T22:42:49.938129209Z"
 tags:
   - stack
   - routing

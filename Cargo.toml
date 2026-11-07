@@ -34,6 +34,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 figment = { version = "0.10.19", features = ["test"] }
 insta = "1.49.0"
 nix = { version = "0.31.3", features = ["signal"] }
+proptest = "1.11.0"
 tempfile = "3.27.0"
 
 # Release binaries are built for x86_64-unknown-linux-musl, which links statically (ADR-0001):

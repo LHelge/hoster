@@ -68,6 +68,19 @@ impl FromStr for Host {
     }
 }
 
+/// hoster's configured hostnames (the reserved admin host, ADR-0031) follow the same rules, so
+/// every [`Hostname`](crate::config::Hostname) is a valid route host.
+impl From<&crate::config::Hostname> for Host {
+    fn from(hostname: &crate::config::Hostname) -> Self {
+        let host = hostname.as_ref();
+        debug_assert!(
+            host.parse::<Host>().is_ok(),
+            "config hostname `{host}` is not a valid route host"
+        );
+        Self(host.to_owned())
+    }
+}
+
 impl AsRef<str> for Host {
     fn as_ref(&self) -> &str {
         &self.0
