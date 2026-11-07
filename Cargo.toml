@@ -12,9 +12,16 @@ publish = false
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+figment = { version = "0.10.19", features = ["toml", "env"] }
+humantime-serde = "1.1.1"
+serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+figment = { version = "0.10.19", features = ["test"] }
 
 # Release binaries are built for x86_64-unknown-linux-musl, which links statically (ADR-0001):
 #   cargo build --release --target x86_64-unknown-linux-musl

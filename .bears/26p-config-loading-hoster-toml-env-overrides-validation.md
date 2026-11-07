@@ -1,10 +1,10 @@
 ---
 id: "26p"
 title: "Config loading: hoster.toml, env overrides, validation"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.155672714Z"
-updated: "2026-11-07T22:11:50.584516309Z"
+updated: "2026-11-07T22:22:45.333233547Z"
 tags:
   - core
 depends_on:

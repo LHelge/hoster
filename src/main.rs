@@ -15,14 +15,67 @@ mod stack;
 mod store;
 mod web;
 
+use std::path::PathBuf;
+use std::process::ExitCode;
+
 use clap::{Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
+
+use crate::config::Config;
 
 /// Single-binary deployment orchestrator for one VPS.
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
+    /// Configuration file [default: $XDG_CONFIG_HOME/hoster/hoster.toml]. Every key can be
+    /// overridden by a HOSTER_* environment variable (`__` separates nested keys).
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+impl Cli {
+    /// Runs the selected command, loading the configuration where it needs one.
+    async fn execute(self) -> anyhow::Result<()> {
+        let config_path = self.config.clone();
+        let command = Command::from(self);
+        tracing::debug!(?command, "starting");
+        let load = || Config::load(config_path.as_deref());
+        match command {
+            Command::Run => {
+                let config = load()?;
+                tracing::info!(
+                    admin_host = %config.admin_host,
+                    state_dir = %config.state_dir.display(),
+                    upstream_ports = %config.upstream_ports,
+                    "configuration loaded"
+                );
+                command.execute().await
+            }
+            Command::Backup(_) => {
+                load()?;
+                command.execute().await
+            }
+            Command::Doctor => command.execute().await,
+        }
+    }
+}
+
+/// Logging to stderr (journald under systemd): compact text, filtered by `RUST_LOG`
+/// (default `info`).
+struct Tracing;
+
+impl Tracing {
+    fn init() {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        tracing_subscriber::fmt()
+            .compact()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
 }
 
 /// The subcommand to execute; `run` when none was given.
@@ -63,10 +116,17 @@ impl Command {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let command = Command::from(Cli::parse());
-    tracing::debug!(?command, "starting");
-    command.execute().await
+async fn main() -> ExitCode {
+    let cli = Cli::parse();
+    Tracing::init();
+    match cli.execute().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            // `{:#}` prints the cause chain on one line and never a backtrace.
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]
@@ -95,6 +155,20 @@ mod tests {
     fn parses_doctor_and_backup_db() {
         assert_eq!(parse(&["doctor"]), Command::Doctor);
         assert_eq!(parse(&["backup", "db"]), Command::Backup(Backup::Db));
+    }
+
+    #[test]
+    fn config_flag_is_global() {
+        let cli = Cli::try_parse_from(["hoster", "run", "--config", "/etc/h.toml"]).unwrap();
+        assert_eq!(
+            cli.config.as_deref(),
+            Some(std::path::Path::new("/etc/h.toml"))
+        );
+        let cli = Cli::try_parse_from(["hoster", "--config", "/etc/h.toml"]).unwrap();
+        assert_eq!(
+            cli.config.as_deref(),
+            Some(std::path::Path::new("/etc/h.toml"))
+        );
     }
 
     #[test]

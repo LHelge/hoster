@@ -1,0 +1,74 @@
+# hoster configuration (ADR-0024).
+#
+# Install as ~/.config/hoster/hoster.toml for the hoster user ($XDG_CONFIG_HOME/hoster/hoster.toml),
+# or point hoster at another file with `--config <path>`. Unknown keys are rejected.
+#
+# Every key can be overridden with a HOSTER_* environment variable, using `__` between nested keys:
+#   HOSTER_ADMIN_HOST=hoster.example.com
+#   HOSTER_ACME__DIRECTORY_URL=https://acme-staging-v02.api.letsencrypt.org/directory
+#   HOSTER_PROXY__TIMEOUTS__READ=90s
+#   HOSTER_UPSTREAM_PORTS__LAST=24999
+# Environment variables win over this file; this file wins over the built-in defaults.
+# Unknown HOSTER_* variables are rejected too, so a typo does not go unnoticed.
+#
+# Required in the environment, never in this file:
+#   HOSTER_ADMIN_GITHUB=<your GitHub handle>   the only account allowed into the admin UI (ADR-0021)
+#
+# Secrets (OAuth client secret, registry credentials, secret-store key) never go in this file.
+# They are read from separate 0600 files or systemd credentials ($CREDENTIALS_DIRECTORY, set by
+# LoadCredential= in the unit).
+#
+# Logging verbosity is set with RUST_LOG (default "info"), e.g. RUST_LOG=hoster=debug.
+#
+# Durations are humantime strings: "500ms", "30s", "5m", "1h 30m".
+# Values shown are the defaults unless marked "required".
+
+# Required. The reserved admin host serving the web UI and the deploy webhook (ADR-0031).
+# A lowercase fully qualified domain name whose DNS points at this server.
+admin_host = "hoster.example.com"
+
+# Where hoster keeps its SQLite database, certificates, ACME account and admin socket.
+# Must be absolute. Default: $XDG_DATA_HOME/hoster (~/.local/share/hoster).
+# state_dir = "/home/hoster/.local/share/hoster"
+
+[acme]
+# ACME directory. Let's Encrypt production by default; use staging for first runs:
+#   "https://acme-staging-v02.api.letsencrypt.org/directory"
+directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+# Contact e-mail registered with the ACME account (optional; a plain address, no "mailto:").
+contact = "admin@example.com"
+# hoster's public IP addresses for the advisory DNS check on app hosts (ADR-0051).
+# Empty: resolve the admin host's A/AAAA records at startup and hourly.
+public_addresses = []
+
+# Loopback ports handed out round-robin to routed services (ADR-0026). Inclusive, within
+# 1024-65535, at least 16 ports, and best kept clear of net.ipv4.ip_local_port_range.
+[upstream_ports]
+first = 20000
+last = 29999
+
+[proxy]
+# Pingora worker threads per listener. Default: the number of CPUs.
+# threads = 2
+# After a stop signal, how long in-flight requests may finish (Pingora grace_period_seconds).
+# Both are whole seconds, and grace_period + graceful_shutdown_timeout must fit within the
+# unit's TimeoutStopSec.
+grace_period = "10s"
+# Then, how long Pingora waits for its runtimes to stop (graceful_shutdown_timeout_seconds).
+graceful_shutdown_timeout = "5s"
+
+# Upstream timeouts for routes that don't set their own `timeouts` (ADR-0011).
+[proxy.timeouts]
+connect = "5s"
+read = "60s"
+write = "60s"
+idle = "90s"
+
+[poller]
+# How often tracked tags are resolved to digests in the registry (ADR-0043). Jitter is added.
+interval = "5m"
+
+[webhook]
+# The `aud` claim deploy webhook OIDC tokens must carry (ADR-0047).
+# Default: "https://<admin_host>".
+# audience = "https://hoster.example.com"
