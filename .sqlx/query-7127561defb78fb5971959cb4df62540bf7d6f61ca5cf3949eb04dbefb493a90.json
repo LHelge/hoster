@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT stack FROM deployments WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "stack",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "stack"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7127561defb78fb5971959cb4df62540bf7d6f61ca5cf3949eb04dbefb493a90"
+}

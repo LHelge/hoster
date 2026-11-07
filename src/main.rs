@@ -24,6 +24,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{Config, ConfigError};
 use crate::doctor::Doctor;
+use crate::store::Store;
 
 /// Single-binary deployment orchestrator for one VPS.
 #[derive(Debug, Parser)]
@@ -106,6 +107,9 @@ impl Command {
                     upstream_ports = %config.upstream_ports,
                     "configuration loaded"
                 );
+                // Startup step 2 (docs/architecture.md §4): open and migrate the state store.
+                let store = Store::open(&config.state_dir).await?;
+                tracing::info!(path = %store.path().display(), "state store ready");
                 anyhow::bail!("`hoster run` is not implemented yet")
             }
             Command::Doctor { json } => {

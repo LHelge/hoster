@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM services WHERE stack = ? AND name = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d734eb4d8e37b097859a80fec869e5a581cf80f5c44611c8428a5bbea45010cf"
+}

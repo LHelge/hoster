@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state AS \"state: DeploymentState\" FROM deployments WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "state: DeploymentState",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1fda47a9308284e6dd0f3e72eb4064e2ae1fb05b1e02f355feed06957acaf177"
+}

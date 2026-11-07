@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM service_ports WHERE stack = ? AND service = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "35b5d225d41d1b0409edc1c7ef133fb2720fd9df8241da3f3a12f45823fb6822"
+}

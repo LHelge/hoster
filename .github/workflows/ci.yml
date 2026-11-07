@@ -33,6 +33,35 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
+  sqlx:
+    name: sqlx offline metadata is up to date
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:${{ github.workspace }}/target/sqlx-check.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Keep the CLI version in step with the sqlx dependency in Cargo.toml (ADR-0022).
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --version 0.9.0 --locked --no-default-features --features sqlite
+
+      # Start from an empty database: rust-cache restores target/, and a stale file with an
+      # edited migration would fail on its checksum.
+      - name: Create and migrate a scratch database
+        run: |
+          mkdir -p target
+          rm -f target/sqlx-check.db*
+          sqlx database create
+          sqlx migrate run
+
+      - name: Check .sqlx/
+        run: cargo sqlx prepare --check -- --all-targets
+
   msrv:
     name: MSRV (rust-version in Cargo.toml)
     runs-on: ubuntu-latest

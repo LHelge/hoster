@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO deployment_targets (deployment_id, service, digest) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "552409790b9945d3c654949fae9e647e7d4df1b8a21a4ad473793dd6ec58e16a"
+}

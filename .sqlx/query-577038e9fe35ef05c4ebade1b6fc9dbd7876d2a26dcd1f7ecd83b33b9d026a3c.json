@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE stacks SET last_generation = last_generation + 1\n               WHERE name = (SELECT stack FROM deployments WHERE id = ?)\n               RETURNING last_generation AS \"generation!: u32\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation!: u32",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stacks",
+            "name": "last_generation"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "577038e9fe35ef05c4ebade1b6fc9dbd7876d2a26dcd1f7ecd83b33b9d026a3c"
+}

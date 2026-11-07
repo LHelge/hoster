@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT service, container_port AS \"container_port: u16\",\n                      host_port AS \"host_port: u16\"\n               FROM service_ports WHERE stack = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "service",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "service_ports",
+            "name": "service"
+          }
+        }
+      },
+      {
+        "name": "container_port: u16",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "service_ports",
+            "name": "container_port"
+          }
+        }
+      },
+      {
+        "name": "host_port: u16",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "service_ports",
+            "name": "host_port"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3ec17b8c813acdcac10369bb94b4b376d44cfc3e282668ac1837f4422e614d60"
+}

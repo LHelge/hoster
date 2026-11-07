@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT name, last_generation AS \"last_generation: u32\",\n                      created_at AS \"created_at: Timestamp\", updated_at AS \"updated_at: Timestamp\"\n               FROM stacks ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "stacks",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "last_generation: u32",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stacks",
+            "name": "last_generation"
+          }
+        }
+      },
+      {
+        "name": "created_at: Timestamp",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stacks",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at: Timestamp",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stacks",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b6f991a38a7bd16997f96dcb6089bd0198935bb875c2e54c6191dac78a04ca5e"
+}

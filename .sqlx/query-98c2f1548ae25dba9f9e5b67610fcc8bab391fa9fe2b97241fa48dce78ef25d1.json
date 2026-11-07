@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id: RevisionId\", stack, revision AS \"revision: u32\", toml,\n                      hash AS \"hash: ContentHash\", created_at AS \"created_at: Timestamp\"\n               FROM stack_revisions WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: RevisionId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "stack",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "revision: u32",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "revision"
+          }
+        }
+      },
+      {
+        "name": "toml",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "toml"
+          }
+        }
+      },
+      {
+        "name": "hash: ContentHash",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "hash"
+          }
+        }
+      },
+      {
+        "name": "created_at: Timestamp",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "98c2f1548ae25dba9f9e5b67610fcc8bab391fa9fe2b97241fa48dce78ef25d1"
+}

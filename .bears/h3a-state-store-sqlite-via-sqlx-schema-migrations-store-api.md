@@ -1,10 +1,10 @@
 ---
 id: h3a
 title: "State store: SQLite via sqlx — schema, migrations, Store API"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.181698219Z"
-updated: "2026-11-07T22:23:02.490589275Z"
+updated: "2026-11-07T22:38:13.388313501Z"
 tags:
   - store
 depends_on:

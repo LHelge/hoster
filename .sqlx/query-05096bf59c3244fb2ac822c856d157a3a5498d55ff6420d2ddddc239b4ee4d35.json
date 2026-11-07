@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO stack_revisions (stack, revision, toml, hash, created_at)\n               VALUES (?1,\n                       (SELECT COALESCE(MAX(revision), 0) + 1 FROM stack_revisions WHERE stack = ?1),\n                       ?2, ?3, ?4)\n               RETURNING id AS \"id!: RevisionId\", stack AS \"stack!\", revision AS \"revision!: u32\",\n                         toml AS \"toml!\", hash AS \"hash!: ContentHash\",\n                         created_at AS \"created_at!: Timestamp\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: RevisionId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "stack!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "revision!: u32",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "revision"
+          }
+        }
+      },
+      {
+        "name": "toml!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "toml"
+          }
+        }
+      },
+      {
+        "name": "hash!: ContentHash",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "hash"
+          }
+        }
+      },
+      {
+        "name": "created_at!: Timestamp",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "stack_revisions",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      null,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "05096bf59c3244fb2ac822c856d157a3a5498d55ff6420d2ddddc239b4ee4d35"
+}

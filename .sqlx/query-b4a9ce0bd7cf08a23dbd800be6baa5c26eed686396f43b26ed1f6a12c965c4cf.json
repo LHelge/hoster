@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id: DeploymentId\", stack, revision_id AS \"revision: RevisionId\",\n                      generation AS \"generation: u32\", state AS \"state: DeploymentState\",\n                      source AS \"source: DeploymentSource\", error,\n                      created_at AS \"created_at: Timestamp\", updated_at AS \"updated_at: Timestamp\",\n                      committed_at AS \"committed_at: Timestamp\",\n                      finished_at AS \"finished_at: Timestamp\"\n               FROM deployments WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: DeploymentId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "stack",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "revision: RevisionId",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "revision_id"
+          }
+        }
+      },
+      {
+        "name": "generation: u32",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "generation"
+          }
+        }
+      },
+      {
+        "name": "state: DeploymentState",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "source: DeploymentSource",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "source"
+          }
+        }
+      },
+      {
+        "name": "error",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "error"
+          }
+        }
+      },
+      {
+        "name": "created_at: Timestamp",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at: Timestamp",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "name": "committed_at: Timestamp",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "committed_at"
+          }
+        }
+      },
+      {
+        "name": "finished_at: Timestamp",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "finished_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "b4a9ce0bd7cf08a23dbd800be6baa5c26eed686396f43b26ed1f6a12c965c4cf"
+}

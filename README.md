@@ -18,7 +18,28 @@ cargo clippy --all-targets -- -D warnings     # lints
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same format, lint and test steps on every push and pull
-request, and checks that the static musl release build links statically.
+request, checks that `.sqlx/` is up to date, and checks that the static musl release build links
+statically.
+
+### State store queries (sqlx)
+
+The state store (`src/store/`) uses sqlx's compile-time checked `query!` / `query_as!` macros.
+Builds use the committed offline metadata in `.sqlx/`, so no database is needed to compile. The
+schema lives in `migrations/` and is embedded into the binary, which migrates its database at
+startup.
+
+After adding or changing a query or a migration, regenerate `.sqlx/` against a scratch database
+and commit the result:
+
+```sh
+cargo install sqlx-cli --version 0.9.0 --locked --no-default-features --features sqlite
+export DATABASE_URL=sqlite:target/sqlx-dev.db
+sqlx database create && sqlx migrate run     # after a schema change: rm the file first
+cargo sqlx prepare -- --all-targets
+```
+
+While `DATABASE_URL` is set the macros check against that database instead of `.sqlx/`; CI runs
+`cargo sqlx prepare --check -- --all-targets`.
 
 ## Releases
 

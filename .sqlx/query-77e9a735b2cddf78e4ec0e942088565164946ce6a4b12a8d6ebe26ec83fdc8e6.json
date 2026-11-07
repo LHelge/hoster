@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO deployment_events (deployment_id, from_state, to_state, message, at)\n             VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "77e9a735b2cddf78e4ec0e942088565164946ce6a4b12a8d6ebe26ec83fdc8e6"
+}

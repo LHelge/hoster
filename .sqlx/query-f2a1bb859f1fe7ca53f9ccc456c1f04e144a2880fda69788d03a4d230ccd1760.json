@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE deployments\n             SET state = ?, updated_at = ?, finished_at = COALESCE(?, finished_at),\n                 error = COALESCE(?, error)\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "f2a1bb859f1fe7ca53f9ccc456c1f04e144a2880fda69788d03a4d230ccd1760"
+}

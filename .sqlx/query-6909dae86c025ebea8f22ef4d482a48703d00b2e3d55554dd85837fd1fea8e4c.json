@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS one FROM stacks WHERE name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "one",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6909dae86c025ebea8f22ef4d482a48703d00b2e3d55554dd85837fd1fea8e4c"
+}

@@ -289,13 +289,13 @@ impl Config {
                 "must be an https:// URL",
             ));
         }
-        if let Some(root) = &self.acme.root_certificate {
-            if !root.is_absolute() {
-                problems.push(Problem::new(
-                    "acme.root_certificate",
-                    "must be an absolute path",
-                ));
-            }
+        if let Some(root) = &self.acme.root_certificate
+            && !root.is_absolute()
+        {
+            problems.push(Problem::new(
+                "acme.root_certificate",
+                "must be an absolute path",
+            ));
         }
         if let Some(contact) = &self.acme.contact {
             let valid = contact
@@ -340,10 +340,10 @@ impl Config {
                 problems.push(Problem::new(key, "must be a whole number of seconds"));
             }
         }
-        if let Some(audience) = &self.webhook.audience {
-            if audience.trim().is_empty() {
-                problems.push(Problem::new("webhook.audience", "must not be empty"));
-            }
+        if let Some(audience) = &self.webhook.audience
+            && audience.trim().is_empty()
+        {
+            problems.push(Problem::new("webhook.audience", "must not be empty"));
         }
         problems
     }

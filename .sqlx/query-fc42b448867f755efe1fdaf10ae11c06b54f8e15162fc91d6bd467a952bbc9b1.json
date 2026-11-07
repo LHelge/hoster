@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO services\n                     (stack, name, generation, digest, config_hash, deployment_id, updated_at)\n                 VALUES (?, ?, ?, ?, ?, ?, ?)\n                 ON CONFLICT (stack, name) DO UPDATE SET\n                     generation = excluded.generation, digest = excluded.digest,\n                     config_hash = excluded.config_hash,\n                     deployment_id = excluded.deployment_id, updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "fc42b448867f755efe1fdaf10ae11c06b54f8e15162fc91d6bd467a952bbc9b1"
+}

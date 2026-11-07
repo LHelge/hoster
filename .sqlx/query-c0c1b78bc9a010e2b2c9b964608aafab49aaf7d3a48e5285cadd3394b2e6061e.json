@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id: DeploymentId\" FROM deployments\n               WHERE finished_at IS NULL ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: DeploymentId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c0c1b78bc9a010e2b2c9b964608aafab49aaf7d3a48e5285cadd3394b2e6061e"
+}

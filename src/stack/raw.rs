@@ -402,19 +402,21 @@ impl RawService {
         let mut valid = true;
 
         let image: Option<ImageRef> = v.parse(&path.key("image"), &self.image);
-        if let Some(image) = &image {
-            if image.tag().is_none() && image.digest().is_none() && !image.is_ci_built() {
-                v.error(
-                    &path.key("image"),
-                    self.image.span(),
-                    format!(
-                        "third-party image `{image}` needs a tag or digest (`repo:tag`, \
+        if let Some(image) = &image
+            && image.tag().is_none()
+            && image.digest().is_none()
+            && !image.is_ci_built()
+        {
+            v.error(
+                &path.key("image"),
+                self.image.span(),
+                format!(
+                    "third-party image `{image}` needs a tag or digest (`repo:tag`, \
                          `repo:tag@sha256:…` or `repo@sha256:…`); only CI-built ghcr.io \
                          images may omit both"
-                    ),
-                );
-                valid = false;
-            }
+                ),
+            );
+            valid = false;
         }
 
         let track = match &self.track {
@@ -552,15 +554,15 @@ impl RawService {
             .optional_duration(path, "stop_timeout", &self.stop_timeout)
             .map(|d| d.unwrap_or(DEFAULT_STOP_TIMEOUT));
 
-        if let Some(user) = &self.user {
-            if !Self::is_user_spec(user.get_ref()) {
-                v.error(
-                    &path.key("user"),
-                    user.span(),
-                    format!("invalid user `{}`: expected `uid[:gid]`", user.get_ref()),
-                );
-                valid = false;
-            }
+        if let Some(user) = &self.user
+            && !Self::is_user_spec(user.get_ref())
+        {
+            v.error(
+                &path.key("user"),
+                user.span(),
+                format!("invalid user `{}`: expected `uid[:gid]`", user.get_ref()),
+            );
+            valid = false;
         }
 
         valid.then_some(())?;
@@ -637,14 +639,15 @@ impl RawRoute {
             None => Some(NormalizedPrefix::root()),
         };
         let strip_prefix = self.strip_prefix.as_ref().is_some_and(|s| *s.get_ref());
-        if let (Some(flag), Some(prefix)) = (&self.strip_prefix, &prefix) {
-            if *flag.get_ref() && prefix.is_root() {
-                v.warn(
-                    &path.key("strip_prefix"),
-                    flag.span(),
-                    "`strip_prefix` has no effect on the root prefix `/`",
-                );
-            }
+        if let (Some(flag), Some(prefix)) = (&self.strip_prefix, &prefix)
+            && *flag.get_ref()
+            && prefix.is_root()
+        {
+            v.warn(
+                &path.key("strip_prefix"),
+                flag.span(),
+                "`strip_prefix` has no effect on the root prefix `/`",
+            );
         }
         let port = v.port(&path.key("port"), &self.port);
         let timeouts = self.timeouts.validate(v, &path.key("timeouts"));

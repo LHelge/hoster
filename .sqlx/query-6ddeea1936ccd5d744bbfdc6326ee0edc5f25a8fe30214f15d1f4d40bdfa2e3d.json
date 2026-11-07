@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT port AS \"port: u16\", stack, service, container_port AS \"container_port: u16\",\n                      generation AS \"generation: u32\"\n               FROM port_allocations ORDER BY port",
+  "describe": {
+    "columns": [
+      {
+        "name": "port: u16",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "port_allocations",
+            "name": "port"
+          }
+        }
+      },
+      {
+        "name": "stack",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "port_allocations",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "service",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "port_allocations",
+            "name": "service"
+          }
+        }
+      },
+      {
+        "name": "container_port: u16",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "port_allocations",
+            "name": "container_port"
+          }
+        }
+      },
+      {
+        "name": "generation: u32",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "port_allocations",
+            "name": "generation"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6ddeea1936ccd5d744bbfdc6326ee0edc5f25a8fe30214f15d1f4d40bdfa2e3d"
+}

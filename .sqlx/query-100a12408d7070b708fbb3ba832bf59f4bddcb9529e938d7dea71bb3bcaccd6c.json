@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT service, digest FROM deployment_targets WHERE deployment_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "service",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployment_targets",
+            "name": "service"
+          }
+        }
+      },
+      {
+        "name": "digest",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployment_targets",
+            "name": "digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "100a12408d7070b708fbb3ba832bf59f4bddcb9529e938d7dea71bb3bcaccd6c"
+}
