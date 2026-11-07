@@ -1,8 +1,10 @@
 //! Spawns the real `hoster run` binary and checks its signal handling, systemd notifications and
-//! exit codes. Podman is a [`FakePodman`] answering the startup handshake, and every phase that
-//! needs the network is still a stub, so this runs offline.
+//! exit codes. Podman is a [`FakePodman`] answering the startup handshake, the proxy listens on
+//! an ephemeral loopback port, and every other phase that needs the network is still a stub, so
+//! this runs offline.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
@@ -67,6 +69,8 @@ impl FakePodman {
 /// A scratch directory with a minimal valid hoster.toml and a [`FakePodman`], removed on drop.
 struct Sandbox {
     dir: PathBuf,
+    /// The proxy's plain-HTTP listen address: a loopback port that was free a moment ago.
+    http: SocketAddr,
 }
 
 impl Sandbox {
@@ -84,7 +88,11 @@ impl Sandbox {
             ),
         )
         .unwrap();
-        Sandbox { dir }
+        let http = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        Sandbox { dir, http }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -102,6 +110,10 @@ impl Sandbox {
             .env("RUST_LOG", "info")
             .env("HOSTER_ADMIN_GITHUB", "octocat")
             .env("HOSTER_PODMAN_SOCKET", self.path("podman.sock"))
+            .env("HOSTER_PROXY__HTTP_LISTEN", self.http.to_string())
+            .env("HOSTER_PROXY__THREADS", "1")
+            .env("HOSTER_PROXY__GRACE_PERIOD", "1s")
+            .env("HOSTER_PROXY__GRACEFUL_SHUTDOWN_TIMEOUT", "1s")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -261,4 +273,79 @@ fn missing_podman_socket_fails_startup_and_points_at_doctor() {
         "stderr: {stderr}"
     );
     assert!(stderr.contains("hoster doctor"), "stderr: {stderr}");
+}
+
+/// Sends one HTTP/1.1 request to `addr` and returns the raw response.
+fn http_get(addr: SocketAddr, path: &str) -> String {
+    let mut stream = TcpStream::connect(addr).expect("proxy accepts connections");
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn proxy_answers_404_and_sigterm_drains_within_the_grace_period() {
+    let sandbox = Sandbox::new("proxy");
+    let hoster = Hoster::spawn(sandbox.command());
+    hoster.wait_for_line("proxy is listening");
+    hoster.wait_for_line("hoster is ready");
+
+    for path in ["/", "/some/where?x=1"] {
+        let response = http_get(sandbox.http, path);
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+    }
+
+    let stopping = Instant::now();
+    hoster.signal(Signal::SIGTERM);
+    hoster.wait_for_line("hoster stopped");
+    let status = hoster.wait();
+    assert!(status.success(), "exit status {status:?}");
+    // grace_period (1s) + graceful_shutdown_timeout (1s), with slack for a loaded machine.
+    let took = stopping.elapsed();
+    assert!(took < Duration::from_secs(5), "shutdown took {took:?}");
+    assert!(
+        TcpStream::connect(sandbox.http).is_err(),
+        "the listener is closed after exit"
+    );
+}
+
+#[test]
+fn a_busy_http_port_fails_startup_in_step_7() {
+    let sandbox = Sandbox::new("busy");
+    let _busy = TcpListener::bind(sandbox.http).unwrap();
+    let output = sandbox.command().output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("step 7"), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&format!("cannot listen on {}", sandbox.http)),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn a_second_sigterm_during_the_grace_period_exits_promptly() {
+    let sandbox = Sandbox::new("escalate");
+    let mut cmd = sandbox.command();
+    // Far longer than the test waits: the exit must not wait out Pingora's grace-period sleep.
+    cmd.env("HOSTER_PROXY__GRACE_PERIOD", "60s");
+    let hoster = Hoster::spawn(cmd);
+    hoster.wait_for_line("hoster is ready");
+
+    hoster.signal(Signal::SIGTERM);
+    hoster.wait_for_line("phase=join proxy thread");
+    let escalated = Instant::now();
+    hoster.signal(Signal::SIGTERM);
+    hoster.wait_for_line("escalating shutdown");
+    hoster.wait_for_line("hoster stopped");
+    let status = hoster.wait();
+    assert!(status.success(), "exit status {status:?}");
+    let took = escalated.elapsed();
+    assert!(took < Duration::from_secs(6), "fast shutdown took {took:?}");
 }

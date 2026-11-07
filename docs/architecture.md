@@ -34,7 +34,15 @@ The library behaviour this design depends on was checked against crate sources a
   channel-backed watcher instead, so signals stay with the orchestrator.
 - **Readiness.** `Server::watch_execution_phase()` returns a broadcast receiver of
   `ExecutionPhase` (`Bootstrap` → `Running` → `GracefulTerminate` → … → `Terminated`). hoster uses
-  `Running` as its "proxy is up" signal.
+  `Running` as its "proxy is up" signal. Caveat (found while implementing): `Running` is sent
+  when the main loop starts, *before* the service tasks bind their listeners, and a bind failure
+  only panics inside the service task; Pingora keeps running without the listener. hoster
+  therefore checks the listen address with a plain `bind` before spawning the thread and, after
+  `Running`, waits until a TCP connect to the listener succeeds.
+- **The grace period is a fixed sleep.** On `GracefulTerminate` Pingora sleeps the whole
+  `grace_period_seconds` (an uninterruptible `thread::sleep`), even with no requests in flight.
+  A later `FastShutdown` cannot cut it short, so a fast shutdown waits only briefly for the
+  thread and then exits without it.
 - **Grace period default.** `grace_period_seconds` defaults to **300 s**, and
   `graceful_shutdown_timeout_seconds` to 5 s. Both must be set explicitly so they fit systemd's
   `TimeoutStopSec`.
@@ -267,7 +275,7 @@ where a boundary needs them:
 | 1 | `acme_tx` | `mpsc::Sender<AcmeCommand>` | Orchestrator → ACME task | `Ensure { hosts }` when the set of routed hosts changes, `Forget { host }`. |
 | 2 | `acme_events` | `mpsc::Sender<AcmeEvent>` | ACME task → Orchestrator | `Issued { host, not_after }`, `Failed { host, error, retry_at }`. The orchestrator records them and fans them out on `ui_events` (#5), so each channel has one producer. Used for status ("TLS pending") in the UI; deploys never wait on certificates (ADR-0036). |
 | 3 | `pingora_shutdown` | `watch::Sender<Option<ShutdownSignal>>` | Supervisor → Pingora "Server" runtime | Read by our `ShutdownSignalWatch` impl. SIGTERM becomes `GracefulTerminate`, a second SIGTERM or SIGINT becomes `FastShutdown`. |
-| 4 | `pingora_phase` | `broadcast::Receiver<ExecutionPhase>` | Pingora → Supervisor | `Running` means the listeners are bound and the ACME task may start. An early `Terminated` means Pingora died, and the supervisor exits non-zero. |
+| 4 | `pingora_phase` | `broadcast::Receiver<ExecutionPhase>` | Pingora → Supervisor | `Running`, followed by a successful connect to the listener (§1.1), means the listeners are bound and the ACME task may start. An early `Terminated` means Pingora died, and the supervisor exits non-zero. |
 | 5 | `ui_events` | `broadcast::Sender<UiEvent>` | Orchestrator → Axum SSE handlers | Deploy progress, health changes and cert events (relayed from #2), pushed to open UI pages (HTMX SSE). Lagging receivers just re-render from current state. |
 | 6 | `shutdown` | `CancellationToken` (tokio-util) | Supervisor → all orchestrator tasks | Cooperative cancellation. Deploy tasks stop at the next safe point (§5.4). |
 

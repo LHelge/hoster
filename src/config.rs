@@ -18,7 +18,7 @@
 //! Every problem is reported with the offending key, all at once, as a [`ConfigError`].
 
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -117,6 +117,8 @@ impl Default for AcmeConfig {
     reason = "fields are consumed by the subsystems as they are implemented"
 )]
 pub struct ProxyConfig {
+    /// Where the plain-HTTP (`:80`) listener binds.
+    pub http_listen: SocketAddr,
     /// Worker threads per Pingora service; defaults to the number of CPUs.
     pub threads: NonZeroUsize,
     /// How long Pingora keeps serving in-flight requests after it stops accepting.
@@ -132,6 +134,7 @@ pub struct ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
+            http_listen: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 80)),
             threads: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
             grace_period: Duration::from_secs(10),
             graceful_shutdown_timeout: Duration::from_secs(5),
@@ -360,6 +363,10 @@ impl Config {
             if duration.subsec_nanos() != 0 {
                 problems.push(Problem::new(key, "must be a whole number of seconds"));
             }
+        }
+        // Port 0 would bind a random port that nothing (not even the readiness check) can find.
+        if self.proxy.http_listen.port() == 0 {
+            problems.push(Problem::new("proxy.http_listen", "must name a port"));
         }
         if let Some(audience) = &self.webhook.audience
             && audience.trim().is_empty()
@@ -881,6 +888,7 @@ mod tests {
             assert_eq!(config.admin_github.as_ref(), "octocat");
             assert_eq!(config.upstream_ports, PortRange::default());
             assert_eq!(config.proxy.grace_period, Duration::from_secs(10));
+            assert_eq!(config.proxy.http_listen.to_string(), "0.0.0.0:80");
             assert_eq!(config.proxy.timeouts, Timeouts::default());
             assert_eq!(config.poller.interval, Duration::from_secs(300));
             assert_eq!(config.acme.contact.as_deref(), Some("admin@example.com"));
@@ -1218,12 +1226,14 @@ mod tests {
             jail.set_env("HOSTER_WEBHOOK__AUDIENCE", "12345");
             jail.set_env("HOSTER_ACME__CONTACT", "1@2.example");
             jail.set_env("HOSTER_PROXY__THREADS", "3");
+            jail.set_env("HOSTER_PROXY__HTTP_LISTEN", "127.0.0.1:8080");
             jail.set_env("HOSTER_ACME__PUBLIC_ADDRESSES", "[\"192.0.2.1\", \"::1\"]");
             let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
             assert_eq!(config.admin_github.as_ref(), "007");
             assert_eq!(config.webhook_audience(), "12345");
             assert_eq!(config.acme.contact.as_deref(), Some("1@2.example"));
             assert_eq!(config.proxy.threads.get(), 3);
+            assert_eq!(config.proxy.http_listen.to_string(), "127.0.0.1:8080");
             assert_eq!(config.acme.public_addresses.len(), 2);
             Ok(())
         });
@@ -1258,6 +1268,17 @@ mod tests {
             jail.set_env("HOSTER_PROXY__GRACE_PERIOD", "1500ms");
             let problems = invalid(load(jail, MINIMAL));
             assert!(has_problem(&problems, "proxy.grace_period"), "{problems:?}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn http_listen_needs_a_port() {
+        Jail::expect_with(|jail| {
+            with_admin(jail);
+            jail.set_env("HOSTER_PROXY__HTTP_LISTEN", "127.0.0.1:0");
+            let problems = invalid(load(jail, MINIMAL));
+            assert!(has_problem(&problems, "proxy.http_listen"), "{problems:?}");
             Ok(())
         });
     }

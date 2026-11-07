@@ -11,13 +11,16 @@ use std::fmt;
 use std::future::Future;
 use std::io;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::Context as _;
+use pingora::server::ShutdownSignal;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::Config;
+use crate::config::{Config, ProxyConfig};
+use crate::proxy::{Proxy, ProxyEvents, ProxyThread};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::store::Store;
 use crate::web::{Listen, WebApp, WebServer};
@@ -219,58 +222,77 @@ impl SignalSource for Signals {
     }
 }
 
-/// The message to Pingora's shutdown watcher (§3.3 #3). Stands in for
-/// `pingora_core::server::ShutdownSignal` until the proxy thread exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProxyShutdown {
-    GracefulTerminate,
-    FastShutdown,
-}
+/// How long startup step 7 waits for the proxy's listeners to accept connections.
+const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a fast shutdown waits for the Pingora thread. Pingora's grace period is an
+/// uninterruptible sleep, so a proxy that was already draining when the shutdown escalated may
+/// not stop sooner; the process then exits without it.
+const FAST_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-impl From<ShutdownMode> for ProxyShutdown {
+impl From<ShutdownMode> for ShutdownSignal {
     fn from(mode: ShutdownMode) -> Self {
         match mode {
-            ShutdownMode::Graceful => ProxyShutdown::GracefulTerminate,
-            ShutdownMode::Fast => ProxyShutdown::FastShutdown,
+            ShutdownMode::Graceful => ShutdownSignal::GracefulTerminate,
+            ShutdownMode::Fast => ShutdownSignal::FastShutdown,
         }
     }
 }
 
-/// The supervisor's side of the Pingora thread: its join handle and the `pingora_shutdown`
-/// watch channel (architecture §3.3 #3).
+/// How hard a pending proxy stop request is; requests only ever get harder.
+fn severity(signal: Option<&ShutdownSignal>) -> u8 {
+    match signal {
+        None => 0,
+        Some(ShutdownSignal::GracefulTerminate | ShutdownSignal::GracefulUpgrade) => 1,
+        Some(ShutdownSignal::FastShutdown) => 2,
+    }
+}
+
+/// The supervisor's side of the Pingora thread: its join handle, the `pingora_shutdown` watch
+/// channel (architecture §3.3 #3) and the `pingora_phase` events (#4).
 struct ProxyHandle {
-    /// Set once phase 7 spawns the Pingora thread.
+    /// Set once phase 7 spawns the Pingora thread; taken when it is joined.
     thread: Option<JoinHandle<()>>,
-    /// A join in progress. Kept here so a join interrupted by an escalating signal resumes
-    /// instead of losing the thread.
-    joining: Option<tokio::task::JoinHandle<std::thread::Result<()>>>,
-    shutdown_tx: watch::Sender<Option<ProxyShutdown>>,
+    shutdown_tx: watch::Sender<Option<ShutdownSignal>>,
+    /// Pingora's lifecycle, set together with `thread`.
+    events: Option<ProxyEvents>,
 }
 
 impl Default for ProxyHandle {
     fn default() -> Self {
         ProxyHandle {
             thread: None,
-            joining: None,
             shutdown_tx: watch::Sender::new(None),
+            events: None,
         }
     }
 }
 
 impl ProxyHandle {
+    /// How often [`ProxyHandle::join`] checks whether the Pingora thread has finished.
+    const JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+    /// Spawns the Pingora thread and waits until its listeners accept connections.
+    async fn start(&mut self, config: &ProxyConfig) -> anyhow::Result<()> {
+        let ProxyThread { thread, events } =
+            Proxy::new(config).spawn(self.shutdown_tx.subscribe())?;
+        self.thread = Some(thread);
+        let events = self.events.insert(events);
+        events.ready(PROXY_READY_TIMEOUT).await?;
+        tracing::info!(http = %config.http_listen, "proxy is listening");
+        Ok(())
+    }
+
     /// Asks Pingora to stop; a later, harder request replaces an earlier one.
     fn signal(&self, mode: ShutdownMode) {
-        let signal = ProxyShutdown::from(mode);
-        let changed = self.shutdown_tx.send_if_modified(|current| {
-            let changed = *current != Some(signal) && *current != Some(ProxyShutdown::FastShutdown);
-            if changed {
+        let signal = ShutdownSignal::from(mode);
+        self.shutdown_tx.send_if_modified(|current| {
+            let harder = severity(Some(&signal)) > severity(current.as_ref());
+            if harder {
+                tracing::info!(?signal, "proxy shutdown requested");
                 *current = Some(signal);
             }
-            changed
+            harder
         });
-        if changed {
-            tracing::info!(?signal, "proxy shutdown requested");
-        }
     }
 
     /// Hardens a stop request that was already sent to `mode`; does nothing if Pingora has not
@@ -283,23 +305,49 @@ impl ProxyHandle {
 
     /// Resolves if the Pingora thread terminates on its own (the `pingora_phase` channel,
     /// §3.3 #4). Never resolves while there is no proxy thread.
-    async fn terminated(&self) {
-        std::future::pending::<()>().await
+    async fn terminated(&mut self) {
+        match self.events.as_mut() {
+            Some(events) => events.terminated().await,
+            None => std::future::pending().await,
+        }
     }
 
-    /// Waits for the Pingora thread to finish. Cancel-safe: dropping the future and calling
-    /// `join` again keeps waiting for the same thread.
-    async fn join(&mut self) -> anyhow::Result<()> {
-        if let Some(thread) = self.thread.take() {
-            self.joining = Some(tokio::task::spawn_blocking(move || thread.join()));
-        }
-        let Some(joining) = self.joining.as_mut() else {
+    /// Waits for the Pingora thread to finish; in fast mode at most [`FAST_JOIN_TIMEOUT`].
+    /// Cancel-safe: dropping the future and calling `join` again keeps waiting for the same
+    /// thread.
+    ///
+    /// The wait polls [`JoinHandle::is_finished`] instead of running `JoinHandle::join` on
+    /// tokio's blocking pool: dropping the orchestrator runtime waits for every blocking task, so
+    /// a join left behind by the fast-mode timeout would hold the process until Pingora's grace
+    /// period ran out.
+    async fn join(&mut self, mode: ShutdownMode) -> anyhow::Result<()> {
+        let Some(thread) = self.thread.as_ref() else {
             return Ok(());
         };
-        let result = joining.await;
-        self.joining = None;
-        result
-            .context("joining the proxy thread")?
+        let finished = async {
+            while !thread.is_finished() {
+                tokio::time::sleep(Self::JOIN_POLL_INTERVAL).await;
+            }
+        };
+        match mode {
+            ShutdownMode::Graceful => finished.await,
+            ShutdownMode::Fast => {
+                if tokio::time::timeout(FAST_JOIN_TIMEOUT, finished)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        timeout = ?FAST_JOIN_TIMEOUT,
+                        "proxy is still draining; exiting without waiting for it"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        // The thread has finished, so this join does not block.
+        let thread = self.thread.take().expect("checked above");
+        thread
+            .join()
             .map_err(|_| anyhow::anyhow!("the proxy thread panicked"))
     }
 }
@@ -433,7 +481,7 @@ impl Teardown {
                 self.proxy.signal(mode);
                 Ok(())
             }
-            ShutdownPhase::JoinProxy => self.proxy.join().await,
+            ShutdownPhase::JoinProxy => self.proxy.join(mode).await,
         }
     }
 }
@@ -465,7 +513,8 @@ impl Startup for Supervisor {
                 self.runtime = Some(runtime);
                 Ok(())
             }
-            Phase::Certificates | Phase::Reconcile | Phase::RouteTable | Phase::Proxy => {
+            Phase::Proxy => self.teardown.proxy.start(&self.config.proxy).await,
+            Phase::Certificates | Phase::Reconcile | Phase::RouteTable => {
                 tracing::info!(%phase, step = phase.number(), "not implemented yet, skipping");
                 Ok(())
             }
@@ -490,6 +539,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// The pending proxy stop request, for comparisons (`ShutdownSignal` is not `PartialEq`).
+    fn requested(signal: &Option<ShutdownSignal>) -> String {
+        format!("{signal:?}")
+    }
 
     /// Records the phases it was asked to enter and fails at `fail_at`.
     #[derive(Default)]
@@ -551,30 +605,27 @@ mod tests {
     fn proxy_shutdown_never_softens() {
         let proxy = ProxyHandle::default();
         let mut rx = proxy.shutdown_tx.subscribe();
-        assert_eq!(*rx.borrow_and_update(), None);
+        assert_eq!(requested(&rx.borrow_and_update()), "None");
         proxy.signal(ShutdownMode::Graceful);
         assert_eq!(
-            *rx.borrow_and_update(),
-            Some(ProxyShutdown::GracefulTerminate)
+            requested(&rx.borrow_and_update()),
+            "Some(GracefulTerminate)"
         );
         proxy.signal(ShutdownMode::Fast);
-        assert_eq!(*rx.borrow_and_update(), Some(ProxyShutdown::FastShutdown));
+        assert_eq!(requested(&rx.borrow_and_update()), "Some(FastShutdown)");
         proxy.signal(ShutdownMode::Graceful);
         assert!(!rx.has_changed().unwrap());
-        assert_eq!(*rx.borrow(), Some(ProxyShutdown::FastShutdown));
+        assert_eq!(requested(&rx.borrow()), "Some(FastShutdown)");
     }
 
     #[test]
     fn proxy_escalation_waits_for_the_stop_proxy_phase() {
         let proxy = ProxyHandle::default();
         proxy.escalate(ShutdownMode::Fast);
-        assert_eq!(*proxy.shutdown_tx.borrow(), None);
+        assert_eq!(requested(&proxy.shutdown_tx.borrow()), "None");
         proxy.signal(ShutdownMode::Graceful);
         proxy.escalate(ShutdownMode::Fast);
-        assert_eq!(
-            *proxy.shutdown_tx.borrow(),
-            Some(ProxyShutdown::FastShutdown)
-        );
+        assert_eq!(requested(&proxy.shutdown_tx.borrow()), "Some(FastShutdown)");
     }
 
     /// Signals sent by the test.
@@ -597,7 +648,7 @@ mod tests {
         let exited = Arc::new(AtomicBool::new(false));
         let flag = exited.clone();
         teardown.proxy.thread = Some(std::thread::spawn(move || {
-            while *rx.borrow() != Some(ProxyShutdown::FastShutdown) {
+            while !matches!(*rx.borrow(), Some(ShutdownSignal::FastShutdown)) {
                 std::thread::sleep(Duration::from_millis(5));
             }
             flag.store(true, Ordering::SeqCst);
@@ -614,8 +665,8 @@ mod tests {
             .await;
         assert!(teardown.token.is_cancelled());
         assert_eq!(
-            *teardown.proxy.shutdown_tx.borrow(),
-            Some(ProxyShutdown::GracefulTerminate)
+            requested(&teardown.proxy.shutdown_tx.borrow()),
+            "Some(GracefulTerminate)"
         );
     }
 
@@ -628,7 +679,7 @@ mod tests {
         // supervisor is joining it.
         tokio::spawn(async move {
             drained
-                .wait_for(|s| *s == Some(ProxyShutdown::GracefulTerminate))
+                .wait_for(|s| matches!(s, Some(ShutdownSignal::GracefulTerminate)))
                 .await
                 .unwrap();
             tx.send(Received::Term).unwrap();
@@ -642,14 +693,17 @@ mod tests {
         .expect("teardown finishes once the proxy is stopped fast");
         assert!(exited.load(Ordering::SeqCst), "the proxy thread was joined");
         assert_eq!(
-            *teardown.proxy.shutdown_tx.borrow(),
-            Some(ProxyShutdown::FastShutdown)
+            requested(&teardown.proxy.shutdown_tx.borrow()),
+            "Some(FastShutdown)"
         );
     }
 
     #[tokio::test]
     async fn joining_without_a_proxy_thread_is_a_no_op() {
-        ProxyHandle::default().join().await.unwrap();
+        ProxyHandle::default()
+            .join(ShutdownMode::Graceful)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -658,7 +712,7 @@ mod tests {
             thread: Some(std::thread::spawn(|| panic!("bind failed"))),
             ..ProxyHandle::default()
         };
-        let err = proxy.join().await.unwrap_err();
+        let err = proxy.join(ShutdownMode::Graceful).await.unwrap_err();
         assert!(err.to_string().contains("panicked"));
     }
 }
