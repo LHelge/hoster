@@ -371,6 +371,101 @@ fn inflight_guards_count_requests_across_tables() {
     assert_eq!(held.inflight(), 0);
 }
 
+fn lone_upstream() -> Arc<Upstream> {
+    Arc::new(Upstream::loopback(20000, name("site"), name("web"), 1))
+}
+
+#[tokio::test]
+async fn drain_of_an_idle_upstream_returns_after_the_settle_delay() {
+    let upstream = lone_upstream();
+    let started = Instant::now();
+    let outcome = upstream
+        .drain(Duration::from_millis(50), Duration::from_secs(5))
+        .await;
+    assert_eq!(outcome, DrainOutcome::Drained);
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn drain_waits_for_the_last_guard() {
+    let upstream = lone_upstream();
+    let first = upstream.track();
+    let second = upstream.track();
+    let releaser = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(second);
+    });
+    let started = Instant::now();
+    let outcome = upstream
+        .drain(Duration::from_millis(10), Duration::from_secs(5))
+        .await;
+    assert_eq!(outcome, DrainOutcome::Drained);
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_eq!(upstream.inflight(), 0);
+    releaser.await.unwrap();
+}
+
+#[tokio::test]
+async fn drain_counts_requests_that_start_during_the_settle_delay() {
+    let upstream = lone_upstream();
+    let late = Arc::clone(&upstream);
+    let request = tokio::spawn(async move {
+        // Loaded the old table before the swap, tracked just after it.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let guard = late.track();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(guard);
+    });
+    let started = Instant::now();
+    let outcome = upstream
+        .drain(Duration::from_millis(100), Duration::from_secs(5))
+        .await;
+    assert_eq!(outcome, DrainOutcome::Drained);
+    assert!(started.elapsed() >= Duration::from_millis(220));
+    request.await.unwrap();
+}
+
+#[tokio::test]
+async fn drain_times_out_with_the_requests_left() {
+    let upstream = lone_upstream();
+    let _stuck = [upstream.track(), upstream.track()];
+    let started = Instant::now();
+    let outcome = upstream
+        .drain(Duration::from_millis(10), Duration::from_millis(100))
+        .await;
+    assert_eq!(outcome, DrainOutcome::TimedOut(2));
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn drain_timeout_includes_the_settle_delay() {
+    let upstream = lone_upstream();
+    let _stuck = upstream.track();
+    let started = Instant::now();
+    let outcome = upstream
+        .drain(Duration::from_secs(30), Duration::from_millis(100))
+        .await;
+    assert_eq!(outcome, DrainOutcome::TimedOut(1));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn drain_accepts_a_timeout_too_large_for_an_instant() {
+    let upstream = lone_upstream();
+    let guard = upstream.track();
+    let releaser = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(guard);
+    });
+    let outcome = upstream.drain(Duration::ZERO, Duration::MAX).await;
+    assert_eq!(outcome, DrainOutcome::Drained);
+    releaser.await.unwrap();
+}
+
 /// Sanity timing for the hot path; not a gate. `cargo test -- --ignored lookup_speed`.
 #[test]
 #[ignore = "timing sanity check, run manually"]

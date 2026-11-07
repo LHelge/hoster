@@ -28,7 +28,9 @@ use tokio::sync::{Notify, watch};
 
 use super::{Proxy, ProxyThread};
 use crate::config::ProxyConfig;
-use crate::routing::{DesiredStack, DesiredState, Reserved, RouteTable, UnixUpstream, Upstream};
+use crate::routing::{
+    DesiredStack, DesiredState, DrainOutcome, Reserved, RouteTable, Target, UnixUpstream, Upstream,
+};
 use crate::stack::{
     DEFAULT_DRAIN_TIMEOUT, DEFAULT_STOP_TIMEOUT, Name, Route, RouteTimeouts, Service, Stack,
     UpdateStrategy,
@@ -177,6 +179,10 @@ fn service(routes: Vec<Route>) -> Service {
 struct Harness {
     proxy: SocketAddr,
     web: Arc<Upstream>,
+    web_port: u16,
+    routes: Arc<ArcSwap<RouteTable>>,
+    desired: DesiredState,
+    reserved: Reserved,
     state: AppState,
     resets: Arc<AtomicUsize>,
     flaky_requests: Arc<AtomicUsize>,
@@ -317,11 +323,16 @@ impl Harness {
         };
         let routes = Arc::new(ArcSwap::from_pointee(table));
         let (shutdown, rx) = watch::channel(None);
-        let ProxyThread { thread, mut events } = Proxy::new(&config, routes).spawn(rx).unwrap();
+        let ProxyThread { thread, mut events } =
+            Proxy::new(&config, Arc::clone(&routes)).spawn(rx).unwrap();
         events.ready(Duration::from_secs(10)).await.unwrap();
         Harness {
             proxy,
             web,
+            web_port,
+            routes,
+            desired,
+            reserved,
             state,
             resets,
             flaky_requests,
@@ -329,6 +340,20 @@ impl Harness {
             thread: Some(thread),
             _socket_dir: socket_dir,
         }
+    }
+
+    /// Publishes a table in which `web` runs on `upstream` instead, as a deploy's swap does.
+    fn swap_web(&self, upstream: Arc<Upstream>) {
+        let mut desired = self.desired.clone();
+        let site = desired.get_mut(&name("site")).unwrap();
+        site.services.insert(
+            name("web"),
+            crate::routing::ServiceState::Live {
+                upstreams: BTreeMap::from([(8080, upstream)]),
+            },
+        );
+        let table = RouteTable::build(&desired, &self.reserved).unwrap();
+        self.routes.store(Arc::new(table));
     }
 
     async fn connect(&self) -> Client {
@@ -777,6 +802,133 @@ async fn server_sent_events_are_not_buffered() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(h.web.inflight(), 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Draining (architecture §3.2, §5.3)
+
+#[tokio::test]
+async fn drain_waits_for_a_request_in_flight_across_a_table_swap() {
+    let h = Harness::start().await;
+    let old = Arc::clone(&h.web);
+    let sent = Instant::now();
+    let slow = tokio::spawn({
+        let proxy = h.proxy;
+        async move {
+            let mut client = Client(BufReader::new(TcpStream::connect(proxy).await.unwrap()));
+            client
+                .write(
+                    b"GET /slow/800 HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            client.reply().await
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while old.inflight() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(old.inflight(), 1, "the slow request is in flight");
+
+    // The new generation serves from the same app on the same port; only the Arc differs.
+    let new = Arc::new(Upstream::loopback(h.web_port, name("site"), name("web"), 2));
+    h.swap_web(Arc::clone(&new));
+    let table = h.routes.load();
+    let Target::Loopback(routed) = &table.lookup("app.example.com", "/").unwrap().target else {
+        panic!("expected a loopback target");
+    };
+    assert!(Arc::ptr_eq(routed, &new));
+
+    // A request after the swap goes to the new generation and does not hold up the drain.
+    let reply = h.get("app.example.com", "/fresh").await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(old.inflight(), 1);
+
+    let started = Instant::now();
+    let outcome = old
+        .drain(Duration::from_millis(50), Duration::from_secs(10))
+        .await;
+    assert_eq!(outcome, DrainOutcome::Drained);
+    assert!(
+        sent.elapsed() >= Duration::from_millis(800),
+        "drain returned after {:?}, before the 800 ms request finished",
+        sent.elapsed()
+    );
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    let reply = slow.await.unwrap();
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.text(), "late");
+    assert_eq!(old.inflight(), 0);
+}
+
+#[tokio::test]
+async fn drain_times_out_while_a_request_is_still_in_flight() {
+    let h = Harness::start().await;
+    let slow = tokio::spawn({
+        let proxy = h.proxy;
+        async move {
+            let mut client = Client(BufReader::new(TcpStream::connect(proxy).await.unwrap()));
+            client
+                .write(b"GET /slow/1500 HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n")
+                .await;
+            client.reply().await
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.web.inflight() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    h.swap_web(Arc::new(Upstream::loopback(
+        h.web_port,
+        name("site"),
+        name("web"),
+        2,
+    )));
+    let outcome = h
+        .web
+        .drain(Duration::from_millis(10), Duration::from_millis(200))
+        .await;
+    assert_eq!(outcome, DrainOutcome::TimedOut(1));
+    assert_eq!(slow.await.unwrap().status, 200);
+}
+
+#[tokio::test]
+async fn failed_requests_release_the_inflight_guard() {
+    let h = Harness::start().await;
+    let table = h.routes.load_full();
+    let Target::Loopback(reset) = &table.lookup("reset.example.com", "/").unwrap().target else {
+        panic!("expected a loopback target");
+    };
+    let reply = h.get("reset.example.com", "/").await;
+    assert_eq!(reply.status, 502, "{}", reply.text());
+    let outcome = reset.drain(Duration::ZERO, Duration::from_secs(4)).await;
+    assert_eq!(outcome, DrainOutcome::Drained);
+    assert_eq!(
+        h.resets.load(Ordering::SeqCst),
+        1,
+        "the request did reach the upstream"
+    );
+}
+
+#[tokio::test]
+async fn client_abort_releases_the_inflight_guard() {
+    let h = Harness::start().await;
+    let mut client = h.connect().await;
+    client
+        .write(b"GET /slow/5000 HTTP/1.1\r\nHost: app.example.com\r\n\r\n")
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.web.inflight() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(h.web.inflight(), 1);
+    drop(client);
+    let outcome = h.web.drain(Duration::ZERO, Duration::from_secs(4)).await;
+    assert_eq!(
+        outcome,
+        DrainOutcome::Drained,
+        "the aborted request is released"
+    );
 }
 
 #[tokio::test]

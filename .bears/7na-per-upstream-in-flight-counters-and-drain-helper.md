@@ -1,15 +1,16 @@
 ---
 id: "7na"
 title: Per-upstream in-flight counters and drain helper
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.292369144Z"
-updated: "2026-11-07T14:45:17.292369144Z"
+updated: "2026-11-07T23:47:14.874341972Z"
 tags:
   - proxy
 depends_on:
   - wks
 parent: mdd
+attempts: 1
 ---
 
 ## Summary

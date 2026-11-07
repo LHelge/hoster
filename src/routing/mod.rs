@@ -31,7 +31,7 @@ pub use desired::{DesiredStack, DesiredState, ServiceState};
 #[allow(unused_imports, reason = "consumed by the orchestrator and the proxy")]
 pub use table::{RouteDiff, RouteEntry, RouteTable, Target};
 #[allow(unused_imports, reason = "consumed by the orchestrator and the proxy")]
-pub use upstream::{InflightGuard, UnixUpstream, Upstream};
+pub use upstream::{DrainOutcome, InflightGuard, UnixUpstream, Upstream};
 
 #[cfg(test)]
 mod table_tests;

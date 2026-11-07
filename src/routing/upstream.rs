@@ -4,6 +4,10 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use crate::stack::Name;
 
@@ -19,6 +23,17 @@ pub struct Upstream {
     pub service: Name,
     pub generation: u32,
     inflight: AtomicU64,
+    /// Woken whenever `inflight` drops to zero, for [`drain`](Self::drain).
+    idle: Notify,
+}
+
+/// How [`Upstream::drain`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainOutcome {
+    /// No request was in flight any more.
+    Drained,
+    /// The timeout passed with this many requests still in flight.
+    TimedOut(u64),
 }
 
 impl Upstream {
@@ -30,6 +45,7 @@ impl Upstream {
             service,
             generation,
             inflight: AtomicU64::new(0),
+            idle: Notify::new(),
         }
     }
 
@@ -43,6 +59,40 @@ impl Upstream {
     pub fn track(self: &Arc<Self>) -> InflightGuard {
         self.inflight.fetch_add(1, Ordering::AcqRel);
         InflightGuard(Arc::clone(self))
+    }
+
+    /// Waits for this upstream to finish its in-flight requests after it was swapped out of the
+    /// route table (architecture §5.3).
+    ///
+    /// Waits `settle` first, so a request that loaded the old table just before the swap but has
+    /// not yet called [`track`](Self::track) is counted, then until no request is in flight.
+    /// `timeout` bounds the whole call, settle delay included (the stack's `drain_timeout`); a
+    /// settle delay longer than `timeout` is cut short.
+    pub async fn drain(&self, settle: Duration, timeout: Duration) -> DrainOutcome {
+        // `timeout` comes from the stack file and may be too large to add to an `Instant`, so the
+        // remaining budget is a duration, which `tokio::time::timeout` clamps for us.
+        let started = Instant::now();
+        tokio::time::sleep(settle.min(timeout)).await;
+        let left = timeout.saturating_sub(started.elapsed());
+        let idle = async {
+            loop {
+                let notified = self.idle.notified();
+                tokio::pin!(notified);
+                // Registered before the check, so a drop to zero in between is not missed.
+                notified.as_mut().enable();
+                if self.inflight() == 0 {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        match tokio::time::timeout(left, idle).await {
+            Ok(()) => DrainOutcome::Drained,
+            Err(_) => match self.inflight() {
+                0 => DrainOutcome::Drained,
+                left => DrainOutcome::TimedOut(left),
+            },
+        }
     }
 }
 
@@ -59,7 +109,9 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.0.inflight.fetch_sub(1, Ordering::AcqRel);
+        if self.0.inflight.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_waiters();
+        }
     }
 }
 
