@@ -62,6 +62,14 @@ impl fmt::Display for RevisionId {
 #[sqlx(transparent)]
 pub struct DeploymentId(i64);
 
+/// Ids are handed out by the store; tests elsewhere fabricate them.
+#[cfg(test)]
+impl From<i64> for DeploymentId {
+    fn from(id: i64) -> Self {
+        Self(id)
+    }
+}
+
 impl fmt::Display for DeploymentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)

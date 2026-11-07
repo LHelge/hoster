@@ -1,10 +1,10 @@
 ---
 id: "3v6"
 title: Podman network and container operations with hoster labels and loopback ports
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.175446334Z"
-updated: "2026-11-07T22:57:14.529113182Z"
+updated: "2026-11-07T23:15:57.710894187Z"
 tags:
   - runtime
 depends_on:

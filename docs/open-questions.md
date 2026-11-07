@@ -1,6 +1,6 @@
 # Open questions
 
-Status: all resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-35 is open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -44,6 +44,7 @@ Index:
 | [OQ-32](#oq-32-when-an-applied-but-not-redeployed-revision-takes-effect) | ~~When an applied-but-not-redeployed revision takes effect~~ **Resolved → ADR-0049 (apply always redeploys)** | — |
 | [OQ-33](#oq-33-orchestrator-actor-or-shared-handle) | ~~Orchestrator: actor + Command enum, or shared handle with async methods~~ **Resolved → ADR-0050 (handle)** | — |
 | [OQ-34](#oq-34-poller-bootstrap-advisory-dns-check-health-default-path-port-host-redirects) | ~~Poller bootstrap, advisory DNS check, health default path, `PORT` injection, host redirects~~ **Resolved → ADR-0051** | — |
+| [OQ-35](#oq-35-ambiguous-podman-object-names-across-stacks) | Ambiguous podman object names across stacks (`-` in stack, service and volume names) | M1 (deploys), ADR-0030 volumes |
 
 ---
 
@@ -348,3 +349,37 @@ new mechanism. `status` defaults to 308; 307 allowed. No path rewriting beyond p
 
 </details>
 
+---
+
+## OQ-35: Ambiguous podman object names across stacks
+
+**Problem.** Stack, service and volume names may contain `-` (`Name`: `[a-z][a-z0-9-]{0,30}`), and
+architecture §8 / ADR-0030 build podman names by joining them with `-`. Different stacks can
+therefore produce the same name:
+
+- Volumes: stack `a-b` volume `c` and stack `a` volume `b-c` are both `hoster-a-b-c`. The second
+  stack silently mounts the first stack's data, which breaks the stack isolation of ADR-0006 and
+  ADR-0046.
+- Containers: stack `a-b` service `c` and stack `a` service `b-c` are both `hoster-a-b-c-g<n>`.
+  The second deploy fails with a name `Conflict` that the reconciler would read as a leftover of
+  its own interrupted deploy.
+- Networks (`hoster-<stack>`) are unambiguous, since they carry only the stack name.
+
+Found while reviewing task 3v6 (`VolumeMount::named`, `ServiceGeneration`).
+
+**Options.**
+
+- **A. Reject at apply.** Like route collisions (ADR-0012), apply refuses a stack whose container
+  or volume names equal another stack's. Names stay as documented. Needs a cross-stack check in
+  apply and still lets the first stack "squat" names.
+- **B. Unambiguous separator.** Use a character `Name` cannot contain, e.g.
+  `hoster-<stack>_<volume>` and `hoster-<stack>_<service>-g<n>` (podman allows `_`). Collisions
+  become impossible; existing docs and examples change.
+- **C. Forbid `-` in stack names.** Smallest change, but restricts the most visible name.
+- **D. Ownership check only.** Keep names; label volumes `hoster.stack` at creation and refuse to
+  mount a volume whose label names another stack. Prevents the data leak, not the container
+  conflict.
+
+**Recommendation.** B, together with D as defence in depth (volumes are labelled at creation in
+any case, ADR-0030). It removes the ambiguity by construction instead of relying on a cross-stack
+check.

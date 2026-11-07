@@ -50,7 +50,7 @@ impl FakeContainer {
             name: self.spec.name.clone(),
             labels: self.spec.labels.clone(),
             state: self.state,
-            ports: self.spec.ports.clone(),
+            ports: self.spec.ports.iter().copied().map(Into::into).collect(),
         }
     }
 }
@@ -297,7 +297,7 @@ impl ContainerRuntime for FakeRuntime {
 mod tests {
     use futures_util::TryStreamExt;
 
-    use super::super::{Labels, LogStream, PortBinding, label};
+    use super::super::{Labels, LogStream, PortBinding, PublishedPort, label};
     use super::*;
 
     fn image() -> PinnedImage {
@@ -360,7 +360,15 @@ mod tests {
         let info = runtime.inspect(&id).await.unwrap();
         assert_eq!(info.state, ContainerState::Running);
         assert_eq!(info.name, "hoster-notes-web-g1");
-        assert_eq!(info.ports, spec("x").ports);
+        assert_eq!(
+            info.ports,
+            spec("x")
+                .ports
+                .into_iter()
+                .map(PublishedPort::from)
+                .collect::<Vec<_>>()
+        );
+        assert!(info.ports.iter().all(PublishedPort::is_loopback));
 
         runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
         assert_eq!(

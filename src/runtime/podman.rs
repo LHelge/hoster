@@ -1,7 +1,9 @@
 //! [`PodmanRuntime`]: the rootless podman socket through bollard's Docker-compatible client
 //! (ADR-0002, docs/architecture.md §1.3).
 
+use std::collections::HashMap;
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,14 +11,23 @@ use std::time::Duration;
 
 use bollard::auth::DockerCredentials;
 use bollard::errors::Error as BollardError;
-use bollard::query_parameters::CreateImageOptionsBuilder;
+use bollard::models::{
+    ContainerCreateBody, ContainerInspectResponse, ContainerSummary, EndpointSettings, HostConfig,
+    Mount, MountType, NetworkCreateRequest, NetworkingConfig, PortMap, PortSummaryTypeEnum,
+    RestartPolicy, RestartPolicyNameEnum,
+};
+use bollard::query_parameters::{
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
+    RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
+};
 use bollard::{API_DEFAULT_VERSION, Docker};
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
 
 use super::{
-    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, LogLine, LogOptions, NetworkSpec,
-    ObjectKind, Operation, RuntimeError,
+    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
+    LogOptions, NetworkSpec, ObjectKind, Operation, PortBinding, PublishedPort, RuntimeError,
+    label,
 };
 use crate::registry::{Anonymous, RegistryCredential, RegistryCredentials};
 use crate::stack::PinnedImage;
@@ -106,7 +117,7 @@ impl fmt::Display for PodmanSocket {
 #[derive(Debug, Clone)]
 #[allow(
     dead_code,
-    reason = "used by the network, container, pull and log operations as they are implemented"
+    reason = "`socket` is reported by the operations implemented later"
 )]
 pub struct PodmanRuntime {
     docker: Docker,
@@ -197,15 +208,358 @@ impl PodmanRuntime {
     fn unsupported(operation: Operation) -> RuntimeError {
         RuntimeError::Unsupported { operation }
     }
+
+    /// The client to stop a container with: the shared one, unless podman may legitimately take
+    /// longer than [`Self::TIMEOUT_SECS`] to answer because the container gets `timeout` to exit.
+    fn client_for_stop(&self, timeout: Duration) -> Docker {
+        let needed = timeout + Duration::from_secs(30);
+        if needed.as_secs() > Self::TIMEOUT_SECS {
+            self.docker.clone().with_timeout(needed)
+        } else {
+            self.docker.clone()
+        }
+    }
+}
+
+/// One runtime call on one object, for turning bollard's errors into [`RuntimeError`]s.
+struct Call<'a> {
+    operation: Operation,
+    kind: ObjectKind,
+    name: &'a str,
+}
+
+impl<'a> Call<'a> {
+    fn new(operation: Operation, kind: ObjectKind, name: &'a str) -> Self {
+        Self {
+            operation,
+            kind,
+            name,
+        }
+    }
+
+    fn error(&self, err: BollardError) -> RuntimeError {
+        let name = self.name.to_owned();
+        let kind = self.kind;
+        match err {
+            BollardError::DockerResponseServerError {
+                status_code,
+                message,
+            } => match (self.operation, status_code) {
+                (_, 404) => RuntimeError::NotFound { kind, name },
+                (Operation::CreateContainer | Operation::EnsureNetwork, 409) => {
+                    RuntimeError::Conflict { kind, name }
+                }
+                // Docker answers 403, podman 500 "network is being used".
+                (Operation::RemoveNetwork, 403 | 409) => RuntimeError::InUse { kind, name },
+                (Operation::RemoveNetwork, _) if Self::in_use(&message) => {
+                    RuntimeError::InUse { kind, name }
+                }
+                _ => RuntimeError::Api {
+                    operation: self.operation,
+                    message: format!("{kind} {name}: {message} (HTTP {status_code})"),
+                },
+            },
+            other => RuntimeError::Api {
+                operation: self.operation,
+                message: format!("{kind} {name}: {other}"),
+            },
+        }
+    }
+
+    /// What a failed container create was missing, from podman's message: a missing image is
+    /// a 404 "no such image: <ref>: image not known", but a missing network is a 500 "unable to
+    /// find network with name or ID <name>: network not found" (podman 6.1). Only the phrases are
+    /// matched, never a bare word, because image references may contain one ("…/networkd").
+    fn missing_on_create(message: &str) -> Option<ObjectKind> {
+        let message = message.to_ascii_lowercase();
+        if message.contains("no such image") || message.contains("image not known") {
+            Some(ObjectKind::Image)
+        } else if message.contains("unable to find network")
+            || message.contains("network not found")
+        {
+            Some(ObjectKind::Network)
+        } else {
+            None
+        }
+    }
+
+    /// A failed create as a [`RuntimeError`], naming the missing image or network when that is
+    /// what failed, and the container otherwise.
+    fn create_error(&self, spec: &ContainerSpec, err: BollardError) -> RuntimeError {
+        let missing = match &err {
+            BollardError::DockerResponseServerError { message, .. } => {
+                Self::missing_on_create(message)
+            }
+            _ => None,
+        };
+        match missing {
+            Some(ObjectKind::Image) => RuntimeError::NotFound {
+                kind: ObjectKind::Image,
+                name: spec.image.to_string(),
+            },
+            Some(ObjectKind::Network) => RuntimeError::NotFound {
+                kind: ObjectKind::Network,
+                name: spec.network().to_owned(),
+            },
+            _ => self.error(err),
+        }
+    }
+
+    fn in_use(message: &str) -> bool {
+        let message = message.to_ascii_lowercase();
+        ["being used", "in use", "active endpoints"]
+            .iter()
+            .any(|needle| message.contains(needle))
+    }
+}
+
+/// The create request, with every ADR-0019 setting pinned to its safe value: never privileged,
+/// the stack network only (no host network), private PID/IPC namespaces, no devices, no added
+/// capabilities, no binds. Ports go to 127.0.0.1 only (ADR-0007) and podman never restarts a
+/// container by itself (ADR-0028).
+impl From<&ContainerSpec> for ContainerCreateBody {
+    fn from(spec: &ContainerSpec) -> Self {
+        let port_key = |port: u16| format!("{port}/tcp");
+        let mut port_bindings: PortMap = PortMap::new();
+        for binding in &spec.ports {
+            port_bindings
+                .entry(port_key(binding.container_port))
+                .or_insert_with(|| Some(Vec::new()))
+                .get_or_insert_with(Vec::new)
+                .push(bollard::models::PortBinding {
+                    host_ip: Some(PortBinding::HOST_IP.to_string()),
+                    host_port: Some(binding.host_port.to_string()),
+                });
+        }
+        let mut exposed: Vec<String> = spec
+            .ports
+            .iter()
+            .map(|b| port_key(b.container_port))
+            .collect();
+        exposed.sort();
+        exposed.dedup();
+        let mounts = spec
+            .volumes
+            .iter()
+            .map(|volume| Mount {
+                typ: Some(MountType::VOLUME),
+                source: Some(volume.volume().to_owned()),
+                target: Some(volume.target().to_owned()),
+                ..Mount::default()
+            })
+            .collect();
+        let host_config = HostConfig {
+            network_mode: Some(spec.network.clone()),
+            port_bindings: Some(port_bindings),
+            publish_all_ports: Some(false),
+            restart_policy: Some(RestartPolicy {
+                name: Some(RestartPolicyNameEnum::NO),
+                maximum_retry_count: None,
+            }),
+            mounts: Some(mounts),
+            binds: None,
+            volumes_from: None,
+            privileged: Some(false),
+            cap_add: None,
+            devices: None,
+            pid_mode: None,
+            ipc_mode: None,
+            uts_mode: None,
+            userns_mode: None,
+            readonly_rootfs: Some(spec.read_only),
+            ..HostConfig::default()
+        };
+        let endpoint = EndpointSettings {
+            aliases: Some(vec![spec.network_alias.clone()]),
+            ..EndpointSettings::default()
+        };
+        Self {
+            image: Some(spec.image.to_string()),
+            cmd: spec.command.clone(),
+            entrypoint: spec.entrypoint.clone(),
+            env: Some(spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
+            labels: Some(spec.labels.clone().into_iter().collect()),
+            user: spec.user.clone(),
+            exposed_ports: Some(exposed),
+            stop_timeout: Some(spec.stop_timeout.as_secs().try_into().unwrap_or(i64::MAX)),
+            host_config: Some(host_config),
+            networking_config: Some(NetworkingConfig {
+                endpoints_config: Some(HashMap::from([(spec.network.clone(), endpoint)])),
+            }),
+            ..ContainerCreateBody::default()
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "reached only through the runtime trait, not yet called"
+)]
+impl ContainerState {
+    /// A state as podman reports it; an unknown one counts as dead (not running, needs
+    /// attention).
+    fn reported(status: &str, exit_code: Option<i64>) -> Self {
+        match status.parse() {
+            Ok(Self::Exited(None)) => Self::Exited(exit_code),
+            Ok(state) => state,
+            Err(_) => Self::Dead,
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "reached only through the runtime trait, not yet called"
+)]
+impl PublishedPort {
+    /// A host IP as podman reports it; an empty one means all interfaces.
+    fn reported_ip(ip: Option<&str>) -> IpAddr {
+        ip.filter(|ip| !ip.is_empty())
+            .and_then(|ip| ip.parse().ok())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+    }
+}
+
+impl From<ContainerInspectResponse> for ContainerInfo {
+    fn from(inspect: ContainerInspectResponse) -> Self {
+        let state = inspect.state.unwrap_or_default();
+        let status = state.status.map(|s| s.to_string()).unwrap_or_default();
+        let ports = inspect
+            .network_settings
+            .and_then(|n| n.ports)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(key, bindings)| {
+                let container_port = key.split('/').next().and_then(|p| p.parse().ok());
+                bindings
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(move |binding| {
+                        Some(PublishedPort {
+                            container_port: container_port?,
+                            host_ip: PublishedPort::reported_ip(binding.host_ip.as_deref()),
+                            host_port: binding.host_port?.parse().ok()?,
+                        })
+                    })
+            })
+            .collect();
+        Self::sorted(Self {
+            id: inspect.id.unwrap_or_default().into(),
+            name: inspect
+                .name
+                .unwrap_or_default()
+                .trim_start_matches('/')
+                .to_owned(),
+            labels: inspect
+                .config
+                .and_then(|c| c.labels)
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            state: ContainerState::reported(&status, state.exit_code),
+            ports,
+        })
+    }
+}
+
+impl From<ContainerSummary> for ContainerInfo {
+    fn from(summary: ContainerSummary) -> Self {
+        let status = summary.state.map(|s| s.to_string()).unwrap_or_default();
+        // The list endpoint has no exit code field; it is in the "Exited (137) 2s ago" text.
+        let exit_code = summary.status.as_deref().and_then(|text| {
+            let (_, rest) = text.split_once('(')?;
+            rest.split_once(')')?.0.parse().ok()
+        });
+        let ports = summary
+            .ports
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.typ.is_none_or(|t| t == PortSummaryTypeEnum::TCP))
+            .filter_map(|p| {
+                Some(PublishedPort {
+                    container_port: p.private_port,
+                    host_ip: PublishedPort::reported_ip(p.ip.as_deref()),
+                    host_port: p.public_port?,
+                })
+            })
+            .collect();
+        Self::sorted(Self {
+            id: summary.id.unwrap_or_default().into(),
+            name: summary
+                .names
+                .unwrap_or_default()
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+                .trim_start_matches('/')
+                .to_owned(),
+            labels: summary.labels.unwrap_or_default().into_iter().collect(),
+            state: ContainerState::reported(&status, exit_code),
+            ports,
+        })
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "reached only through the runtime trait, not yet called"
+)]
+impl ContainerInfo {
+    fn sorted(mut self) -> Self {
+        self.ports.sort();
+        self.ports.dedup();
+        self
+    }
 }
 
 impl ContainerRuntime for PodmanRuntime {
-    async fn ensure_network(&self, _network: &NetworkSpec) -> Result<(), RuntimeError> {
-        Err(Self::unsupported(Operation::EnsureNetwork))
+    /// Creates `hoster-<stack>` unless it exists. A same-named network hoster did not create is
+    /// a [`RuntimeError::Conflict`], never adopted.
+    async fn ensure_network(&self, network: &NetworkSpec) -> Result<(), RuntimeError> {
+        let call = Call::new(Operation::EnsureNetwork, ObjectKind::Network, &network.name);
+        match self.docker.inspect_network(&network.name, None).await {
+            Ok(existing) => {
+                let managed = existing
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(label::MANAGED))
+                    .is_some_and(|v| v == "true");
+                return if managed {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::Conflict {
+                        kind: ObjectKind::Network,
+                        name: network.name.clone(),
+                    })
+                };
+            }
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {}
+            Err(err) => return Err(call.error(err)),
+        }
+        let request = NetworkCreateRequest {
+            name: network.name.clone(),
+            driver: Some("bridge".to_owned()),
+            labels: Some(network.labels.clone().into_iter().collect()),
+            ..NetworkCreateRequest::default()
+        };
+        match self.docker.create_network(request).await {
+            Ok(_) => Ok(()),
+            // Created concurrently since the inspect: that is the state we wanted.
+            Err(BollardError::DockerResponseServerError {
+                status_code: 409, ..
+            }) => Ok(()),
+            Err(err) => Err(call.error(err)),
+        }
     }
 
-    async fn remove_network(&self, _name: &str) -> Result<(), RuntimeError> {
-        Err(Self::unsupported(Operation::RemoveNetwork))
+    async fn remove_network(&self, name: &str) -> Result<(), RuntimeError> {
+        let call = Call::new(Operation::RemoveNetwork, ObjectKind::Network, name);
+        self.docker
+            .remove_network(name)
+            .await
+            .map_err(|err| call.error(err))
     }
 
     async fn pull_image(&self, image: &PinnedImage) -> Result<(), RuntimeError> {
@@ -249,28 +603,88 @@ impl ContainerRuntime for PodmanRuntime {
         Ok(())
     }
 
-    async fn create_container(&self, _spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
-        Err(Self::unsupported(Operation::CreateContainer))
+    async fn create_container(&self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
+        let call = Call::new(
+            Operation::CreateContainer,
+            ObjectKind::Container,
+            &spec.name,
+        );
+        let options = CreateContainerOptionsBuilder::new()
+            .name(&spec.name)
+            .build();
+        let created = self
+            .docker
+            .create_container(Some(options), spec.into())
+            .await
+            .map_err(|err| call.create_error(spec, err))?;
+        for warning in &created.warnings {
+            tracing::warn!(container = %spec.name, %warning, "podman warned on create");
+        }
+        Ok(created.id.into())
     }
 
-    async fn start(&self, _id: &ContainerId) -> Result<(), RuntimeError> {
-        Err(Self::unsupported(Operation::Start))
+    async fn start(&self, id: &ContainerId) -> Result<(), RuntimeError> {
+        let call = Call::new(Operation::Start, ObjectKind::Container, id.as_ref());
+        // Starting a running container is a 304, which bollard treats as success.
+        self.docker
+            .start_container(id.as_ref(), None)
+            .await
+            .map_err(|err| call.error(err))
     }
 
-    async fn stop(&self, _id: &ContainerId, _timeout: Duration) -> Result<(), RuntimeError> {
-        Err(Self::unsupported(Operation::Stop))
+    async fn stop(&self, id: &ContainerId, timeout: Duration) -> Result<(), RuntimeError> {
+        let call = Call::new(Operation::Stop, ObjectKind::Container, id.as_ref());
+        let seconds = i32::try_from(timeout.as_secs()).unwrap_or(i32::MAX);
+        let options = StopContainerOptionsBuilder::new().t(seconds).build();
+        // Stopping a stopped container is a 304, which bollard treats as success.
+        self.client_for_stop(timeout)
+            .stop_container(id.as_ref(), Some(options))
+            .await
+            .map_err(|err| call.error(err))
     }
 
-    async fn remove(&self, _id: &ContainerId) -> Result<(), RuntimeError> {
-        Err(Self::unsupported(Operation::Remove))
+    async fn remove(&self, id: &ContainerId) -> Result<(), RuntimeError> {
+        let call = Call::new(Operation::Remove, ObjectKind::Container, id.as_ref());
+        // Named volumes are kept (ADR-0030): `v` only concerns anonymous ones, and hoster never
+        // creates those, but leave them alone too.
+        let options = RemoveContainerOptionsBuilder::new()
+            .force(true)
+            .v(false)
+            .build();
+        self.docker
+            .remove_container(id.as_ref(), Some(options))
+            .await
+            .map_err(|err| call.error(err))
     }
 
-    async fn inspect(&self, _id: &ContainerId) -> Result<ContainerInfo, RuntimeError> {
-        Err(Self::unsupported(Operation::Inspect))
+    async fn inspect(&self, id: &ContainerId) -> Result<ContainerInfo, RuntimeError> {
+        let call = Call::new(Operation::Inspect, ObjectKind::Container, id.as_ref());
+        self.docker
+            .inspect_container(id.as_ref(), None)
+            .await
+            .map(ContainerInfo::from)
+            .map_err(|err| call.error(err))
     }
 
     async fn list_managed(&self) -> Result<Vec<ContainerInfo>, RuntimeError> {
-        Err(Self::unsupported(Operation::ListManaged))
+        let call = Call::new(Operation::ListManaged, ObjectKind::Container, "list");
+        let filters = HashMap::from([("label", vec![format!("{}=true", label::MANAGED)])]);
+        let options = ListContainersOptionsBuilder::new()
+            .all(true)
+            .filters(&filters)
+            .build();
+        let mut containers: Vec<ContainerInfo> = self
+            .docker
+            .list_containers(Some(options))
+            .await
+            .map_err(|err| call.error(err))?
+            .into_iter()
+            .map(ContainerInfo::from)
+            // The label filter is podman's; check it again rather than trust it.
+            .filter(ContainerInfo::is_managed)
+            .collect();
+        containers.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(containers)
     }
 
     fn logs(
@@ -634,5 +1048,581 @@ mod tests {
             ),
             "{err:?}"
         );
+    }
+
+    use super::super::{Labels, ServiceGeneration, VolumeMount};
+    use crate::stack::Name;
+    use crate::store::DeploymentId;
+
+    /// The image the container lifecycle tests run (busybox has `httpd` and `sleep`), pinned
+    /// by digest. Distinct from [`PUBLIC_IMAGE`] so the pull test can remove that one freely.
+    const RUN_IMAGE: &str = "docker.io/library/busybox:1.37@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4";
+
+    fn run_image() -> PinnedImage {
+        RUN_IMAGE.parse().unwrap()
+    }
+
+    fn spec_for(stack: &str, service: &str) -> ContainerSpec {
+        let generation = ServiceGeneration {
+            stack: stack.parse().unwrap(),
+            service: service.parse().unwrap(),
+            generation: 1,
+        };
+        ContainerSpec::new(&generation, DeploymentId::from(1), run_image())
+    }
+
+    #[test]
+    fn create_body_publishes_on_loopback_only_and_pins_safe_settings() {
+        let mut spec = spec_for("notes", "web");
+        spec.command = Some(vec!["httpd".into(), "-f".into()]);
+        spec.entrypoint = Some(vec!["/bin/sh".into()]);
+        spec.env.insert("FOO".into(), "bar=baz".into());
+        spec.user = Some("1000:1000".into());
+        spec.read_only = true;
+        spec.stop_timeout = Duration::from_secs(25);
+        spec.ports = vec![
+            PortBinding {
+                container_port: 8080,
+                host_port: 20000,
+            },
+            PortBinding {
+                container_port: 9000,
+                host_port: 20001,
+            },
+        ];
+        spec.volumes =
+            vec![VolumeMount::named(&"notes".parse().unwrap(), "data", "/data").unwrap()];
+
+        let body = ContainerCreateBody::from(&spec);
+        assert_eq!(
+            body.image.as_deref(),
+            Some(
+                "docker.io/library/busybox@sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4"
+            )
+        );
+        assert_eq!(body.cmd, spec.command);
+        assert_eq!(body.entrypoint, spec.entrypoint);
+        assert_eq!(body.env, Some(vec!["FOO=bar=baz".to_owned()]));
+        assert_eq!(body.user.as_deref(), Some("1000:1000"));
+        assert_eq!(body.stop_timeout, Some(25));
+        assert_eq!(
+            body.labels.unwrap().into_iter().collect::<Labels>(),
+            spec.labels
+        );
+        let mut exposed = body.exposed_ports.unwrap();
+        exposed.sort();
+        assert_eq!(exposed, ["8080/tcp", "9000/tcp"]);
+
+        let host = body.host_config.unwrap();
+        let bindings = host.port_bindings.unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(
+            bindings["8080/tcp"],
+            Some(vec![bollard::models::PortBinding {
+                host_ip: Some("127.0.0.1".into()),
+                host_port: Some("20000".into()),
+            }])
+        );
+        for binding in bindings.values().flatten().flatten() {
+            assert_eq!(binding.host_ip.as_deref(), Some("127.0.0.1"));
+        }
+        assert_eq!(host.network_mode.as_deref(), Some("hoster-notes"));
+        assert_eq!(host.publish_all_ports, Some(false));
+        assert_eq!(
+            host.restart_policy.unwrap().name,
+            Some(RestartPolicyNameEnum::NO)
+        );
+        assert_eq!(host.privileged, Some(false));
+        assert_eq!(host.readonly_rootfs, Some(true));
+        assert!(host.binds.is_none());
+        assert!(host.cap_add.is_none());
+        assert!(host.devices.is_none());
+        assert!(host.pid_mode.is_none());
+        assert!(host.ipc_mode.is_none());
+        assert!(host.volumes_from.is_none());
+        let mounts = host.mounts.unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].typ, Some(MountType::VOLUME));
+        assert_eq!(mounts[0].source.as_deref(), Some("hoster-notes-data"));
+        assert_eq!(mounts[0].target.as_deref(), Some("/data"));
+
+        let endpoints = body.networking_config.unwrap().endpoints_config.unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(
+            endpoints["hoster-notes"].aliases,
+            Some(vec!["web".to_owned()])
+        );
+    }
+
+    #[test]
+    fn inspect_and_summary_convert_to_container_info() {
+        let inspect: ContainerInspectResponse = serde_json::from_value(serde_json::json!({
+            "Id": "abc",
+            "Name": "/hoster-notes-web-g1",
+            "State": { "Status": "exited", "ExitCode": 137 },
+            "Config": { "Labels": { "hoster.managed": "true" } },
+            "NetworkSettings": { "Ports": {
+                "8080/tcp": [{ "HostIp": "127.0.0.1", "HostPort": "20000" }],
+                "9000/tcp": [{ "HostIp": "", "HostPort": "20001" }],
+                "9100/tcp": null
+            } }
+        }))
+        .unwrap();
+        let info = ContainerInfo::from(inspect);
+        assert_eq!(info.id.as_ref(), "abc");
+        assert_eq!(info.name, "hoster-notes-web-g1");
+        assert_eq!(info.state, ContainerState::Exited(Some(137)));
+        assert!(info.is_managed());
+        assert_eq!(
+            info.ports,
+            [
+                PublishedPort {
+                    container_port: 8080,
+                    host_ip: Ipv4Addr::LOCALHOST.into(),
+                    host_port: 20000,
+                },
+                PublishedPort {
+                    container_port: 9000,
+                    host_ip: Ipv4Addr::UNSPECIFIED.into(),
+                    host_port: 20001,
+                },
+            ]
+        );
+
+        let summary: ContainerSummary = serde_json::from_value(serde_json::json!({
+            "Id": "def",
+            "Names": ["hoster-notes-web-g2"],
+            "State": "exited",
+            "Status": "Exited (3) 2 seconds ago",
+            "Labels": { "hoster.managed": "true" },
+            "Ports": [{ "IP": "127.0.0.1", "PrivatePort": 8080, "PublicPort": 20002, "Type": "tcp" }]
+        }))
+        .unwrap();
+        let info = ContainerInfo::from(summary);
+        assert_eq!(info.name, "hoster-notes-web-g2");
+        assert_eq!(info.state, ContainerState::Exited(Some(3)));
+        assert_eq!(
+            info.ports,
+            [PublishedPort {
+                container_port: 8080,
+                host_ip: Ipv4Addr::LOCALHOST.into(),
+                host_port: 20002,
+            }]
+        );
+        assert_eq!(
+            ContainerState::reported("bogus", None),
+            ContainerState::Dead
+        );
+        assert_eq!(
+            ContainerState::reported("running", Some(0)),
+            ContainerState::Running
+        );
+    }
+
+    #[test]
+    fn server_errors_become_typed_runtime_errors() {
+        let server = |status_code, message: &str| BollardError::DockerResponseServerError {
+            status_code,
+            message: message.into(),
+        };
+        let mut spec = spec_for("notes", "web");
+        spec.image = "ghcr.io/me/networkd:1@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".parse().unwrap();
+        let create = Call::new(
+            Operation::CreateContainer,
+            ObjectKind::Container,
+            &spec.name,
+        );
+        assert_eq!(
+            create.create_error(&spec, server(409, "name is in use")),
+            RuntimeError::Conflict {
+                kind: ObjectKind::Container,
+                name: "hoster-notes-web-g1".into()
+            }
+        );
+        // podman 6.1's messages, verbatim. The image name contains "network" on purpose.
+        assert_eq!(
+            create.create_error(
+                &spec,
+                server(
+                    404,
+                    "no such image: ghcr.io/me/networkd@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: image not known"
+                )
+            ),
+            RuntimeError::NotFound {
+                kind: ObjectKind::Image,
+                name: "ghcr.io/me/networkd@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()
+            }
+        );
+        assert_eq!(
+            create.create_error(
+                &spec,
+                server(
+                    500,
+                    "container create: unable to find network with name or ID hoster-notes: \
+                     network not found"
+                )
+            ),
+            RuntimeError::NotFound {
+                kind: ObjectKind::Network,
+                name: "hoster-notes".into()
+            }
+        );
+        assert!(matches!(
+            create.create_error(&spec, server(500, "boom")),
+            RuntimeError::Api {
+                operation: Operation::CreateContainer,
+                ..
+            }
+        ));
+        let remove = Call::new(Operation::RemoveNetwork, ObjectKind::Network, "n");
+        let in_use = RuntimeError::InUse {
+            kind: ObjectKind::Network,
+            name: "n".into(),
+        };
+        assert_eq!(remove.error(server(403, "active endpoints")), in_use);
+        assert_eq!(remove.error(server(500, "network n is being used")), in_use);
+        assert_eq!(
+            remove.error(server(404, "no such network")),
+            RuntimeError::NotFound {
+                kind: ObjectKind::Network,
+                name: "n".into()
+            }
+        );
+        let start = Call::new(Operation::Start, ObjectKind::Container, "c");
+        assert!(matches!(
+            start.error(server(500, "boom")),
+            RuntimeError::Api {
+                operation: Operation::Start,
+                ..
+            }
+        ));
+    }
+
+    /// A stack name no other test run uses, so parallel runs on one podman do not collide.
+    fn unique_stack() -> Name {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        format!("itest-{:x}-{nanos:x}", std::process::id())
+            .parse()
+            .unwrap()
+    }
+
+    async fn real_podman() -> Option<PodmanRuntime> {
+        if !enabled() {
+            eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to run against rootless podman");
+            return None;
+        }
+        let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(PathBuf::from);
+        Some(
+            PodmanRuntime::connect(&PodmanSocket::from_env(socket.as_deref()))
+                .await
+                .expect("connect to rootless podman"),
+        )
+    }
+
+    /// Removes every container and network labelled with `stack`.
+    async fn clean_up(runtime: &PodmanRuntime, stack: &Name) {
+        let filter = HashMap::from([("label", vec![format!("{}={stack}", label::STACK)])]);
+        let options = ListContainersOptionsBuilder::new()
+            .all(true)
+            .filters(&filter)
+            .build();
+        for container in runtime.docker.list_containers(Some(options)).await.unwrap() {
+            let id = ContainerId::from(container.id.unwrap());
+            let _ = runtime.remove(&id).await;
+        }
+        let options = bollard::query_parameters::ListNetworksOptionsBuilder::new()
+            .filters(&filter)
+            .build();
+        for network in runtime.docker.list_networks(Some(options)).await.unwrap() {
+            let _ = runtime.docker.remove_network(&network.name.unwrap()).await;
+        }
+    }
+
+    /// Listening TCP sockets on `port` in this network namespace, from /proc/net/tcp{,6}: the
+    /// local address field in hex, e.g. `0100007F` for 127.0.0.1.
+    fn listeners(port: u16) -> Vec<String> {
+        let suffix = format!(":{port:04X}");
+        ["/proc/net/tcp", "/proc/net/tcp6"]
+            .iter()
+            .flat_map(|path| {
+                std::fs::read_to_string(path)
+                    .unwrap_or_default()
+                    .lines()
+                    .skip(1)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                let (local, state) = (fields.get(1)?, fields.get(3)?);
+                (*state == "0A" && local.ends_with(&suffix))
+                    .then(|| local.trim_end_matches(&suffix).to_owned())
+            })
+            .collect()
+    }
+
+    /// A blocking HTTP/1.0 GET; fine for a test, and keeps tokio's `net` feature out.
+    fn http_get(port: u16) -> std::io::Result<String> {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    #[tokio::test]
+    async fn network_and_container_lifecycle_on_real_podman() {
+        let Some(runtime) = real_podman().await else {
+            return;
+        };
+        let stack = unique_stack();
+        // Run the body on its own task so a failed assertion still reaches the clean-up.
+        let body = tokio::spawn({
+            let runtime = runtime.clone();
+            let stack = stack.clone();
+            async move { lifecycle(&runtime, &stack).await }
+        });
+        let result = body.await;
+        clean_up(&runtime, &stack).await;
+        if let Err(err) = result {
+            std::panic::resume_unwind(err.into_panic());
+        }
+    }
+
+    async fn lifecycle(runtime: &PodmanRuntime, stack: &Name) {
+        runtime
+            .pull_image(&run_image())
+            .await
+            .expect("pull busybox");
+
+        let network = NetworkSpec::for_stack(stack);
+        runtime.ensure_network(&network).await.unwrap();
+        runtime.ensure_network(&network).await.expect("idempotent");
+        let inspected = runtime
+            .docker
+            .inspect_network(&network.name, None)
+            .await
+            .unwrap();
+        let labels: Labels = inspected.labels.unwrap().into_iter().collect();
+        assert_eq!(labels, network.labels);
+
+        // A same-named network hoster did not create is not adopted.
+        let foreign = format!("{}-foreign", network.name);
+        runtime
+            .docker
+            .create_network(NetworkCreateRequest {
+                name: foreign.clone(),
+                labels: Some(HashMap::from([(label::STACK.into(), stack.to_string())])),
+                ..NetworkCreateRequest::default()
+            })
+            .await
+            .unwrap();
+        let err = runtime
+            .ensure_network(&NetworkSpec {
+                name: foreign.clone(),
+                labels: network.labels.clone(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RuntimeError::Conflict { .. }), "{err:?}");
+
+        let host_port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut spec = spec_for(stack.as_ref(), "web");
+        spec.entrypoint = Some(vec!["/bin/sh".into(), "-c".into()]);
+        spec.command = Some(vec![
+            "echo \"$GREETING\" > /tmp/index.html && exec httpd -f -p 8080 -h /tmp".into(),
+        ]);
+        spec.env
+            .insert("GREETING".into(), "hello-from-hoster".into());
+        spec.stop_timeout = Duration::from_secs(1);
+        spec.ports = vec![PortBinding {
+            container_port: 8080,
+            host_port,
+        }];
+        // A missing image or network is told apart and named.
+        let mut missing = spec.clone();
+        missing.image = format!(
+            "docker.io/library/hoster-no-such-image@sha256:{}",
+            "0".repeat(64)
+        )
+        .parse()
+        .unwrap();
+        assert_eq!(
+            runtime.create_container(&missing).await.unwrap_err(),
+            RuntimeError::NotFound {
+                kind: ObjectKind::Image,
+                name: missing.image.to_string()
+            }
+        );
+        let orphan = spec_for(&format!("{stack}-x"), "web");
+        assert_eq!(
+            runtime.create_container(&orphan).await.unwrap_err(),
+            RuntimeError::NotFound {
+                kind: ObjectKind::Network,
+                name: orphan.network().to_owned()
+            }
+        );
+
+        let id = runtime.create_container(&spec).await.unwrap();
+        let err = runtime.create_container(&spec).await.unwrap_err();
+        assert_eq!(
+            err,
+            RuntimeError::Conflict {
+                kind: ObjectKind::Container,
+                name: spec.name.clone()
+            }
+        );
+        let created = runtime.inspect(&id).await.unwrap();
+        assert_eq!(created.state, ContainerState::Created);
+        assert_eq!(created.name, spec.name);
+
+        runtime.start(&id).await.unwrap();
+        runtime.start(&id).await.expect("starting twice is a no-op");
+        let info = runtime.inspect(&id).await.unwrap();
+        assert_eq!(info.state, ContainerState::Running);
+        for (key, value) in &spec.labels {
+            assert_eq!(info.labels.get(key), Some(value), "label {key}");
+        }
+        assert_eq!(
+            info.ports,
+            [PublishedPort {
+                container_port: 8080,
+                host_ip: Ipv4Addr::LOCALHOST.into(),
+                host_port,
+            }]
+        );
+
+        // Raw inspect: what podman actually applied.
+        let raw = runtime
+            .docker
+            .inspect_container(id.as_ref(), None)
+            .await
+            .unwrap();
+        let host = raw.host_config.unwrap();
+        assert_eq!(
+            host.restart_policy.and_then(|p| p.name),
+            Some(RestartPolicyNameEnum::NO)
+        );
+        assert_ne!(host.privileged, Some(true));
+        let endpoint = &raw.network_settings.unwrap().networks.unwrap()[&network.name];
+        assert!(
+            endpoint
+                .aliases
+                .iter()
+                .flatten()
+                .any(|alias| alias == "web"),
+            "{endpoint:?}"
+        );
+
+        // The published port answers on loopback ...
+        let mut response = Err(std::io::Error::other("not tried"));
+        for _ in 0..50 {
+            response = http_get(host_port);
+            if response
+                .as_ref()
+                .is_ok_and(|r| r.contains("hello-from-hoster"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let response = response.expect("GET from the published port");
+        assert!(response.contains("hello-from-hoster"), "{response}");
+        // ... and is bound on 127.0.0.1 only: no 0.0.0.0 or [::] listener (an `ss -ltn` check).
+        let bound = listeners(host_port);
+        assert_eq!(bound, ["0100007F"], "listeners on {host_port}: {bound:?}");
+
+        let managed = runtime.list_managed().await.unwrap();
+        let ours: Vec<_> = managed
+            .iter()
+            .filter(|c| c.labels.get(label::STACK) == Some(&stack.to_string()))
+            .collect();
+        assert_eq!(ours.len(), 1, "{managed:?}");
+        assert_eq!(ours[0].id, id);
+        assert_eq!(ours[0].state, ContainerState::Running);
+
+        let err = runtime.remove_network(&network.name).await.unwrap_err();
+        assert_eq!(
+            err,
+            RuntimeError::InUse {
+                kind: ObjectKind::Network,
+                name: network.name.clone()
+            }
+        );
+
+        runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
+        runtime
+            .stop(&id, Duration::from_secs(1))
+            .await
+            .expect("stopping twice is a no-op");
+        let stopped = runtime.inspect(&id).await.unwrap();
+        assert!(
+            matches!(stopped.state, ContainerState::Exited(Some(_))),
+            "{stopped:?}"
+        );
+        assert!(listeners(host_port).is_empty());
+
+        runtime.remove(&id).await.unwrap();
+        assert!(matches!(
+            runtime.inspect(&id).await,
+            Err(RuntimeError::NotFound {
+                kind: ObjectKind::Container,
+                ..
+            })
+        ));
+        runtime.remove_network(&network.name).await.unwrap();
+        assert!(matches!(
+            runtime.remove_network(&network.name).await,
+            Err(RuntimeError::NotFound {
+                kind: ObjectKind::Network,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn remove_kills_a_running_container() {
+        let Some(runtime) = real_podman().await else {
+            return;
+        };
+        let stack = unique_stack();
+        let body = tokio::spawn({
+            let runtime = runtime.clone();
+            let stack = stack.clone();
+            async move {
+                runtime
+                    .ensure_network(&NetworkSpec::for_stack(&stack))
+                    .await
+                    .unwrap();
+                let mut spec = spec_for(stack.as_ref(), "sleeper");
+                spec.command = Some(vec!["sleep".into(), "300".into()]);
+                // The lifecycle test may not have run yet, so make sure the image is here.
+                runtime
+                    .pull_image(&run_image())
+                    .await
+                    .expect("pull busybox");
+                let id = runtime.create_container(&spec).await.unwrap();
+                runtime.start(&id).await.unwrap();
+                runtime.remove(&id).await.expect("force remove");
+                assert!(matches!(
+                    runtime.remove(&id).await,
+                    Err(RuntimeError::NotFound { .. })
+                ));
+            }
+        });
+        let result = body.await;
+        clean_up(&runtime, &stack).await;
+        if let Err(err) = result {
+            std::panic::resume_unwind(err.into_panic());
+        }
     }
 }

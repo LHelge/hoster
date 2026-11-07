@@ -12,13 +12,16 @@ mod podman;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr};
+use std::path::{Component, Path};
 use std::str::FromStr;
 use std::time::Duration;
 
 use futures_util::stream::BoxStream;
 
 use crate::registry::CredentialError;
-use crate::stack::PinnedImage;
+use crate::stack::{DEFAULT_STOP_TIMEOUT, Name, PinnedImage};
+use crate::store::DeploymentId;
 
 #[allow(
     unused_imports,
@@ -137,6 +140,9 @@ impl fmt::Display for ContainerId {
     }
 }
 
+/// The prefix of every podman object hoster names (docs/architecture.md §8).
+const PREFIX: &str = "hoster";
+
 /// A stack network (`hoster-<stack>`, ADR-0006).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkSpec {
@@ -144,11 +150,52 @@ pub struct NetworkSpec {
     pub labels: Labels,
 }
 
+#[allow(
+    dead_code,
+    reason = "consumed by the deploy engine as it is implemented"
+)]
+impl NetworkSpec {
+    /// `hoster-<stack>`, labelled `hoster.managed=true` and `hoster.stack=<stack>`.
+    pub fn for_stack(stack: &Name) -> Self {
+        Self {
+            name: format!("{PREFIX}-{stack}"),
+            labels: Labels::from([
+                (label::MANAGED.into(), "true".into()),
+                (label::STACK.into(), stack.to_string()),
+            ]),
+        }
+    }
+}
+
+/// One generation of one service of a stack: what a container *is*. Its `Display` is the
+/// container name, `hoster-<stack>-<service>-g<generation>` (docs/architecture.md §8).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(
+    dead_code,
+    reason = "consumed by the deploy engine as it is implemented"
+)]
+pub struct ServiceGeneration {
+    pub stack: Name,
+    pub service: Name,
+    pub generation: u32,
+}
+
+impl fmt::Display for ServiceGeneration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{PREFIX}-{}-{}-g{}",
+            self.stack, self.service, self.generation
+        )
+    }
+}
+
 /// Everything needed to create one container generation of a service.
 ///
 /// There is deliberately no way to express privileged mode, host namespaces, devices, extra
-/// capabilities or bind mounts (ADR-0019), and ports are only ever published on 127.0.0.1
-/// (ADR-0007).
+/// capabilities or bind mounts (ADR-0019): [`PodmanRuntime`] pins each of those to its safe value
+/// itself, and the only mounts are named volumes ([`VolumeMount`]). Ports are only ever published
+/// on 127.0.0.1 (ADR-0007), and podman's restart policy is always `no` (ADR-0028).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(
     dead_code,
@@ -162,9 +209,12 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub env: BTreeMap<String, String>,
     pub labels: Labels,
-    /// The stack network to join, and the alias (the service name) to join it with.
-    pub network: String,
-    pub network_alias: String,
+    /// The stack network to join, and the alias (the service name) to join it with. Both are
+    /// derived from the [`ServiceGeneration`] by [`ContainerSpec::new`] and cannot be set from
+    /// outside the runtime: a free-form network would admit `host` or `container:<id>`
+    /// (ADR-0019) or another stack's network (ADR-0006).
+    network: String,
+    network_alias: String,
     pub ports: Vec<PortBinding>,
     pub volumes: Vec<VolumeMount>,
     pub user: Option<String>,
@@ -172,22 +222,150 @@ pub struct ContainerSpec {
     pub stop_timeout: Duration,
 }
 
-/// A container port published on `127.0.0.1:<host_port>` (ADR-0007, ADR-0026).
+#[allow(
+    dead_code,
+    reason = "consumed by the deploy engine as it is implemented"
+)]
+impl ContainerSpec {
+    /// A spec for `generation` running `image`, created by `deployment`: the name, the full
+    /// label set, and the stack network joined with the service name as alias. Everything else
+    /// (command, env, ports, volumes, …) starts empty or at its default.
+    ///
+    /// `image` is pinned by digest; that digest is recorded as `hoster.digest`, the *requested*
+    /// digest (podman reports platform-specific image IDs instead).
+    pub fn new(
+        generation: &ServiceGeneration,
+        deployment: DeploymentId,
+        image: PinnedImage,
+    ) -> Self {
+        let labels = Labels::from([
+            (label::MANAGED.into(), "true".into()),
+            (label::STACK.into(), generation.stack.to_string()),
+            (label::SERVICE.into(), generation.service.to_string()),
+            (label::GENERATION.into(), generation.generation.to_string()),
+            (
+                label::IMAGE.into(),
+                format!("{}/{}", image.registry(), image.repository()),
+            ),
+            (label::DIGEST.into(), image.digest().to_string()),
+            (label::DEPLOYMENT.into(), deployment.to_string()),
+        ]);
+        Self {
+            name: generation.to_string(),
+            image,
+            command: None,
+            entrypoint: None,
+            env: BTreeMap::new(),
+            labels,
+            network: NetworkSpec::for_stack(&generation.stack).name,
+            network_alias: generation.service.to_string(),
+            ports: Vec::new(),
+            volumes: Vec::new(),
+            user: None,
+            read_only: false,
+            stop_timeout: DEFAULT_STOP_TIMEOUT,
+        }
+    }
+
+    /// The stack network the container joins, `hoster-<stack>`.
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    /// The alias the container joins its network with: the service name.
+    pub fn network_alias(&self) -> &str {
+        &self.network_alias
+    }
+}
+
+/// A container port published on `127.0.0.1:<host_port>` (ADR-0007, ADR-0026). There is no host
+/// IP to choose: loopback is the only one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PortBinding {
     pub container_port: u16,
     pub host_port: u16,
 }
 
+impl PortBinding {
+    /// The only address hoster ever publishes on.
+    pub const HOST_IP: Ipv4Addr = Ipv4Addr::LOCALHOST;
+}
+
 /// A named podman volume (`hoster-<stack>-<volume>`, ADR-0030) mounted at `target`.
+///
+/// Built only through [`VolumeMount::named`], so it can never be a bind mount of a host path
+/// (ADR-0019).
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeMount {
+    volume: String,
+    target: String,
+}
+
 #[allow(
     dead_code,
     reason = "consumed by the deploy engine as it is implemented"
 )]
-pub struct VolumeMount {
-    pub volume: String,
-    pub target: String,
+impl VolumeMount {
+    /// The stack's volume `volume` (podman name `hoster-<stack>-<volume>`) mounted at the
+    /// absolute path `target`.
+    /// The volume name follows the stack format's rules for names, and the target must be an
+    /// absolute path below `/` without `.` or `..` segments or `:`.
+    pub fn named(stack: &Name, volume: &str, target: &str) -> Result<Self, String> {
+        let volume: Name = volume.parse()?;
+        let path = Path::new(target);
+        let mut components = path.components();
+        let below_root = components.next() == Some(Component::RootDir)
+            && target.split('/').skip(1).all(|s| !matches!(s, "." | ".."))
+            && components.all(|c| matches!(c, Component::Normal(_)))
+            && path.components().count() > 1;
+        if !below_root || target.contains(':') {
+            return Err(format!(
+                "invalid mount path `{target}`: must be an absolute path below `/` without `.`, \
+                 `..` or `:`"
+            ));
+        }
+        Ok(Self {
+            volume: format!("{PREFIX}-{stack}-{volume}"),
+            target: target.to_owned(),
+        })
+    }
+
+    /// The podman volume name, `hoster-<stack>-<volume>`.
+    pub fn volume(&self) -> &str {
+        &self.volume
+    }
+
+    /// The absolute mount path inside the container.
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+}
+
+/// A published port as podman reports it, host IP included, so a binding that is not on loopback
+/// shows up instead of being assumed away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PublishedPort {
+    pub container_port: u16,
+    pub host_ip: IpAddr,
+    pub host_port: u16,
+}
+
+impl PublishedPort {
+    /// Whether this is a binding hoster could have made: on 127.0.0.1.
+    #[allow(dead_code, reason = "consumed by the reconciler")]
+    pub fn is_loopback(&self) -> bool {
+        self.host_ip == IpAddr::V4(PortBinding::HOST_IP)
+    }
+}
+
+impl From<PortBinding> for PublishedPort {
+    fn from(binding: PortBinding) -> Self {
+        Self {
+            container_port: binding.container_port,
+            host_ip: PortBinding::HOST_IP.into(),
+            host_port: binding.host_port,
+        }
+    }
 }
 
 /// What the runtime reports about one container.
@@ -199,7 +377,7 @@ pub struct ContainerInfo {
     pub labels: Labels,
     pub state: ContainerState,
     /// The published ports, as podman reports them.
-    pub ports: Vec<PortBinding>,
+    pub ports: Vec<PublishedPort>,
 }
 
 impl ContainerInfo {
@@ -437,6 +615,96 @@ mod tests {
         assert!(!info.is_managed());
         info.labels.insert(label::MANAGED.into(), "true".into());
         assert!(info.is_managed());
+    }
+
+    fn name(s: &str) -> Name {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn network_is_named_and_labelled_per_stack() {
+        let network = NetworkSpec::for_stack(&name("notes"));
+        assert_eq!(network.name, "hoster-notes");
+        assert_eq!(
+            network.labels,
+            Labels::from([
+                ("hoster.managed".into(), "true".into()),
+                ("hoster.stack".into(), "notes".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn container_spec_carries_name_labels_and_network() {
+        let generation = ServiceGeneration {
+            stack: name("notes"),
+            service: name("web"),
+            generation: 7,
+        };
+        let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let image: PinnedImage = format!("ghcr.io/me/notes@{digest}").parse().unwrap();
+        let spec = ContainerSpec::new(&generation, DeploymentId::from(42), image.clone());
+        assert_eq!(spec.name, "hoster-notes-web-g7");
+        assert_eq!(spec.network(), "hoster-notes");
+        assert_eq!(spec.network_alias(), "web");
+        assert_eq!(spec.image, image);
+        assert_eq!(spec.stop_timeout, DEFAULT_STOP_TIMEOUT);
+        assert_eq!(
+            spec.labels,
+            Labels::from([
+                ("hoster.managed".into(), "true".into()),
+                ("hoster.stack".into(), "notes".into()),
+                ("hoster.service".into(), "web".into()),
+                ("hoster.generation".into(), "7".into()),
+                ("hoster.image".into(), "ghcr.io/me/notes".into()),
+                ("hoster.digest".into(), digest.into()),
+                ("hoster.deployment".into(), "42".into()),
+            ])
+        );
+        // A tag carried alongside the digest stays out of the image label.
+        let tagged = ContainerSpec::new(
+            &generation,
+            DeploymentId::from(1),
+            format!("docker.io/library/busybox:1.37@{digest}")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(tagged.labels[label::DIGEST], digest);
+        assert_eq!(tagged.labels[label::IMAGE], "docker.io/library/busybox");
+    }
+
+    #[test]
+    fn volume_mounts_are_named_volumes_only() {
+        let stack = name("notes");
+        let mount = VolumeMount::named(&stack, "data", "/var/lib/notes").unwrap();
+        assert_eq!(mount.volume(), "hoster-notes-data");
+        assert_eq!(mount.target(), "/var/lib/notes");
+        for volume in ["", "/etc", "../x", "a/b", "-x", "Data", "a_b"] {
+            assert!(
+                VolumeMount::named(&stack, volume, "/data").is_err(),
+                "{volume}"
+            );
+        }
+        for target in ["data", "/data/../etc", "/a:/b", "./x", "", "/", "/a/./b"] {
+            assert!(
+                VolumeMount::named(&stack, "data", target).is_err(),
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn published_ports_from_bindings_are_loopback() {
+        let port = PublishedPort::from(PortBinding {
+            container_port: 80,
+            host_port: 20001,
+        });
+        assert!(port.is_loopback());
+        let wide = PublishedPort {
+            host_ip: Ipv4Addr::UNSPECIFIED.into(),
+            ..port
+        };
+        assert!(!wide.is_loopback());
     }
 
     #[test]

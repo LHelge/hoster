@@ -1,10 +1,10 @@
 ---
 id: f9t
 title: "Spike: systemd socket activation for :80/:443 across hoster restarts"
-status: open
+status: in_progress
 priority: P3
 created: "2026-11-07T15:57:16.041553238Z"
-updated: "2026-11-07T15:57:16.041553238Z"
+updated: "2026-11-07T23:10:47.706693011Z"
 tags:
   - proxy
   - ops
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - vhg
 parent: up4
+attempts: 1
 ---
 
 ## Summary
