@@ -1,0 +1,17 @@
+[package]
+name = "hoster"
+version = "0.1.0"
+edition = "2024"
+# MSRV: Pingora 0.9.1 needs 1.85. The development toolchain is pinned in rust-toolchain.toml.
+rust-version = "1.85"
+description = "Single-binary deployment orchestrator for one VPS: rootless podman, embedded proxy with ACME, zero-downtime deploys"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1.44"

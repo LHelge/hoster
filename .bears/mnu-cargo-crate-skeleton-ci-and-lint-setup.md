@@ -1,14 +1,15 @@
 ---
 id: mnu
 title: Cargo crate skeleton, CI and lint setup
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.153121669Z"
-updated: "2026-11-07T21:27:43.348397081Z"
+updated: "2026-11-07T22:11:30.693368167Z"
 tags:
   - core
   - ci
 parent: "8xd"
+attempts: 1
 ---
 
 ## Summary
