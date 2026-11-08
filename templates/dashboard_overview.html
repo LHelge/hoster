@@ -1,10 +1,10 @@
 {%- macro stack_head(stack) %}
       <th scope="rowgroup" rowspan="{{ stack.rows() }}"><a href="{{ stack.url }}">{{ stack.name }}</a>
-        {%- if let Some(flag) = stack.flag %}<br><span class="badge badge-error">{{ flag }}</span>{% endif %}</th>
+        {%- if let Some(flag) = stack.flag %}<br><span class="badge badge-error">{{ crate::web::Icon::Warning }}{{ flag }}</span>{% endif %}</th>
 {%- endmacro -%}
 {%- macro deployment_cell(stack) %}
       <td rowspan="{{ stack.rows() }}">
-        {%- if let Some(deployment) = stack.deployment %}<a href="{{ deployment.url }}">#{{ deployment.id }}</a> {% if deployment.failed %}<span class="badge badge-error">{{ deployment.state }}</span>{% else %}{{ deployment.state }}{% endif %} <span class="muted">({{ deployment.detail }})</span>
+        {%- if let Some(deployment) = stack.deployment %}<a href="{{ deployment.url }}">#{{ deployment.id }}</a> {% if deployment.failed %}<span class="badge badge-error">{{ crate::web::Icon::Failed }}{{ deployment.state }}</span>{% else %}{{ deployment.state }}{% endif %} <span class="muted">({{ deployment.detail }})</span>
         {%- else %}<span class="muted">none</span>{% endif %}
         {%- if let Some(queued) = stack.queued %}<br><span class="muted">#{{ queued }} queued</span>{% endif %}
         <br><a class="muted" href="{{ stack.history_url }}">history</a></td>
@@ -19,7 +19,7 @@
 {%- else %}
 <ul class="warnings">
   {%- for warning in warnings %}
-  <li><span class="badge badge-error">{{ warning.kind }}</span> <a href="{{ warning.href }}">{{ warning.subject }}</a>{% if !warning.detail.is_empty() %}: {{ warning.detail }}{% endif %}</li>
+  <li><span class="badge badge-error">{{ crate::web::Icon::Warning }}{{ warning.kind }}</span> <a href="{{ warning.href }}">{{ warning.subject }}</a>{% if !warning.detail.is_empty() %}: {{ warning.detail }}{% endif %}</li>
   {%- endfor %}
 </ul>
 {%- endif %}
@@ -45,7 +45,7 @@
       <td>{{ service.name }}</td>
       <td>{% if let Some((short, full)) = service.digest %}<code title="{{ full }}">{{ short }}</code> <span class="muted">{{ service.state }}</span>{% else %}<span class="muted">{{ service.state }}</span>{% endif %}</td>
       <td>
-        {%- if service.crash_looping %}<span class="badge badge-error">crash looping</span>
+        {%- if service.crash_looping %}<span class="badge badge-error">{{ crate::web::Icon::Warning }}crash looping</span>
         {%- else if service.running %}<span class="{{ service.health_class() }}"{% if let Some(detail) = service.health_detail %} title="{{ detail }}"{% endif %}>{{ service.health }}</span>
         {%- else %}<span class="muted">-</span>{% endif %}</td>
       <td>{% if service.running %}{{ service.restarts }}{% else %}<span class="muted">-</span>{% endif %}</td>
@@ -54,7 +54,7 @@
         {%- else %}
         <ul class="plain">
           {%- for cert in service.certs %}
-          <li>{{ cert.host }}: {% if let Some(left) = cert.left %}{% if cert.expiring %}<span class="badge badge-error" title="{{ cert.not_after }}">{{ left }}</span>{% else %}<span title="{{ cert.not_after }}">{{ left }}</span>{% endif %}{% else %}<span class="muted">none yet</span>{% endif %}</li>
+          <li>{{ cert.host }}: {% if let Some(left) = cert.left %}{% if cert.expiring %}<span class="badge badge-error" title="{{ cert.not_after }}">{{ crate::web::Icon::Warning }}{{ left }}</span>{% else %}<span title="{{ cert.not_after }}">{{ left }}</span>{% endif %}{% else %}<span class="muted">none yet</span>{% endif %}</li>
           {%- endfor %}
         </ul>
         {%- endif %}</td>

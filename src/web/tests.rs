@@ -144,24 +144,31 @@ async fn dashboard_shows_the_statistics() {
     let html = body(app.get("/", Some(&browser.cookie)).await).await;
     let compact: String = html.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        compact.contains(
+        compact.contains(&format!(
             "<td>blog.example.com/</td> <td>web (blog)</td><td>0</td><td>0</td><td>2</td>\
-             <td>0</td><td>0</td><td>1</td> <td><span class=\"badge badge-error\">1</span></td> \
-             <td>1</td>"
-        ),
+             <td>0</td><td>0</td><td>1</td> <td><span class=\"badge badge-error\">{}1</span></td> \
+             <td>1</td>",
+            crate::web::Icon::Warning
+        )),
         "{compact}"
     );
     assert!(
-        compact.contains("<td>7</td> <td><span class=\"badge badge-error\">2</span></td>"),
+        compact.contains(&format!(
+            "<td>7</td> <td><span class=\"badge badge-error\">{}2</span></td>",
+            crate::web::Icon::Warning
+        )),
         "{compact}"
     );
     assert!(
         compact.contains("<td>12.0 s</td> <td>40.0 s</td>"),
         "{compact}"
     );
-    assert!(compact.contains("worker <span class=\"muted\">(blog)</span> <span class=\"badge badge-error\">crash looping</span>"), "{compact}");
+    assert!(compact.contains(&format!("worker <span class=\"muted\">(blog)</span> <span class=\"badge badge-error\">{}crash looping</span>", crate::web::Icon::Warning)), "{compact}");
     assert!(
-        compact.contains("<span class=\"badge badge-error\">3 d</span>"),
+        compact.contains(&format!(
+            "<span class=\"badge badge-error\">{}3 d</span>",
+            crate::web::Icon::Warning
+        )),
         "{compact}"
     );
     assert!(
@@ -189,6 +196,32 @@ async fn htmx_is_served_with_a_long_cache_and_javascript_type() {
         "public, max-age=31536000, immutable"
     );
     assert!(body(response).await.starts_with("var htmx="));
+}
+
+#[tokio::test]
+async fn icon_sprite_is_served_as_svg_with_a_long_cache() {
+    let url = Assets::get().icons.url();
+    let response = get(&url).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        header(&response, "content-type"),
+        "image/svg+xml; charset=utf-8"
+    );
+    assert_eq!(
+        header(&response, "cache-control"),
+        "public, max-age=31536000, immutable"
+    );
+    // An SVG opened directly is a document: it gets the same CSP and no sniffing.
+    assert!(header(&response, "content-security-policy").starts_with("default-src 'self';"));
+    assert_eq!(header(&response, "x-content-type-options"), "nosniff");
+    let svg = body(response).await;
+    assert!(svg.contains(r#"<symbol id="redeploy" "#), "{svg}");
+
+    // Only the hashed name is served, so a cached page never pairs with another sprite.
+    assert_eq!(
+        get("/assets/icons.svg").await.status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -391,7 +424,10 @@ mod containers {
         assert_eq!(response.status(), StatusCode::OK);
         let html = body(response).await;
         assert!(
-            html.contains(r#"<a href="/containers" aria-current="page">Containers</a>"#),
+            html.contains(&format!(
+                r#"<a href="/containers" aria-current="page">{}Containers</a>"#,
+                crate::web::Icon::Containers
+            )),
             "{html}"
         );
         assert!(html.contains("<code>hoster-notes-web-g3</code>"), "{html}");

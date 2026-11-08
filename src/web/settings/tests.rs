@@ -107,7 +107,10 @@ async fn the_page_lists_hosts_and_usernames_but_no_tokens() {
     let (status, html) = clean(app.get("/settings/registries", Some(&browser.cookie)).await).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        html.contains(r#"<a href="/settings/registries" aria-current="page">Settings</a>"#),
+        html.contains(&format!(
+            r#"<a href="/settings/registries" aria-current="page">{}Settings</a>"#,
+            crate::web::Icon::Settings
+        )),
         "{html}"
     );
     assert!(html.contains("<code>ghcr.io</code>"), "{html}");

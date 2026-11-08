@@ -1,8 +1,10 @@
-//! Static assets embedded in the binary (ADR-0021): the vendored HTMX build, its SSE extension
-//! and hoster's stylesheet. Each is served under a content-hashed name such as
+//! Static assets embedded in the binary (ADR-0021): the vendored HTMX build, its SSE extension,
+//! hoster's stylesheet and the icon sprite (ADR-0053). Each is served under a content-hashed name
+//! such as
 //! `/assets/htmx.min.a0abb04f2f45.js`, so it can be cached for a year; a changed file gets a new
 //! URL.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 
@@ -11,11 +13,14 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
+use super::icons::Icon;
+
 /// One embedded file.
 #[derive(Debug)]
 pub struct Asset {
     content_type: &'static str,
-    bytes: &'static [u8],
+    /// Borrowed for files compiled in with `include_bytes!`, owned for generated ones.
+    bytes: Cow<'static, [u8]>,
     /// The served name: `name` with the first 12 hex digits of its SHA-256 before the extension.
     hashed_name: String,
 }
@@ -26,8 +31,13 @@ impl Asset {
     /// Hex digits of the SHA-256 put into the served name.
     const HASH_LEN: usize = 12;
 
-    fn new(name: &'static str, content_type: &'static str, bytes: &'static [u8]) -> Self {
-        let hash = Self::sha256_hex(bytes);
+    fn new(
+        name: &'static str,
+        content_type: &'static str,
+        bytes: impl Into<Cow<'static, [u8]>>,
+    ) -> Self {
+        let bytes = bytes.into();
+        let hash = Self::sha256_hex(&bytes);
         let (stem, ext) = name
             .rsplit_once('.')
             .expect("asset names have an extension");
@@ -67,7 +77,7 @@ impl IntoResponse for &'static Asset {
                     HeaderValue::from_static(Asset::CACHE_CONTROL),
                 ),
             ],
-            self.bytes,
+            &*self.bytes,
         )
             .into_response()
     }
@@ -80,6 +90,8 @@ pub struct Assets {
     /// HTMX's SSE extension, for live views such as container logs (ADR-0044).
     pub htmx_sse: Asset,
     pub stylesheet: Asset,
+    /// Every [`Icon`] as one SVG sprite, generated at startup.
+    pub icons: Asset,
 }
 
 impl Assets {
@@ -101,12 +113,17 @@ impl Assets {
                 "text/css; charset=utf-8",
                 include_bytes!("../../assets/hoster.css"),
             ),
+            icons: Asset::new(
+                "icons.svg",
+                "image/svg+xml; charset=utf-8",
+                Icon::sprite().into_bytes(),
+            ),
         });
         &ASSETS
     }
 
-    fn all(&'static self) -> [&'static Asset; 3] {
-        [&self.htmx, &self.htmx_sse, &self.stylesheet]
+    fn all(&'static self) -> [&'static Asset; 4] {
+        [&self.htmx, &self.htmx_sse, &self.stylesheet, &self.icons]
     }
 
     /// The asset served as `hashed_name`. Unhashed or stale names are not found, so a cached
@@ -151,7 +168,7 @@ mod tests {
             ("htmx.min.js", &assets.htmx),
             ("hx-sse.min.js", &assets.htmx_sse),
         ] {
-            let checksum = Asset::sha256_hex(asset.bytes);
+            let checksum = Asset::sha256_hex(&asset.bytes);
             let row = VENDORED
                 .lines()
                 .find(|line| line.starts_with(&format!("| `{file}`")))
@@ -168,7 +185,9 @@ mod tests {
     fn only_hashed_names_are_found() {
         let assets = Assets::get();
         assert!(assets.find(&assets.stylesheet.hashed_name).is_some());
+        assert!(assets.find(&assets.icons.hashed_name).is_some());
         assert!(assets.find("hoster.css").is_none());
+        assert!(assets.find("icons.svg").is_none());
         assert!(assets.find("htmx.min.js").is_none());
     }
 }

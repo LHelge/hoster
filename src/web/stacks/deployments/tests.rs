@@ -51,7 +51,10 @@ async fn the_history_shows_each_deployment_newest_first() {
     assert!(rows[0].contains("(running)"), "{}", rows[0]);
     assert!(rows[1].contains(">4</a>"), "{}", rows[1]);
     assert!(
-        rows[1].contains(r#"<strong class="state-failed">Failed</strong>"#),
+        rows[1].contains(&format!(
+            r#"<strong class="state-failed">{}Failed</strong>"#,
+            crate::web::Icon::Failed
+        )),
         "{}",
         rows[1]
     );

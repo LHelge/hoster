@@ -14,14 +14,14 @@
     <nav aria-label="Main">
       <ul>
         {%- for item in layout.nav() %}
-        <li><a href="{{ item.href }}"{% if item.current %} aria-current="page"{% endif %}>{{ item.label }}</a></li>
+        <li><a href="{{ item.href }}"{% if item.current %} aria-current="page"{% endif %}>{{ item.icon }}{{ item.label }}</a></li>
         {%- endfor %}
       </ul>
     </nav>
     {%- if let Some(user) = layout.user %}
     <div class="account">
       <span class="login">{{ user.login }}</span>
-      <button type="button" hx-post="/auth/logout">Log out</button>
+      <button type="button" hx-post="/auth/logout">{{ crate::web::Icon::LogOut }}Log out</button>
       <button type="button" hx-post="/auth/logout-everywhere">Log out everywhere</button>
     </div>
     {%- endif %}

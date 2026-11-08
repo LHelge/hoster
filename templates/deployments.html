@@ -15,7 +15,7 @@
     {%- for deployment in deployments %}
     <tr>
       <td><a href="{{ deployment.url }}">{{ deployment.id }}</a></td>
-      <td>{% if deployment.failed %}<strong class="state-failed">{{ deployment.state }}</strong>{% else %}{{ deployment.state }}{% endif %}</td>
+      <td>{% if deployment.failed %}<strong class="state-failed">{{ crate::web::Icon::Failed }}{{ deployment.state }}</strong>{% else %}{{ deployment.state }}{% endif %}</td>
       <td>{{ deployment.source }}</td>
       <td>
         {%- for (service, short, digest) in deployment.digests %}
@@ -28,7 +28,7 @@
       <td>
         {%- if let Some(url) = deployment.redeploy_url %}
         <form class="inline-form" hx-post="{{ url }}" hx-target="#redeploy-result" hx-confirm="Redeploy deployment {{ deployment.id }}? Its digests and stack revision become the running ones again.">
-          <button type="submit">Redeploy</button>
+          <button type="submit">{{ crate::web::Icon::Redeploy }}Redeploy</button>
         </form>
         {%- endif %}
       </td>

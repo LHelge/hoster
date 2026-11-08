@@ -19,7 +19,7 @@
   <form class="stack-form" hx-post="{{ confirm_url }}" hx-target="#reresolve-result">
     <input type="hidden" name="revision" value="{{ revision }}">
     <p class="muted">Applies the stack file of revision {{ revision }} again, pinned to the new digests, as a new revision. Tags are resolved again when you confirm.</p>
-    <button type="submit">{% if changed.is_empty() %}Apply{% else %}Apply and redeploy {{ changed.len() }} service{% if changed.len() != 1 %}s{% endif %}{% endif %}</button>
+    <button type="submit">{{ crate::web::Icon::Apply }}{% if changed.is_empty() %}Apply{% else %}Apply and redeploy {{ changed.len() }} service{% if changed.len() != 1 %}s{% endif %}{% endif %}</button>
   </form>
   {%- else %}
   <p>Every tag still resolves to the digest of revision {{ revision }}: nothing to apply.</p>

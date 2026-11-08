@@ -18,6 +18,16 @@ SHA-256 recorded here.
 - Downloaded 2026-11-07; `hx-sse.min.js` taken from the same tarball (integrity re-verified)
   on 2026-11-08.
 
+## Icons
+
+The icon sprite (`/assets/icons.<hash>.svg`, ADR-0053) is generated at startup from
+[Lucide](https://lucide.dev) glyphs in the `icondata` crate (`icondata_lu`, pinned in
+`Cargo.lock`), so no SVG file is vendored here. Only the icons `src/web/icons.rs` names are
+compiled in. Lucide is ISC-licensed, with the icons derived from Feather under MIT; both texts
+are in `lucide.LICENSE`, and the sprite carries the copyright notice in a comment. Upgrading the
+glyphs means `cargo update -p icondata_lu`; a glyph Lucide renamed fails the build, since
+`icons.rs` names each one as a Rust item.
+
 ## CSP notes
 
 The admin UI's CSP allows no inline scripts and no `eval` (`script-src 'self'`), so HTMX 4
