@@ -1,10 +1,10 @@
 ---
 id: "98v"
 title: Continuous health monitoring and status
-status: open
+status: done
 priority: P3
 created: "2026-11-07T14:45:17.374526819Z"
-updated: "2026-11-07T14:45:17.374526819Z"
+updated: "2026-11-08T00:54:40.250143385Z"
 tags:
   - observability
   - orchestrator
@@ -12,6 +12,7 @@ depends_on:
   - gnz
   - tsm
 parent: "6gn"
+attempts: 1
 ---
 
 ## Summary

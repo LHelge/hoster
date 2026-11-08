@@ -18,6 +18,10 @@
 //! The reconciler (`reconcile`, ADR-0028) resolves interrupted deployments and adopts, starts
 //! or removes containers at startup ([`Orchestrator::recover`]), then keeps the current
 //! generation running with backoff ([`Orchestrator::run_reconciler`]).
+//!
+//! The health monitor (`monitor`, ADR-0038) keeps probing every live generation
+//! ([`Orchestrator::run_health_monitor`]) and reports status changes on `ui_events`
+//! ([`Orchestrator::subscribe`]) and in [`Orchestrator::status`].
 
 #![allow(
     dead_code,
@@ -26,6 +30,7 @@
 
 mod engine;
 pub mod machine;
+mod monitor;
 mod plan;
 mod reconcile;
 
@@ -36,8 +41,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, broadcast};
 
+use crate::health::{HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
 use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError};
 use crate::routing::{CollisionError, Reserved, RouteClaims};
@@ -81,6 +87,8 @@ pub struct Settings {
     pub settle_poll: Duration,
     /// How the reconciler restarts crashed containers (ADR-0028).
     pub restart: RestartPolicy,
+    /// How often live services are probed (ADR-0038).
+    pub monitor: MonitorSettings,
 }
 
 impl Default for Settings {
@@ -90,6 +98,7 @@ impl Default for Settings {
             settle: Duration::from_secs(5),
             settle_poll: Duration::from_millis(500),
             restart: RestartPolicy::default(),
+            monitor: MonitorSettings::default(),
         }
     }
 }
@@ -196,6 +205,25 @@ struct Prepared {
     noop: bool,
 }
 
+/// What open UI pages are told about (architecture §3.3 #5). A receiver that lags just
+/// re-renders from [`Orchestrator::status`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiEvent {
+    /// A live service's health status changed (ADR-0038).
+    Health {
+        stack: String,
+        service: String,
+        generation: u32,
+        from: HealthStatus,
+        to: HealthStatus,
+        /// The probe result (or reconciler verdict) behind the change.
+        detail: String,
+    },
+}
+
+/// How many `ui_events` a slow receiver may fall behind before it lags.
+const UI_EVENTS_CAPACITY: usize = 256;
+
 /// Why a deployment ended when its stack was removed under it.
 const STACK_REMOVED: &str = "stack removed";
 
@@ -280,6 +308,8 @@ pub struct ServiceStatus {
     /// How often the reconciler restarted the running generation, and whether it is crash
     /// looping (ADR-0028).
     pub restarts: RestartStats,
+    /// The running generation's liveness and probe statistics (ADR-0038, ADR-0045).
+    pub health: HealthStats,
 }
 
 /// What one service runs.
@@ -311,6 +341,12 @@ pub struct Orchestrator<R> {
     removal: Notify,
     /// Restart histories and warnings of the reconciler (ADR-0028).
     reconciler: Mutex<Reconciler>,
+    /// Liveness of the live generations (ADR-0038).
+    watchlist: Mutex<monitor::Watchlist>,
+    /// Carries out the health monitor's probes.
+    prober: Arc<dyn Prober>,
+    /// Status changes for open UI pages (architecture §3.3 #5).
+    ui_events: broadcast::Sender<UiEvent>,
 }
 
 /// The deploy slot of one stack (ADR-0040): one active deployment, one pending.
@@ -408,6 +444,27 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         secrets: SecretStore,
         settings: Settings,
     ) -> Arc<Self> {
+        Self::with_prober(
+            store,
+            runtime,
+            resolver,
+            ports,
+            secrets,
+            settings,
+            Arc::new(NetworkProber),
+        )
+    }
+
+    /// [`Self::new`] with the health monitor probing through `prober`.
+    pub fn with_prober(
+        store: Store,
+        runtime: Arc<R>,
+        resolver: Arc<dyn TagResolver>,
+        ports: PortAllocator,
+        secrets: SecretStore,
+        settings: Settings,
+        prober: Arc<dyn Prober>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             runtime,
@@ -419,6 +476,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             finished: Notify::new(),
             removal: Notify::new(),
             reconciler: Mutex::default(),
+            watchlist: Mutex::default(),
+            prober,
+            ui_events: broadcast::channel(UI_EVENTS_CAPACITY).0,
         })
     }
 
@@ -451,6 +511,17 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             pins,
             changed: prepared.changed,
         })
+    }
+
+    /// Receives the [`UiEvent`]s sent from now on.
+    pub fn subscribe(&self) -> broadcast::Receiver<UiEvent> {
+        self.ui_events.subscribe()
+    }
+
+    /// Sends `event` to the open UI pages, if there are any.
+    fn emit(&self, event: UiEvent) {
+        // No receiver is not an error: no UI page is open.
+        let _ = self.ui_events.send(event);
     }
 
     /// Applies a stack file (ADR-0027, ADR-0049): validates it, checks its routes against the
@@ -773,6 +844,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         let restarts = pointer
                             .map(|p| self.restart_stats(&stack.name, &p.service, p.generation))
                             .unwrap_or_default();
+                        let health = pointer
+                            .map(|p| self.health_stats(&stack.name, &p.service, p.generation))
+                            .unwrap_or_default();
                         let state = match pointer {
                             Some(p) => ServiceState::Running {
                                 generation: p.generation,
@@ -791,6 +865,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                             ci_built: service.image.is_ci_built(),
                             state,
                             restarts,
+                            health,
                         }
                     })
                     .collect(),
@@ -876,6 +951,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     fn reconciler(&self) -> MutexGuard<'_, Reconciler> {
         // Restart histories are plain data; a panic cannot leave them half-updated.
         self.reconciler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn watchlist(&self) -> MutexGuard<'_, monitor::Watchlist> {
+        // Liveness records are plain data; a panic cannot leave them half-updated.
+        self.watchlist
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
@@ -1131,6 +1213,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 }
 
+#[cfg(test)]
+mod monitor_tests;
 #[cfg(test)]
 mod reconcile_tests;
 #[cfg(test)]

@@ -8,6 +8,7 @@ use axum::http::Request;
 use http_body_util::BodyExt as _;
 
 use super::*;
+use crate::health::HealthStats;
 use crate::orchestrator::{RestartStats, ServiceStatus};
 use crate::stack::Stack;
 use crate::store::{ContentHash, RevisionId, StackRevision};
@@ -74,6 +75,7 @@ fn notes_status() -> StackStatus {
                     digest: digest(1),
                 },
                 restarts: RestartStats::default(),
+                health: HealthStats::default(),
             },
             ServiceStatus {
                 name: "storage".into(),
@@ -81,6 +83,7 @@ fn notes_status() -> StackStatus {
                 ci_built: false,
                 state: ServiceState::NotDeployed,
                 restarts: RestartStats::default(),
+                health: HealthStats::default(),
             },
         ],
         active: None,

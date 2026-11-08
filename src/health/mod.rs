@@ -9,6 +9,8 @@
 //! - [`Check::run`] carries it out against one container until it passes, its `start_period`
 //!   runs out, or the container exits (checked with `inspect` before every probe).
 //! - Results go to a [`ProbeLog`]; [`DeploymentLog`] records them as deployment events.
+//! - After a deploy, [`Check::live`] probes a live container once, through a [`Prober`], and
+//!   [`Liveness`] turns the results into a [`HealthStatus`] (see `liveness`).
 //!
 //! hoster turns podman's restart policy off (ADR-0028), so "running at every look" is "running
 //! and not restarted".
@@ -31,6 +33,12 @@ use tokio::time::Instant;
 use crate::runtime::{ContainerId, ContainerRuntime, ContainerState, RuntimeError};
 use crate::stack::{DEFAULT_HEALTH_PATH, ExpectStatus, Probe, Service};
 use crate::store::{DeploymentId, DeploymentState, PortMap, Store};
+
+mod liveness;
+
+pub use liveness::{
+    HealthChange, HealthStats, HealthStatus, Liveness, MonitorSettings, NetworkProber, Prober,
+};
 
 /// Time between two probes when `interval` is unset.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
@@ -190,6 +198,20 @@ impl Check {
         self
     }
 
+    /// Consecutive passes required.
+    pub fn healthy_after(&self) -> u32 {
+        self.healthy_after
+    }
+
+    /// One liveness probe of a container known to be running: through `prober` for an HTTP or
+    /// TCP check; the settle check has nothing to probe, running is passing.
+    pub async fn live(&self, prober: &dyn Prober) -> Result<String, String> {
+        match self.kind {
+            Kind::Settle => Ok("running".to_owned()),
+            Kind::Http { .. } | Kind::Tcp { .. } => prober.probe(self).await,
+        }
+    }
+
     /// Runs the check against `container` until it passes, `start_period` runs out or the
     /// container stops running. Probe results, and the verdict, go to `log`; a result is
     /// logged when it differs from the previous one, so a steady failure is one event.
@@ -272,7 +294,7 @@ impl Check {
     }
 
     /// One probe, bounded by `timeout`: `Ok` with what passed, `Err` with why it failed.
-    async fn attempt(&self) -> Result<String, String> {
+    pub(crate) async fn attempt(&self) -> Result<String, String> {
         let probe = async {
             match &self.kind {
                 Kind::Http {

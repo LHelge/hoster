@@ -1,10 +1,10 @@
 ---
 id: "7mg"
 title: "Web UI: stack secrets (write-only), registry credentials, re-resolve tags"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T21:12:34.638757908Z"
-updated: "2026-11-07T21:39:44.699204429Z"
+updated: "2026-11-08T00:52:30.571385573Z"
 tags:
   - web
   - security
@@ -12,6 +12,7 @@ depends_on:
   - ax3
   - "3g2"
 parent: ame
+attempts: 1
 ---
 
 ## Summary

@@ -621,6 +621,10 @@ impl Startup for Supervisor {
                 tokio::spawn(
                     Arc::clone(&orchestrator).run_reconciler(self.teardown.token.child_token()),
                 );
+                // Live services are probed from now on (ADR-0038).
+                tokio::spawn(
+                    Arc::clone(&orchestrator).run_health_monitor(self.teardown.token.child_token()),
+                );
                 self.orchestrator = Some(orchestrator);
                 Ok(())
             }
