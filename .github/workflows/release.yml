@@ -1,8 +1,11 @@
 name: Release
 
-# Builds the static musl binary (ADR-0001) and publishes it with its checksum and the deploy/ files.
+# Builds the static musl binaries (ADR-0001) for x86_64 and aarch64 and publishes them with one
+# SHA256SUMS, the deploy/ files and install.sh as a GitHub release (ADR-0052).
 #
-# - Push a `v*` tag (e.g. `v0.2.0`, matching `version` in Cargo.toml) to create a GitHub release.
+# - `scripts/release.sh tag X.Y.Z` pushes a `vX.Y.Z` tag on main (matching `version` in
+#   Cargo.toml), which creates the GitHub release. Its notes are git-cliff's rendering of the
+#   Conventional Commits since the previous tag (cliff.toml).
 # - Run it by hand (workflow_dispatch) to build and check everything without publishing; the
 #   files are then attached to the workflow run as an artifact.
 
@@ -17,20 +20,19 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  TARGET: x86_64-unknown-linux-musl
+  # git-cliff for the release notes, pinned by version and by the SHA-512 of its x86_64 tarball.
+  GIT_CLIFF_VERSION: 2.14.2
+  GIT_CLIFF_SHA512: 95b0c55ab3e351ca7c0285fbbde8f1e8c42906466a173e6884f5c7ca814523bda44cbd4ab26b0aa28cace4c02c5ee6b553e9742bd9d7df47a73b9ef58ea429a9
 
 jobs:
-  build:
-    name: build, test, package
+  verify:
+    name: verify tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install toolchain and musl-tools
-        run: |
-          rustup toolchain install
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
+        with:
+          # Full history and every branch, so the tagged commit can be checked against main.
+          fetch-depth: 0
 
       - name: Tag matches Cargo.toml version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -40,6 +42,48 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
+
+      # Releases come from main only (ADR-0052); a tag on a branch or PR commit is refused.
+      - name: Tagged commit is on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not reachable from main"
+            exit 1
+          fi
+
+  build:
+    name: build, test, package (${{ matrix.target }})
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          # Native build and tests on GitHub's ARM runner, no cross-compiling (ADR-0052).
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup reads rust-toolchain.toml (which lists both musl targets). musl-tools provides
+      # musl-gcc for the C parts of dependencies (ring, bundled libsqlite3); cc-rs only picks it
+      # by itself for x86_64, so point it at musl-gcc for whichever target this is.
+      - name: Install toolchain and musl-tools
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
 
       - name: Format
         run: cargo fmt --all --check
@@ -60,21 +104,51 @@ jobs:
       - name: Check binary is static
         run: scripts/check-release-binary.sh "target/$TARGET/release/hoster"
 
-      # Release files, flat: the binary, SHA256SUMS, and whatever deploy/ holds (systemd unit,
-      # sysctl drop-in, example config). deploy/ is optional so the workflow works before it exists.
+      - name: Stage binary
+        run: |
+          mkdir -p bin
+          cp "target/$TARGET/release/hoster" "bin/hoster-$TARGET"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoster-${{ matrix.target }}
+          path: bin/
+          if-no-files-found: error
+
+  package:
+    name: package
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hoster-*-unknown-linux-musl
+          path: dist
+          merge-multiple: true
+
+      # Release files, flat: one binary per target, install.sh, whatever deploy/ holds (systemd
+      # unit, sysctl drop-in, example config) and one SHA256SUMS over all of them. install.sh and
+      # deploy/ are optional so the workflow works before they exist.
       - name: Package
         run: |
-          mkdir dist
-          cp "target/$TARGET/release/hoster" "dist/hoster-$TARGET"
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            test -f "dist/hoster-$target" || { echo "::error::missing hoster-$target"; exit 1; }
+          done
+          chmod +x dist/hoster-*
+          add() {
+            local name
+            name=$(basename "$1")
+            if [ -e "dist/$name" ]; then
+              echo "::error::two release files are named $name; release assets must be unique"
+              exit 1
+            fi
+            cp "$1" "dist/$name"
+          }
+          if [ -f install.sh ]; then add install.sh; fi
           if [ -d deploy ]; then
-            find deploy -type f -print0 | while IFS= read -r -d '' f; do
-              name=$(basename "$f")
-              if [ -e "dist/$name" ]; then
-                echo "::error::two files in deploy/ are named $name; release assets must be unique"
-                exit 1
-              fi
-              cp "$f" "dist/$name"
-            done
+            while IFS= read -r -d '' f; do add "$f"; done < <(find deploy -type f -print0 | sort -z)
           fi
           (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
 
@@ -88,17 +162,44 @@ jobs:
 
   release:
     name: publish GitHub release
-    needs: build
+    needs: package
     # Only a tag push publishes; workflow_dispatch never does, even when started on a tag.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          # git-cliff needs the history and the tags to find the previous release.
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           name: hoster-release
           path: dist
+
+      - name: Install git-cliff
+        run: |
+          tarball="git-cliff-$GIT_CLIFF_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/orhun/git-cliff/releases/download/v$GIT_CLIFF_VERSION/$tarball"
+          echo "$GIT_CLIFF_SHA512  $RUNNER_TEMP/$tarball" | sha512sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/git-cliff-$GIT_CLIFF_VERSION" >> "$GITHUB_PATH"
+
+      # Conventional Commits from the previous tag (any v* tag, pre-releases included) to this one,
+      # grouped by cliff.toml. The first release covers the whole history.
+      - name: Release notes
+        run: |
+          # The checkout's HEAD is the tagged commit, which is what git-cliff uses without a range.
+          range=()
+          if prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_REF_NAME^" 2>/dev/null); then
+            range=("$prev..$GITHUB_REF_NAME")
+          fi
+          echo "notes for ${range[*]:-the whole history up to $GITHUB_REF_NAME}"
+          git cliff --config cliff.toml --strip all "${range[@]}" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
 
       - name: Create release
         env:
@@ -111,5 +212,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file "$RUNNER_TEMP/notes.md" \
             "${prerelease[@]}"

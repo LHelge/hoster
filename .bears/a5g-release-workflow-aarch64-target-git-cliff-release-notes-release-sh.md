@@ -1,14 +1,15 @@
 ---
 id: a5g
 title: "Release workflow: aarch64 target, git-cliff release notes, release.sh"
-status: open
+status: done
 priority: P1
 created: "2026-11-08T08:25:15.945638084Z"
-updated: "2026-11-08T08:47:16.938500113Z"
+updated: "2026-11-08T09:31:39.520615505Z"
 tags:
   - ci
   - ops
 parent: tbf
+attempts: 1
 ---
 
 ## Summary

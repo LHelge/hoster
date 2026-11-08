@@ -1,0 +1,45 @@
+# git-cliff configuration (https://git-cliff.org): release notes from Conventional Commits.
+#
+# The release workflow (.github/workflows/release.yml) renders the notes for `<previous tag>..<tag>`
+# and uses them as the GitHub release body; `scripts/release.sh prepare` puts the same preview in
+# the release PR. There is no CHANGELOG.md: the GitHub releases are the record (ADR-0052).
+#
+# Preview what the next release would say:  git cliff --unreleased
+
+[changelog]
+# The GitHub release title already carries the version, so the body is just the grouped commits.
+header = ""
+body = """
+{% if commits | length == 0 %}No user-facing changes.{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+{% if commit.breaking %}[**breaking**] {% endif %}\
+{{ commit.message | split(pat="\n") | first | trim | upper_first }} ({{ commit.id | truncate(length=7, end="") }})\
+{% endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+# Commits that don't follow Conventional Commits still show up, under "Other".
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+# Release tags: vX.Y.Z, with an optional SemVer pre-release suffix (v0.2.0-rc.1).
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+topo_order = false
+sort_commits = "oldest"
+# The HTML comments order the groups; `striptags` removes them from the headings.
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Fixes" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^docs", group = "<!-- 3 -->Documentation" },
+  { message = ".*", group = "<!-- 4 -->Other" },
+]

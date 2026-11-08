@@ -62,11 +62,39 @@ cargo sqlx prepare -- --all-targets
 While `DATABASE_URL` is set the macros check against that database instead of `.sqlx/`; CI runs
 `cargo sqlx prepare --check -- --all-targets`.
 
+### Cutting a release
+
+`main` is protected, so a release goes through a PR and the tag is pushed after it is merged
+(ADR-0052). `scripts/release.sh` needs `gh` (logged in) and [git-cliff](https://git-cliff.org).
+
+```sh
+git cliff --unreleased                 # preview the release notes for the commits since the last tag
+scripts/release.sh prepare 0.2.0       # on a clean, up-to-date main: opens the release/v0.2.0 PR
+# ... CI passes, rebase-merge the PR on GitHub ...
+git switch main && git pull --ff-only
+scripts/release.sh tag 0.2.0           # tags the merged chore(release) commit, pushes only the tag
+```
+
+`prepare` refuses unless `main` is clean and equal to `origin/main` and the version is valid
+SemVer above the one in `Cargo.toml` (the first release, `prepare 0.1.0`, may keep the version
+already there as long as it was never tagged; its release commit is empty). It bumps `Cargo.toml`
+and `Cargo.lock`, commits `chore(release): v0.2.0`, pushes the branch and opens a PR whose body is
+the git-cliff preview. If it fails before pushing, it switches back to `main` and deletes the local
+release branch; if the PR can't be opened after the push, it says how to finish or drop the branch.
+`tag` refuses unless local `main` equals `origin/main`, its tip is that commit and `Cargo.toml`
+says the version; it asks before pushing (`--yes` skips the prompt). The tag is created only after
+merging because GitHub's rebase merge gives the commit a new SHA. A version with a pre-release
+suffix (`0.2.0-rc.1`) becomes a GitHub pre-release. `scripts/test-release.sh` exercises both steps
+against a local bare remote with `gh` and git-cliff stubbed.
+
 ## Releases
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds the static
-`x86_64-unknown-linux-musl` binary and publishes it with `SHA256SUMS` and the `deploy/` files as a
-GitHub release. See [docs/install.md](docs/install.md).
+Pushing a `v*` tag on `main` runs `.github/workflows/release.yml`. It refuses a tag that doesn't
+match `Cargo.toml` or isn't on `main`, tests and builds static musl binaries for
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (natively, on GitHub's ARM runner),
+and publishes them with one `SHA256SUMS`, the `deploy/` files and `install.sh` as a GitHub
+release. The release notes are git-cliff's grouping of the Conventional Commits since the previous
+tag (`cliff.toml`); `chore(release)` commits are left out. See [docs/install.md](docs/install.md).
 
 App repositories deploy to hoster from their own release workflows with a GitHub Actions OIDC
 token; see [docs/deploying-from-ci.md](docs/deploying-from-ci.md) and the example in

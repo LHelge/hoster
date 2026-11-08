@@ -22,6 +22,7 @@ Every `v*` tag publishes a GitHub release (`.github/workflows/release.yml`) with
 | File | What it is |
 | --- | --- |
 | `hoster-x86_64-unknown-linux-musl` | The binary: x86_64 Linux, statically linked against musl, so it runs on any distribution with no shared-library dependencies. |
+| `hoster-aarch64-unknown-linux-musl` | The same for aarch64 (arm64) Linux. Use it instead of the x86_64 binary below on an ARM server. |
 | `SHA256SUMS` | SHA-256 checksums of every file in the release. |
 | `hoster.service`, `50-hoster.conf`, example config | The systemd user unit, the sysctl drop-in and an example configuration, copied from `deploy/` in the repository. |
 
