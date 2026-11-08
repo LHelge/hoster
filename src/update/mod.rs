@@ -24,10 +24,13 @@
     reason = "consumed by `hoster update` / `hoster rollback` and the System page (ADR-0052)"
 )]
 
+mod cli;
 mod github;
 mod release;
 mod service;
 
+#[cfg(test)]
+mod cli_tests;
 #[cfg(test)]
 mod github_tests;
 #[cfg(test)]
@@ -47,6 +50,11 @@ use thiserror::Error;
 use crate::installation::{BuildInfo, Installation, InstallationError, Version};
 use crate::store::{SchemaVersion, Store, StoreError};
 
+#[allow(
+    unused_imports,
+    reason = "part of the updater API for the CLI and the UI"
+)]
+pub use cli::{CommandError, Console, RollbackCommand, Terminal, Uid, UpdateCommand};
 #[allow(
     unused_imports,
     reason = "part of the updater API for the CLI and the UI"
@@ -166,6 +174,13 @@ pub enum UpdateError {
     },
     #[error(transparent)]
     Service(#[from] ServiceError),
+    #[error(
+        "$HOME is not set, so the binary layout cannot be found; run this as the hoster user in \
+         a session of its own (`sudo machinectl shell hoster@` or `sudo -iu hoster`)"
+    )]
+    NoHome,
+    #[error("cannot set up the HTTPS client for GitHub")]
+    Client(#[source] reqwest::Error),
 }
 
 type Result<T, E = UpdateError> = std::result::Result<T, E>;
@@ -181,6 +196,31 @@ pub trait DeploymentActivity: Send + Sync {
 impl DeploymentActivity for Store {
     async fn in_progress(&self) -> Result<usize, StoreError> {
         Ok(self.unfinished_deployments().await?.len())
+    }
+}
+
+/// The deployments recorded in the database under a state directory, opened read-only for
+/// each question so a running hoster (or a stopped one) is not disturbed. No database means
+/// no deployments.
+#[derive(Debug, Clone)]
+pub struct StateDeployments(PathBuf);
+
+impl StateDeployments {
+    pub fn new(state_dir: impl Into<PathBuf>) -> Self {
+        Self(state_dir.into())
+    }
+}
+
+#[async_trait]
+impl DeploymentActivity for StateDeployments {
+    async fn in_progress(&self) -> Result<usize, StoreError> {
+        if !self.0.join(Store::FILE_NAME).is_file() {
+            return Ok(0);
+        }
+        let store = Store::open_read_only(&self.0).await?;
+        let count = store.in_progress().await;
+        store.close().await;
+        count
     }
 }
 
@@ -214,6 +254,28 @@ pub enum UpdateOutcome {
         /// The versions deleted by pruning.
         pruned: Vec<Version>,
     },
+}
+
+/// What [`Updater::rollback`] is about to do ([`Updater::rollback_plan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackPlan {
+    /// The current version.
+    pub from: Version,
+    /// The previous version, which becomes current.
+    pub to: Version,
+    /// The schema the database is at; `None` when there is no database.
+    pub database: Option<SchemaVersion>,
+    /// The schema the database is undone to: the previous binary's.
+    pub target: SchemaVersion,
+}
+
+impl RollbackPlan {
+    /// How many migrations the rollback undoes (their data is lost).
+    pub fn migrations_undone(&self) -> usize {
+        self.database.map_or(0, |database| {
+            Store::migrations_between(self.target, database)
+        })
+    }
 }
 
 /// What [`Updater::rollback`] did.
@@ -262,6 +324,20 @@ impl Updater {
         }
     }
 
+    /// The updater for this host, as the CLI uses it: the layout under `$HOME`, the database
+    /// under `state_dir`, GitHub releases and the `hoster` systemd user service.
+    pub fn for_host(state_dir: &Path) -> Result<Self> {
+        let installation = Installation::from_env().ok_or(UpdateError::NoHome)?;
+        let source = GithubReleases::new().map_err(UpdateError::Client)?;
+        Ok(Self::new(
+            installation,
+            state_dir,
+            Arc::new(source),
+            Arc::new(StateDeployments::new(state_dir)),
+            Arc::new(SystemdUserService::from_env()),
+        ))
+    }
+
     /// Pretends to be the binary `running` describes (tests).
     #[cfg(test)]
     fn with_running(mut self, running: BuildInfo) -> Self {
@@ -275,12 +351,27 @@ impl Updater {
 
     /// Compares the running version with the latest stable release.
     pub async fn check(&self) -> Result<UpdateCheck> {
-        let latest = self.source.latest().await?;
+        self.check_for(None).await
+    }
+
+    /// Compares the running version with the release `version`, or with the latest stable
+    /// release when `None`.
+    pub async fn check_for(&self, version: Option<&Version>) -> Result<UpdateCheck> {
+        let release = match version {
+            Some(version) => self.source.release(version).await?,
+            None => self.source.latest().await?,
+        };
         Ok(UpdateCheck {
             running: self.running_version(),
-            latest: latest.version,
-            notes: latest.notes,
+            latest: release.version,
+            notes: release.notes,
         })
+    }
+
+    /// Restarts the hoster service so it runs the version `current` names: what the CLI does
+    /// after [`update`](Self::update) switched it.
+    pub async fn restart(&self) -> Result<()> {
+        Ok(self.service.perform(ServiceAction::Restart).await?)
     }
 
     /// Installs and switches to `version`, or to the latest stable release when `None`. See the
@@ -448,9 +539,9 @@ impl Updater {
         schema.map(Some).map_err(UpdateError::Snapshot)
     }
 
-    /// Returns to the previous installed version, undoing the database schema to the one it
-    /// expects. Run by the current (newer) binary; see the module documentation.
-    pub async fn rollback(&self) -> Result<RollbackOutcome> {
+    /// What [`rollback`](Self::rollback) would do, without changing anything: the versions,
+    /// and the schema the database is undone to.
+    pub async fn rollback_plan(&self) -> Result<RollbackPlan> {
         let current = self
             .installation
             .current()?
@@ -477,6 +568,23 @@ impl Updater {
         }
         // A database already at or below the target has nothing to undo.
         let target = database.map_or(target, |database| database.min(target));
+        Ok(RollbackPlan {
+            from: current,
+            to: previous,
+            database,
+            target,
+        })
+    }
+
+    /// Returns to the previous installed version, undoing the database schema to the one it
+    /// expects. Run by the current (newer) binary; see the module documentation.
+    pub async fn rollback(&self) -> Result<RollbackOutcome> {
+        let RollbackPlan {
+            from: current,
+            to: previous,
+            target,
+            ..
+        } = self.rollback_plan().await?;
 
         self.service.perform(ServiceAction::Stop).await?;
         let rolled_back = self.undo_and_switch(&current, &previous, target).await;

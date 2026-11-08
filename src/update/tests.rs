@@ -8,14 +8,14 @@ use tempfile::TempDir;
 use super::*;
 use crate::store::{DeploymentSource, NewDeployment};
 
-const TARGET: &str = "test-target";
+pub(super) const TARGET: &str = "test-target";
 
-fn v(s: &str) -> Version {
+pub(super) fn v(s: &str) -> Version {
     s.parse().unwrap()
 }
 
 /// A fake `hoster` binary: a script answering `version --json` like the real one.
-fn script(version: &str, schema: i64) -> Vec<u8> {
+pub(super) fn script(version: &str, schema: i64) -> Vec<u8> {
     format!(
         "#!/bin/sh\necho '{{\"version\":\"{version}\",\"target\":\"{TARGET}\",\"schema\":{schema}}}'\n"
     )
@@ -23,14 +23,14 @@ fn script(version: &str, schema: i64) -> Vec<u8> {
 }
 
 #[derive(Default)]
-struct FakeReleases {
+pub(super) struct FakeReleases {
     releases: Vec<Release>,
     files: HashMap<Url, Vec<u8>>,
 }
 
 impl FakeReleases {
     /// Publishes `version` with the given files.
-    fn publish(mut self, version: &str, files: &[(&str, Vec<u8>)]) -> Self {
+    pub(super) fn publish(mut self, version: &str, files: &[(&str, Vec<u8>)]) -> Self {
         let version = v(version);
         let assets = files
             .iter()
@@ -56,7 +56,7 @@ impl FakeReleases {
     }
 
     /// Publishes `version` with its binary and a matching `SHA256SUMS`.
-    fn publish_binary(self, version: &str, binary: Vec<u8>) -> Self {
+    pub(super) fn publish_binary(self, version: &str, binary: Vec<u8>) -> Self {
         let name = Release::binary_name(TARGET);
         let sums = format!(
             "{}  {name}\n{}  hoster-other\n",
@@ -112,7 +112,7 @@ impl ReleaseSource for FakeReleases {
 }
 
 #[derive(Default)]
-struct FakeDeployments(AtomicUsize);
+pub(super) struct FakeDeployments(pub(super) AtomicUsize);
 
 #[async_trait]
 impl DeploymentActivity for FakeDeployments {
@@ -122,13 +122,13 @@ impl DeploymentActivity for FakeDeployments {
 }
 
 #[derive(Default)]
-struct FakeService {
+pub(super) struct FakeService {
     calls: Mutex<Vec<ServiceAction>>,
-    fail: Option<ServiceAction>,
+    pub(super) fail: Option<ServiceAction>,
 }
 
 impl FakeService {
-    fn calls(&self) -> Vec<ServiceAction> {
+    pub(super) fn calls(&self) -> Vec<ServiceAction> {
         self.calls.lock().unwrap().clone()
     }
 }
@@ -147,22 +147,22 @@ impl ServiceControl for FakeService {
     }
 }
 
-struct Host {
+pub(super) struct Host {
     _dir: TempDir,
-    installation: Installation,
-    state_dir: PathBuf,
-    deployments: Arc<FakeDeployments>,
-    service: Arc<FakeService>,
+    pub(super) installation: Installation,
+    pub(super) state_dir: PathBuf,
+    pub(super) deployments: Arc<FakeDeployments>,
+    pub(super) service: Arc<FakeService>,
 }
 
 impl Host {
     /// A host with `installed` versions (version, schema its binary reports), the last one
     /// current, and a migrated database.
-    async fn new(installed: &[(&str, i64)]) -> Self {
+    pub(super) async fn new(installed: &[(&str, i64)]) -> Self {
         Self::with_service(installed, FakeService::default()).await
     }
 
-    async fn with_service(installed: &[(&str, i64)], service: FakeService) -> Self {
+    pub(super) async fn with_service(installed: &[(&str, i64)], service: FakeService) -> Self {
         let dir = TempDir::new().unwrap();
         let installation = Installation::new(dir.path().join("lib"));
         let source = dir.path().join("source");
@@ -185,7 +185,7 @@ impl Host {
         }
     }
 
-    fn updater(&self, source: FakeReleases, running: &str) -> Updater {
+    pub(super) fn updater(&self, source: FakeReleases, running: &str) -> Updater {
         Updater::new(
             self.installation.clone(),
             &self.state_dir,
@@ -200,12 +200,12 @@ impl Host {
         })
     }
 
-    fn current(&self) -> Option<Version> {
+    pub(super) fn current(&self) -> Option<Version> {
         self.installation.current().unwrap()
     }
 
     /// Files in the state directory besides the database.
-    fn snapshots(&self) -> Vec<String> {
+    pub(super) fn snapshots(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(&self.state_dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -216,7 +216,7 @@ impl Host {
     }
 
     /// Anything left in the layout root besides `versions` and `current`.
-    fn leftovers(&self) -> Vec<String> {
+    pub(super) fn leftovers(&self) -> Vec<String> {
         fs::read_dir(self.installation.root())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -228,7 +228,7 @@ impl Host {
         Store::open_read_only(&self.state_dir).await.unwrap()
     }
 
-    async fn schema(&self) -> SchemaVersion {
+    pub(super) async fn schema(&self) -> SchemaVersion {
         let store = self.store().await;
         let schema = store.schema_version().await.unwrap();
         store.close().await;
@@ -523,6 +523,18 @@ async fn the_store_reports_unfinished_deployments() {
         .unwrap();
     assert_eq!(store.in_progress().await.unwrap(), 1);
     store.close().await;
+    // The CLI's view opens the database read-only for each question.
+    let state = StateDeployments::new(&host.state_dir);
+    assert_eq!(state.in_progress().await.unwrap(), 1);
+    let empty = TempDir::new().unwrap();
+    assert_eq!(
+        StateDeployments::new(empty.path())
+            .in_progress()
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!empty.path().join(Store::FILE_NAME).exists());
 }
 
 #[tokio::test]
@@ -757,4 +769,23 @@ async fn a_failed_install_leaves_no_version_directory() {
     assert!(matches!(err, UpdateError::Installation(_)), "{err}");
     assert!(!stray.parent().unwrap().exists());
     assert_untouched(&host);
+}
+
+#[test]
+fn systemctl_gets_a_runtime_dir_only_when_the_session_has_none() {
+    use std::ffi::OsStr;
+    let fallback = Some(PathBuf::from("/run/user/1001"));
+    // `sudo -iu hoster` sets no XDG_RUNTIME_DIR; `systemctl --user` would not find the manager.
+    assert_eq!(
+        SystemdUserService::fallback_runtime_dir(None, 1001),
+        fallback
+    );
+    assert_eq!(
+        SystemdUserService::fallback_runtime_dir(Some(OsStr::new("")), 1001),
+        fallback
+    );
+    assert_eq!(
+        SystemdUserService::fallback_runtime_dir(Some(OsStr::new("/run/user/1001")), 1001),
+        None
+    );
 }

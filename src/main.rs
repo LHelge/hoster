@@ -28,7 +28,7 @@ mod web;
 #[cfg(test)]
 mod e2e_tests;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -39,6 +39,7 @@ use crate::installation::BuildInfo;
 use crate::logging::{LogFormat, Logging};
 use crate::store::Store;
 use crate::supervisor::Supervisor;
+use crate::update::{CommandError, RollbackCommand, Terminal, Uid, UpdateCommand, Updater};
 
 /// Single-binary deployment orchestrator for one VPS.
 #[derive(Debug, Parser)]
@@ -65,7 +66,7 @@ impl Cli {
             .map_or(LogFormat::default(), |config| config.log.format);
         Logging::from(format).init();
         tracing::debug!(?command, "starting");
-        command.execute(config).await
+        command.execute(config, config_path.as_deref()).await
     }
 }
 
@@ -98,6 +99,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Update hoster to the latest stable release (or the one named) and restart the service.
+    /// Run as the hoster user; refused while a deployment is in progress.
+    Update(UpdateCommand),
+    /// Return to the previous installed version, undoing the database migrations it does not
+    /// know (their data is lost). Run as the hoster user.
+    Rollback(RollbackCommand),
 }
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
@@ -112,9 +119,15 @@ enum Backup {
 }
 
 impl Command {
-    /// Runs the command. `config` is the outcome of loading the configuration: `doctor` reports
-    /// a failure as one of its findings, every other command needs it to have loaded.
-    async fn execute(self, config: Result<Config, ConfigError>) -> anyhow::Result<()> {
+    /// Runs the command. `config` is the outcome of loading the configuration from
+    /// `config_path`: `doctor` reports a failure as one of its findings, `update` and `rollback`
+    /// read only `state_dir` from `config_path` (they run outside the service's environment),
+    /// every other command needs it to have loaded.
+    async fn execute(
+        self,
+        config: Result<Config, ConfigError>,
+        config_path: Option<&Path>,
+    ) -> anyhow::Result<()> {
         match self {
             Command::Version { json } => {
                 println!("{}", Self::version(json)?);
@@ -148,7 +161,23 @@ impl Command {
                 );
                 Ok(())
             }
+            Command::Update(command) => {
+                let updater = Self::updater(config_path)?;
+                Ok(command.run(&updater, &mut Terminal).await?)
+            }
+            Command::Rollback(command) => {
+                let updater = Self::updater(config_path)?;
+                Ok(command.run(&updater, &mut Terminal).await?)
+            }
         }
+    }
+
+    /// The updater for `hoster update` / `hoster rollback`, refusing root first. Only
+    /// `state_dir` is read from the configuration: an SSH session as hoster has no
+    /// `HOSTER_ADMIN_GITHUB` (the unit's drop-in sets it), and these commands do not need it.
+    fn updater(config_path: Option<&Path>) -> anyhow::Result<Updater> {
+        Uid::current()?.refuse_root()?;
+        Ok(Updater::for_host(&Config::load_state_dir(config_path)?)?)
     }
 
     /// What `hoster version [--json]` prints.
@@ -185,7 +214,8 @@ fn main() -> ExitCode {
         Err(err) => {
             // `{:#}` prints the cause chain on one line and never a backtrace.
             eprintln!("error: {err:#}");
-            ExitCode::FAILURE
+            err.downcast_ref::<CommandError>()
+                .map_or(ExitCode::FAILURE, |err| err.exit_code().into())
         }
     }
 }
@@ -261,9 +291,79 @@ mod tests {
     #[tokio::test]
     async fn version_needs_no_config() {
         Command::Version { json: true }
-            .execute(Err(ConfigError::NoConfigDir))
+            .execute(Err(ConfigError::NoConfigDir), None)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn parses_update_and_rollback() {
+        let update = |version: Option<&str>, check, yes| {
+            Command::Update(UpdateCommand {
+                version: version.map(|v| v.parse().unwrap()),
+                check,
+                yes,
+            })
+        };
+        assert_eq!(parse(&["update"]), update(None, false, false));
+        assert_eq!(parse(&["update", "--check"]), update(None, true, false));
+        assert_eq!(parse(&["update", "-y"]), update(None, false, true));
+        assert_eq!(
+            parse(&["update", "--version", "v0.2.0", "--yes"]),
+            update(Some("0.2.0"), false, true)
+        );
+        assert_eq!(
+            parse(&["update", "--version", "0.3.0-rc.1", "--check"]),
+            update(Some("v0.3.0-rc.1"), true, false)
+        );
+        assert_eq!(
+            parse(&["rollback"]),
+            Command::Rollback(RollbackCommand { yes: false })
+        );
+        assert_eq!(
+            parse(&["rollback", "--yes"]),
+            Command::Rollback(RollbackCommand { yes: true })
+        );
+    }
+
+    #[test]
+    fn update_and_rollback_usage_errors_exit_2() {
+        for args in [
+            &["update", "--version", "latest"][..],
+            &["update", "--version"],
+            &["update", "--check", "--yes"],
+            &["rollback", "--version", "v0.1.0"],
+        ] {
+            let err = Cli::try_parse_from(std::iter::once("hoster").chain(args.iter().copied()))
+                .unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{args:?}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn update_and_rollback_need_a_config_file() {
+        if Uid::current().unwrap().refuse_root().is_err() {
+            return; // Running the suite as root: the root check rightly comes first.
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("hoster.toml");
+        let update = Command::Update(UpdateCommand {
+            version: None,
+            check: true,
+            yes: false,
+        });
+        for command in [update, Command::Rollback(RollbackCommand { yes: true })] {
+            // A config that failed to load (no HOSTER_ADMIN_GITHUB in an SSH session) is not
+            // what stops them; only a missing file is.
+            let err = command
+                .execute(Err(ConfigError::NoConfigDir), Some(&missing))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err.downcast_ref(), Some(ConfigError::NotFound(path)) if *path == missing),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -292,7 +392,7 @@ mod tests {
         });
         for command in [Command::Run, backup] {
             let err = command
-                .execute(Err(ConfigError::NoConfigDir))
+                .execute(Err(ConfigError::NoConfigDir), None)
                 .await
                 .unwrap_err();
             assert!(err.to_string().contains("hoster.toml"), "{err}");
