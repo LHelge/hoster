@@ -380,20 +380,45 @@ impl Auth {
         let Some(token) = Cookie::get(headers, Cookie::SESSION) else {
             return Ok(None);
         };
-        let hash = RandomToken::hash(token);
+        self.active(&RandomToken::hash(token)).await
+    }
+
+    /// The live session with `hash`, refreshing its idle timer.
+    async fn active(&self, hash: &str) -> Result<Option<Session>, StoreError> {
         let now = Timestamp::now();
         let Some(record) = self
             .store
-            .active_session(&hash, now, now - self.settings.idle_timeout)
+            .active_session(hash, now, now - self.settings.idle_timeout)
             .await?
         else {
             return Ok(None);
         };
         let touch_every = Self::TOUCH_INTERVAL.min(self.settings.idle_timeout / 2);
         if record.last_seen_at < now - touch_every {
-            self.store.touch_session(&hash, now).await?;
+            self.store.touch_session(hash, now).await?;
         }
         Ok(Some(Session::from(record)))
+    }
+
+    /// Resolves once `session` has ended (logged out, revoked everywhere, or expired), checking
+    /// every `every`, so a long-lived response such as a followed log does not outlive it. A
+    /// response that is still open counts as activity, as a request does. A failed check is
+    /// returned as an error, and the caller should end the response then too.
+    pub async fn session_ended(
+        &self,
+        session: &Session,
+        every: Duration,
+    ) -> Result<(), StoreError> {
+        let mut checks = tokio::time::interval(every);
+        checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick is immediate; the request was just let through.
+        checks.tick().await;
+        loop {
+            checks.tick().await;
+            if self.active(&session.token_hash).await?.is_none() {
+                return Ok(());
+            }
+        }
     }
 
     /// Sends the browser to `to`: a `303`, or for HTMX requests an `HX-Redirect` (fetch would

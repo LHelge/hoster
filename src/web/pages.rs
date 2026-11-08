@@ -16,14 +16,16 @@ use super::auth::Session;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Dashboard,
+    Containers,
 }
 
 impl Section {
-    const ALL: [Section; 1] = [Section::Dashboard];
+    const ALL: [Section; 2] = [Section::Dashboard, Section::Containers];
 
     fn href(self) -> &'static str {
         match self {
             Section::Dashboard => "/",
+            Section::Containers => "/containers",
         }
     }
 }
@@ -32,6 +34,7 @@ impl fmt::Display for Section {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Section::Dashboard => "Dashboard",
+            Section::Containers => "Containers",
         })
     }
 }
@@ -135,6 +138,11 @@ impl Layout {
 
     pub fn htmx(&self) -> String {
         Assets::get().htmx.url()
+    }
+
+    /// HTMX's SSE extension, loaded on every page so any of them can hold a live view.
+    pub fn htmx_sse(&self) -> String {
+        Assets::get().htmx_sse.url()
     }
 
     pub fn stylesheet(&self) -> String {

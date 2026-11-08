@@ -220,3 +220,282 @@ async fn serves_on_loopback_tcp_for_development() {
         .unwrap();
     server.stop(true).await.unwrap();
 }
+
+mod containers {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::runtime::{
+        ContainerId, ContainerRuntime, ContainerSpec, LogLine, LogStream, NetworkSpec,
+        ServiceGeneration, label,
+    };
+    use crate::store::DeploymentId;
+    use crate::web::auth::tests::Browser;
+
+    const IMAGE: &str =
+        "ghcr.io/me/notes@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// A signed-in app with one running container, `hoster-notes-web-g3`, that has logged two
+    /// lines.
+    async fn with_container() -> (TestApp, Browser, ContainerId) {
+        let app = TestApp::new().await;
+        let browser = app.sign_in().await;
+        let generation = ServiceGeneration {
+            stack: "notes".parse().unwrap(),
+            service: "web".parse().unwrap(),
+            generation: 3,
+        };
+        let spec = ContainerSpec::new(&generation, DeploymentId::from(1), IMAGE.parse().unwrap());
+        let runtime = &app.runtime;
+        runtime
+            .ensure_network(&NetworkSpec::for_stack(&generation.stack))
+            .await
+            .unwrap();
+        runtime.pull_image(&spec.image).await.unwrap();
+        let id = runtime.create_container(&spec).await.unwrap();
+        runtime.start(&id).await.unwrap();
+        runtime.push_log(&id, line(LogStream::Stdout, "listening on :8080"));
+        runtime.push_log(&id, line(LogStream::Stderr, "warning: <no config>"));
+        (app, browser, id)
+    }
+
+    fn line(stream: LogStream, text: &str) -> LogLine {
+        LogLine {
+            stream,
+            time: Some(humantime::parse_rfc3339("2026-11-08T12:00:00Z").unwrap()),
+            text: text.into(),
+        }
+    }
+
+    /// Reads body frames until `needle` has arrived, and returns everything read so far.
+    async fn read_until(body: &mut Body, needle: &str) -> String {
+        let mut text = String::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !text.contains(needle) {
+                let frame = body.frame().await.expect("the stream is open").unwrap();
+                if let Ok(data) = frame.into_data() {
+                    text.push_str(std::str::from_utf8(&data).unwrap());
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("`{needle}` never arrived"));
+        text
+    }
+
+    #[tokio::test]
+    async fn containers_page_lists_managed_containers_with_log_links() {
+        let (app, browser, _) = with_container().await;
+        let response = app.get("/containers", Some(&browser.cookie)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body(response).await;
+        assert!(
+            html.contains(r#"<a href="/containers" aria-current="page">Containers</a>"#),
+            "{html}"
+        );
+        assert!(html.contains("<code>hoster-notes-web-g3</code>"), "{html}");
+        assert!(
+            html.contains(r#"<a href="/containers/hoster-notes-web-g3/logs">Logs</a>"#),
+            "{html}"
+        );
+        assert!(html.contains("<td>running</td>"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn log_page_connects_to_the_stream_with_its_query() {
+        let (app, browser, _) = with_container().await;
+        let response = app
+            .get(
+                "/containers/hoster-notes-web-g3/logs?tail=10&since=1h&follow=on",
+                Some(&browser.cookie),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body(response).await;
+        assert!(
+            html.contains(
+                r#"hx-sse:connect="/containers/hoster-notes-web-g3/logs/stream?tail=10&#38;since=1h&#38;follow=on""#
+            ),
+            "{html}"
+        );
+        assert!(html.contains(r#"hx-sse:close="end""#), "{html}");
+        assert!(html.contains(r#"name="tail" min="0" value="10""#), "{html}");
+        assert!(html.contains(r#"value="1h""#), "{html}");
+        assert!(html.contains(" checked>"), "{html}");
+        assert!(
+            html.contains(&format!(
+                r#"<script src="{}" defer></script>"#,
+                Assets::get().htmx_sse.url()
+            )),
+            "the SSE extension is loaded: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_log_options_are_reported_without_a_stream() {
+        let (app, browser, _) = with_container().await;
+        let page = "/containers/hoster-notes-web-g3/logs?tail=lots&since=";
+        let html = body(app.get(page, Some(&browser.cookie)).await).await;
+        assert!(html.contains("flash-error"), "{html}");
+        assert!(html.contains("whole number"), "{html}");
+        assert!(!html.contains("hx-sse:connect"), "{html}");
+
+        let stream = "/containers/hoster-notes-web-g3/logs/stream?since=soon";
+        let response = app.get(stream, Some(&browser.cookie)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn unknown_and_unmanaged_containers_are_not_found() {
+        let (app, browser, _) = with_container().await;
+        // A container hoster did not create, under a name it could have.
+        let generation = ServiceGeneration {
+            stack: "notes".parse().unwrap(),
+            service: "foreign".parse().unwrap(),
+            generation: 1,
+        };
+        let mut spec =
+            ContainerSpec::new(&generation, DeploymentId::from(1), IMAGE.parse().unwrap());
+        spec.labels.remove(label::MANAGED);
+        app.runtime.create_container(&spec).await.unwrap();
+
+        for name in ["hoster-notes-web-g9", "hoster-notes-foreign-g1"] {
+            for path in [
+                format!("/containers/{name}/logs"),
+                format!("/containers/{name}/logs/stream"),
+            ] {
+                let response = app.get(&path, Some(&browser.cookie)).await;
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_need_a_session() {
+        let (app, _, _) = with_container().await;
+        let response = app
+            .get("/containers/hoster-notes-web-g3/logs/stream", None)
+            .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn unfollowed_log_streams_the_lines_then_ends() {
+        let (app, browser, _) = with_container().await;
+        let response = app
+            .get(
+                "/containers/hoster-notes-web-g3/logs/stream?tail=&since=",
+                Some(&browser.cookie),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header(&response, "content-type"), "text/event-stream");
+        let text = body(response).await;
+        // Both lines in one message, stdout and stderr told apart, the text escaped.
+        assert!(
+            text.contains(
+                r#"<span class="log-line log-stdout"><time datetime="2026-11-08T12:00:00.000Z">2026-11-08T12:00:00.000Z</time> listening on :8080</span>"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"<span class="log-line log-stderr">"#),
+            "{text}"
+        );
+        assert!(text.contains("warning: &#60;no config&#62;"), "{text}");
+        // The batch carries its last line's time, for resuming.
+        assert!(text.contains("\nid: 1794139200000000000\n"), "{text}");
+        assert!(text.contains("End of the log."), "{text}");
+        assert!(text.trim_end().ends_with("\nevent: end"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn tail_limits_the_lines() {
+        let (app, browser, _) = with_container().await;
+        let page = "/containers/hoster-notes-web-g3/logs/stream?tail=1&since=";
+        let text = body(app.get(page, Some(&browser.cookie)).await).await;
+        assert!(!text.contains("listening"), "{text}");
+        assert!(text.contains("no config"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn reconnects_resume_after_the_last_event_id() {
+        let (app, browser, id) = with_container().await;
+        let later = LogLine {
+            time: Some(humantime::parse_rfc3339("2026-11-08T12:00:01Z").unwrap()),
+            ..line(LogStream::Stdout, "request served")
+        };
+        app.runtime.push_log(&id, later);
+        let request = Request::get("/containers/hoster-notes-web-g3/logs/stream?tail=1")
+            .header(header::COOKIE, &browser.cookie)
+            .header("last-event-id", "1794139200000000000")
+            .body(Body::empty())
+            .unwrap();
+        let text = body(app.send(request).await).await;
+        assert!(!text.contains("listening"), "{text}");
+        assert!(!text.contains("no config"), "{text}");
+        assert!(text.contains("request served"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn followed_log_streams_new_lines_and_stops_when_the_browser_leaves() {
+        let (app, browser, id) = with_container().await;
+        let response = app
+            .get(
+                "/containers/hoster-notes-web-g3/logs/stream",
+                Some(&browser.cookie),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body();
+        read_until(&mut stream, "no config").await;
+        assert_eq!(app.runtime.log_followers(&id), 1);
+
+        app.runtime
+            .push_log(&id, line(LogStream::Stdout, "GET /healthz 200"));
+        read_until(&mut stream, "GET /healthz 200").await;
+
+        // The browser goes away: the response body is dropped, and the log is no longer read.
+        drop(stream);
+        assert_eq!(app.runtime.log_followers(&id), 0);
+    }
+
+    #[tokio::test]
+    async fn followed_log_ends_when_the_session_is_revoked() {
+        let (app, browser, id) = with_container().await;
+        let response = app
+            .get(
+                "/containers/hoster-notes-web-g3/logs/stream",
+                Some(&browser.cookie),
+            )
+            .await;
+        let mut stream = response.into_body();
+        read_until(&mut stream, "no config").await;
+        // "Log out everywhere", e.g. from another device.
+        app.store.remove_all_sessions().await.unwrap();
+        let text = read_until(&mut stream, "event: end").await;
+        assert!(text.contains("Signed out"), "{text}");
+        assert!(stream.frame().await.is_none(), "the stream ends");
+        assert_eq!(
+            app.runtime.log_followers(&id),
+            0,
+            "podman is no longer read"
+        );
+    }
+
+    #[tokio::test]
+    async fn followed_log_ends_when_the_container_stops() {
+        let (app, browser, id) = with_container().await;
+        let response = app
+            .get(
+                "/containers/hoster-notes-web-g3/logs/stream",
+                Some(&browser.cookie),
+            )
+            .await;
+        let mut stream = response.into_body();
+        read_until(&mut stream, "no config").await;
+        app.runtime.stop(&id, Duration::ZERO).await.unwrap();
+        read_until(&mut stream, "event: end").await;
+        assert!(stream.frame().await.is_none(), "the stream ends");
+    }
+}

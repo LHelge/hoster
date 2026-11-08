@@ -7,27 +7,30 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bollard::auth::DockerCredentials;
+use bollard::container::LogOutput;
 use bollard::errors::Error as BollardError;
 use bollard::models::{
     ContainerCreateBody, ContainerInspectResponse, ContainerSummary, EndpointSettings, HostConfig,
-    Mount, MountType, NetworkCreateRequest, NetworkingConfig, PortMap, PortSummaryTypeEnum,
-    RestartPolicy, RestartPolicyNameEnum,
+    HostConfigLogConfig, Mount, MountType, NetworkCreateRequest, NetworkingConfig, PortMap,
+    PortSummaryTypeEnum, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
+    LogsOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
-    LogOptions, NetworkSpec, ObjectKind, Operation, PortBinding, PublishedPort, RuntimeError,
-    label,
+    LogOptions, LogStream, NetworkSpec, ObjectKind, Operation, PortBinding, PublishedPort,
+    RuntimeError, label,
 };
 use crate::registry::{Anonymous, RegistryCredential, RegistryCredentials};
 use crate::stack::PinnedImage;
@@ -204,11 +207,6 @@ impl PodmanRuntime {
         }
     }
 
-    /// A placeholder for the operations implemented by later tasks.
-    fn unsupported(operation: Operation) -> RuntimeError {
-        RuntimeError::Unsupported { operation }
-    }
-
     /// The client to stop a container with: the shared one, unless podman may legitimately take
     /// longer than [`Self::TIMEOUT_SECS`] to answer because the container gets `timeout` to exit.
     fn client_for_stop(&self, timeout: Duration) -> Docker {
@@ -315,8 +313,8 @@ impl<'a> Call<'a> {
 
 /// The create request, with every ADR-0019 setting pinned to its safe value: never privileged,
 /// the stack network only (no host network), private PID/IPC namespaces, no devices, no added
-/// capabilities, no binds. Ports go to 127.0.0.1 only (ADR-0007) and podman never restarts a
-/// container by itself (ADR-0028).
+/// capabilities, no binds. Ports go to 127.0.0.1 only (ADR-0007), podman never restarts a
+/// container by itself (ADR-0028), and the log is a size-capped `k8s-file` (ADR-0044).
 impl From<&ContainerSpec> for ContainerCreateBody {
     fn from(spec: &ContainerSpec) -> Self {
         let port_key = |port: u16| format!("{port}/tcp");
@@ -367,6 +365,7 @@ impl From<&ContainerSpec> for ContainerCreateBody {
             uts_mode: None,
             userns_mode: None,
             readonly_rootfs: Some(spec.read_only),
+            log_config: Some(ContainerLog::config()),
             ..HostConfig::default()
         };
         let endpoint = EndpointSettings {
@@ -687,12 +686,168 @@ impl ContainerRuntime for PodmanRuntime {
         Ok(containers)
     }
 
+    /// Reads the log through the compat `logs` endpoint, with timestamps, and joins podman's
+    /// frames into lines (see [`ContainerLog`]). Dropping the stream closes the request, so a
+    /// followed log stops being read as soon as its reader goes away.
     fn logs(
         &self,
-        _id: &ContainerId,
-        _options: LogOptions,
+        id: &ContainerId,
+        options: LogOptions,
     ) -> BoxStream<'static, Result<LogLine, RuntimeError>> {
-        stream::once(async { Err(Self::unsupported(Operation::Logs)) }).boxed()
+        let name = id.to_string();
+        let frames = self
+            .docker
+            .logs(id.as_ref(), Some(ContainerLog::query(options)));
+        let mut log = ContainerLog::default();
+        frames
+            .map(Some)
+            // A sentinel after the last frame, to flush a final line without a newline.
+            .chain(stream::once(async { None }))
+            .flat_map(move |frame| {
+                let lines: Vec<_> = match frame {
+                    Some(Ok(frame)) => log.push(frame).into_iter().map(Ok).collect(),
+                    Some(Err(err)) => {
+                        let call = Call::new(Operation::Logs, ObjectKind::Container, &name);
+                        vec![Err(call.error(err))]
+                    }
+                    None => log.flush().into_iter().map(Ok).collect(),
+                };
+                stream::iter(lines)
+            })
+            .boxed()
+    }
+}
+
+/// A container's log as podman keeps and serves it (ADR-0044): written by the `k8s-file` driver
+/// with a size cap set at create, and read back through the compat `logs` endpoint.
+///
+/// Read with timestamps, podman sends one frame per log entry, prefixed with the entry's RFC 3339
+/// time (in the host's offset, not necessarily UTC). Output without a trailing newline, or a line
+/// longer than conmon's buffer, arrives as several partial frames; this joins them per stream
+/// until the newline, so a [`LogLine`] is always one whole line.
+#[derive(Debug, Default)]
+struct ContainerLog {
+    stdout: Option<PendingLine>,
+    stderr: Option<PendingLine>,
+}
+
+/// The start of a line whose newline has not arrived yet.
+#[derive(Debug)]
+struct PendingLine {
+    time: Option<SystemTime>,
+    text: String,
+}
+
+impl PendingLine {
+    fn new(time: Option<SystemTime>) -> Self {
+        Self {
+            time,
+            text: String::new(),
+        }
+    }
+
+    /// The finished line, with `rest` appended and a trailing `\r` dropped.
+    fn finish(mut self, stream: LogStream, rest: &str) -> LogLine {
+        self.text.push_str(rest);
+        if self.text.ends_with('\r') {
+            self.text.pop();
+        }
+        LogLine {
+            stream,
+            time: self.time,
+            text: self.text,
+        }
+    }
+}
+
+impl ContainerLog {
+    /// The log driver every container is created with.
+    const DRIVER: &str = "k8s-file";
+    /// The most log podman keeps per container. Beyond it, podman truncates the file and starts
+    /// over, so a chatty service cannot fill the disk.
+    const MAX_SIZE: &str = "10m";
+
+    /// The `LogConfig` of a container create request.
+    fn config() -> HostConfigLogConfig {
+        HostConfigLogConfig {
+            typ: Some(Self::DRIVER.to_owned()),
+            config: Some(HashMap::from([(
+                "max-size".to_owned(),
+                Self::MAX_SIZE.to_owned(),
+            )])),
+        }
+    }
+
+    /// The query of a `logs` request: both streams, with timestamps, and `since` rounded down to
+    /// the whole second the API takes.
+    fn query(options: LogOptions) -> LogsOptions {
+        let mut query = LogsOptionsBuilder::new()
+            .follow(options.follow)
+            .stdout(true)
+            .stderr(true)
+            .timestamps(true);
+        if let Some(tail) = options.tail {
+            query = query.tail(&tail.to_string());
+        }
+        if let Some(since) = options.since {
+            let seconds = since.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            // 0 means "no limit" to the API; the epoch itself is as good as no limit.
+            query = query.since(i32::try_from(seconds).unwrap_or(i32::MAX));
+        }
+        query.build()
+    }
+
+    /// The lines that `frame` completes.
+    fn push(&mut self, frame: LogOutput) -> Vec<LogLine> {
+        let (stream, bytes) = match frame {
+            // A TTY has no separate stderr; hoster does not allocate one, but be lenient.
+            LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                (LogStream::Stdout, message)
+            }
+            LogOutput::StdErr { message } => (LogStream::Stderr, message),
+            LogOutput::StdIn { .. } => return Vec::new(),
+        };
+        let frame = String::from_utf8_lossy(&bytes);
+        let (time, mut rest) = Self::timestamp(&frame);
+        let pending = match stream {
+            LogStream::Stdout => &mut self.stdout,
+            LogStream::Stderr => &mut self.stderr,
+        };
+        let mut lines = Vec::new();
+        while let Some((line, more)) = rest.split_once('\n') {
+            let start = pending.take().unwrap_or_else(|| PendingLine::new(time));
+            lines.push(start.finish(stream, line));
+            rest = more;
+        }
+        if !rest.is_empty() {
+            pending
+                .get_or_insert_with(|| PendingLine::new(time))
+                .text
+                .push_str(rest);
+        }
+        lines
+    }
+
+    /// The unfinished lines at the end of the log, stdout first.
+    fn flush(&mut self) -> Vec<LogLine> {
+        [
+            (LogStream::Stdout, self.stdout.take()),
+            (LogStream::Stderr, self.stderr.take()),
+        ]
+        .into_iter()
+        .filter_map(|(stream, pending)| pending.map(|p| p.finish(stream, "")))
+        .collect()
+    }
+
+    /// Splits the leading timestamp off a frame. A frame without one is all text.
+    fn timestamp(frame: &str) -> (Option<SystemTime>, &str) {
+        frame
+            .split_once(' ')
+            .and_then(|(stamp, rest)| {
+                let time = OffsetDateTime::parse(stamp, &Rfc3339).ok()?;
+                Some((Some(SystemTime::from(time)), rest))
+            })
+            .unwrap_or((None, frame))
     }
 }
 
@@ -1140,6 +1295,9 @@ mod tests {
         assert!(host.pid_mode.is_none());
         assert!(host.ipc_mode.is_none());
         assert!(host.volumes_from.is_none());
+        let log = host.log_config.unwrap();
+        assert_eq!(log.typ.as_deref(), Some("k8s-file"));
+        assert_eq!(log.config.unwrap()["max-size"], "10m");
         let mounts = host.mounts.unwrap();
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].typ, Some(MountType::VOLUME));
@@ -1624,5 +1782,221 @@ mod tests {
         if let Err(err) = result {
             std::panic::resume_unwind(err.into_panic());
         }
+    }
+
+    fn stdout(text: &str) -> LogOutput {
+        LogOutput::StdOut {
+            message: text.to_owned().into(),
+        }
+    }
+
+    fn stderr(text: &str) -> LogOutput {
+        LogOutput::StdErr {
+            message: text.to_owned().into(),
+        }
+    }
+
+    fn rfc3339(s: &str) -> SystemTime {
+        humantime::parse_rfc3339(s).unwrap()
+    }
+
+    #[test]
+    fn log_frames_become_whole_lines_with_utc_times() {
+        let mut log = ContainerLog::default();
+        // podman 6.1 stamps frames in the host's offset.
+        let lines = log.push(stdout("2026-11-08T00:29:20.630992353+01:00 out1\n"));
+        assert_eq!(
+            lines,
+            [LogLine {
+                stream: LogStream::Stdout,
+                time: Some(rfc3339("2026-11-07T23:29:20.630992353Z")),
+                text: "out1".into(),
+            }]
+        );
+        // A partial frame waits for its newline; the other stream is not held up by it.
+        assert!(
+            log.push(stdout("2026-11-08T00:29:20.630992353+01:00 part"))
+                .is_empty()
+        );
+        let err = log.push(stderr("2026-11-08T00:29:21Z err1\r\n"));
+        assert_eq!(err[0].stream, LogStream::Stderr);
+        assert_eq!(err[0].text, "err1");
+        assert_eq!(err[0].time, Some(rfc3339("2026-11-08T00:29:21Z")));
+        assert!(log.push(stdout("2026-11-08T00:29:22+01:00 ial")).is_empty());
+        let joined = log.push(stdout("2026-11-08T00:29:23+01:00 \nnext\n"));
+        assert_eq!(joined.len(), 2);
+        assert_eq!(joined[0].text, "partial");
+        assert_eq!(
+            joined[0].time,
+            Some(rfc3339("2026-11-07T23:29:20.630992353Z")),
+            "a joined line keeps the time of its first frame"
+        );
+        assert_eq!(joined[1].text, "next");
+        // An empty line is a line.
+        assert_eq!(log.push(stdout("2026-11-08T00:29:24Z \n"))[0].text, "");
+        // Without a timestamp, the whole frame is text.
+        let plain = log.push(stdout("no-stamp here\n"));
+        assert_eq!(
+            (plain[0].time, plain[0].text.as_str()),
+            (None, "no-stamp here")
+        );
+        // stdin is never shown; a TTY counts as stdout.
+        assert!(
+            log.push(LogOutput::StdIn {
+                message: "x\n".into()
+            })
+            .is_empty()
+        );
+        let console = log.push(LogOutput::Console {
+            message: "tty\n".into(),
+        });
+        assert_eq!(console[0].stream, LogStream::Stdout);
+
+        // The end of the log flushes unfinished lines.
+        assert!(log.push(stderr("2026-11-08T00:29:25Z tail")).is_empty());
+        let rest = log.flush();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(
+            (rest[0].stream, rest[0].text.as_str()),
+            (LogStream::Stderr, "tail")
+        );
+        assert!(log.flush().is_empty());
+    }
+
+    #[test]
+    fn log_query_asks_for_both_streams_with_timestamps() {
+        let query = ContainerLog::query(LogOptions::default());
+        assert!(query.stdout && query.stderr && query.timestamps);
+        assert!(!query.follow);
+        assert_eq!(query.tail, "all");
+        assert_eq!(query.since, 0);
+
+        let query = ContainerLog::query(LogOptions {
+            follow: true,
+            tail: Some(50),
+            since: Some(UNIX_EPOCH + Duration::from_millis(1_700_000_000_900)),
+        });
+        assert!(query.follow);
+        assert_eq!(query.tail, "50");
+        assert_eq!(query.since, 1_700_000_000, "rounded down to the second");
+    }
+
+    #[tokio::test]
+    async fn streams_logs_from_a_real_container() {
+        let Some(runtime) = real_podman().await else {
+            return;
+        };
+        let stack = unique_stack();
+        let body = tokio::spawn({
+            let runtime = runtime.clone();
+            let stack = stack.clone();
+            async move { stream_logs(&runtime, &stack).await }
+        });
+        let result = body.await;
+        clean_up(&runtime, &stack).await;
+        if let Err(err) = result {
+            std::panic::resume_unwind(err.into_panic());
+        }
+    }
+
+    async fn stream_logs(runtime: &PodmanRuntime, stack: &Name) {
+        use futures_util::TryStreamExt;
+
+        runtime
+            .ensure_network(&NetworkSpec::for_stack(stack))
+            .await
+            .unwrap();
+        runtime
+            .pull_image(&run_image())
+            .await
+            .expect("pull busybox");
+        let mut spec = spec_for(stack.as_ref(), "talker");
+        spec.command = Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "echo out1; echo err1 >&2; printf part; sleep 1; echo ial; \
+             while sleep 0.2; do echo tick; done"
+                .into(),
+        ]);
+        let id = runtime.create_container(&spec).await.unwrap();
+        let before = SystemTime::now() - Duration::from_secs(2);
+        runtime.start(&id).await.unwrap();
+
+        // Followed: the lines arrive live, whole and on their own streams.
+        let follow = LogOptions {
+            follow: true,
+            ..LogOptions::default()
+        };
+        let mut lines = runtime.logs(&id, follow);
+        let mut seen = Vec::new();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(line) = lines.next().await {
+                let line = line.expect("log line");
+                let tick = line.text == "tick";
+                seen.push(line);
+                if tick {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the followed log yields the first tick");
+        drop(lines);
+        let find = |text: &str| {
+            seen.iter()
+                .find(|line| line.text == text)
+                .unwrap_or_else(|| panic!("`{text}` in {seen:?}"))
+        };
+        assert_eq!(find("out1").stream, LogStream::Stdout);
+        assert_eq!(find("err1").stream, LogStream::Stderr);
+        assert_eq!(find("partial").stream, LogStream::Stdout);
+        for line in &seen {
+            let time = line.time.expect("podman stamps every line");
+            assert!(time >= before, "{line:?} is not from before the start");
+        }
+
+        // Not followed: the stream ends, and `tail` keeps the last lines only.
+        let tail: Vec<_> = tokio::time::timeout(
+            Duration::from_secs(30),
+            runtime
+                .logs(
+                    &id,
+                    LogOptions {
+                        tail: Some(1),
+                        ..LogOptions::default()
+                    },
+                )
+                .try_collect(),
+        )
+        .await
+        .expect("an unfollowed log ends")
+        .unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].text, "tick");
+
+        // `since` in the future leaves nothing.
+        let none: Vec<_> = runtime
+            .logs(
+                &id,
+                LogOptions {
+                    since: Some(SystemTime::now() + Duration::from_secs(3600)),
+                    ..LogOptions::default()
+                },
+            )
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(none.is_empty(), "{none:?}");
+
+        let missing = ContainerId::from("hoster-no-such-container".to_owned());
+        let result: Result<Vec<_>, _> = runtime
+            .logs(&missing, LogOptions::default())
+            .try_collect()
+            .await;
+        assert!(
+            matches!(result, Err(RuntimeError::NotFound { .. })),
+            "{result:?}"
+        );
+        runtime.remove(&id).await.unwrap();
     }
 }

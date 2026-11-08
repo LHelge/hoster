@@ -6,6 +6,7 @@
   <title>{% block title %}{% endblock %} · hoster</title>
   <link rel="stylesheet" href="{{ layout.stylesheet() }}">
   <script src="{{ layout.htmx() }}" defer></script>
+  <script src="{{ layout.htmx_sse() }}" defer></script>
 </head>
 <body{% if let Some(headers) = layout.hx_headers() %} hx-headers:inherited="{{ headers }}"{% endif %}>
   <header>

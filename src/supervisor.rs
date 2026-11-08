@@ -571,7 +571,11 @@ impl Startup for Supervisor {
                     .store
                     .clone()
                     .context("the state store opens before the admin app")?;
-                let web = WebApp::from_config(&self.config, store)?
+                let runtime = self
+                    .runtime
+                    .clone()
+                    .context("podman is connected before the admin app")?;
+                let web = WebApp::from_config(&self.config, store, runtime)?
                     .start(listen, self.teardown.token.child_token())
                     .await?;
                 self.teardown.web = Some(web);

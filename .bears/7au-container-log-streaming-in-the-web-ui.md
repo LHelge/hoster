@@ -1,10 +1,10 @@
 ---
 id: "7au"
 title: Container log streaming in the web UI
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.369479443Z"
-updated: "2026-11-07T23:27:26.694074718Z"
+updated: "2026-11-08T00:02:37.840228967Z"
 tags:
   - observability
   - web

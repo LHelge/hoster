@@ -15,7 +15,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Component, Path};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures_util::stream::BoxStream;
 
@@ -449,20 +449,34 @@ pub struct LogOptions {
     pub follow: bool,
     /// Only the last `n` lines of the existing log; all of it when `None`.
     pub tail: Option<usize>,
+    /// Only lines written at or after this time. Podman resolves it to whole seconds, so a
+    /// caller that needs more precision filters on [`LogLine::time`] as well.
+    pub since: Option<SystemTime>,
 }
 
-/// One line of container output.
+/// One line of container output, without its line break.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogLine {
     pub stream: LogStream,
+    /// When podman recorded the line, if it said.
+    pub time: Option<SystemTime>,
     pub text: String,
 }
 
+/// Which output stream a [`LogLine`] was written to. Its `Display` is the lowercase name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "constructed by the podman log stream")]
 pub enum LogStream {
     Stdout,
     Stderr,
+}
+
+impl fmt::Display for LogStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        })
+    }
 }
 
 /// A [`ContainerRuntime`] call, for error messages and failure injection.

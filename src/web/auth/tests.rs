@@ -10,6 +10,7 @@ use wiremock::matchers::{body_string_contains, header as has_header, method, pat
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
+use crate::runtime::FakeRuntime;
 use crate::web::WebApp;
 
 pub const ORIGIN: &str = "https://hoster.example.com";
@@ -20,6 +21,8 @@ const USER_PATH: &str = "/api/user";
 pub struct TestApp {
     pub github: MockServer,
     pub store: Store,
+    /// The containers the app shows.
+    pub runtime: Arc<FakeRuntime>,
     pub app: WebApp,
     _dir: TempDir,
 }
@@ -59,10 +62,12 @@ impl TestApp {
             origin: ORIGIN.into(),
             idle_timeout,
         };
-        let app = WebApp::from(Auth::new(settings, store.clone(), client));
+        let runtime = Arc::new(FakeRuntime::new());
+        let app = WebApp::new(Auth::new(settings, store.clone(), client), runtime.clone());
         TestApp {
             github,
             store,
+            runtime,
             app,
             _dir: dir,
         }

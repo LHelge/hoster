@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
+use tokio::sync::mpsc;
 
 use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
@@ -41,9 +42,20 @@ struct FakeContainer {
     spec: ContainerSpec,
     state: ContainerState,
     logs: Vec<LogLine>,
+    /// The streams following the log; each gets every line pushed from now on. They end when
+    /// the container stops running, as podman's followed logs do.
+    followers: Vec<mpsc::UnboundedSender<LogLine>>,
 }
 
 impl FakeContainer {
+    /// Sets the state; a container that stops running ends the streams following its log.
+    fn set_state(&mut self, state: ContainerState) {
+        self.state = state;
+        if !state.is_running() {
+            self.followers.clear();
+        }
+    }
+
     fn info(&self, id: &ContainerId) -> ContainerInfo {
         ContainerInfo {
             id: id.clone(),
@@ -145,15 +157,28 @@ impl FakeRuntime {
     /// Simulates something happening behind hoster's back, e.g. a crash (`Exited(Some(1))`).
     pub fn set_state(&self, id: &ContainerId, state: ContainerState) {
         if let Some(container) = self.lock().containers.get_mut(id) {
-            container.state = state;
+            container.set_state(state);
         }
     }
 
-    /// Appends a line to a container's log.
+    /// Appends a line to a container's log, and sends it to the streams following it.
     pub fn push_log(&self, id: &ContainerId, line: LogLine) {
         if let Some(container) = self.lock().containers.get_mut(id) {
+            container
+                .followers
+                .retain(|follower| follower.send(line.clone()).is_ok());
             container.logs.push(line);
         }
+    }
+
+    /// How many streams still follow a container's log; a dropped stream no longer counts.
+    pub fn log_followers(&self, id: &ContainerId) -> usize {
+        let mut state = self.lock();
+        let Some(container) = state.containers.get_mut(id) else {
+            return 0;
+        };
+        container.followers.retain(|follower| !follower.is_closed());
+        container.followers.len()
     }
 }
 
@@ -224,6 +249,7 @@ impl ContainerRuntime for FakeRuntime {
                 spec: spec.clone(),
                 state: ContainerState::Created,
                 logs: Vec::new(),
+                followers: Vec::new(),
             },
         );
         Ok(id)
@@ -232,7 +258,7 @@ impl ContainerRuntime for FakeRuntime {
     async fn start(&self, id: &ContainerId) -> Result<(), RuntimeError> {
         let mut state = self.lock();
         state.enter(Operation::Start)?;
-        state.container(id)?.state = ContainerState::Running;
+        state.container(id)?.set_state(ContainerState::Running);
         Ok(())
     }
 
@@ -241,7 +267,7 @@ impl ContainerRuntime for FakeRuntime {
         state.enter(Operation::Stop)?;
         let container = state.container(id)?;
         if container.state.is_running() {
-            container.state = ContainerState::Exited(Some(0));
+            container.set_state(ContainerState::Exited(Some(0)));
         }
         Ok(())
     }
@@ -271,24 +297,46 @@ impl ContainerRuntime for FakeRuntime {
             .collect())
     }
 
-    /// Yields the lines pushed so far; `follow` does not wait for more.
+    /// Yields the lines pushed so far (`since` and `tail` applied, `since` to the whole second
+    /// as podman does). With `follow`, a running container's stream then yields every line
+    /// pushed until the container stops running or the stream is dropped.
     fn logs(
         &self,
         id: &ContainerId,
         options: LogOptions,
     ) -> BoxStream<'static, Result<LogLine, RuntimeError>> {
         let mut state = self.lock();
-        let lines = state
-            .enter(Operation::Logs)
-            .and_then(|()| Ok(state.container(id)?.logs.clone()));
-        match lines {
-            Ok(lines) => {
-                let skip = options
-                    .tail
-                    .map_or(0, |tail| lines.len().saturating_sub(tail));
-                stream::iter(lines.into_iter().skip(skip).map(Ok)).boxed()
-            }
-            Err(err) => stream::once(async move { Err(err) }).boxed(),
+        let found = state.enter(Operation::Logs).and_then(|()| {
+            let container = state.container(id)?;
+            let follower = (options.follow && container.state.is_running()).then(|| {
+                let (tx, rx) = mpsc::unbounded_channel();
+                container.followers.push(tx);
+                rx
+            });
+            Ok((container.logs.clone(), follower))
+        });
+        let (mut lines, follower) = match found {
+            Ok(found) => found,
+            Err(err) => return stream::once(async move { Err(err) }).boxed(),
+        };
+        if let Some(since) = options.since {
+            let second = since
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let since = std::time::UNIX_EPOCH + Duration::from_secs(second);
+            lines.retain(|line| line.time.is_none_or(|time| time >= since));
+        }
+        let skip = options
+            .tail
+            .map_or(0, |tail| lines.len().saturating_sub(tail));
+        let existing = stream::iter(lines.into_iter().skip(skip).map(Ok));
+        match follower {
+            Some(rx) => existing
+                .chain(stream::unfold(rx, |mut rx| async move {
+                    rx.recv().await.map(|line| (Ok(line), rx))
+                }))
+                .boxed(),
+            None => existing.boxed(),
         }
     }
 }
@@ -517,6 +565,7 @@ mod tests {
                 &id,
                 LogLine {
                     stream: LogStream::Stdout,
+                    time: None,
                     text: text.into(),
                 },
             );
@@ -531,8 +580,8 @@ mod tests {
             .logs(
                 &id,
                 LogOptions {
-                    follow: false,
                     tail: Some(2),
+                    ..LogOptions::default()
                 },
             )
             .map_ok(|line| line.text)
@@ -547,5 +596,71 @@ mod tests {
             .try_collect()
             .await;
         assert!(matches!(result, Err(RuntimeError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn followed_logs_stream_new_lines_until_stopped_or_dropped() {
+        let runtime = ready().await;
+        let id = runtime.create_container(&spec("a")).await.unwrap();
+        runtime.start(&id).await.unwrap();
+        let line = |text: &str| LogLine {
+            stream: LogStream::Stderr,
+            time: None,
+            text: text.into(),
+        };
+        runtime.push_log(&id, line("before"));
+        let follow = LogOptions {
+            follow: true,
+            ..LogOptions::default()
+        };
+        let mut stream = runtime.logs(&id, follow);
+        assert_eq!(stream.next().await, Some(Ok(line("before"))));
+        runtime.push_log(&id, line("after"));
+        assert_eq!(stream.next().await, Some(Ok(line("after"))));
+        assert_eq!(runtime.log_followers(&id), 1);
+        drop(stream);
+        assert_eq!(runtime.log_followers(&id), 0);
+
+        let mut stream = runtime.logs(&id, follow);
+        assert_eq!(stream.next().await.unwrap().unwrap().text, "before");
+        runtime.stop(&id, Duration::ZERO).await.unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap().text, "after");
+        assert_eq!(stream.next().await, None, "stopping ends the stream");
+    }
+
+    #[tokio::test]
+    async fn logs_since_keep_the_whole_starting_second() {
+        let runtime = ready().await;
+        let id = runtime.create_container(&spec("a")).await.unwrap();
+        let at = |secs: u64, millis: u64| {
+            std::time::UNIX_EPOCH + Duration::from_secs(secs) + Duration::from_millis(millis)
+        };
+        for (text, time) in [
+            ("old", at(99, 900)),
+            ("same", at(100, 100)),
+            ("new", at(101, 0)),
+        ] {
+            runtime.push_log(
+                &id,
+                LogLine {
+                    stream: LogStream::Stdout,
+                    time: Some(time),
+                    text: text.into(),
+                },
+            );
+        }
+        let texts: Vec<_> = runtime
+            .logs(
+                &id,
+                LogOptions {
+                    since: Some(at(100, 500)),
+                    ..LogOptions::default()
+                },
+            )
+            .map_ok(|line| line.text)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(texts, ["same", "new"]);
     }
 }

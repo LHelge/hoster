@@ -1,5 +1,5 @@
-//! Static assets embedded in the binary (ADR-0021): the vendored HTMX build and hoster's
-//! stylesheet. Each is served under a content-hashed name such as
+//! Static assets embedded in the binary (ADR-0021): the vendored HTMX build, its SSE extension
+//! and hoster's stylesheet. Each is served under a content-hashed name such as
 //! `/assets/htmx.min.a0abb04f2f45.js`, so it can be cached for a year; a changed file gets a new
 //! URL.
 
@@ -77,6 +77,8 @@ impl IntoResponse for &'static Asset {
 #[derive(Debug)]
 pub struct Assets {
     pub htmx: Asset,
+    /// HTMX's SSE extension, for live views such as container logs (ADR-0044).
+    pub htmx_sse: Asset,
     pub stylesheet: Asset,
 }
 
@@ -89,6 +91,11 @@ impl Assets {
                 "text/javascript; charset=utf-8",
                 include_bytes!("../../assets/htmx.min.js"),
             ),
+            htmx_sse: Asset::new(
+                "hx-sse.min.js",
+                "text/javascript; charset=utf-8",
+                include_bytes!("../../assets/hx-sse.min.js"),
+            ),
             stylesheet: Asset::new(
                 "hoster.css",
                 "text/css; charset=utf-8",
@@ -98,8 +105,8 @@ impl Assets {
         &ASSETS
     }
 
-    fn all(&'static self) -> [&'static Asset; 2] {
-        [&self.htmx, &self.stylesheet]
+    fn all(&'static self) -> [&'static Asset; 3] {
+        [&self.htmx, &self.htmx_sse, &self.stylesheet]
     }
 
     /// The asset served as `hashed_name`. Unhashed or stale names are not found, so a cached
@@ -139,17 +146,22 @@ mod tests {
 
     #[test]
     fn vendored_files_match_their_recorded_checksums() {
-        let htmx = &Assets::get().htmx;
-        let checksum = Asset::sha256_hex(htmx.bytes);
-        let row = VENDORED
-            .lines()
-            .find(|line| line.starts_with("| `htmx.min.js`"))
-            .expect("htmx.min.js is listed in assets/VENDORED.md");
-        assert!(
-            row.contains(&checksum),
-            "assets/VENDORED.md does not record the SHA-256 {checksum} of htmx.min.js"
-        );
-        assert!(row.contains("| 4.0."), "HTMX 4.0.x is vendored: {row}");
+        let assets = Assets::get();
+        for (file, asset) in [
+            ("htmx.min.js", &assets.htmx),
+            ("hx-sse.min.js", &assets.htmx_sse),
+        ] {
+            let checksum = Asset::sha256_hex(asset.bytes);
+            let row = VENDORED
+                .lines()
+                .find(|line| line.starts_with(&format!("| `{file}`")))
+                .unwrap_or_else(|| panic!("{file} is listed in assets/VENDORED.md"));
+            assert!(
+                row.contains(&checksum),
+                "assets/VENDORED.md does not record the SHA-256 {checksum} of {file}"
+            );
+            assert!(row.contains("| 4.0."), "HTMX 4.0.x is vendored: {row}");
+        }
     }
 
     #[test]

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Logs of {{ container.name }}{% endblock %}
+{% block content %}
+<h1>Logs of <code>{{ container.name }}</code></h1>
+<p class="muted">Stack {{ container.stack }}, service {{ container.service }}, generation {{ container.generation }}: {{ container.state }}. <a href="/containers">All containers</a></p>
+<form class="log-options" method="get">
+  <label>Last <input type="number" name="tail" min="0" value="{{ form.tail }}" placeholder="all"> lines</label>
+  <label>since <input type="text" name="since" value="{{ form.since }}" placeholder="15m or 2026-11-08T12:00:00Z"></label>
+  <label><input type="checkbox" name="follow"{% if form.follow %} checked{% endif %}> Follow</label>
+  <button type="submit">Show</button>
+</form>
+<p class="log-legend"><span class="log-stdout">stdout</span> <span class="log-stderr">stderr</span></p>
+{%- if let Some(url) = stream_url %}
+<pre id="log" class="log" hx-sse:connect="{{ url }}" hx-swap="beforeend" hx-sse:close="end"></pre>
+{%- endif %}
+{% endblock %}

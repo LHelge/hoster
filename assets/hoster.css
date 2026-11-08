@@ -82,3 +82,36 @@ main { max-width: 64rem; margin: 0 auto; padding: 1rem; }
 .flash-error { background: var(--error-bg); }
 
 footer { padding: 1rem; color: var(--muted); font-size: 0.85em; text-align: center; }
+
+.muted { color: var(--muted); }
+
+table.containers { width: 100%; border-collapse: collapse; }
+table.containers th, table.containers td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+/* Container logs (ADR-0044): one block per line, stderr set apart. */
+.log-options { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin: 1rem 0; }
+.log-options input[type="number"] { width: 6rem; }
+.log-options input[type="text"] { width: 16rem; }
+.log-legend { margin: 0 0 0.5rem; font-size: 0.85em; }
+.log-legend span { padding: 0 0.4rem; border-left: 3px solid transparent; }
+.log {
+  min-height: 10rem;
+  max-height: 70vh;
+  overflow: auto;
+  margin: 0;
+  padding: 0.5rem 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.log-line { display: block; padding: 0 0.75rem; border-left: 3px solid transparent; }
+.log-line time { color: var(--muted); }
+.log-stderr { border-left-color: #cf222e; background: var(--error-bg); }
+.log-legend .log-stdout { border-left-color: var(--border); }
+.log-notice { display: block; padding: 0.25rem 0.75rem; color: var(--muted); font-style: italic; }

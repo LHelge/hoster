@@ -1,5 +1,5 @@
-//! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), and the deploy
-//! webhook handler (ADR-0042, ADR-0047).
+//! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), container logs
+//! (ADR-0044, see `containers.rs`), and the deploy webhook handler (ADR-0042, ADR-0047).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
 //! binds the [`Listen`] address and serves until the root cancellation token is cancelled.
@@ -12,6 +12,7 @@
 
 mod assets;
 mod auth;
+mod containers;
 mod pages;
 
 use std::fmt;
@@ -22,19 +23,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use axum::Router;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Extension, Router};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::runtime::ContainerRuntime;
 use crate::store::Store;
 
 use self::assets::Assets;
 use self::auth::Auth;
+use self::containers::{ContainerSource, Containers};
 use self::pages::Dashboard;
 
 /// Where the admin app listens.
@@ -103,20 +106,40 @@ impl SecurityHeaders {
 #[derive(Clone)]
 pub struct WebApp {
     auth: Arc<Auth>,
+    containers: Containers,
 }
 
 impl WebApp {
-    /// The app for `config`, with sessions in `store` and the GitHub OAuth App's credentials
-    /// read from their files or systemd credentials. Fails when they are missing.
-    pub fn from_config(config: &Config, store: Store) -> anyhow::Result<Self> {
+    /// The app for `config`, with sessions in `store`, containers from `runtime`, and the GitHub
+    /// OAuth App's credentials read from their files or systemd credentials. Fails when they are
+    /// missing.
+    pub fn from_config<R: ContainerRuntime>(
+        config: &Config,
+        store: Store,
+        runtime: R,
+    ) -> anyhow::Result<Self> {
         let auth = Auth::from_config(config, store).context("setting up the GitHub login")?;
-        Ok(WebApp::from(auth))
+        Ok(WebApp::new(auth, Arc::new(runtime)))
+    }
+
+    fn new(auth: Auth, containers: Arc<dyn ContainerSource>) -> Self {
+        WebApp {
+            auth: Arc::new(auth),
+            containers: Containers::from(containers),
+        }
     }
 
     /// All routes, behind the authentication guard and with the security headers applied.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/", get(Dashboard::show))
+            .route("/containers", get(Containers::list))
+            .route("/containers/{name}/logs", get(Containers::log_page))
+            .route(
+                "/containers/{name}/logs/stream",
+                get(Containers::log_stream),
+            )
+            .layer(Extension(self.containers.clone()))
             .route("/healthz", get(WebApp::healthz))
             .route("/assets/{file}", get(Assets::serve))
             .merge(Auth::routes())
@@ -178,14 +201,6 @@ impl WebApp {
             socket,
             token,
         })
-    }
-}
-
-impl From<Auth> for WebApp {
-    fn from(auth: Auth) -> Self {
-        WebApp {
-            auth: Arc::new(auth),
-        }
     }
 }
 

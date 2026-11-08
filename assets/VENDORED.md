@@ -8,13 +8,15 @@ SHA-256 recorded here.
 | File | Upstream | Version | SHA-256 of the file | License |
 |---|---|---|---|---|
 | `htmx.min.js` | npm `htmx.org`, `dist/htmx.min.js` | 4.0.1 | `a0abb04f2f45a1f89d1d4844023245537e5e6014c87b144553e0607b4cc32130` | 0BSD (`htmx.LICENSE`) |
+| `hx-sse.min.js` | npm `htmx.org`, `dist/ext/hx-sse.min.js` (the SSE extension, registers as `sse`) | 4.0.1 | `18ef2761356ec1fe0bb6d92612315b37517a7c1e9856b661c5ae81fef239d103` | 0BSD (`htmx.LICENSE`) |
 
 ## Provenance
 
 - Tarball: `https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.1.tgz`
 - npm integrity of the tarball (verified on download):
   `sha512-oF7JgXhDW9UXCy/k1ZYFUQgzu/rm19ORWPSPNL91vPluB2PB9+MV55tyQdH/w7o2EAbTYUG5SDW1R60mdkdqGg==`
-- Downloaded 2026-11-07.
+- Downloaded 2026-11-07; `hx-sse.min.js` taken from the same tarball (integrity re-verified)
+  on 2026-11-08.
 
 ## CSP notes
 
