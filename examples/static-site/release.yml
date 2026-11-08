@@ -1,0 +1,103 @@
+# Example workflow for a static site deployed to hoster.
+#
+# Copy it to `.github/workflows/release.yml` in the site repository, next to the Dockerfile and
+# default.conf from this directory, and adjust the `env` block. On every push to `main` it builds
+# the site with aphid, packs it into an nginx image, pushes it to ghcr and posts the digest to
+# hoster's deploy webhook with the job's OIDC token. See docs/static-sites.md and
+# docs/deploying-from-ci.md in the hoster repository.
+#
+# The stack file must allow this repository and ref, e.g.
+#
+#   [deploy]
+#   repository_id = 123456789        # gh api repos/OWNER/REPO --jq .id
+#   refs = ["refs/heads/main"]
+#   environment = "production"
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # The repository the stack's service `image` names. ghcr names are lowercase.
+  IMAGE: ghcr.io/acme/blog
+  STACK: blog
+  SERVICE: web
+  HOSTER_URL: https://hoster.example.com/hooks/deploy
+  HOSTER_AUDIENCE: https://hoster.example.com
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # A GitHub environment limited to `main`; hoster checks the `environment` claim.
+    environment: production
+    permissions:
+      contents: read
+      packages: write   # push to ghcr with GITHUB_TOKEN
+      id-token: write   # request an OIDC token for hoster
+    steps:
+      - uses: actions/checkout@v7
+
+      # Any generator works here; the Dockerfile only needs the output in `dist/`.
+      - uses: LHelge/aphid@v0.3.0
+        with:
+          version: v0.3.0   # the binary; defaults to the latest release
+          config: aphid.toml
+          output: dist
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+
+      - id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64   # the VPS's architecture
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # Identical to examples/github-actions/release.yml; see that file for comments.
+      - name: Deploy to hoster
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          audience=$(jq -rn --arg a "$HOSTER_AUDIENCE" '$a|@uri')
+          token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -r .value)
+          echo "::add-mask::$token"
+
+          body=$(jq -nc --arg s "$STACK" --arg svc "$SERVICE" --arg d "$DIGEST" \
+            --arg t "${GITHUB_SHA::7}" '{stack:$s, images:{($svc):$d}, tag:$t}')
+          status=$(curl -sS -o response.json -w '%{http_code}' -X POST "$HOSTER_URL" \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $token" \
+            --data "$body")
+          echo "response ($status): $(cat response.json)"
+          case "$status" in
+            200|202) ;;
+            *) echo "::error::hoster refused the deploy ($status): $(cat response.json)"; exit 1 ;;
+          esac

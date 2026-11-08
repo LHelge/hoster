@@ -114,6 +114,8 @@ tag (`cliff.toml`); `chore(release)` commits are left out. See [docs/install.md]
 App repositories deploy to hoster from their own release workflows with a GitHub Actions OIDC
 token; see [docs/deploying-from-ci.md](docs/deploying-from-ci.md) and the example in
 [examples/github-actions/release.yml](examples/github-actions/release.yml).
+Static sites are packed into an nginx image and deployed the same way; see
+[docs/static-sites.md](docs/static-sites.md).
 
 ## License
 
