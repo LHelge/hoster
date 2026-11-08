@@ -1,6 +1,6 @@
 # ADR-0023: Run hoster as a systemd user service with linger and a lowered unprivileged-port start
 
-- Status: Accepted (resolves OQ-09)
+- Status: Accepted (resolves OQ-09; binary location amended by ADR-0052)
 - Date: 2026-11-07
 
 ## Context

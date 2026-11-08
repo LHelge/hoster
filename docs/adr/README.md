@@ -62,6 +62,7 @@ becomes a new ADR here.
 | [0049](0049-apply-always-redeploys.md) | Applying a revision or changing a secret redeploys the affected services immediately; no staged apply (resolves OQ-32; refines ADR-0029) | Next-deploy pickup, applied/deployed pointer pair |
 | [0050](0050-orchestrator-handle-with-async-methods.md) | The orchestrator is an `Arc<Orchestrator>` with async methods and one internal lock, not a command-channel actor (resolves OQ-33) | Actor + `Command` enum, hybrid |
 | [0051](0051-poller-bootstrap-advisory-dns-health-default-port.md) | Poller deploys on first sighting of a never-run service; advisory DNS check; default health `GET /healthz`; `PORT` injected; no host redirects in v1 (resolves OQ-34; amends 0036, 0038, 0043) | Hard DNS gate, prefix-following health default, `[[redirects]]` target |
+| [0052](0052-release-install-and-self-update.md) | Semver tags release musl x86_64/aarch64 binaries with git-cliff notes; curlable idempotent `install.sh`; versioned binaries in `~/.local/lib/hoster` with self-update from the UI or CLI (checksum only, refused while deploying); reversible migrations, with rollback run by the newer binary (amends 0023) | Root-owned binary with sudo update, signing, auto-update, preflight/auto-revert |
 
 ## Template
 
