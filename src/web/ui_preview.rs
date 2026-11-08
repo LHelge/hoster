@@ -1120,6 +1120,21 @@ impl Session<'_> {
         Self::inject(&Self::replace_div(page, id, main), oob_id, inner)
     }
 
+    /// `page` with `text`, HTML-escaped, in the `<textarea>` whose id is `id`: what someone
+    /// typed or uploaded into it before the htmx request.
+    fn fill_textarea(page: &str, id: &str, text: &str) -> String {
+        let at = page
+            .find(&format!("<textarea id=\"{id}\""))
+            .unwrap_or_else(|| panic!("no textarea#{id} in the page"));
+        let start = at + page[at..].find('>').unwrap() + 1;
+        let end = start + page[start..].find("</textarea>").unwrap();
+        let escaped = text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        format!("{}{escaped}{}", &page[..start], &page[end..])
+    }
+
     /// `page` with `fragment` as the content of the element whose id is `id`.
     fn inject(page: &str, id: &str, fragment: &str) -> String {
         let at = page
@@ -1280,25 +1295,39 @@ async fn ui_preview() {
     // htmx results, each in the page that asks for it.
     let apply = session.get("/apply", StatusCode::OK).await;
     let edited = NOTES.replace("port = 8080", "port = 9090");
-    for (file, label, toml) in [
+    for (file, label, toml, changed) in [
         (
             "states/apply-preview.html",
             "Apply: preview with diff",
             edited.as_str(),
+            &["api"][..],
+        ),
+        (
+            "states/apply-new-stack.html",
+            "Apply: a new stack with a warning",
+            "version = 1\nname = \"links\"\n\n[services.web]\nimage = \"docker.io/library/nginx:1.27\"\nvolumes = { data = \"/usr/share/nginx/html\" }\n\n[[services.web.routes]]\nhost = \"links.example.com\"\nport = 80\n\n[services.cache]\nimage = \"docker.io/library/redis:7\"\n",
+            &["cache", "web"],
         ),
         (
             "states/apply-problems.html",
             "Apply: problems in the file",
             "version = 1\nname = \"Not Valid\"\n[services.web]\nimage = 3\n",
+            &[],
         ),
     ] {
+        *app.stacks.changed.lock().unwrap() = changed.iter().map(|&s| s.to_owned()).collect();
         let result = session.post("/apply/preview", &[("toml", toml)]).await;
         preview.write(
             file,
             label,
-            &Session::inject(&apply, "apply-result", &result),
+            &Session::swap_with_oob(
+                &Session::fill_textarea(&apply, "stack-toml", toml),
+                "apply-result",
+                &result,
+            ),
         );
     }
+    *app.stacks.changed.lock().unwrap() = vec!["api".into()];
     let stack = session.get("/stacks/notes", StatusCode::OK).await;
     let reresolve = session.post("/stacks/notes/reresolve/preview", &[]).await;
     preview.write(

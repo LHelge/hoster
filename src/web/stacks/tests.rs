@@ -9,7 +9,7 @@ use http_body_util::BodyExt as _;
 
 use super::*;
 use crate::health::HealthStats;
-use crate::orchestrator::{RestartStats, ServiceState, ServiceStatus};
+use crate::orchestrator::{PinChange, RestartStats, ServiceState, ServiceStatus};
 use crate::runtime::VolumeMount;
 use crate::stack::Stack;
 use crate::store::{ContentHash, RevisionId, StackRevision};
@@ -1086,6 +1086,24 @@ async fn read_only_pages_need_a_session_but_no_javascript() {
         "{apply}"
     );
     assert!(apply.contains(r#"hx-post="/apply/preview""#), "{apply}");
+    // Laid out as "New stack": the editor, the aside the preview fills, the diff card's slot.
+    assert!(
+        apply.contains(r#"<a href="/stacks">~/stacks</a>/new"#),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(r#"<aside class="apply-aside" aria-label="Plan">"#),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(r#"<div id="apply-result" class="apply-result" aria-live="polite">"#),
+        "{apply}"
+    );
+    assert!(apply.contains(r#"<div id="apply-diff"></div>"#), "{apply}");
+    assert!(
+        apply.contains(r#"<button class="primary" type="submit">Check</button>"#),
+        "{apply}"
+    );
 }
 
 #[tokio::test]
@@ -1104,7 +1122,17 @@ async fn preview_reports_validation_errors_with_line_numbers() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let html = body(response).await;
     assert!(html.contains("The stack file is invalid."), "{html}");
+    assert!(
+        html.contains(r#"<section class="card plan-card preflight-fail">"#),
+        "{html}"
+    );
+    assert!(html.contains(r#"<li class="check-fail">"#), "{html}");
     assert!(html.contains("line 6"), "{html}");
+    // The diff of an earlier check no longer matches the editor.
+    assert!(
+        html.ends_with(r#"<div id="apply-diff" hx-swap-oob="innerHTML"></div>"#),
+        "{html}"
+    );
     assert!(
         html.contains(r#"<pre class="problem-source">bogus = true</pre>"#),
         "{html}"
@@ -1135,9 +1163,37 @@ async fn preview_shows_the_diff_pins_and_services_to_redeploy() {
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
     assert_eq!(app.stacks.calls(), [Call::Preview(edited.clone())]);
-    assert!(html.contains("Replaces the active"), "{html}");
-    assert!(html.contains(r#"<ul class="redeploy">"#), "{html}");
-    assert!(html.contains("<li>api</li>"), "{html}");
+    // The plan: the replaced revision, the redeploy, the route that moves and the pin.
+    assert!(
+        html.contains(r#"replace <a href="/stacks/notes"><strong>notes revision 1</strong></a>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<li class="plan-change"><span class="plan-mark" aria-hidden="true">~</span><span class="plan-text"><span class="visually-hidden">Changes: </span>redeploy <strong>api</strong></span></li>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains("route <strong>notes.example.com/ → api:9090</strong>"),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<li class="plan-remove"><span class="plan-mark" aria-hidden="true">−</span><span class="plan-text"><span class="visually-hidden">Removes: </span>route <strong>notes.example.com/ → api:8080</strong>"#),
+        "{html}"
+    );
+    assert!(html.contains("re-pin <strong>storage</strong>"), "{html}");
+    // Pre-flight: what the preview checked.
+    assert!(
+        html.contains(r#"<li class="check-ok"><span class="check-mark" aria-hidden="true">✓</span><span class="check-body">stack file valid · 2 services</span></li>"#),
+        "{html}"
+    );
+    assert!(html.contains("1 route, none taken by hoster"), "{html}");
+    assert!(html.contains("1 third-party tag resolved"), "{html}");
+    // The diff goes into its full-width card out of band.
+    assert!(
+        html.contains(r#"<div id="apply-diff" hx-swap-oob="innerHTML">"#),
+        "{html}"
+    );
+    assert!(html.contains("against revision 1"), "{html}");
     assert!(
         html.contains(r#"<td class="diff-sign">-</td><td class="diff-text">port = 8080</td>"#),
         "{html}"
@@ -1147,10 +1203,24 @@ async fn preview_shows_the_diff_pins_and_services_to_redeploy() {
         "{html}"
     );
     assert!(
-        html.contains(&format!(r#"<code class="wrap">{}</code>"#, digest(0xbb))),
+        html.contains(&format!(
+            r#"<span class="plan-detail">from <code>{}</code></span>"#,
+            digest(0xaa)
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"<span class="plan-detail">to <code>{}</code></span>"#,
+            digest(0xbb)
+        )),
         "{html}"
     );
     assert!(html.contains("Apply and redeploy 1 service<"), "{html}");
+    assert!(
+        html.contains(r#"<a class="plan-cancel" href="/stacks">"#),
+        "{html}"
+    );
     // The confirm form carries the file, escaped.
     assert!(html.contains(r#"<input type="hidden" name="toml" value="version = 1"#));
     assert!(html.contains("name = &#34;notes&#34;"), "{html}");
@@ -1480,37 +1550,6 @@ async fn a_deployment_before_switching_can_be_cancelled_from_its_page() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn file_diff_has_hunks_with_line_numbers_and_context() {
-    let old = (1..=20).map(|n| format!("line {n}\n")).collect::<String>();
-    let new = old
-        .replace("line 2\n", "line two\n")
-        .replace("line 18\n", "");
-    let diff = FileDiff::between(&old, &new);
-    assert_eq!(diff.hunks.len(), 2, "{diff:?}");
-    let first = &diff.hunks[0];
-    assert_eq!(
-        first
-            .iter()
-            .filter(|l| l.kind != "same")
-            .map(|l| (l.sign, l.old, l.new, l.text.as_str()))
-            .collect::<Vec<_>>(),
-        [
-            ('-', Some(2), None, "line 2"),
-            ('+', None, Some(2), "line two"),
-        ]
-    );
-    assert_eq!(
-        first.last().unwrap().text,
-        "line 5",
-        "three lines of context"
-    );
-    assert!(FileDiff::between(&old, &old).is_empty());
-    // A new stack: every line is added.
-    let created = FileDiff::between("", "a\nb\n");
-    assert!(created.hunks[0].iter().all(|l| l.sign == '+'));
-}
-
-#[test]
 fn short_digests_keep_the_algorithm() {
     assert_eq!(
         ShortDigest(&digest(0xab)).to_string(),
@@ -1541,6 +1580,39 @@ fn orchestrator_errors_map_to_status_codes_and_messages() {
 }
 
 #[test]
+fn preview_lists_warnings_as_pre_flight_lines_with_their_source() {
+    let toml = "version = 1\nname = \"wiki\"\n\n[services.web]\nimage = \"docker.io/library/nginx:1\"\nvolumes = { data = \"/data\" }\n";
+    let parsed = Stack::parse(toml).unwrap();
+    assert_eq!(parsed.warnings.len(), 1, "{:?}", parsed.warnings);
+    let preview = ApplyPreview {
+        stack: "wiki".into(),
+        current: None,
+        warnings: parsed.warnings,
+        pins: Vec::new(),
+        changed: vec!["web".into()],
+    };
+    let html = PreviewView::new(preview, toml.into()).render().unwrap();
+    assert!(
+        html.contains(r#"<span class="card-note">1 warning</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<li class="check-warn"><span class="check-mark" aria-hidden="true">!</span><span class="check-body"><span class="visually-hidden">Warning: </span><span class="problem-where"><span class="problem-at">line 6"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<pre class="problem-source">volumes = { data = &#34;/data&#34; }</pre>"#),
+        "{html}"
+    );
+    // A new stack: its service is new.
+    assert!(
+        html.contains(r#"deploy <strong>web</strong> <span class="plan-note">new service</span>"#),
+        "{html}"
+    );
+    assert!(html.contains("stack file valid · 1 service<"), "{html}");
+}
+
+#[test]
 fn preview_of_a_new_stack_says_so_and_lists_no_redeploy() {
     let preview = ApplyPreview {
         stack: "notes".into(),
@@ -1551,13 +1623,19 @@ fn preview_of_a_new_stack_says_so_and_lists_no_redeploy() {
     };
     let html = PreviewView::new(preview, NOTES.into()).render().unwrap();
     assert!(
-        html.contains("Creates the new stack <strong>notes</strong>."),
+        html.contains("create stack <strong>notes</strong>"),
         "{html}"
     );
     assert!(
-        html.contains("No service: every service already runs"),
+        html.contains(r#"redeploy <strong>no service</strong> <span class="plan-note">every service already runs this configuration</span>"#),
         "{html}"
     );
+    // Every route of a new stack appears.
+    assert!(
+        html.contains(r#"<li class="plan-add"><span class="plan-mark" aria-hidden="true">+</span><span class="plan-text"><span class="visually-hidden">Adds: </span>route <strong>notes.example.com/ → api:8080</strong>"#),
+        "{html}"
+    );
+    assert!(html.contains("a new stack"), "{html}");
     assert!(html.contains(">Apply</button>"), "{html}");
 }
 
@@ -1589,9 +1667,9 @@ async fn reresolve_previews_the_moved_digests_then_applies_the_reviewed_revision
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
-    assert!(html.contains(r#"<tr class="changes">"#), "{html}");
+    assert!(html.contains("re-pin <strong>storage</strong>"), "{html}");
     assert!(html.contains(&digest(0xbb)), "{html}");
-    assert!(html.contains("<li>storage</li>"), "{html}");
+    assert!(html.contains("redeploy <strong>storage</strong>"), "{html}");
     assert!(
         html.contains(r#"<input type="hidden" name="revision" value="1">"#),
         "{html}"

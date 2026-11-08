@@ -436,7 +436,6 @@ table.list, table.containers {
 .card .table-scroll:has(> table) { border: 0; border-radius: 0; background: none; }
 .table-scroll > table.list, .table-scroll > table.containers { border: 0; border-radius: 0; background: none; }
 
-table.pins tr.changes td { background: var(--progress-tint); }
 
 ul.plain { margin: 0; padding: 0; list-style: none; }
 
@@ -510,8 +509,6 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); outline
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 label { color: var(--text-2); }
 
-.stack-form { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; margin: 0 0 1rem; }
-.stack-form textarea { width: 100%; font: 13px/1.45 var(--mono); }
 .inline-form { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0 0.25rem 0.25rem 0; }
 
 /* ---- Status pills (src/web/ui.rs, Tone) ------------------------------------------------------ */
@@ -733,18 +730,115 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
   .log-chip, .log-preset, .log-containers .log-chip, .switch, .log-toolbar input, .log-options button { min-height: 44px; }
 }
 
-/* ---- Stack pages: forms, problems, the apply preview and its diff --------------------------- */
+/* ---- Stack pages: the apply page, its plan and pre-flight, problems and the diff ------------
+   `/apply` (src/web/stacks/apply.rs): the editor card and the aside wrap side by side, the aside
+   below on narrow screens. The aside stays in view while a long editor scrolls; it sits in its
+   own row, so sticking never takes it over the diff card under both. */
 
 .dns-detail { display: block; margin-top: 0.25rem; font-size: 12px; }
-.problems { margin: 0.5rem 0 0; padding-left: 1.25rem; }
-.problem-at { font-weight: 600; }
+.apply-layout { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 20px; margin: 0 0 20px; }
+.apply-editor { flex: 999 1 560px; min-width: 0; margin: 0; }
+.apply-aside { position: sticky; top: 16px; flex: 1 1 340px; min-width: 0; }
+.apply-result { display: flex; flex-direction: column; gap: 16px; }
+.apply-result > .card, .apply-result > .flash { margin: 0; }
+.step-head { justify-content: flex-start; gap: 12px; padding-inline: 20px; }
+.step-head h2 { font-size: 15px; }
+.step-no {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--hover);
+  color: var(--accent);
+  font: 700 12px/1 var(--mono);
+}
+.apply-form { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px; }
+.apply-form textarea { width: 100%; min-height: 24rem; font: 13px/1.5 var(--mono); tab-size: 4; resize: vertical; }
+.apply-form-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; }
+.apply-upload { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.apply-upload input { max-width: 100%; font-size: 13px; }
+.apply-form-foot .primary { padding-inline: 24px; }
+.plan-empty { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.55; }
+.plan-empty strong { color: var(--text); }
+
+/* A plan: one mono line per thing that appears (+), changes (~), goes away (−) or stays (=). */
+.plan {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 14px 18px;
+  list-style: none;
+  font: 12px/1.5 var(--mono);
+}
+.plan li { display: flex; gap: 8px; min-width: 0; }
+.plan-mark { flex: none; width: 1ch; font-weight: 700; }
+.plan-add .plan-mark { color: var(--ok); }
+.plan-change .plan-mark { color: var(--progress); }
+.plan-remove .plan-mark { color: var(--fail); }
+.plan-keep .plan-mark { color: var(--muted); }
+.plan-text { min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.plan-text strong { color: var(--text); font-weight: 600; }
+.plan-text a strong { color: var(--link); }
+.plan-note { color: var(--muted); }
+.plan-detail { display: block; color: var(--muted); }
+.plan-detail code { color: var(--text-2); font-size: inherit; }
+
+/* Pre-flight checks and problems: ✓ passed, ! a warning, ✗ a problem, each with its source line. */
+.checks {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 0;
+  padding: 14px 18px;
+  list-style: none;
+  font: 12px/1.5 var(--mono);
+}
+.checks + .checks { padding-top: 0; }
+.checks li { display: flex; gap: 8px; min-width: 0; }
+.check-mark { flex: none; width: 1ch; font-weight: 700; }
+.check-ok .check-mark { color: var(--ok); }
+.check-warn .check-mark { color: var(--warn); }
+.check-fail .check-mark { color: var(--fail); }
+.check-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; color: var(--text-2); overflow-wrap: anywhere; }
+.problem-where { color: var(--muted); }
+.problem-at { color: var(--text); font-weight: 600; }
+.problem-path { color: var(--text-2); font-size: inherit; }
+.problem-message { color: var(--text); }
 .problem-source {
-  margin: 0.25rem 0;
-  padding: 0.35rem 0.6rem;
-  border-radius: var(--radius-control);
+  margin: 2px 0 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   background: var(--inset);
+  color: var(--text);
+  font-size: 12px;
   overflow-x: auto;
 }
+.flash .checks { padding: 4px 0 2px; }
+.preflight-fail {
+  border-color: color-mix(in srgb, var(--fail) 45%, var(--border));
+  background: color-mix(in srgb, var(--fail) 7%, var(--surface));
+}
+.preflight-fail .card-head { border-bottom-color: color-mix(in srgb, var(--fail) 25%, var(--border)); }
+.preflight-fail .card-head h2, .preflight-fail .card-note { color: var(--fail); }
+.preflight-fail > .card-body { margin: 0; color: var(--text); font-size: 13px; }
+.preflight-fail > .checks { padding-top: 0; }
+
+/* The confirm form: full width under the aside's cards, a sentence card-foot in a re-resolve. */
+.plan-confirm { display: flex; flex-direction: column; gap: 8px; margin: 0; }
+.apply-result .plan-confirm button { width: 100%; }
+.plan-hint { margin: 0; color: var(--muted); font: 11.5px/1.5 var(--mono); }
+.apply-result .plan-hint { text-align: center; }
+.plan-cancel { align-self: center; padding: 6px 10px; font: 12px/1.4 var(--mono); }
+.reresolve .plan-confirm { align-items: flex-start; padding: 14px 18px; border-top: 1px solid var(--divider); }
+.reresolve > p.card-body { margin: 0; font-size: 13px; }
+.diff-card { margin: 0; }
+.diff-card > p.card-body { margin: 0; font-size: 13px; }
+.diff-card .diff { margin: 0; border: 0; border-radius: 0 0 var(--radius-card) var(--radius-card); }
 .diff {
   margin: 0 0 1rem;
   border: 1px solid var(--border);
@@ -759,6 +853,11 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .diff-sign { width: 1rem; user-select: none; }
 .diff-add { background: var(--ok-tint); }
 .diff-remove { background: var(--fail-tint); }
+/* At phone width the cancel link and the upload input are touch targets. */
+@media (max-width: 760px) {
+  .plan-cancel { display: inline-flex; align-items: center; min-height: 44px; }
+  .apply-upload input { min-height: 44px; }
+}
 
 /* Stacks list (src/web/stacks/list.rs): a status filter of links, then a grid of cards that is
    one column at narrow widths. */
@@ -904,7 +1003,7 @@ p.stack-stats { font-size: 12px; }
 .tabs a:focus-visible { outline-offset: -2px; }
 .tabs a[aria-selected="true"] { box-shadow: inset 0 -2px var(--accent); color: var(--text); font-weight: 600; }
 #stack-action-result:empty, #reresolve-result:empty { display: none; }
-#reresolve-result .preview { margin: 0 0 1.25rem; }
+#reresolve-result .plan-card { margin: 0 0 1.25rem; }
 
 /* Stack overview (src/web/stacks/overview.rs) */
 .card-count, .card-note { color: var(--muted); font-family: var(--mono); font-size: 12px; font-weight: 400; }
