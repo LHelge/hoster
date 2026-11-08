@@ -1,15 +1,16 @@
 ---
 id: "25t"
 title: Per-stack deploy queue, coalescing and cancellation
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-07T14:45:17.305987152Z"
-updated: "2026-11-07T14:45:17.305987152Z"
+updated: "2026-11-08T02:02:27.807660527Z"
 tags:
   - orchestrator
 depends_on:
   - shg
 parent: mdd
+attempts: 1
 ---
 
 ## Summary

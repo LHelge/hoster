@@ -22,6 +22,9 @@ mod store;
 mod supervisor;
 mod web;
 
+#[cfg(test)]
+mod e2e_tests;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 

@@ -33,6 +33,31 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
+  podman:
+    name: zero-downtime deploy on rootless podman
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ubuntu-latest ships podman; its rootless API socket is a systemd user unit.
+      - name: Start the rootless podman socket
+        run: |
+          podman --version
+          systemctl --user start podman.socket
+          echo "HOSTER_PODMAN_SOCKET=/run/user/$(id -u)/podman/podman.sock" >> "$GITHUB_ENV"
+
+      # ADR-0017 end to end: hoster's orchestrator and proxy in-process against real podman,
+      # deploying under continuous load (src/e2e_tests.rs).
+      - name: End-to-end deploy under load
+        env:
+          HOSTER_PODMAN_TESTS: "1"
+        run: cargo test --locked e2e_tests -- --nocapture
+
   systemd:
     name: systemd unit and sysctl drop-in
     runs-on: ubuntu-latest

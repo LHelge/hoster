@@ -213,15 +213,16 @@ struct Harness {
     _socket_dir: tempfile::TempDir,
 }
 
-/// A throwaway CA issuing one leaf per host.
-struct TestCa {
+/// A throwaway CA issuing one leaf per host; the end-to-end deploy test (`crate::e2e_tests`)
+/// serves its certificates too.
+pub(crate) struct TestCa {
     issuer: Issuer<'static, KeyPair>,
     root: CertificateDer<'static>,
     root_pem: String,
 }
 
 impl TestCa {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -237,7 +238,7 @@ impl TestCa {
     }
 
     /// (fullchain PEM, key PEM) for `host`.
-    fn issue(&self, host: &str) -> (String, String) {
+    pub(crate) fn issue(&self, host: &str) -> (String, String) {
         let key = KeyPair::generate().unwrap();
         let leaf = CertificateParams::new(vec![host.to_owned()])
             .unwrap()
@@ -255,7 +256,7 @@ impl TestCa {
     }
 
     /// The rustls client configuration behind [`TestCa::connector`].
-    fn client_config(&self, alpn: &[&[u8]]) -> ClientConfig {
+    pub(crate) fn client_config(&self, alpn: &[&[u8]]) -> ClientConfig {
         let mut roots = RootCertStore::empty();
         roots.add(self.root.clone()).unwrap();
         let provider = Arc::new(rustls::crypto::ring::default_provider());

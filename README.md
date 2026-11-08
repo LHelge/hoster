@@ -21,6 +21,22 @@ CI (`.github/workflows/ci.yml`) runs the same format, lint and test steps on eve
 request, checks that `.sqlx/` is up to date, and checks that the static musl release build links
 statically.
 
+### Tests against real podman
+
+Tests that need rootless podman skip themselves unless `HOSTER_PODMAN_TESTS=1` is set
+(`HOSTER_PODMAN_SOCKET` overrides the socket path). The main one is the end-to-end zero-downtime
+test in `src/e2e_tests.rs` (ADR-0017): it runs hoster's orchestrator and proxy in-process,
+deploys a busybox-based app as v1, keeps keep-alive, HTTP/2, new-connection and one streaming
+request running through the TLS proxy while it deploys v2 and a broken v3, and fails on any
+error or non-2xx answer, on a client that does not switch cleanly from v1 to v2, on a cut
+stream, or on v3 ever answering. CI runs it in the `podman` job; locally:
+
+```sh
+systemctl --user start podman.socket
+HOSTER_PODMAN_TESTS=1 cargo test e2e_tests -- --nocapture   # just the end-to-end test
+HOSTER_PODMAN_TESTS=1 cargo test                             # every podman test (pulls from ghcr)
+```
+
 ### State store queries (sqlx)
 
 The state store (`src/store/`) uses sqlx's compile-time checked `query!` / `query_as!` macros.
