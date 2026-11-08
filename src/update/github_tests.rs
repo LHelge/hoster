@@ -22,6 +22,8 @@ fn release_json(server: &MockServer, tag: &str, prerelease: bool) -> serde_json:
         "body": "## Features\n- things",
         "draft": false,
         "prerelease": prerelease,
+        "published_at": "2026-11-06T09:30:00Z",
+        "html_url": format!("https://github.com/LHelge/hoster/releases/tag/{tag}"),
         "assets": [{
             "name": "hoster-x86_64-unknown-linux-musl",
             "browser_download_url": format!("{}/download/{tag}/hoster-x86_64-unknown-linux-musl", server.uri()),
@@ -82,6 +84,14 @@ async fn latest_reads_version_notes_and_assets() {
     let names: Vec<_> = release.assets.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, ["hoster-x86_64-unknown-linux-musl", "SHA256SUMS"]);
     assert_eq!(release.asset("SHA256SUMS").unwrap().size, Some(100));
+    assert_eq!(
+        release.published,
+        Some(humantime::parse_rfc3339("2026-11-06T09:30:00Z").unwrap())
+    );
+    assert_eq!(
+        release.page.as_ref().map(Url::as_str),
+        Some("https://github.com/LHelge/hoster/releases/tag/v0.2.0")
+    );
 
     // The User-Agent names hoster and its version, nothing about the host or its owner.
     let requests: Vec<Request> = server.received_requests().await.unwrap();
@@ -167,6 +177,30 @@ async fn a_tag_that_is_not_a_version_is_malformed() {
         source.latest().await,
         Err(SourceError::Malformed(_))
     ));
+}
+
+#[tokio::test]
+async fn a_page_off_github_and_a_bad_date_are_left_out() {
+    let (server, source) = server().await;
+    for (tag, page) in [
+        ("v0.2.0", "javascript:alert(1)"),
+        ("v0.3.0", "https://evil.example/LHelge/hoster/releases"),
+        (
+            "v0.4.0",
+            "http://github.com/LHelge/hoster/releases/tag/v0.4.0",
+        ),
+    ] {
+        let mut json = release_json(&server, tag, false);
+        json["html_url"] = page.into();
+        json["published_at"] = "last tuesday".into();
+        Mock::given(path(format!("{REPO}/releases/tags/{tag}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json))
+            .mount(&server)
+            .await;
+        let release = source.release(&tag.parse().unwrap()).await.unwrap();
+        assert_eq!(release.page, None, "{page}");
+        assert_eq!(release.published, None);
+    }
 }
 
 #[tokio::test]

@@ -41,8 +41,8 @@ use super::auth::{Auth, Session};
 use super::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 use super::stacks::Stacks;
 use crate::runtime::{
-    ContainerId, ContainerInfo, ContainerRuntime, LogLine, LogOptions, LogStream, RuntimeError,
-    label,
+    ContainerId, ContainerInfo, ContainerRuntime, EngineInfo, LogLine, LogOptions, LogStream,
+    RuntimeError, label,
 };
 
 /// What the container pages need from the runtime. Unlike [`ContainerRuntime`] it is
@@ -64,6 +64,9 @@ pub trait ContainerSource: Send + Sync + 'static {
         id: &ContainerId,
         options: LogOptions,
     ) -> BoxStream<'static, Result<LogLine, RuntimeError>>;
+
+    /// What the engine says about itself; see [`ContainerRuntime::engine`].
+    async fn engine(&self) -> Result<EngineInfo, RuntimeError>;
 }
 
 #[async_trait::async_trait]
@@ -98,6 +101,10 @@ impl<R: ContainerRuntime> ContainerSource for R {
         options: LogOptions,
     ) -> BoxStream<'static, Result<LogLine, RuntimeError>> {
         self.logs(id, options)
+    }
+
+    async fn engine(&self) -> Result<EngineInfo, RuntimeError> {
+        ContainerRuntime::engine(self).await
     }
 }
 

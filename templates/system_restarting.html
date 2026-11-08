@@ -1,6 +1,25 @@
-{#- After a successful update: hoster shuts down and systemd starts the new binary. The poll
+{#- After a successful update: hoster shuts down and systemd starts the new binary. The steps are
+    the ones the updater did, then the restart; nothing hoster cannot know is listed. The poll
     keeps asking which version answers (failing while hoster is down) until the new one does;
     that answer carries HX-Refresh, which reloads the page. -#}
-<div class="flash flash-success" role="status" hx-get="/system/version?from={{ from }}" hx-trigger="every 2s" hx-swap="none">
-  <p>Switched from {{ from }} to {{ to }}{% if let Some(snapshot) = snapshot %}; the database was snapshotted to <code>{{ snapshot }}</code>{% endif %}. Restarting&hellip; this page reloads once {{ to }} answers.</p>
+<div class="update-offer" hx-get="/system/version?from={{ from }}" hx-trigger="every 2s" hx-swap="none">
+  <div class="update-title">
+    <h2 class="eyebrow eyebrow-progress">Updating</h2>
+    <span class="update-version">{{ from }} → {{ to }}</span>
+  </div>
+  <ol class="update-steps-list">
+    <li class="step-done"><span aria-hidden="true">✓</span> downloaded <code>{{ binary }}</code> and verified it against <code>SHA256SUMS</code></li>
+    <li class="step-done"><span aria-hidden="true">✓</span> installed {{ to }} under <code>versions/</code></li>
+    {%- if let Some(snapshot) = snapshot %}
+    <li class="step-done"><span aria-hidden="true">✓</span> snapshotted the database to <code>{{ snapshot }}</code></li>
+    {%- else %}
+    <li class="step-done"><span aria-hidden="true">✓</span> no database to snapshot yet</li>
+    {%- endif %}
+    <li class="step-done"><span aria-hidden="true">✓</span> switched <code>current</code> to {{ to }}</li>
+    {%- if !pruned.is_empty() %}
+    <li class="step-done"><span aria-hidden="true">✓</span> removed old {% for version in pruned %}{% if !loop.first %}, {% endif %}{{ version }}{% endfor %}</li>
+    {%- endif %}
+    <li class="step-now"><span aria-hidden="true">●</span> restarting into {{ to }}&hellip; this page reloads once it answers</li>
+  </ol>
+  <p class="update-note">Stacks keep running while hoster restarts; hoster's own connections (its proxy and this page) drop for a few seconds.</p>
 </div>

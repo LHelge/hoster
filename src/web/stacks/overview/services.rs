@@ -24,7 +24,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use super::super::ShortDigest;
 use super::super::list::{ServiceChip, StackCard};
@@ -32,6 +32,7 @@ use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::runtime::{ContainerInfo, PublishedPort, label};
 use crate::stack::Stack;
+use crate::web::ui::Uptime;
 use crate::web::ui::{Pill, Tone};
 
 /// The managed containers of one stack, with the service and generation their labels name.
@@ -464,11 +465,6 @@ impl fmt::Display for Ports<'_> {
     }
 }
 
-/// How long a container has been up, in its two largest units: `45s`, `12m`, `2h 04m`,
-/// `12d 6h`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Uptime(pub Duration);
-
 impl Uptime {
     /// The uptime of `container` at `now`, while it runs and its start time is known.
     fn of(container: &ContainerInfo, now: SystemTime) -> Option<Self> {
@@ -477,32 +473,12 @@ impl Uptime {
             .filter(|_| container.state.is_running())?;
         Some(Uptime(now.duration_since(started).unwrap_or_default()))
     }
-
-    /// When it started, for the tooltip.
-    pub fn title(&self, now: SystemTime) -> String {
-        format!(
-            "up since {}",
-            humantime::format_rfc3339_seconds(now - self.0)
-        )
-    }
-}
-
-impl fmt::Display for Uptime {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let secs = self.0.as_secs();
-        let (d, h, m) = (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60);
-        match secs {
-            0..60 => write!(f, "{secs}s"),
-            60..3_600 => write!(f, "{m}m"),
-            3_600..86_400 => write!(f, "{h}h {m:02}m"),
-            _ => write!(f, "{d}d {h}h"),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::time::Duration;
 
     use super::*;
     use crate::runtime::{ContainerId, ContainerState, Labels};
@@ -522,15 +498,6 @@ mod tests {
             ports: Vec::new(),
             started_at: None,
         }
-    }
-
-    #[test]
-    fn uptime_shows_its_two_largest_units() {
-        let up = |secs| Uptime(Duration::from_secs(secs)).to_string();
-        assert_eq!(up(45), "45s");
-        assert_eq!(up(12 * 60 + 5), "12m");
-        assert_eq!(up(2 * 3_600 + 4 * 60), "2h 04m");
-        assert_eq!(up(12 * 86_400 + 6 * 3_600 + 59), "12d 6h");
     }
 
     #[test]

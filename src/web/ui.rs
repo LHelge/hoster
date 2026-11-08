@@ -1,12 +1,12 @@
 //! The admin UI's small rendered components (ADR-0054): the [`Tone`] every status maps into
 //! (deployment states, health, [`CertState`] here; DNS verdicts and warnings where they are
-//! defined), the [`Pill`] that shows one, and the server-drawn [`Meter`] bar. Each renders its
-//! own markup in Askama templates (`HtmlSafe`, like [`Icon`]) and is coloured by a class whose
-//! colours are the role tokens in `assets/hoster.css`, so no page names a palette colour and
-//! nothing needs an inline `style=` under the CSP.
+//! defined), the [`Pill`] that shows one, the server-drawn [`Meter`] bar and the [`Uptime`] of
+//! something running. Each renders its own markup in Askama templates (`HtmlSafe`, like
+//! [`Icon`]) and is coloured by a class whose colours are the role tokens in `assets/hoster.css`,
+//! so no page names a palette colour and nothing needs an inline `style=` under the CSP.
 
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use askama::filters::{Html, escape};
 
@@ -343,6 +343,34 @@ impl fmt::Display for Count {
     }
 }
 
+/// How long something (a container, hoster, the host) has been up, in its two largest units:
+/// `45s`, `12m`, `2h 04m`, `12d 6h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Uptime(pub Duration);
+
+impl Uptime {
+    /// When it started, for the tooltip.
+    pub fn title(&self, now: SystemTime) -> String {
+        format!(
+            "up since {}",
+            humantime::format_rfc3339_seconds(now - self.0)
+        )
+    }
+}
+
+impl fmt::Display for Uptime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secs = self.0.as_secs();
+        let (d, h, m) = (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60);
+        match secs {
+            0..60 => write!(f, "{secs}s"),
+            60..3_600 => write!(f, "{m}m"),
+            3_600..86_400 => write!(f, "{h}h {m:02}m"),
+            _ => write!(f, "{d}d {h}h"),
+        }
+    }
+}
+
 /// Text HTML-escaped the way Askama escapes template values.
 struct Escaped<'a>(&'a str);
 
@@ -358,6 +386,15 @@ impl fmt::Display for Escaped<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uptime_shows_its_two_largest_units() {
+        let up = |secs| Uptime(Duration::from_secs(secs)).to_string();
+        assert_eq!(up(45), "45s");
+        assert_eq!(up(12 * 60 + 5), "12m");
+        assert_eq!(up(2 * 3_600 + 4 * 60), "2h 04m");
+        assert_eq!(up(12 * 86_400 + 6 * 3_600 + 59), "12d 6h");
+    }
 
     #[test]
     fn states_map_to_tones() {

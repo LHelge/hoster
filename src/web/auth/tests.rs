@@ -101,6 +101,7 @@ impl TestApp {
                 Arc::new(FakeService::default()),
             ),
             ShutdownRequest::default(),
+            Arc::new(crate::web::system::Facts::default()),
         );
         let app = WebApp::new(
             Auth::new(settings, store.clone(), client),

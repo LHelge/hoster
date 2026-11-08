@@ -1,17 +1,28 @@
-{#- The result of "Check for updates" when a newer release exists. The release notes come from
-    GitHub and are shown as escaped, preformatted text: no HTML from the release body is ever
-    rendered. -#}
-<div class="update-available">
-  <p class="flash flash-info" role="status">{{ latest }} is available; this is {{ running }}.</p>
-  <h3>Release notes for {{ latest }}</h3>
-  <pre class="release-notes">{{ notes }}</pre>
+{#- The result of "check for updates" when a newer release exists, swapped into the update card.
+    The release notes come from GitHub and are shown as escaped, preformatted text: no HTML
+    from the release body is ever rendered. -#}
+<div class="update-offer">
+  <div class="update-head">
+    <div class="update-title">
+      <h2 class="eyebrow eyebrow-progress">Update available</h2>
+      <span class="update-version">{{ latest }} <span class="update-meta">·{% if let Some(released) = released %} released {{ released }} ·{% endif %} this is {{ running }}</span></span>
+    </div>
+    {%- if let Some(page) = page %}
+    <a class="update-changelog" href="{{ page }}">full changelog ↗</a>
+    {%- endif %}
+  </div>
+  <pre class="release-notes" tabindex="0" aria-label="Release notes for {{ latest }}">{{ notes }}</pre>
   {%- if let Some(reason) = blocked %}
-  <button type="button" disabled aria-describedby="update-blocked">{{ crate::web::Icon::Update }}Update to {{ latest }}</button>
-  <p id="update-blocked" class="muted">{{ reason }}</p>
+  <div class="update-apply">
+    <p id="update-blocked" class="update-blocked">{{ reason }}</p>
+    <button type="button" class="primary" disabled aria-describedby="update-blocked">{{ crate::web::Icon::Update }}Apply update</button>
+  </div>
   {%- else %}
-  <form class="inline-form" hx-post="/system/update" hx-target="#update-check" hx-confirm="Update hoster to {{ latest }}? hoster restarts, dropping connections for a few seconds.">
+  <form class="update-apply" hx-post="/system/update" hx-target="#update-check" hx-confirm="Update hoster to {{ latest }}? hoster restarts, dropping its connections for a few seconds.">
     <input type="hidden" name="version" value="{{ latest }}">
-    <button type="submit">{{ crate::web::Icon::Update }}Update to {{ latest }}</button>
+    <span class="update-steps">verify <code>SHA256SUMS</code> · snapshot the database · restart into {{ latest }}</span>
+    <button type="submit" class="primary">{{ crate::web::Icon::Update }}Apply update</button>
   </form>
   {%- endif %}
+  <p class="update-note">Stacks keep running while hoster restarts; hoster's own connections (its proxy and this page) drop for a few seconds.</p>
 </div>

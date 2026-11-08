@@ -146,6 +146,23 @@ pub trait ContainerRuntime: Send + Sync + 'static {
         id: &ContainerId,
         options: LogOptions,
     ) -> BoxStream<'static, Result<LogLine, RuntimeError>>;
+
+    /// What the engine behind the socket says about itself, for the System page.
+    fn engine(&self) -> impl Future<Output = Result<EngineInfo, RuntimeError>> + Send;
+}
+
+/// The container engine as it describes itself (podman's compat `/info`). Every part is
+/// optional: an engine that leaves one out is shown as not knowing it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EngineInfo {
+    /// The engine's version (`5.4.2`).
+    pub version: Option<String>,
+    /// Whether it runs rootless (ADR-0002); `None` when it does not say.
+    pub rootless: Option<bool>,
+    /// The cgroups version (`2`).
+    pub cgroup_version: Option<String>,
+    /// The cgroup manager (`systemd`, `cgroupfs`).
+    pub cgroup_driver: Option<String>,
 }
 
 /// A podman container ID.
@@ -653,6 +670,7 @@ pub enum Operation {
     Inspect,
     ListManaged,
     Logs,
+    Engine,
 }
 
 impl fmt::Display for Operation {
@@ -673,6 +691,7 @@ impl fmt::Display for Operation {
             Self::Inspect => "inspect container",
             Self::ListManaged => "list containers",
             Self::Logs => "read logs",
+            Self::Engine => "read engine info",
         })
     }
 }

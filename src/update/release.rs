@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::time::SystemTime;
 use thiserror::Error;
 
 use crate::installation::Version;
@@ -19,6 +20,10 @@ pub struct Release {
     /// The release notes (git-cliff Markdown).
     pub notes: String,
     pub assets: Vec<Asset>,
+    /// When it was published, if the source says.
+    pub published: Option<SystemTime>,
+    /// The release's page on GitHub (its full notes), if the source names one on github.com.
+    pub page: Option<Url>,
 }
 
 impl Release {
