@@ -110,7 +110,10 @@ impl SecurityHeaders {
         for (name, value) in [
             (header::CONTENT_SECURITY_POLICY, Self::CSP),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (header::REFERRER_POLICY, "no-referrer"),
+            // Not `no-referrer`: under it browsers send `Origin: null` on same-origin POSTs,
+            // which the CSRF origin check (ADR-0031) then refuses. `same-origin` still sends
+            // no referrer to other sites.
+            (header::REFERRER_POLICY, "same-origin"),
             (header::X_FRAME_OPTIONS, "DENY"),
             (
                 header::HeaderName::from_static("cross-origin-opener-policy"),
