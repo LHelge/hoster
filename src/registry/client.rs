@@ -460,6 +460,22 @@ impl RegistryClient {
             .retain(|(cached, _), _| cached != registry);
     }
 
+    /// Checks that `image`'s repository holds a manifest with `digest` (ADR-0042): a
+    /// [`RegistryError::NotFound`] means it does not, so the digest belongs to some other
+    /// repository or to none.
+    pub async fn contains(&self, image: &ImageRef, digest: &Digest) -> Result<(), RegistryError> {
+        let served = self.manifest_digest(image, digest.as_ref()).await?;
+        if &served == digest {
+            Ok(())
+        } else {
+            Err(RegistryError::Digest {
+                registry: image.registry().to_owned(),
+                image: format!("{}/{}@{digest}", image.registry(), image.repository()),
+                reason: format!("the registry served {served} instead"),
+            })
+        }
+    }
+
     fn endpoint(&self, registry: &str) -> Result<Url, RegistryError> {
         match self.endpoints.get(registry) {
             Some(url) => Ok(url.clone()),
@@ -472,13 +488,20 @@ impl RegistryClient {
         }
     }
 
-    /// `HEAD` the manifest, authenticating on demand and refreshing a rejected token once.
-    async fn manifest_digest(&self, image: &ImageRef, tag: &str) -> Result<Digest, RegistryError> {
+    /// `HEAD` the manifest of `reference` (a tag or a digest), authenticating on demand and
+    /// refreshing a rejected token once.
+    async fn manifest_digest(
+        &self,
+        image: &ImageRef,
+        reference: &str,
+    ) -> Result<Digest, RegistryError> {
         let registry = image.registry();
         let repository = image.repository();
+        let separator = if reference.contains(':') { '@' } else { ':' };
+        let named = format!("{registry}/{repository}{separator}{reference}");
         let base = self.endpoint(registry)?;
         let url = base
-            .join(&format!("v2/{repository}/manifests/{tag}"))
+            .join(&format!("v2/{repository}/manifests/{reference}"))
             .map_err(|e| RegistryError::Challenge {
                 registry: registry.to_owned(),
                 reason: format!("invalid manifest URL: {e}"),
@@ -513,14 +536,12 @@ impl RegistryClient {
                     self.forget_auth(&key);
                     return Err(RegistryError::Unauthorized {
                         registry: registry.to_owned(),
-                        image: format!("{registry}/{repository}:{tag}"),
+                        image: named,
                         status,
                     });
                 }
                 StatusCode::NOT_FOUND => {
-                    return Err(RegistryError::NotFound {
-                        image: format!("{registry}/{repository}:{tag}"),
-                    });
+                    return Err(RegistryError::NotFound { image: named });
                 }
                 StatusCode::TOO_MANY_REQUESTS => {
                     return Err(Self::rate_limited(registry, &response));

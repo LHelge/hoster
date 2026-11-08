@@ -36,13 +36,14 @@ use super::pages::{FlashKind, Layout, Page, Section};
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, PinChange,
     RemoveOutcome, RemoveStack, SecretChange, ServiceState, StackSecret, StackStatus,
+    WebhookDeploy,
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
 use crate::stack::{Diagnostic, StackError};
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
-    Timestamp,
+    Timestamp, WebhookRejection,
 };
 
 /// What the stack pages need from the orchestrator. Dyn-compatible, so the app holds the real
@@ -64,6 +65,16 @@ pub trait StackControl: Send + Sync + 'static {
         stack: &str,
         images: DigestSet,
     ) -> Result<DeployOutcome, OrchestratorError>;
+
+    /// A deploy from the webhook; see [`Orchestrator::deploy_webhook`].
+    async fn deploy_webhook(
+        &self,
+        request: WebhookDeploy,
+    ) -> Result<DeployOutcome, OrchestratorError>;
+
+    /// See [`Orchestrator::record_rejection`].
+    async fn record_rejection(&self, rejection: &WebhookRejection)
+    -> Result<(), OrchestratorError>;
 
     /// See [`Orchestrator::remove`].
     async fn remove(&self, request: RemoveStack) -> Result<RemoveOutcome, OrchestratorError>;
@@ -124,6 +135,20 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         images: DigestSet,
     ) -> Result<DeployOutcome, OrchestratorError> {
         Orchestrator::deploy(self, stack, images, DeploymentSource::Manual).await
+    }
+
+    async fn deploy_webhook(
+        &self,
+        request: WebhookDeploy,
+    ) -> Result<DeployOutcome, OrchestratorError> {
+        Orchestrator::deploy_webhook(self, request).await
+    }
+
+    async fn record_rejection(
+        &self,
+        rejection: &WebhookRejection,
+    ) -> Result<(), OrchestratorError> {
+        Orchestrator::record_rejection(self, rejection).await
     }
 
     async fn remove(&self, request: RemoveStack) -> Result<RemoveOutcome, OrchestratorError> {
@@ -653,7 +678,9 @@ impl From<OrchestratorError> for Outcome {
                 StatusCode::NOT_FOUND
             }
             E::Secret(SecretError::InvalidName { .. }) => StatusCode::UNPROCESSABLE_ENTITY,
-            E::Invalid(_)
+            E::Forbidden { .. } => StatusCode::FORBIDDEN,
+            E::ForeignDigest { .. }
+            | E::Invalid(_)
             | E::Collision(_)
             | E::Resolve { .. }
             | E::NotCiBuilt(_)
@@ -801,6 +828,8 @@ pub struct StackView {
     active: Option<(String, String, String)>,
     queued: Option<String>,
     flag: Option<String>,
+    /// Refused webhook attempts, newest first (ADR-0047).
+    rejections: Vec<RejectionView>,
 }
 
 impl StackView {
@@ -849,6 +878,45 @@ impl From<&StackStatus> for StackView {
             }),
             queued: status.queued.map(|id| id.to_string()),
             flag: status.flag.clone(),
+            rejections: status.rejections.iter().map(RejectionView::from).collect(),
+        }
+    }
+}
+
+/// A refused webhook attempt, with the claims that help write the `[deploy]` rule.
+#[derive(Debug)]
+struct RejectionView {
+    at: String,
+    reason: String,
+    repository: String,
+    repository_id: String,
+    git_ref: String,
+    environment: String,
+    /// The `workflow_ref` claim (ADR-0047).
+    workflow_ref: String,
+    /// The `job_workflow_ref` claim, the value a `[deploy]` rule names, when it differs from
+    /// `workflow_ref` (a reusable workflow).
+    job_workflow_ref: Option<String>,
+    actor: String,
+    run_id: String,
+}
+
+impl From<&WebhookRejection> for RejectionView {
+    fn from(rejection: &WebhookRejection) -> Self {
+        Self {
+            at: When(rejection.at).to_string(),
+            reason: rejection.reason.clone(),
+            repository: rejection.repository.clone(),
+            repository_id: rejection.repository_id.clone(),
+            git_ref: rejection.git_ref.clone(),
+            environment: rejection.environment.clone().unwrap_or_default(),
+            workflow_ref: rejection.workflow_ref.clone().unwrap_or_default(),
+            job_workflow_ref: rejection
+                .job_workflow_ref
+                .clone()
+                .filter(|job| Some(job) != rejection.workflow_ref.as_ref()),
+            actor: rejection.actor.clone(),
+            run_id: rejection.run_id.clone(),
         }
     }
 }
@@ -919,6 +987,8 @@ pub struct DeploymentView {
     generation: Option<u32>,
     error: Option<String>,
     target: Vec<(String, String)>,
+    /// Where a webhook deployment came from, as (label, value) rows.
+    provenance: Vec<(&'static str, String)>,
     events: Vec<EventView>,
     created_at: String,
     finished_at: Option<String>,
@@ -946,6 +1016,23 @@ impl DeploymentView {
                 .iter()
                 .map(|(service, digest)| (service.clone(), digest.clone()))
                 .collect(),
+            provenance: deployment
+                .provenance
+                .as_ref()
+                .map(|p| {
+                    let mut rows = vec![
+                        ("Repository", p.repository.clone()),
+                        ("Ref", p.git_ref.clone()),
+                        ("Commit", p.sha.clone()),
+                        ("Run", p.run_id.clone()),
+                        ("Actor", p.actor.clone()),
+                    ];
+                    if let Some(tag) = &p.tag {
+                        rows.push(("Tag", tag.clone()));
+                    }
+                    rows
+                })
+                .unwrap_or_default(),
             events: events.iter().map(EventView::from).collect(),
             created_at: When(deployment.created_at).to_string(),
             finished_at: deployment.finished_at.map(|t| When(t).to_string()),

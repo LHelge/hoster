@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM webhook_rejections WHERE stack = ? AND id NOT IN\n                 (SELECT id FROM webhook_rejections WHERE stack = ? ORDER BY id DESC LIMIT ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "70dd130ffec50113eff75212718df600a22e1f13ae76fc6a0972e35b55bca2d5"
+}

@@ -1496,6 +1496,7 @@ dependencies = [
  "proptest",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "rustls-platform-verifier",
  "sd-notify",

@@ -1,7 +1,7 @@
 //! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), container logs
 //! (ADR-0044, see `containers.rs`), the stack pages with their secrets (ADR-0027, ADR-0029,
 //! ADR-0049, see `stacks.rs`), Settings → Registries (ADR-0025, see `settings.rs`), and the
-//! deploy webhook handler (ADR-0042, ADR-0047).
+//! deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
 //! binds the [`Listen`] address and serves until the root cancellation token is cancelled.
@@ -18,6 +18,7 @@ mod containers;
 mod pages;
 mod settings;
 mod stacks;
+mod webhook;
 
 use std::fmt;
 use std::io;
@@ -46,6 +47,7 @@ use self::containers::{ContainerSource, Containers};
 use self::pages::Dashboard;
 use self::settings::{Registries, RegistryControl};
 use self::stacks::{StackControl, Stacks};
+use self::webhook::{OidcVerifier, Webhook};
 
 pub use self::settings::RegistryAccess;
 
@@ -113,12 +115,15 @@ pub struct WebApp {
     containers: Containers,
     stacks: Stacks,
     registries: Registries,
+    webhook: Webhook,
 }
 
 impl WebApp {
     /// The app for `config`, with sessions in `store`, containers from `runtime`, stacks managed
     /// through `orchestrator`, registry credentials in `registry`, and the GitHub OAuth App's
     /// credentials read from their files or systemd credentials. Fails when they are missing.
+    /// Deploy webhook tokens are verified against GitHub's key set for the configured audience
+    /// (ADR-0047).
     pub fn from_config<R: ContainerRuntime>(
         config: &Config,
         store: Store,
@@ -126,12 +131,17 @@ impl WebApp {
         orchestrator: Arc<Orchestrator<R>>,
         registry: RegistryAccess,
     ) -> anyhow::Result<Self> {
-        let auth = Auth::from_config(config, store).context("setting up the GitHub login")?;
+        let verifier = OidcVerifier::github(config.webhook_audience())
+            .context("setting up the deploy webhook")?;
+        let auth =
+            Auth::from_config(config, store.clone()).context("setting up the GitHub login")?;
         Ok(WebApp::new(
             auth,
             runtime,
             Arc::new(orchestrator),
             Arc::new(registry),
+            verifier,
+            store,
         ))
     }
 
@@ -140,10 +150,13 @@ impl WebApp {
         containers: Arc<dyn ContainerSource>,
         stacks: Arc<dyn StackControl>,
         registries: Arc<dyn RegistryControl>,
+        verifier: OidcVerifier,
+        store: Store,
     ) -> Self {
         WebApp {
             auth: Arc::new(auth),
             containers: Containers::from(containers),
+            webhook: Webhook::new(verifier, store, Arc::clone(&stacks)),
             stacks: Stacks::from(stacks),
             registries: Registries::from(registries),
         }
@@ -192,6 +205,8 @@ impl WebApp {
             .route("/settings/registries/delete", post(Registries::delete))
             .route("/settings/registries/test", post(Registries::test))
             .layer(Extension(self.registries.clone()))
+            .route("/hooks/deploy", post(Webhook::deploy))
+            .layer(Extension(self.webhook.clone()))
             .route("/healthz", get(WebApp::healthz))
             .route("/assets/{file}", get(Assets::serve))
             .merge(Auth::routes())

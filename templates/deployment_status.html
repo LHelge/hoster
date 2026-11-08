@@ -15,6 +15,15 @@
     {%- endfor %}
   </ul>
   {%- endif %}
+  {%- if !deployment.provenance.is_empty() %}
+  <h2>Provenance</h2>
+  <p class="muted">From the verified GitHub Actions token; the tag is what the request named.</p>
+  <ul class="plain provenance">
+    {%- for (label, value) in deployment.provenance %}
+    <li><strong>{{ label }}</strong> <code>{{ value }}</code></li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
   <h2>Transitions</h2>
   <table class="list events">
     <thead><tr><th scope="col">Time</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Detail</th></tr></thead>

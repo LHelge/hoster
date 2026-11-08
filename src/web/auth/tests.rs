@@ -14,10 +14,13 @@ use crate::runtime::FakeRuntime;
 use crate::web::WebApp;
 use crate::web::settings::tests::FakeRegistries;
 use crate::web::stacks::tests::FakeStacks;
+use crate::web::webhook::OidcVerifier;
 
 pub const ORIGIN: &str = "https://hoster.example.com";
 const TOKEN_PATH: &str = "/login/oauth/access_token";
 const USER_PATH: &str = "/api/user";
+/// Where the mock GitHub serves the OIDC key set for the deploy webhook.
+pub const JWKS_PATH: &str = "/.well-known/jwks";
 
 /// The admin app wired to a mock GitHub, with its own state store.
 pub struct TestApp {
@@ -71,11 +74,14 @@ impl TestApp {
         let runtime = Arc::new(FakeRuntime::new());
         let stacks = Arc::new(FakeStacks::default());
         let registries = Arc::new(FakeRegistries::default());
+        let verifier = OidcVerifier::new(ORIGIN, base.join(JWKS_PATH).unwrap()).unwrap();
         let app = WebApp::new(
             Auth::new(settings, store.clone(), client),
             runtime.clone(),
             stacks.clone(),
             registries.clone(),
+            verifier,
+            store.clone(),
         );
         TestApp {
             github,
@@ -577,8 +583,9 @@ async fn webhooks_bypass_sessions_and_csrf() {
                 .unwrap(),
         )
         .await;
-    // Not refused by the guard; the endpoint itself does not exist yet.
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Not refused or redirected by the guard: the endpoint answers itself, asking for a token.
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(header(&response, "www-authenticate"), "Bearer");
 }
 
 #[tokio::test]

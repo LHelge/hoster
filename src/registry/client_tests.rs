@@ -719,3 +719,33 @@ mod live {
         eprintln!("{reference} -> {}", pinned.digest());
     }
 }
+
+#[tokio::test]
+async fn contains_heads_the_manifest_by_digest() {
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/owner/app/manifests/{DIGEST}")))
+        .respond_with(found())
+        .expect(1)
+        .mount(&server)
+        .await;
+    let foreign = format!("sha256:{}", "ab".repeat(32));
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/owner/app/manifests/{foreign}")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let client = client(&server, Arc::new(Anonymous));
+    let image = image("registry.test/owner/app");
+    client
+        .contains(&image, &DIGEST.parse().unwrap())
+        .await
+        .unwrap();
+    let err = client
+        .contains(&image, &foreign.parse().unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RegistryError::NotFound { .. }), "{err}");
+    assert!(err.to_string().contains(&format!("app@{foreign}")), "{err}");
+}

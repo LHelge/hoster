@@ -51,7 +51,7 @@ use crate::registry::RegistryError;
 use crate::routing::RouteTable;
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::{SecretKey, SecretStore};
-use crate::stack::{ImageRef, PinnedImage};
+use crate::stack::{Digest, ImageRef, PinnedImage};
 use crate::store::{Deployment, DeploymentState, Store};
 
 /// busybox (it has `httpd` with CGI), pinned by digest so the orchestrator never resolves a tag.
@@ -78,6 +78,10 @@ struct NoRegistry;
 impl TagResolver for NoRegistry {
     async fn resolve(&self, image: &ImageRef) -> Result<PinnedImage, RegistryError> {
         panic!("the end-to-end test resolves no tags, but was asked for {image}");
+    }
+
+    async fn contains(&self, image: &ImageRef, digest: &Digest) -> Result<(), RegistryError> {
+        panic!("the end-to-end test looks up no digests, but was asked for {image}@{digest}");
     }
 }
 

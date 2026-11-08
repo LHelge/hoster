@@ -13,6 +13,7 @@
 // The orchestrator and web UI that consume the model land in later tasks.
 #![allow(dead_code)]
 
+mod deploy;
 mod diagnostic;
 mod image;
 mod raw;
@@ -23,6 +24,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
 pub use image::{Digest, ImageRef, PinnedImage};
 pub use route::{Host, NormalizedPrefix};
@@ -103,16 +105,6 @@ impl fmt::Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
-}
-
-/// Webhook deploy authorization, matched against GitHub Actions OIDC claims (ADR-0047).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeployAuth {
-    pub repository_id: u64,
-    /// Glob patterns over the token's `ref`; empty means any ref.
-    pub refs: Vec<String>,
-    pub environment: Option<String>,
-    pub job_workflow_ref: Option<String>,
 }
 
 /// One container of a stack.

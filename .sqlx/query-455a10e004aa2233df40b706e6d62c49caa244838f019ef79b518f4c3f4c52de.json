@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id: DeploymentId\", stack, revision_id AS \"revision: RevisionId\",\n                      generation AS \"generation: u32\", state AS \"state: DeploymentState\",\n                      source AS \"source: DeploymentSource\", error,\n                      created_at AS \"created_at: Timestamp\", updated_at AS \"updated_at: Timestamp\",\n                      committed_at AS \"committed_at: Timestamp\",\n                      finished_at AS \"finished_at: Timestamp\"\n               FROM deployments WHERE id = ?",
+  "query": "SELECT id AS \"id: DeploymentId\", stack, revision_id AS \"revision: RevisionId\",\n                      generation AS \"generation: u32\", state AS \"state: DeploymentState\",\n                      source AS \"source: DeploymentSource\", error,\n                      created_at AS \"created_at: Timestamp\", updated_at AS \"updated_at: Timestamp\",\n                      committed_at AS \"committed_at: Timestamp\",\n                      finished_at AS \"finished_at: Timestamp\",\n                      source_repository, source_sha, source_ref, source_run_id, source_actor,\n                      source_tag\n               FROM deployments WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -123,6 +123,72 @@
             "name": "finished_at"
           }
         }
+      },
+      {
+        "name": "source_repository",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "source_repository"
+          }
+        }
+      },
+      {
+        "name": "source_sha",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "source_sha"
+          }
+        }
+      },
+      {
+        "name": "source_ref",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "source_ref"
+          }
+        }
+      },
+      {
+        "name": "source_run_id",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "source_run_id"
+          }
+        }
+      },
+      {
+        "name": "source_actor",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "source_actor"
+          }
+        }
+      },
+      {
+        "name": "source_tag",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "source_tag"
+          }
+        }
       }
     ],
     "parameters": {
@@ -139,8 +205,14 @@
       false,
       false,
       true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "b4a9ce0bd7cf08a23dbd800be6baa5c26eed686396f43b26ed1f6a12c965c4cf"
+  "hash": "455a10e004aa2233df40b706e6d62c49caa244838f019ef79b518f4c3f4c52de"
 }

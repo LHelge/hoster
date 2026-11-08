@@ -253,6 +253,8 @@ pub struct NewDeployment {
     pub revision: Option<RevisionId>,
     pub source: DeploymentSource,
     pub target: DigestSet,
+    /// Where a webhook deployment came from (ADR-0047); `None` for every other source.
+    pub provenance: Option<Provenance>,
 }
 
 /// A recorded deployment attempt.
@@ -266,6 +268,8 @@ pub struct Deployment {
     pub state: DeploymentState,
     pub source: DeploymentSource,
     pub target: DigestSet,
+    /// Where a webhook deployment came from (ADR-0047).
+    pub provenance: Option<Provenance>,
     /// Why the deployment failed or was rejected, if it did.
     pub error: Option<String>,
     pub created_at: Timestamp,
@@ -274,6 +278,43 @@ pub struct Deployment {
     pub committed_at: Option<Timestamp>,
     /// When the deployment reached a terminal state.
     pub finished_at: Option<Timestamp>,
+}
+
+/// Where a webhook deployment came from: the verified OIDC token's claims (ADR-0047), plus
+/// the informational `tag` of the request body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    /// `owner/name` of the repository whose workflow sent the deploy.
+    pub repository: String,
+    /// The commit the workflow ran on.
+    pub sha: String,
+    /// The token's `ref`, e.g. `refs/tags/v1.4.2`.
+    pub git_ref: String,
+    /// The workflow run's id.
+    pub run_id: String,
+    /// The GitHub user who triggered the run.
+    pub actor: String,
+    /// The tag the request body names; not verified.
+    pub tag: Option<String>,
+}
+
+/// A webhook attempt that carried a valid token but was refused (ADR-0047), with the token's
+/// claims (never the token itself), so the admin can see who tried and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookRejection {
+    pub stack: String,
+    /// Why it was refused, for the admin.
+    pub reason: String,
+    pub repository: String,
+    /// GitHub's numeric repository id, the value a `[deploy]` rule names.
+    pub repository_id: String,
+    pub git_ref: String,
+    pub environment: Option<String>,
+    pub workflow_ref: Option<String>,
+    pub job_workflow_ref: Option<String>,
+    pub actor: String,
+    pub run_id: String,
+    pub at: Timestamp,
 }
 
 /// One entry of a deployment's transition log.

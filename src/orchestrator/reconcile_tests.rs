@@ -88,6 +88,7 @@ async fn interrupted(h: &Harness, state: DeploymentState) -> (Deployment, u16) {
             revision: Some(revision.id),
             source: DeploymentSource::Webhook,
             target: DigestSet::from([("api".into(), digest(3))]),
+            provenance: None,
         })
         .await
         .unwrap();

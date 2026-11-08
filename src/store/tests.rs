@@ -39,6 +39,7 @@ async fn deployment(store: &Store, stack: &str) -> Deployment {
             revision: None,
             source: DeploymentSource::Webhook,
             target: target(&[("api", "sha256:aa"), ("web", "sha256:bb")]),
+            provenance: None,
         })
         .await
         .unwrap()
@@ -202,6 +203,7 @@ async fn deployment_lifecycle_is_logged() {
             revision: Some(rev.id),
             source: DeploymentSource::Apply,
             target: target(&[("api", "sha256:aa")]),
+            provenance: None,
         })
         .await
         .unwrap();
@@ -257,6 +259,7 @@ async fn unknown_stack_and_deployment_are_errors() {
             revision: None,
             source: DeploymentSource::Poller,
             target: DigestSet::new(),
+            provenance: None,
         })
         .await
         .unwrap_err();
@@ -287,6 +290,7 @@ async fn unknown_stack_and_deployment_are_errors() {
             revision: None,
             source: DeploymentSource::Poller,
             target: DigestSet::new(),
+            provenance: None,
         })
         .await
         .unwrap_err();
@@ -796,4 +800,83 @@ async fn deployment_events_are_written_to_the_log_too() {
     // The event message is its own field, next to the fixed line text.
     assert_eq!(lines[2]["message"], "deployment event");
     assert_eq!(lines[2]["detail"], "pull failed");
+}
+
+#[tokio::test]
+async fn webhook_deployments_keep_their_provenance() {
+    let (_dir, store) = open().await;
+    store.add_revision("blog", "a = 1").await.unwrap();
+    let provenance = Provenance {
+        repository: "acme/blog".into(),
+        sha: "0f3c".into(),
+        git_ref: "refs/tags/v1".into(),
+        run_id: "77".into(),
+        actor: "octocat".into(),
+        tag: None,
+    };
+    let created = store
+        .create_deployment(&NewDeployment {
+            stack: "blog".into(),
+            revision: None,
+            source: DeploymentSource::Webhook,
+            target: target(&[("api", "sha256:aa")]),
+            provenance: Some(provenance.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.provenance.as_ref(), Some(&provenance));
+    let loaded = store.deployment(created.id).await.unwrap().unwrap();
+    assert_eq!(loaded.provenance, Some(provenance));
+    assert_eq!(deployment(&store, "blog").await.provenance, None);
+}
+
+#[tokio::test]
+async fn token_ids_are_single_use_until_they_expire() {
+    let (_dir, store) = open().await;
+    let later = Timestamp::now() + Duration::from_secs(600);
+    assert!(store.claim_token("jti-1", later).await.unwrap());
+    assert!(!store.claim_token("jti-1", later).await.unwrap());
+    assert!(store.claim_token("jti-2", later).await.unwrap());
+    // An id whose token has expired is forgotten.
+    let past = Timestamp::now() - Duration::from_secs(1);
+    assert!(store.claim_token("old", past).await.unwrap());
+    assert!(store.claim_token("old", later).await.unwrap());
+}
+
+#[tokio::test]
+async fn rejections_are_kept_per_known_stack_newest_first_and_capped() {
+    let (_dir, store) = open().await;
+    store.add_revision("blog", "a = 1").await.unwrap();
+    let rejection = |n: u32| WebhookRejection {
+        stack: "blog".into(),
+        reason: format!("attempt {n}"),
+        repository: "acme/blog".into(),
+        repository_id: "42".into(),
+        git_ref: "refs/heads/main".into(),
+        environment: None,
+        workflow_ref: Some("acme/blog/.github/workflows/release.yml@refs/heads/main".into()),
+        job_workflow_ref: None,
+        actor: "octocat".into(),
+        run_id: n.to_string(),
+        at: Timestamp::now(),
+    };
+    for n in 0..Store::KEPT_REJECTIONS + 5 {
+        assert!(store.record_rejection(&rejection(n)).await.unwrap());
+    }
+    let kept = store.rejections("blog", 1000).await.unwrap();
+    assert_eq!(kept.len(), Store::KEPT_REJECTIONS as usize);
+    assert_eq!(
+        kept[0],
+        WebhookRejection {
+            at: kept[0].at,
+            ..rejection(Store::KEPT_REJECTIONS + 4)
+        }
+    );
+    assert_eq!(kept.last().unwrap().reason, "attempt 5");
+    assert_eq!(store.rejections("blog", 2).await.unwrap().len(), 2);
+    let ghost = WebhookRejection {
+        stack: "ghost".into(),
+        ..rejection(0)
+    };
+    assert!(!store.record_rejection(&ghost).await.unwrap());
 }

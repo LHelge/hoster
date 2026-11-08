@@ -134,7 +134,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             // version change.
             let pins = self.store.revision_images(revision.id).await?;
             let target = Target::new(Arc::new(definition), revision, pins, DigestSet::new());
-            Some(self.submit(target, DeploymentSource::Apply).await?)
+            Some(self.submit(target, DeploymentSource::Apply, None).await?)
         };
         Ok(SecretChange {
             secret: secret.to_string(),

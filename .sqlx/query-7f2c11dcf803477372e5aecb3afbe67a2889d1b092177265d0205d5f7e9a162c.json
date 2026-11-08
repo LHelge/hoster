@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO deployments\n                   (stack, revision_id, state, source, created_at, updated_at, source_repository,\n                    source_sha, source_ref, source_run_id, source_actor, source_tag)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!: DeploymentId\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: DeploymentId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7f2c11dcf803477372e5aecb3afbe67a2889d1b092177265d0205d5f7e9a162c"
+}

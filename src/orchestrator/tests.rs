@@ -52,11 +52,14 @@ pub(super) fn digest(n: u8) -> String {
 }
 
 /// Resolves every tag to `digest(<digest>)`, `digest(0xaa)` unless changed, and counts the
-/// lookups.
+/// lookups. Every repository holds every digest, except `digest(0xee)`, which none holds, and
+/// `digest(0xef)`, whose lookup fails.
 pub(super) struct FakeResolver {
     calls: AtomicUsize,
     /// What tags resolve to; change it to move a tag upstream.
     pub(super) digest: std::sync::atomic::AtomicU8,
+    /// The (image, digest) pairs looked up with `contains`.
+    pub(super) lookups: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl Default for FakeResolver {
@@ -64,6 +67,7 @@ impl Default for FakeResolver {
         Self {
             calls: AtomicUsize::new(0),
             digest: std::sync::atomic::AtomicU8::new(0xaa),
+            lookups: std::sync::Mutex::default(),
         }
     }
 }
@@ -74,6 +78,26 @@ impl TagResolver for FakeResolver {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let to = digest(self.digest.load(Ordering::SeqCst));
         Ok(image.clone().pin(to.parse().unwrap()))
+    }
+
+    async fn contains(&self, image: &ImageRef, found: &Digest) -> Result<(), RegistryError> {
+        self.lookups
+            .lock()
+            .unwrap()
+            .push((image.to_string(), found.to_string()));
+        if found.as_ref() == digest(0xee) {
+            Err(RegistryError::NotFound {
+                image: format!("{image}@{found}"),
+            })
+        } else if found.as_ref() == digest(0xef) {
+            Err(RegistryError::Status {
+                registry: image.registry().to_owned(),
+                what: "the manifest request",
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            })
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -1593,4 +1617,213 @@ async fn rollback_and_restart_follow_the_active_revisions_hosts() {
         drain(&mut acme_rx),
         [ensure(&["notes.example.com", "s3.example.org"])]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The deploy webhook (ADR-0042, ADR-0047)
+// ---------------------------------------------------------------------------------------------
+
+/// NOTES with a `[deploy]` rule: repository 42, tags `v*` only.
+fn hooked() -> String {
+    format!("{NOTES}\n[deploy]\nrepository_id = 42\nrefs = [\"refs/tags/v*\"]\n")
+}
+
+fn caller(repository_id: u64, git_ref: &str) -> DeployCaller {
+    DeployCaller {
+        repository_id,
+        git_ref: git_ref.into(),
+        environment: None,
+        job_workflow_ref: None,
+    }
+}
+
+fn provenance() -> Provenance {
+    Provenance {
+        repository: "acme/notes".into(),
+        sha: "0f3c".into(),
+        git_ref: "refs/tags/v1.4.2".into(),
+        run_id: "123456".into(),
+        actor: "octocat".into(),
+        tag: Some("v1.4.2".into()),
+    }
+}
+
+fn webhook(stack: &str, images: &[(&str, u8)], caller: DeployCaller) -> WebhookDeploy {
+    WebhookDeploy {
+        stack: stack.into(),
+        images: images
+            .iter()
+            .map(|(s, d)| ((*s).to_owned(), digest(*d)))
+            .collect(),
+        caller,
+        provenance: provenance(),
+    }
+}
+
+#[tokio::test]
+async fn webhook_deploys_several_services_as_one_deployment_with_provenance() {
+    let h = harness().await;
+    h.finish(h.apply(&hooked()).await.deployment.as_ref().unwrap())
+        .await;
+    let outcome = h
+        .orchestrator
+        .deploy_webhook(webhook(
+            "notes",
+            &[("api", 1), ("web", 1)],
+            caller(42, "refs/tags/v1.4.2"),
+        ))
+        .await
+        .unwrap();
+    let deployment = h.finish(&outcome).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+    assert_eq!(deployment.source, DeploymentSource::Webhook);
+    assert_eq!(deployment.provenance, Some(provenance()));
+    assert_eq!(deployment.target["api"], digest(1));
+    assert_eq!(deployment.target["web"], digest(1));
+    // Each digest was looked up in its own service's repository.
+    let mut lookups = h.resolver.lookups.lock().unwrap().clone();
+    lookups.sort();
+    assert_eq!(
+        lookups,
+        [
+            ("ghcr.io/acme/notes-api".to_owned(), digest(1)),
+            ("ghcr.io/acme/notes-web".to_owned(), digest(1)),
+        ]
+    );
+    // The same digests again: nothing to do.
+    let again = h
+        .orchestrator
+        .deploy_webhook(webhook(
+            "notes",
+            &[("api", 1), ("web", 1)],
+            caller(42, "refs/tags/v1.4.2"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(again.state, S::Noop);
+}
+
+#[tokio::test]
+async fn webhook_is_forbidden_without_a_matching_deploy_rule() {
+    let h = harness().await;
+    let forbidden = |err: OrchestratorError| match err {
+        OrchestratorError::Forbidden { reason, .. } => reason,
+        other => panic!("expected Forbidden, got {other}"),
+    };
+    // An unknown stack looks the same as a refused one.
+    let reason = forbidden(
+        h.orchestrator
+            .deploy_webhook(webhook("ghost", &[("api", 1)], caller(42, "refs/tags/v1")))
+            .await
+            .unwrap_err(),
+    );
+    assert!(reason.contains("does not exist"), "{reason}");
+    // A stack without `[deploy]` takes no webhook deploys.
+    h.apply(NOTES).await;
+    let reason = forbidden(
+        h.orchestrator
+            .deploy_webhook(webhook("notes", &[("api", 1)], caller(42, "refs/tags/v1")))
+            .await
+            .unwrap_err(),
+    );
+    assert!(reason.contains("[deploy]"), "{reason}");
+    h.apply(&hooked()).await;
+    let reason = forbidden(
+        h.orchestrator
+            .deploy_webhook(webhook("notes", &[("api", 1)], caller(7, "refs/tags/v1")))
+            .await
+            .unwrap_err(),
+    );
+    assert!(reason.contains("repository_id 7"), "{reason}");
+    let reason = forbidden(
+        h.orchestrator
+            .deploy_webhook(webhook(
+                "notes",
+                &[("api", 1)],
+                caller(42, "refs/heads/main"),
+            ))
+            .await
+            .unwrap_err(),
+    );
+    assert!(reason.contains("refs/heads/main"), "{reason}");
+    // Nothing was looked up or recorded for a refused caller.
+    assert!(h.resolver.lookups.lock().unwrap().is_empty());
+    let deployments = h.store.deployments("notes", 10).await.unwrap();
+    assert!(
+        deployments
+            .iter()
+            .all(|d| d.source != DeploymentSource::Webhook)
+    );
+}
+
+#[tokio::test]
+async fn webhook_payload_checks_and_digest_ownership() {
+    let h = harness().await;
+    h.apply(&hooked()).await;
+    let ok = || caller(42, "refs/tags/v1");
+    let deploy = |images: &[(&str, u8)]| {
+        h.orchestrator
+            .deploy_webhook(webhook("notes", images, ok()))
+    };
+    assert!(matches!(
+        deploy(&[("db", 1)]).await.unwrap_err(),
+        OrchestratorError::UnknownService(_)
+    ));
+    assert!(matches!(
+        deploy(&[("storage", 1)]).await.unwrap_err(),
+        OrchestratorError::NotCiBuilt(_)
+    ));
+    // A digest the service's repository does not hold, even with a valid one beside it.
+    let err = deploy(&[("api", 1), ("web", 0xee)]).await.unwrap_err();
+    match &err {
+        OrchestratorError::ForeignDigest {
+            service,
+            repository,
+        } => {
+            assert_eq!(service, "web");
+            assert_eq!(repository, "ghcr.io/acme/notes-web");
+        }
+        other => panic!("expected ForeignDigest, got {other}"),
+    }
+    assert!(matches!(
+        deploy(&[("api", 0xef)]).await.unwrap_err(),
+        OrchestratorError::Resolve { .. }
+    ));
+    let mut request = webhook("notes", &[], ok());
+    request.images.insert("api".into(), "latest".into());
+    assert!(matches!(
+        h.orchestrator.deploy_webhook(request).await.unwrap_err(),
+        OrchestratorError::Digest { .. }
+    ));
+}
+
+#[tokio::test]
+async fn refused_webhook_attempts_show_in_the_stack_status() {
+    let h = harness().await;
+    h.apply(NOTES).await;
+    let rejection = WebhookRejection {
+        stack: "notes".into(),
+        reason: "no [deploy] section".into(),
+        repository: "acme/notes".into(),
+        repository_id: "42".into(),
+        git_ref: "refs/tags/v1".into(),
+        environment: Some("production".into()),
+        workflow_ref: None,
+        job_workflow_ref: None,
+        actor: "octocat".into(),
+        run_id: "1".into(),
+        at: crate::store::Timestamp::now(),
+    };
+    h.orchestrator.record_rejection(&rejection).await.unwrap();
+    // Attempts on stacks hoster does not know are not kept.
+    h.orchestrator
+        .record_rejection(&WebhookRejection {
+            stack: "ghost".into(),
+            ..rejection.clone()
+        })
+        .await
+        .unwrap();
+    let status = h.orchestrator.status().await.unwrap();
+    assert_eq!(status[0].rejections, [rejection]);
+    assert!(h.store.rejections("ghost", 10).await.unwrap().is_empty());
 }

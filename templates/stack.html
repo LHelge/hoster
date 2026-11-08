@@ -55,6 +55,30 @@
 <div id="deploy-result" aria-live="polite"></div>
 {%- endif %}
 
+{%- if !stack.rejections.is_empty() %}
+<h2>Refused webhook deploys</h2>
+<p class="muted">Attempts with a valid GitHub Actions token that were refused, newest first. To allow a repository, put its <code>repository_id</code> in the stack file's <code>[deploy]</code> section.</p>
+<table class="list rejections">
+  <thead>
+    <tr><th scope="col">Time</th><th scope="col">Repository</th><th scope="col">repository_id</th><th scope="col">Ref</th><th scope="col">Environment</th><th scope="col">Workflow</th><th scope="col">Run</th><th scope="col">Reason</th></tr>
+  </thead>
+  <tbody>
+    {%- for rejection in stack.rejections %}
+    <tr>
+      <td>{{ rejection.at }}</td>
+      <td>{{ rejection.repository }} <span class="muted">({{ rejection.actor }})</span></td>
+      <td><code>{{ rejection.repository_id }}</code></td>
+      <td><code>{{ rejection.git_ref }}</code></td>
+      <td>{{ rejection.environment }}</td>
+      <td><code>{{ rejection.workflow_ref }}</code>{% if let Some(job) = rejection.job_workflow_ref %}<br><span class="muted">job_workflow_ref</span> <code>{{ job }}</code>{% endif %}</td>
+      <td>{{ rejection.run_id }}</td>
+      <td>{{ rejection.reason }}</td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+
 <h2>Remove</h2>
 <form class="stack-form" hx-post="{{ stack.remove_url() }}" hx-target="#remove-result">
   <p>Removes the stack's containers, network and routes. Its revisions and deployment history are kept, and so are its named volumes unless you delete them.</p>

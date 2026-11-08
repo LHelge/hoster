@@ -52,6 +52,7 @@ fn deployment(id: i64, state: DeploymentState) -> Deployment {
         state,
         source: DeploymentSource::Apply,
         target: DigestSet::from([("api".into(), digest(1))]),
+        provenance: None,
         error: None,
         created_at: Timestamp::now(),
         updated_at: Timestamp::now(),
@@ -90,6 +91,7 @@ fn notes_status() -> StackStatus {
         queued: None,
         last: Some(deployment(3, DeploymentState::Live)),
         flag: Some("revision 1: deploy failed: <pull> denied".into()),
+        rejections: Vec::new(),
     }
 }
 
@@ -99,6 +101,7 @@ pub enum Call {
     Preview(String),
     Apply(String),
     Deploy(String, DigestSet),
+    Webhook(Box<WebhookDeploy>),
     Remove(RemoveStack),
     ReresolvePreview(String),
     Reresolve(String, u32),
@@ -147,6 +150,10 @@ pub struct FakeStacks {
     /// Whether a re-resolve finds a moved digest.
     pub tags_moved: Mutex<bool>,
     pub calls: Mutex<Vec<Call>>,
+    /// Digests a webhook deploy finds in some other repository than its service's.
+    pub foreign: Mutex<Vec<String>>,
+    /// Every refused webhook attempt recorded, oldest first.
+    pub rejections: Mutex<Vec<WebhookRejection>>,
 }
 
 impl Default for FakeStacks {
@@ -159,6 +166,8 @@ impl Default for FakeStacks {
             secrets: Mutex::new(notes_secrets()),
             tags_moved: Mutex::new(true),
             calls: Mutex::new(Vec::new()),
+            foreign: Mutex::new(Vec::new()),
+            rejections: Mutex::new(Vec::new()),
         }
     }
 }
@@ -243,6 +252,59 @@ impl StackControl for FakeStacks {
             deployment: DeploymentId::from(8),
             state: *self.deploy_state.lock().unwrap(),
         })
+    }
+
+    /// Like the orchestrator: the stack's `[deploy]` rule first, then the services and digests.
+    async fn deploy_webhook(
+        &self,
+        request: WebhookDeploy,
+    ) -> Result<DeployOutcome, OrchestratorError> {
+        self.record(Call::Webhook(Box::new(request.clone())));
+        let forbidden = |reason: &str| OrchestratorError::Forbidden {
+            stack: request.stack.clone(),
+            reason: reason.into(),
+        };
+        let status = self
+            .current(&request.stack)
+            .ok_or_else(|| forbidden("the stack does not exist"))?;
+        let definition: Stack = status.revision.toml.parse()?;
+        definition
+            .deploy
+            .as_ref()
+            .ok_or_else(|| forbidden("the stack file has no [deploy] section"))?
+            .check(&request.caller)
+            .map_err(|denied| forbidden(&denied.to_string()))?;
+        let images = request.images.clone();
+        for (service, digest) in &images {
+            if self.foreign.lock().unwrap().contains(digest) {
+                return Err(OrchestratorError::ForeignDigest {
+                    service: service.clone(),
+                    repository: "ghcr.io/acme/notes-api".into(),
+                });
+            }
+        }
+        let calls = self.calls.lock().unwrap().len();
+        let outcome = self.deploy(&request.stack, images).await;
+        // `deploy` recorded a manual deploy call too; this was one webhook call.
+        self.calls.lock().unwrap().truncate(calls);
+        outcome
+    }
+
+    async fn record_rejection(
+        &self,
+        rejection: &WebhookRejection,
+    ) -> Result<(), OrchestratorError> {
+        self.rejections.lock().unwrap().push(rejection.clone());
+        if let Some(status) = self
+            .stacks
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|s| s.name == rejection.stack)
+        {
+            status.rejections.insert(0, rejection.clone());
+        }
+        Ok(())
     }
 
     async fn remove(&self, request: RemoveStack) -> Result<RemoveOutcome, OrchestratorError> {

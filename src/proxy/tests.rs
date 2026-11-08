@@ -801,12 +801,12 @@ async fn the_admin_host_reaches_the_admin_app() {
     assert_eq!(reply.status, 303, "{}", reply.text());
     assert_eq!(reply.header("location"), Some("/auth/login"));
 
-    // `/hooks/*` goes to the same app (its own 404, not the proxy's), whatever the method.
+    // `/hooks/*` goes to the same app: the webhook itself asks for a token.
     let head = "POST /hooks/deploy HTTP/1.1\r\nHost: hoster.example.com\r\n\
                 Content-Length: 2\r\nConnection: close\r\n\r\n{}";
     let reply = h.request(head).await;
-    assert_eq!(reply.status, 404, "{}", reply.text());
-    assert_ne!(reply.text(), "404 Not Found\n", "answered by the proxy");
+    assert_eq!(reply.status, 401, "{}", reply.text());
+    assert_eq!(reply.header("www-authenticate"), Some("Bearer"));
     assert!(
         reply.header("content-security-policy").is_some(),
         "{reply:?}"

@@ -542,6 +542,7 @@ async fn deployment_log_records_probe_results_as_events() {
             revision: None,
             source: DeploymentSource::Webhook,
             target: DigestSet::new(),
+            provenance: None,
         })
         .await
         .unwrap();

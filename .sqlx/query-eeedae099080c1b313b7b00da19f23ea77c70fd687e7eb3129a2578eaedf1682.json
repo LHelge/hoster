@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO webhook_rejections\n                 (stack, reason, repository, repository_id, git_ref, environment, workflow_ref,\n                  job_workflow_ref, actor, run_id, at)\n             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\n             WHERE EXISTS (SELECT 1 FROM stacks WHERE name = ? AND removed_at IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "eeedae099080c1b313b7b00da19f23ea77c70fd687e7eb3129a2578eaedf1682"
+}

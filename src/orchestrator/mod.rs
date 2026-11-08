@@ -4,7 +4,8 @@
 //! [`Orchestrator`] is the single writer of desired state. Callers (the web UI, the webhook, the
 //! poller) hold an `Arc<Orchestrator>` and call its async methods:
 //! [`preview`](Orchestrator::preview) and [`apply`](Orchestrator::apply),
-//! [`deploy`](Orchestrator::deploy), [`remove`](Orchestrator::remove) (see [`RemoveStack`]),
+//! [`deploy`](Orchestrator::deploy) and [`deploy_webhook`](Orchestrator::deploy_webhook),
+//! [`remove`](Orchestrator::remove) (see [`RemoveStack`]),
 //! [`rollback`](Orchestrator::rollback), [`status`](Orchestrator::status) and
 //! [`deployment`](Orchestrator::deployment), each answering with a typed result. The per-stack deploy slots live in one `std::sync::Mutex`, held only for
 //! in-memory work, never across an `.await`.
@@ -63,10 +64,12 @@ use crate::registry::{RegistryClient, RegistryError};
 use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
 use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, VolumeMount, label};
 use crate::secrets::{SecretError, SecretStore};
-use crate::stack::{Diagnostic, ImageRef, Name, PinnedImage, Stack, StackError};
+use crate::stack::{
+    DeployCaller, Diagnostic, Digest, ImageRef, Name, PinnedImage, Stack, StackError,
+};
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
-    NewDeployment, StackRevision, Store, StoreError,
+    NewDeployment, Provenance, StackRevision, Store, StoreError, WebhookRejection,
 };
 
 use certs::CertHosts;
@@ -81,17 +84,25 @@ pub use reconcile::{RestartPolicy, RestartStats};
 use routes::Routes;
 pub use stack_secrets::{SecretChange, StackSecret};
 
-/// Resolves a third-party image's tag to the digest the registry serves for it (ADR-0025).
-/// [`RegistryClient`] in production; tests use a fake.
+/// The registry lookups the orchestrator needs: a third-party image's tag resolved to the
+/// digest the registry serves for it (ADR-0025), and whether a webhook's digest is in its
+/// service's repository (ADR-0042). [`RegistryClient`] in production; tests use a fake.
 #[async_trait]
 pub trait TagResolver: Send + Sync {
     async fn resolve(&self, image: &ImageRef) -> Result<PinnedImage, RegistryError>;
+
+    /// `Ok` when `image`'s repository holds `digest`; [`RegistryError::NotFound`] when not.
+    async fn contains(&self, image: &ImageRef, digest: &Digest) -> Result<(), RegistryError>;
 }
 
 #[async_trait]
 impl TagResolver for RegistryClient {
     async fn resolve(&self, image: &ImageRef) -> Result<PinnedImage, RegistryError> {
         RegistryClient::resolve(self, image).await
+    }
+
+    async fn contains(&self, image: &ImageRef, digest: &Digest) -> Result<(), RegistryError> {
+        RegistryClient::contains(self, image, digest).await
     }
 }
 
@@ -149,6 +160,12 @@ pub enum OrchestratorError {
     NotCiBuilt(String),
     #[error("invalid digest for service {service}: {message}")]
     Digest { service: String, message: String },
+    /// A webhook may not deploy this stack (ADR-0047): it does not exist, has no `[deploy]`
+    /// rule, or the caller does not match it. `reason` is for the admin only.
+    #[error("not allowed to deploy stack {stack}: {reason}")]
+    Forbidden { stack: String, reason: String },
+    #[error("the digest for service {service} is not in its repository {repository}")]
+    ForeignDigest { service: String, repository: String },
     #[error("deployment {id} cannot be redeployed: {reason}")]
     NotRedeployable { id: DeploymentId, reason: String },
     #[error("stack {0} has an active deployment")]
@@ -193,6 +210,18 @@ pub struct DeployOutcome {
     /// `Noop` (nothing to do), `Queued` (another deployment is active) or the state the
     /// started deployment had when the call returned.
     pub state: DeploymentState,
+}
+
+/// A deploy request from the webhook (ADR-0042, ADR-0047), with its verified caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookDeploy {
+    pub stack: String,
+    /// Service → digest; CI-built services only, each digest from the service's repository.
+    pub images: DigestSet,
+    /// Checked against the stack's `[deploy]` rule.
+    pub caller: DeployCaller,
+    /// Recorded on the deployment.
+    pub provenance: Provenance,
 }
 
 /// The reply to [`Orchestrator::apply`].
@@ -332,6 +361,8 @@ pub struct StackStatus {
     /// "revision N: deploy failed: …" when the latest deployment of the active revision failed
     /// (ADR-0049).
     pub flag: Option<String>,
+    /// The latest refused webhook attempts, newest first (ADR-0047).
+    pub rejections: Vec<WebhookRejection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,6 +512,9 @@ enum Enqueued {
 }
 
 impl<R: ContainerRuntime> Orchestrator<R> {
+    /// How many refused webhook attempts [`status`](Self::status) reports per stack.
+    const SHOWN_REJECTIONS: u32 = 10;
+
     pub fn new(
         store: Store,
         runtime: Arc<R>,
@@ -664,7 +698,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             None
         } else {
             let target = Target::new(definition, revision.clone(), images, DigestSet::new());
-            Some(self.submit(target, DeploymentSource::Apply).await?)
+            Some(self.submit(target, DeploymentSource::Apply, None).await?)
         };
         Ok(ApplyOutcome {
             revision,
@@ -717,7 +751,88 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .await?
             .ok_or_else(|| OrchestratorError::UnknownStack(stack.to_owned()))?;
         let definition: Arc<Stack> = Arc::new(revision.toml.parse()?);
-        for (service, digest) in &images {
+        Self::deployable(&definition, &images)?;
+        let pins = self.store.revision_images(revision.id).await?;
+        self.submit(
+            Target::new(definition, revision, pins, images),
+            source,
+            None,
+        )
+        .await
+    }
+
+    /// A deploy from the webhook (ADR-0042, ADR-0047): the caller must match the stack's
+    /// `[deploy]` rule, and every digest must be in its service's repository. Otherwise like
+    /// [`deploy`](Self::deploy), with the provenance recorded on the deployment.
+    ///
+    /// An unknown stack is [`Forbidden`](OrchestratorError::Forbidden) too, so the answer does
+    /// not tell anyone with a GitHub token which stacks exist.
+    #[tracing::instrument(skip_all, fields(stack = %request.stack))]
+    pub async fn deploy_webhook(self: &Arc<Self>, request: WebhookDeploy) -> Result<DeployOutcome> {
+        let stack = request.stack.as_str();
+        let forbidden = |reason: String| OrchestratorError::Forbidden {
+            stack: stack.to_owned(),
+            reason,
+        };
+        let revision = match self.store.stack(stack).await? {
+            Some(_) => self.store.latest_revision(stack).await?,
+            None => None,
+        }
+        .ok_or_else(|| forbidden("the stack does not exist".into()))?;
+        let definition: Arc<Stack> = Arc::new(revision.toml.parse()?);
+        let rule = definition
+            .deploy
+            .as_ref()
+            .ok_or_else(|| forbidden("the stack file has no [deploy] section".into()))?;
+        rule.check(&request.caller)
+            .map_err(|denied| forbidden(denied.to_string()))?;
+        Self::deployable(&definition, &request.images)?;
+        for (service, digest) in &request.images {
+            let image = &definition
+                .services
+                .iter()
+                .find(|(name, _)| name.as_ref() == service)
+                .ok_or_else(|| OrchestratorError::UnknownService(service.clone()))?
+                .1
+                .image;
+            let digest: Digest = digest
+                .parse()
+                .map_err(|message| OrchestratorError::Digest {
+                    service: service.clone(),
+                    message,
+                })?;
+            match self.resolver.contains(image, &digest).await {
+                Ok(()) => {}
+                Err(RegistryError::NotFound { .. }) => {
+                    return Err(OrchestratorError::ForeignDigest {
+                        service: service.clone(),
+                        repository: format!("{}/{}", image.registry(), image.repository()),
+                    });
+                }
+                Err(err) => {
+                    return Err(OrchestratorError::Resolve {
+                        service: service.clone(),
+                        message: err.to_string(),
+                    });
+                }
+            }
+        }
+        let pins = self.store.revision_images(revision.id).await?;
+        let target = Target::new(definition, revision, pins, request.images);
+        self.submit(target, DeploymentSource::Webhook, Some(request.provenance))
+            .await
+    }
+
+    /// Records a refused webhook attempt for the stack page (ADR-0047). Attempts on stacks
+    /// hoster does not know are dropped.
+    pub async fn record_rejection(&self, rejection: &WebhookRejection) -> Result<()> {
+        self.store.record_rejection(rejection).await?;
+        Ok(())
+    }
+
+    /// Checks that every service of `images` exists, is CI-built and gets a valid digest.
+    fn deployable(definition: &Stack, images: &DigestSet) -> Result<()> {
+        for (service, digest) in images {
             let image = definition
                 .services
                 .iter()
@@ -727,16 +842,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             if !image.is_ci_built() {
                 return Err(OrchestratorError::NotCiBuilt(service.clone()));
             }
-            digest.parse::<crate::stack::Digest>().map_err(|message| {
-                OrchestratorError::Digest {
+            digest
+                .parse::<Digest>()
+                .map_err(|message| OrchestratorError::Digest {
                     service: service.clone(),
                     message,
-                }
-            })?;
+                })?;
         }
-        let pins = self.store.revision_images(revision.id).await?;
-        self.submit(Target::new(definition, revision, pins, images), source)
-            .await
+        Ok(())
     }
 
     /// Redeploys an earlier successful deployment: its digest set and its stack revision
@@ -790,7 +903,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         // the newer revision routed are forgotten, exactly as at apply (ADR-0036).
         self.lock().certs.apply(&definition);
         let target = Target::new(definition, revision, pins, earlier.target);
-        self.submit(target, DeploymentSource::Rollback).await
+        self.submit(target, DeploymentSource::Rollback, None).await
     }
 
     /// Removes a stack (ADR-0030): aborts its active deployment and drops its queued one, then
@@ -1023,7 +1136,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     slot.and_then(|s| s.pending.as_ref().map(Run::id)),
                 )
             };
+            let rejections = self
+                .store
+                .rejections(&stack.name, Self::SHOWN_REJECTIONS)
+                .await?;
             out.push(StackStatus {
+                rejections,
                 name: stack.name,
                 revision,
                 services,
@@ -1180,6 +1298,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self: &Arc<Self>,
         target: Target,
         source: DeploymentSource,
+        provenance: Option<Provenance>,
     ) -> Result<DeployOutcome> {
         let stack = target.stack().to_string();
         if self.is_removing(&stack) {
@@ -1195,6 +1314,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 revision: Some(target.revision_id()),
                 source,
                 target: digests,
+                provenance,
             })
             .await?;
         let id = record.id;

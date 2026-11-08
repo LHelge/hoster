@@ -18,6 +18,7 @@
 mod secrets;
 mod sessions;
 mod types;
+mod webhook;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, DirBuilder, OpenOptions, Permissions};
@@ -39,8 +40,9 @@ use thiserror::Error;
 )]
 pub use types::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState,
-    DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, RevisionId, SealedSecret,
-    SecretEntry, ServicePointer, SessionRecord, Stack, StackRevision, Timestamp,
+    DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, Provenance, RevisionId,
+    SealedSecret, SecretEntry, ServicePointer, SessionRecord, Stack, StackRevision, Timestamp,
+    WebhookRejection,
 };
 
 /// The embedded migrations from `migrations/`.
@@ -598,9 +600,20 @@ impl Store {
         if !exists {
             return Err(StoreError::UnknownStack(new.stack.clone()));
         }
+        let provenance = new.provenance.as_ref();
+        let (repository, sha, git_ref, run_id, actor, tag) = (
+            provenance.map(|p| &p.repository),
+            provenance.map(|p| &p.sha),
+            provenance.map(|p| &p.git_ref),
+            provenance.map(|p| &p.run_id),
+            provenance.map(|p| &p.actor),
+            provenance.and_then(|p| p.tag.as_ref()),
+        );
         let id = sqlx::query_scalar!(
-            r#"INSERT INTO deployments (stack, revision_id, state, source, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+            r#"INSERT INTO deployments
+                   (stack, revision_id, state, source, created_at, updated_at, source_repository,
+                    source_sha, source_ref, source_run_id, source_actor, source_tag)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                RETURNING id AS "id!: DeploymentId""#,
             new.stack,
             new.revision,
@@ -608,6 +621,12 @@ impl Store {
             new.source,
             now,
             now,
+            repository,
+            sha,
+            git_ref,
+            run_id,
+            actor,
+            tag,
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -937,7 +956,9 @@ impl Store {
                       source AS "source: DeploymentSource", error,
                       created_at AS "created_at: Timestamp", updated_at AS "updated_at: Timestamp",
                       committed_at AS "committed_at: Timestamp",
-                      finished_at AS "finished_at: Timestamp"
+                      finished_at AS "finished_at: Timestamp",
+                      source_repository, source_sha, source_ref, source_run_id, source_actor,
+                      source_tag
                FROM deployments WHERE id = ?"#,
             id,
         )
@@ -955,6 +976,25 @@ impl Store {
         .into_iter()
         .map(|t| (t.service, t.digest))
         .collect();
+        let provenance = match (
+            row.source_repository,
+            row.source_sha,
+            row.source_ref,
+            row.source_run_id,
+            row.source_actor,
+        ) {
+            (Some(repository), Some(sha), Some(git_ref), Some(run_id), Some(actor)) => {
+                Some(Provenance {
+                    repository,
+                    sha,
+                    git_ref,
+                    run_id,
+                    actor,
+                    tag: row.source_tag,
+                })
+            }
+            _ => None,
+        };
         Ok(Some(Deployment {
             id: row.id,
             stack: row.stack,
@@ -963,6 +1003,7 @@ impl Store {
             state: row.state,
             source: row.source,
             target,
+            provenance,
             error: row.error,
             created_at: row.created_at,
             updated_at: row.updated_at,

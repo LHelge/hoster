@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT stack, reason, repository, repository_id, git_ref, environment,\n                      workflow_ref, job_workflow_ref, actor, run_id, at AS \"at: Timestamp\"\n               FROM webhook_rejections WHERE stack = ? ORDER BY id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "stack",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "repository",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "repository"
+          }
+        }
+      },
+      {
+        "name": "repository_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "repository_id"
+          }
+        }
+      },
+      {
+        "name": "git_ref",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "git_ref"
+          }
+        }
+      },
+      {
+        "name": "environment",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "environment"
+          }
+        }
+      },
+      {
+        "name": "workflow_ref",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "workflow_ref"
+          }
+        }
+      },
+      {
+        "name": "job_workflow_ref",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "job_workflow_ref"
+          }
+        }
+      },
+      {
+        "name": "actor",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "actor"
+          }
+        }
+      },
+      {
+        "name": "run_id",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "run_id"
+          }
+        }
+      },
+      {
+        "name": "at: Timestamp",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "webhook_rejections",
+            "name": "at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "81a0bed15f3e5d162cb0615549eb182273d6520eb6a585eab41533118a1a9056"
+}
