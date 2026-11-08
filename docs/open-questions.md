@@ -383,3 +383,43 @@ Found while reviewing task 3v6 (`VolumeMount::named`, `ServiceGeneration`).
 **Recommendation.** B, together with D as defence in depth (volumes are labelled at creation in
 any case, ADR-0030). It removes the ambiguity by construction instead of relying on a cross-stack
 check.
+
+## OQ-36: No file-system sandbox for the user unit on Ubuntu
+
+**Problem.** On Ubuntu ≥ 23.10, `kernel.apparmor_restrict_unprivileged_userns = 1` gives the user
+manager a user namespace without capabilities. The unit therefore cannot set up a mount
+namespace. `ProtectSystem=strict`, `ProtectHome=read-only`, `ReadWritePaths=`, `PrivateTmp=`,
+`ProtectKernelTunables=` and `ProtectControlGroups=` are silently skipped, and hoster can write
+wherever the `hoster` user can. Only `NoNewPrivileges=` and the seccomp filters apply.
+
+Directives that drop capabilities made the unit fail outright (`218/CAPABILITIES`) and were
+removed (ADR-0023 correction). Ubuntu is the most likely VPS image, and with self-update
+(ADR-0052) the binary itself is writable by the service user. The file-system sandbox is what
+should keep a compromised hoster away from the rest of `~hoster`, the unit and the credential
+files.
+
+Found on the first real install (Ubuntu 26.04, v0.1.0). The `unit_sandbox` check in
+`hoster doctor` and `scripts/test-systemd-unit.sh` in CI report it.
+
+**Options.**
+
+- **A. Accept it on Ubuntu.** Keep the user unit, document the gap (done) and rely on seccomp,
+  `NoNewPrivileges=` and Unix permissions. No work, but the main deployment target gets the
+  weakest sandbox.
+- **B. Lift the restriction host-wide.** Ship `kernel.apparmor_restrict_unprivileged_userns = 0`
+  in `50-hoster.conf`, next to the low-port sysctl. Trivial, and the full sandbox works. It
+  undoes an Ubuntu kernel-hardening default for every local user, the same trade-off ADR-0023
+  already makes for low ports on a single-purpose VPS.
+- **C. An AppArmor profile that grants `userns`.** Attached to `systemd-executor`, it would apply
+  to every user unit on the host, so it amounts to B with more moving parts. Attached to the
+  hoster binary, it doesn't help: the namespace is created by systemd before `exec`.
+- **D. Run hoster as a system service with `User=hoster`.** This revisits the alternative ADR-0023
+  rejected. The root system manager sets up the full sandbox without user namespaces, and
+  `AmbientCapabilities=CAP_NET_BIND_SERVICE` can replace the low-port sysctl. The costs:
+  - ordering against `user@<uid>.service`, plus waiting for the rootless podman socket;
+  - root-owned unit and journal;
+  - install.sh and the docs change.
+
+**Recommendation.** D. It gives the strongest sandbox on every distribution, it drops the
+low-ports-for-everyone sysctl, and it doesn't weaken host defaults. Until then, A, which is the
+current state. B is a reasonable stopgap if the owner wants the sandbox on Ubuntu now.

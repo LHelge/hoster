@@ -61,15 +61,20 @@ KillMode=mixed
 # A user manager has no privileges, so only directives it can apply as the hoster user work
 # here. Filesystem and kernel protections are set up in a user namespace (systemd implies
 # PrivateUsers= for them in user units). docs/install.md lists what is not available.
+#
+# No directive here may drop capabilities (CapabilityBoundingSet=, PrivateDevices=,
+# ProtectKernelModules=, ProtectKernelLogs=, ProtectClock=): with
+# kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu >= 23.10) the user namespace has no
+# capabilities, dropping them fails and the unit cannot start (218/CAPABILITIES). hoster has no
+# capabilities on the host anyway, NoNewPrivileges= keeps it that way, and SystemCallFilter=
+# ~@privileged blocks module loading, clock changes and raw I/O. On such hosts systemd also
+# skips the namespace-based directives below without failing; `hoster doctor` reports it
+# (unit_sandbox, OQ-36).
 NoNewPrivileges=yes
-# Made explicit: a user namespace that maps only hoster's own uid/gid (and root). The process
-# has no capabilities on the host anyway; the empty bounding set also drops them inside the
-# namespace.
+# Made explicit: a user namespace that maps only hoster's own uid/gid (and root).
 PrivateUsers=yes
-CapabilityBoundingSet=
 UMask=0077
 PrivateTmp=yes
-PrivateDevices=yes
 PrivateIPC=yes
 KeyringMode=private
 ProtectSystem=strict
@@ -80,10 +85,7 @@ ProtectHome=read-only
 # this line too if state_dir is moved.
 ReadWritePaths=%h/.local/share/hoster %h/.config/hoster %h/.local/lib/hoster
 ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
 ProtectControlGroups=yes
-ProtectClock=yes
 ProtectHostname=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes

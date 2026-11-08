@@ -141,6 +141,7 @@ impl Doctor {
                 Check::required("podman_service", self.check_podman_service()),
                 Check::advisory("cgroup_delegation", self.check_cgroup_delegation()),
                 Check::advisory("user_credentials", self.check_user_credentials()),
+                Check::advisory("unit_sandbox", self.check_unit_sandbox()),
                 // ADR-0026: the range "must stay outside" the ephemeral range.
                 Check::required(
                     "port_range",
@@ -396,6 +397,37 @@ impl Doctor {
                 None => Outcome::fail(format!("cannot parse {output:?}"), hint),
             },
             Err(e) => Outcome::fail(format!("systemctl --version: {e}"), hint),
+        }
+    }
+
+    /// The unit's file-system sandboxing (`ProtectSystem=`, `ProtectHome=`, `ReadWritePaths=`,
+    /// `PrivateTmp=`, …) needs a mount namespace, which a user manager can only set up inside a
+    /// user namespace where it holds capabilities. Ubuntu ≥ 23.10 lets unprivileged processes
+    /// create user namespaces but, with `kernel.apparmor_restrict_unprivileged_userns = 1`,
+    /// gives them no capabilities there, so systemd silently skips those directives. hoster
+    /// still runs (seccomp filters and `NoNewPrivileges=` apply); this only reports it.
+    fn check_unit_sandbox(&self) -> Outcome {
+        const KEY: &str = "kernel/apparmor_restrict_unprivileged_userns";
+        match self.sysctl(KEY) {
+            Ok(value) if value == "1" => Outcome::fail(
+                "kernel.apparmor_restrict_unprivileged_userns = 1: the unit's file-system \
+                 sandboxing (ProtectSystem, ProtectHome, ReadWritePaths, PrivateTmp, \
+                 ProtectKernelTunables, ProtectControlGroups) is not applied; seccomp filters \
+                 and NoNewPrivileges still are",
+                "see Hardening in docs/install.md (OQ-36)",
+            ),
+            Ok(value) => Outcome::Pass(format!(
+                "kernel.apparmor_restrict_unprivileged_userns = {value}; the unit's sandboxing \
+                 applies"
+            )),
+            // Not an AppArmor kernel with that restriction (Debian, Fedora, older Ubuntu).
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Outcome::Pass("no AppArmor user-namespace restriction".to_owned())
+            }
+            Err(e) => Outcome::fail(
+                format!("cannot read kernel.apparmor_restrict_unprivileged_userns: {e}"),
+                "see Hardening in docs/install.md (OQ-36)",
+            ),
         }
     }
 
@@ -1134,6 +1166,31 @@ mod tests {
         assert!(report.ok(), "{report}");
         assert!(report.checks().iter().all(|c| c.status == Status::Pass));
         assert!(report.to_string().ends_with("all required checks passed"));
+    }
+
+    #[test]
+    fn apparmor_userns_restriction_is_reported() {
+        let fx = Fixture::new();
+        // No such sysctl: not an AppArmor kernel with the restriction.
+        assert_eq!(status(fx.doctor.check_unit_sandbox()), "pass");
+        fx.sysctl("kernel/apparmor_restrict_unprivileged_userns", "0\n");
+        assert_eq!(status(fx.doctor.check_unit_sandbox()), "pass");
+        fx.sysctl("kernel/apparmor_restrict_unprivileged_userns", "1\n");
+        let Outcome::Fail { detail, hint } = fx.doctor.check_unit_sandbox() else {
+            panic!("the restriction must be reported");
+        };
+        assert!(detail.contains("ProtectSystem"), "{detail}");
+        assert!(hint.contains("OQ-36"), "{hint}");
+        let report = fx
+            .doctor
+            .diagnose(&Err(ConfigError::NotFound(PathBuf::from("/nope"))));
+        let check = report
+            .checks()
+            .iter()
+            .find(|c| c.name == "unit_sandbox")
+            .unwrap();
+        assert_eq!(check.status, Status::Warn);
+        assert!(!check.required);
     }
 
     #[test]

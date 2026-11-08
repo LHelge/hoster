@@ -404,14 +404,28 @@ unit applies:
 | Directives | Effect |
 | --- | --- |
 | `NoNewPrivileges=yes` | No setuid or file-capability escalation. |
-| `PrivateUsers=yes`, `CapabilityBoundingSet=` | A user namespace that maps only hoster's uid and gid, with no capabilities even inside it. |
+| `PrivateUsers=yes` | A user namespace that maps only hoster's uid and gid. |
 | `ProtectSystem=strict`, `ProtectHome=read-only`, `ReadWritePaths=%h/.local/share/hoster %h/.config/hoster %h/.local/lib/hoster` | The whole file system is read-only except the state directory, the configuration directory (where hoster generates its secret-store key, ADR-0029) and the binary layout (which `hoster update` writes, ADR-0052). Credential files stay readable. |
-| `PrivateTmp=yes`, `PrivateDevices=yes`, `PrivateIPC=yes` | Private `/tmp` and `/var/tmp`, a minimal `/dev`, its own SysV IPC namespace. |
-| `ProtectKernelTunables=`, `ProtectKernelModules=`, `ProtectKernelLogs=`, `ProtectControlGroups=`, `ProtectClock=`, `ProtectHostname=` | No writes to `/proc/sys` or cgroupfs; no module loading, kernel log, clock or hostname changes. |
+| `PrivateTmp=yes`, `PrivateIPC=yes` | Private `/tmp` and `/var/tmp`, its own SysV IPC namespace. |
+| `ProtectKernelTunables=`, `ProtectControlGroups=`, `ProtectHostname=` | No writes to `/proc/sys` or cgroupfs; no hostname changes. |
 | `RestrictNamespaces=yes`, `RestrictRealtime=yes`, `RestrictSUIDSGID=yes`, `LockPersonality=yes`, `MemoryDenyWriteExecute=yes` | Seccomp-based restrictions, open to unprivileged units because of `NoNewPrivileges=`. |
 | `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` | Only Unix sockets (podman API, admin socket, sd_notify) and IP sockets. |
-| `SystemCallArchitectures=native`, `SystemCallFilter=@system-service ~@privileged` | A system-call allow list. |
+| `SystemCallArchitectures=native`, `SystemCallFilter=@system-service ~@privileged` | A system-call allow list; `~@privileged` also blocks module loading, clock changes and raw I/O. |
 | `KeyringMode=private`, `UMask=0077` | Its own kernel keyring; new files are private to hoster. |
+
+**Ubuntu ≥ 23.10 (`kernel.apparmor_restrict_unprivileged_userns = 1`).** AppArmor lets the user
+manager create the user namespace but gives it no capabilities there. Two consequences:
+
+- Directives that drop capabilities (`CapabilityBoundingSet=`, `PrivateDevices=`,
+  `ProtectKernelModules=`, `ProtectKernelLogs=`, `ProtectClock=`) make the unit fail to start
+  (`218/CAPABILITIES`), so the unit doesn't use them. hoster has no capabilities on the host, and
+  `NoNewPrivileges=` and `~@privileged` cover what they added.
+- systemd silently skips the namespace-based directives: `ProtectSystem=`, `ProtectHome=`,
+  `ReadWritePaths=`, `PrivateTmp=`, `PrivateIPC=`, `ProtectKernelTunables=`,
+  `ProtectControlGroups=` and `ProtectHostname=` do **not** apply, and hoster can write wherever
+  the `hoster` user can. `NoNewPrivileges=` and the seccomp-based directives still apply.
+  `hoster doctor` reports this as `unit_sandbox`. How to restore the sandbox there is open
+  (OQ-36).
 
 hoster talks to podman only through its API socket. The containers run in podman's own cgroups
 and user namespaces, so none of this restricts the apps.
