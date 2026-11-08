@@ -247,6 +247,16 @@ impl From<Arc<dyn StackControl>> for Stacks {
 }
 
 impl Stacks {
+    /// Every stack; see [`Orchestrator::status`].
+    pub(super) async fn status(&self) -> Result<Vec<StackStatus>, OrchestratorError> {
+        self.0.status().await
+    }
+
+    /// The [`UiEvent`]s sent from now on; see [`Orchestrator::subscribe`].
+    pub(super) fn subscribe(&self) -> broadcast::Receiver<UiEvent> {
+        self.0.subscribe()
+    }
+
     /// The stack called `name`.
     async fn find(&self, name: &str) -> Result<StackStatus, Outcome> {
         self.0

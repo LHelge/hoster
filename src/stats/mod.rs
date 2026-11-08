@@ -69,6 +69,13 @@ impl Stats {
         Self { traffic, source }
     }
 
+    /// The certificates served now, soonest expiry first.
+    pub fn certificates(&self) -> Vec<CertExpiry> {
+        let mut certificates = self.source.certificates();
+        certificates.sort_by_key(|cert| cert.not_after);
+        certificates
+    }
+
     /// Everything, as of now. A source that fails leaves its part empty and names the problem
     /// in [`Snapshot::problems`], so the rest still shows.
     pub async fn snapshot(&self) -> Snapshot {
@@ -92,13 +99,11 @@ impl Stats {
                 Vec::new()
             }
         };
-        let mut certificates = self.source.certificates();
-        certificates.sort_by_key(|cert| cert.not_after);
         Snapshot {
             traffic: self.traffic.snapshot(),
             deployments,
             services,
-            certificates,
+            certificates: self.certificates(),
             problems,
             taken_at: SystemTime::now(),
         }

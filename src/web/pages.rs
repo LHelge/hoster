@@ -2,18 +2,13 @@
 //! binary by Askama; every page extends `base.html`, which reads the page's [`Layout`].
 
 use std::fmt;
-use std::time::Duration;
 
 use askama::Template;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
-use axum::Extension;
-
 use super::assets::Assets;
 use super::auth::Session;
-use crate::routing::Owner;
-use crate::stats::{Counts, Elapsed, ServiceRestarts, Snapshot, Stats, StatusClass};
 
 /// A section of the admin UI, as listed in the navigation bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,179 +166,6 @@ impl Layout {
     }
 }
 
-/// The dashboard at `/`: the in-process statistics of ADR-0045.
-#[derive(Template)]
-#[template(path = "dashboard.html")]
-pub struct Dashboard {
-    pub layout: Layout,
-    pub stats: StatsView,
-}
-
-impl Dashboard {
-    /// The `GET /` handler.
-    pub async fn show(
-        Extension(session): Extension<Session>,
-        Extension(stats): Extension<Stats>,
-    ) -> Page<Dashboard> {
-        Page(Dashboard {
-            layout: Layout::new(Section::Dashboard, &session),
-            stats: StatsView::from(stats.snapshot().await),
-        })
-    }
-}
-
-/// The statistics as the dashboard shows them.
-#[derive(Debug, Default)]
-pub struct StatsView {
-    pub routes: Vec<TrafficRow>,
-    /// Requests that matched no route.
-    pub unrouted: TrafficRow,
-    pub deployments: Vec<DeployRow>,
-    pub services: Vec<ServiceRestarts>,
-    pub certificates: Vec<CertRow>,
-    pub problems: Vec<String>,
-}
-
-/// One route's traffic.
-#[derive(Debug, Default)]
-pub struct TrafficRow {
-    /// `host/prefix`.
-    pub route: String,
-    /// Who serves it: "web (blog)", "hoster (admin UI)".
-    pub owner: String,
-    pub statuses: Vec<(StatusClass, u64)>,
-    /// Every finished request.
-    pub requests: u64,
-    pub upstream_errors: u64,
-    pub inflight: u64,
-    pub p50: String,
-    pub p95: String,
-}
-
-/// One stack's deployments.
-#[derive(Debug)]
-pub struct DeployRow {
-    pub stack: String,
-    pub succeeded: u32,
-    pub failed: u32,
-    pub skipped: u32,
-    pub mean: String,
-    pub max: String,
-}
-
-/// One served certificate.
-#[derive(Debug)]
-pub struct CertRow {
-    pub host: String,
-    pub not_after: String,
-    pub left: String,
-    /// Expires within [`CertRow::WARN_WITHIN`].
-    pub expiring: bool,
-}
-
-impl CertRow {
-    /// Certificates closer to expiry than this are flagged (renewal starts well before).
-    pub const WARN_WITHIN: Duration = Duration::from_secs(14 * 24 * 60 * 60);
-}
-
-impl StatsView {
-    /// The status classes, in the order of [`TrafficRow::statuses`].
-    pub fn classes(&self) -> [StatusClass; 6] {
-        StatusClass::ALL
-    }
-
-    /// How far back the latency percentiles look, e.g. `5 min`.
-    pub fn latency_window(&self) -> String {
-        Elapsed(Stats::LATENCY_WINDOW).to_string()
-    }
-
-    /// How far back the deployment statistics look, e.g. `30 d`.
-    pub fn deploy_history(&self) -> String {
-        Elapsed(Stats::DEPLOY_HISTORY).to_string()
-    }
-
-    /// The rows of the traffic table: every route, then the unrouted requests.
-    pub fn traffic(&self) -> impl Iterator<Item = &TrafficRow> {
-        self.routes.iter().chain([&self.unrouted])
-    }
-}
-
-impl TrafficRow {
-    fn new(route: String, owner: String, counts: &Counts) -> Self {
-        TrafficRow {
-            route,
-            owner,
-            statuses: counts.statuses.iter().collect(),
-            requests: counts.statuses.total(),
-            upstream_errors: counts.upstream_errors,
-            inflight: counts.inflight,
-            p50: Elapsed::cell(counts.latency.p50),
-            p95: Elapsed::cell(counts.latency.p95),
-        }
-    }
-}
-
-impl From<Snapshot> for StatsView {
-    fn from(snapshot: Snapshot) -> Self {
-        let routes = snapshot
-            .traffic
-            .routes
-            .iter()
-            .map(|route| {
-                let owner = match &route.owner {
-                    Some(Owner::Route(owner)) => format!("{} ({})", owner.service, owner.stack),
-                    Some(Owner::Reserved(purpose)) => format!("hoster ({purpose})"),
-                    None => String::new(),
-                };
-                let name = format!("{}{}", route.host, route.prefix);
-                TrafficRow::new(name, owner, &route.counts)
-            })
-            .collect();
-        let unrouted = TrafficRow::new(
-            "unrouted".to_owned(),
-            String::new(),
-            &snapshot.traffic.unrouted,
-        );
-        let deployments = snapshot
-            .deployments
-            .iter()
-            .map(|stack| DeployRow {
-                stack: stack.stack.clone(),
-                succeeded: stack.succeeded(),
-                failed: stack.failed(),
-                skipped: stack.skipped(),
-                mean: Elapsed::cell(stack.mean_live_duration()),
-                max: Elapsed::cell(stack.max_live_duration()),
-            })
-            .collect();
-        let certificates = snapshot
-            .certificates
-            .iter()
-            .map(|cert| {
-                let left = cert.remaining(snapshot.taken_at);
-                CertRow {
-                    host: cert.host.clone(),
-                    not_after: humantime::format_rfc3339_seconds(cert.not_after).to_string(),
-                    left: if left.is_zero() {
-                        "expired".to_owned()
-                    } else {
-                        Elapsed(left).to_string()
-                    },
-                    expiring: left < CertRow::WARN_WITHIN,
-                }
-            })
-            .collect();
-        StatsView {
-            routes,
-            unrouted,
-            deployments,
-            services: snapshot.services,
-            certificates,
-            problems: snapshot.problems,
-        }
-    }
-}
-
 /// A rendered template as an HTML response; a rendering failure becomes a logged 500.
 pub struct Page<T>(pub T);
 
@@ -362,6 +184,7 @@ impl<T: Template> IntoResponse for Page<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::dashboard::Dashboard;
 
     fn layout() -> Layout {
         Layout::new(Section::Dashboard, &Session::for_tests("octocat", "c0ffee"))
@@ -369,12 +192,7 @@ mod tests {
 
     #[test]
     fn base_layout_has_nav_flash_area_and_assets() {
-        let html = Dashboard {
-            layout: layout(),
-            stats: StatsView::default(),
-        }
-        .render()
-        .unwrap();
+        let html = Dashboard::empty(layout()).render().unwrap();
         assert!(html.contains(r#"<a href="/" aria-current="page">Dashboard</a>"#));
         assert!(
             html.contains(
@@ -397,13 +215,10 @@ mod tests {
 
     #[test]
     fn flash_messages_are_escaped() {
-        let html = Dashboard {
-            layout: layout().with_flash(Flash {
-                kind: FlashKind::Error,
-                message: "<b>deploy failed</b>".into(),
-            }),
-            stats: StatsView::default(),
-        }
+        let html = Dashboard::empty(layout().with_flash(Flash {
+            kind: FlashKind::Error,
+            message: "<b>deploy failed</b>".into(),
+        }))
         .render()
         .unwrap();
         assert!(html.contains(r#"class="flash flash-error""#));

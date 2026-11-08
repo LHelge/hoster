@@ -2,11 +2,17 @@
 {% block title %}Dashboard{% endblock %}
 {% block content %}
 <h1>Dashboard</h1>
+<div id="overview" hx-sse:connect="{{ self.events_url() }}" hx-swap="innerHTML" hx-sse:close="end">
+{{ overview|safe }}
+</div>
+
+<h2>Statistics</h2>
+<p class="muted">As of when this page was loaded; <a href="/">reload</a> to refresh them.</p>
 {%- for problem in stats.problems %}
 <p class="flash flash-error">Cannot show {{ problem }}</p>
 {%- endfor %}
 
-<h2>Traffic</h2>
+<h3>Traffic</h3>
 <p class="muted">Requests since hoster started; latency over the last {{ stats.latency_window() }}.</p>
 {%- if stats.routes.is_empty() && stats.unrouted.requests == 0 %}
 <p>No requests yet.</p>
@@ -33,7 +39,7 @@
 </table>
 {%- endif %}
 
-<h2>Deployments</h2>
+<h3>Deployments</h3>
 <p class="muted">Finished deployments of the last {{ stats.deploy_history() }}; durations of those that went live.</p>
 {%- if stats.deployments.is_empty() %}
 <p>No deployments yet.</p>
@@ -57,7 +63,7 @@
 </table>
 {%- endif %}
 
-<h2>Restarts</h2>
+<h3>Restarts</h3>
 {%- if stats.services.is_empty() %}
 <p>No services running.</p>
 {%- else %}
@@ -78,7 +84,7 @@
 </table>
 {%- endif %}
 
-<h2>Certificates</h2>
+<h3>Certificates</h3>
 {%- if stats.certificates.is_empty() %}
 <p>No certificates yet.</p>
 {%- else %}

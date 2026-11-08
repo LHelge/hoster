@@ -2,10 +2,10 @@
 id: "6gn"
 title: "M8: Observability"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.148039506Z"
-updated: "2026-11-07T19:32:45.186300522Z"
+updated: "2026-11-08T03:14:19.452484181Z"
 ---
 
 ## Scope

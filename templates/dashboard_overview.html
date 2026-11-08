@@ -1,0 +1,68 @@
+{%- macro stack_head(stack) %}
+      <th scope="rowgroup" rowspan="{{ stack.rows() }}"><a href="{{ stack.url }}">{{ stack.name }}</a>
+        {%- if let Some(flag) = stack.flag %}<br><span class="badge badge-error">{{ flag }}</span>{% endif %}</th>
+{%- endmacro -%}
+{%- macro deployment_cell(stack) %}
+      <td rowspan="{{ stack.rows() }}">
+        {%- if let Some(deployment) = stack.deployment %}<a href="{{ deployment.url }}">#{{ deployment.id }}</a> {% if deployment.failed %}<span class="badge badge-error">{{ deployment.state }}</span>{% else %}{{ deployment.state }}{% endif %} <span class="muted">({{ deployment.detail }})</span>
+        {%- else %}<span class="muted">none</span>{% endif %}
+        {%- if let Some(queued) = stack.queued %}<br><span class="muted">#{{ queued }} queued</span>{% endif %}
+        <br><a class="muted" href="{{ stack.history_url }}">history</a></td>
+{%- endmacro -%}
+<section id="overview-status">
+<h2>Warnings</h2>
+{%- if let Some(problem) = problem %}
+<p class="flash flash-error">{{ problem }}</p>
+{%- endif %}
+{%- if warnings.is_empty() %}
+<p class="muted">No warnings.</p>
+{%- else %}
+<ul class="warnings">
+  {%- for warning in warnings %}
+  <li><span class="badge badge-error">{{ warning.kind }}</span> <a href="{{ warning.href }}">{{ warning.subject }}</a>{% if !warning.detail.is_empty() %}: {{ warning.detail }}{% endif %}</li>
+  {%- endfor %}
+</ul>
+{%- endif %}
+
+<h2>Stacks</h2>
+{%- if stacks.is_empty() %}
+<p>No stacks yet. <a href="/apply">Apply a stack file</a> to create one.</p>
+{%- else %}
+<table class="list overview">
+  <thead>
+    <tr><th scope="col">Stack</th><th scope="col">Service</th><th scope="col">Digest</th><th scope="col">Health</th><th scope="col">Restarts</th><th scope="col">Certificate</th><th scope="col">Last deployment</th></tr>
+  </thead>
+  {%- for stack in stacks %}
+  <tbody class="stack">
+    {%- if stack.services.is_empty() %}
+    <tr>{% call stack_head(stack) %}{% endcall %}
+      <td colspan="5"><span class="muted">no services: the active revision cannot be read</span></td>{% call deployment_cell(stack) %}{% endcall %}
+    </tr>
+    {%- endif %}
+    {%- for service in stack.services %}
+    <tr>
+      {%- if loop.first %}{% call stack_head(stack) %}{% endcall %}{% endif %}
+      <td>{{ service.name }}</td>
+      <td>{% if let Some((short, full)) = service.digest %}<code title="{{ full }}">{{ short }}</code> <span class="muted">{{ service.state }}</span>{% else %}<span class="muted">{{ service.state }}</span>{% endif %}</td>
+      <td>
+        {%- if service.crash_looping %}<span class="badge badge-error">crash looping</span>
+        {%- else if service.running %}<span class="{{ service.health_class() }}"{% if let Some(detail) = service.health_detail %} title="{{ detail }}"{% endif %}>{{ service.health }}</span>
+        {%- else %}<span class="muted">-</span>{% endif %}</td>
+      <td>{% if service.running %}{{ service.restarts }}{% else %}<span class="muted">-</span>{% endif %}</td>
+      <td>
+        {%- if service.certs.is_empty() %}<span class="muted">not routed</span>
+        {%- else %}
+        <ul class="plain">
+          {%- for cert in service.certs %}
+          <li>{{ cert.host }}: {% if let Some(left) = cert.left %}{% if cert.expiring %}<span class="badge badge-error" title="{{ cert.not_after }}">{{ left }}</span>{% else %}<span title="{{ cert.not_after }}">{{ left }}</span>{% endif %}{% else %}<span class="muted">none yet</span>{% endif %}</li>
+          {%- endfor %}
+        </ul>
+        {%- endif %}</td>
+      {%- if loop.first %}{% call deployment_cell(stack) %}{% endcall %}{% endif %}
+    </tr>
+    {%- endfor %}
+  </tbody>
+  {%- endfor %}
+</table>
+{%- endif %}
+</section>

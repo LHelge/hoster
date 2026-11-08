@@ -1,10 +1,10 @@
 ---
 id: d5z
 title: Web UI dashboard with live status
-status: open
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.379437087Z"
-updated: "2026-11-07T14:45:17.379437087Z"
+updated: "2026-11-08T03:14:19.452309479Z"
 tags:
   - web
   - observability
@@ -14,6 +14,7 @@ depends_on:
   - qwj
   - cuh
 parent: "6gn"
+attempts: 1
 ---
 
 ## Summary

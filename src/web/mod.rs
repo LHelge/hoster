@@ -1,5 +1,6 @@
-//! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), the dashboard
-//! with hoster's in-process statistics (ADR-0045, read through [`Stats`]), container logs
+//! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), the live
+//! dashboard with hoster's in-process statistics (ADR-0045, read through [`Stats`], see
+//! `dashboard.rs`), container logs
 //! (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
 //! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029,
 //! ADR-0049, see `stacks.rs`), Settings → Registries (ADR-0025, see `settings.rs`), and the
@@ -18,6 +19,7 @@ mod assets;
 mod auth;
 mod certificates;
 mod containers;
+mod dashboard;
 mod pages;
 mod settings;
 mod stacks;
@@ -50,7 +52,7 @@ use self::assets::Assets;
 use self::auth::Auth;
 use self::certificates::{CertificateAccess, CertificateControl, Certificates};
 use self::containers::{ContainerSource, Containers};
-use self::pages::Dashboard;
+use self::dashboard::Dashboard;
 use self::settings::{Registries, RegistryControl};
 use self::stacks::{StackControl, Stacks};
 use self::webhook::{OidcVerifier, Webhook};
@@ -199,6 +201,7 @@ impl WebApp {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/", get(Dashboard::show))
+            .route(Dashboard::EVENTS, get(Dashboard::events))
             .layer(Extension(self.stats.clone()))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))

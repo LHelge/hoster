@@ -154,3 +154,9 @@ button.danger { border-color: #cf222e; color: #cf222e; }
 /* Deployment history */
 .state-failed { background: var(--error-bg); padding: 0 0.25em; border-radius: 3px; }
 .deployments .digest { white-space: nowrap; }
+
+/* Dashboard */
+ul.warnings { margin: 0 0 1rem; padding-left: 1.25rem; }
+ul.warnings li { margin: 0.15rem 0; }
+table.overview tbody.stack { border-top: 2px solid var(--border); }
+table.overview th[scope="rowgroup"] { font-weight: 600; }
