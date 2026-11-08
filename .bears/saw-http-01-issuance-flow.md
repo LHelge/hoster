@@ -1,10 +1,10 @@
 ---
 id: saw
 title: HTTP-01 issuance flow
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.270749593Z"
-updated: "2026-11-08T00:25:10.299197943Z"
+updated: "2026-11-08T00:38:03.794300710Z"
 tags:
   - tls
   - acme

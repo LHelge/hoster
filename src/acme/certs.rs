@@ -450,6 +450,12 @@ impl CertMap {
         ))
     }
 
+    /// `host` lowercased, if it is a name [`CertMap::insert`] accepts: a plain DNS name that is
+    /// also safe as a directory name.
+    pub fn normalize_host(host: &str) -> Result<String, CertError> {
+        Certificate::normalize_host(host)
+    }
+
     /// Validates `chain_pem` (PEM, any order) against `key_pem` for `host`, persists both under
     /// `certs/<host>/` and publishes a snapshot serving the new certificate, replacing any
     /// previous one for that host. A rejected certificate changes nothing.
