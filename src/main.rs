@@ -8,6 +8,7 @@
 mod acme;
 mod config;
 mod doctor;
+mod health;
 mod logging;
 mod orchestrator;
 mod ports;

@@ -230,6 +230,17 @@ impl ExpectStatus {
     }
 }
 
+/// As a stack file writes it: `2xx`, `204`, or `2xx-3xx` for the default.
+impl fmt::Display for ExpectStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExpectStatus::SuccessOrRedirect => f.write_str("2xx-3xx"),
+            ExpectStatus::Class(class) => write!(f, "{class}xx"),
+            ExpectStatus::Exact(code) => write!(f, "{code}"),
+        }
+    }
+}
+
 impl FromStr for ExpectStatus {
     type Err = String;
 

@@ -6,12 +6,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::time::Instant;
+use futures_util::future::try_join_all;
 use tracing::Instrument;
 
 use super::machine::{Effect, Event};
 use super::plan::{Change, Plan, SecretVersions};
 use super::{Orchestrator, Result};
+use crate::health::Check;
 use crate::logging::LogSpan;
 use crate::routing::RouteClaims;
 use crate::runtime::{
@@ -572,33 +573,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 
     /// The built-in health check (§5.1, M3): every container stays running for
-    /// [`Settings::settle`](super::Settings::settle). hoster turns podman's restart policy
-    /// off (ADR-0028), so "running at every look" is "running and not restarted".
+    /// [`Settings::settle`](super::Settings::settle), checked concurrently.
     async fn settle(&self, ids: &[ContainerId]) -> Result<(), String> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let deadline = Instant::now() + self.settings.settle;
-        loop {
-            for id in ids {
-                let info = self
-                    .runtime
-                    .inspect(id)
-                    .await
-                    .map_err(|err| format!("cannot inspect container {id}: {err}"))?;
-                if !info.state.is_running() {
-                    return Err(format!(
-                        "container {} {} before it became healthy",
-                        info.name, info.state
-                    ));
-                }
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Ok(());
-            }
-            tokio::time::sleep(self.settings.settle_poll.min(deadline - now)).await;
-        }
+        let check = Check::settle(self.settings.settle, self.settings.settle_poll);
+        let runtime = &*self.runtime;
+        try_join_all(ids.iter().map(|id| check.run(runtime, id, &())))
+            .await
+            .map(drop)
+            .map_err(|err| err.to_string())
     }
 }
 

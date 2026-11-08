@@ -1,10 +1,10 @@
 ---
 id: gnz
 title: "Health checker: HTTP and TCP probes"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.288083789Z"
-updated: "2026-11-08T00:06:31.677455917Z"
+updated: "2026-11-08T00:26:18.713883839Z"
 tags:
   - orchestrator
 depends_on:

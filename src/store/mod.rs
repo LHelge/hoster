@@ -706,6 +706,33 @@ impl Store {
         Ok(())
     }
 
+    /// Logs a note on a deployment without changing its state: an event from `state` to
+    /// `state` carrying `message` (health probe results, for example). Unlike
+    /// [`transition`](Self::transition), the deployment row is left untouched.
+    pub async fn note(
+        &self,
+        id: DeploymentId,
+        state: DeploymentState,
+        message: &str,
+    ) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        let stack = sqlx::query_scalar!("SELECT stack FROM deployments WHERE id = ?", id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or(StoreError::UnknownDeployment(id))?;
+        let event = Self::log_event(
+            &mut conn,
+            id,
+            Some(state),
+            state,
+            Some(message),
+            Timestamp::now(),
+        )
+        .await?;
+        event.log(id, &stack);
+        Ok(())
+    }
+
     /// The deploy commit point (docs/architecture.md §5.1, §5.4): in one transaction, writes the
     /// current pointer of every service the deployment changed, drops the pointers of
     /// `removed` services, and marks the deployment committed. Either all of it is stored or

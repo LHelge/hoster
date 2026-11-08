@@ -112,6 +112,12 @@ for a service mounted under a preserved prefix. Services without routes have no 
 them v1 uses "running and not restarted for 5 s", and `health` is not allowed on non-routed
 services.
 
+Unset timings default to `interval = "1s"`, `timeout = "2s"`, `healthy_after = 1` and
+`start_period = "30s"`. `path` is sent as written, so spaces, control and non-ASCII characters
+must be percent-encoded. HTTP probes do not follow redirects, so a 3xx answer is the result. A
+deploy aborts as soon as the container exits during the check. Probe results (each change, and the
+verdict) are recorded as deployment events.
+
 ### 2.5 Deploy authorization (ADR-0047)
 
 ```toml

@@ -596,6 +596,16 @@ const APPENDED_ERRORS: &[(&str, &str, &str)] = &[
         "must start with `/`",
     ),
     (
+        "health path with a newline",
+        "[services.app.health]\nhttp = { path = \"/a\\r\\nX: y\" }",
+        "invalid health path `/a\\r\\nX: y`: spaces, control",
+    ),
+    (
+        "health path with a space",
+        "[services.app.health]\nhttp = { path = \"/a b\" }",
+        "must be percent-encoded",
+    ),
+    (
         "health bad status",
         "[services.app.health]\nhttp = { expect_status = \"2xy\" }",
         "invalid status `2xy`",

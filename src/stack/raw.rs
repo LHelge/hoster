@@ -722,10 +722,7 @@ impl RawHealth {
                 let http_path = path.key("http");
                 let http = http.into_inner();
                 let probe_path = match &http.path {
-                    Some(p) if p.get_ref().starts_with('/') && !p.get_ref().contains(' ') => {
-                        Some(p.get_ref().clone())
-                    }
-                    Some(p) => {
+                    Some(p) if !p.get_ref().starts_with('/') => {
                         v.error(
                             &http_path.key("path"),
                             p.span(),
@@ -733,6 +730,20 @@ impl RawHealth {
                         );
                         None
                     }
+                    // The path goes verbatim into the probe's HTTP request line.
+                    Some(p) if !p.get_ref().bytes().all(|b| b.is_ascii_graphic()) => {
+                        v.error(
+                            &http_path.key("path"),
+                            p.span(),
+                            format!(
+                                "invalid health path `{}`: spaces, control and non-ASCII \
+                                 characters must be percent-encoded",
+                                p.get_ref().escape_debug()
+                            ),
+                        );
+                        None
+                    }
+                    Some(p) => Some(p.get_ref().clone()),
                     None => Some(DEFAULT_HEALTH_PATH.to_owned()),
                 };
                 let port = probe_port(v, http_path.key("port"), &http.port);
