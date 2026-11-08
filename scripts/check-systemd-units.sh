@@ -18,13 +18,23 @@ example="$root/deploy/hoster.example.toml"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# A stub binary in place of /usr/local/bin/hoster.
+# A stub binary in place of the versioned layout's current binary (ADR-0052).
+exec_start='ExecStart=%h/.local/lib/hoster/current/hoster '
 printf '#!/bin/sh\nexit 0\n' > "$work/hoster"
 chmod +x "$work/hoster"
 mkdir -p "$work/units"
-sed "s|^ExecStart=/usr/local/bin/hoster |ExecStart=$work/hoster |" "$unit" > "$work/units/hoster.service"
+if [ "$(grep -c '^ExecStart=' "$unit")" -ne 1 ]; then
+    echo "error: $unit must have exactly one ExecStart= line" >&2
+    exit 1
+fi
+sed "s|^${exec_start}|ExecStart=$work/hoster |" "$unit" > "$work/units/hoster.service"
 if ! grep -q "^ExecStart=$work/hoster " "$work/units/hoster.service"; then
-    echo "error: $unit has no 'ExecStart=/usr/local/bin/hoster ...' line" >&2
+    echo "error: $unit has no '${exec_start}...' line" >&2
+    exit 1
+fi
+# The layout must be writable for self-update.
+if ! grep -Eq '^ReadWritePaths=.*%h/\.local/lib/hoster( |$)' "$unit"; then
+    echo "error: $unit must list %h/.local/lib/hoster in ReadWritePaths=" >&2
     exit 1
 fi
 

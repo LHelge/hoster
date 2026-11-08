@@ -3,7 +3,8 @@
 //! misconfiguration is diagnosed before `hoster run`.
 //!
 //! [`Doctor`] holds everything a check looks at — the uid, `/proc/sys`, the cgroup tree, the
-//! podman socket candidates, the ports to bind and the external tools (`loginctl`, `systemctl`,
+//! podman socket candidates, the ports to bind, the running binary and its versioned layout
+//! (ADR-0052) and the external tools (`loginctl`, `systemctl`,
 //! `timedatectl`) behind [`Commands`] — so tests inject fakes for each. [`Doctor::diagnose`] runs every check
 //! and returns a [`Report`], which renders as text ([`Display`](fmt::Display)) or JSON
 //! ([`Serialize`]). Nothing here needs root; it runs as the service user.
@@ -21,6 +22,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::config::{Config, ConfigError, PortRange};
+use crate::installation::Installation;
 use crate::runtime::PodmanSocket;
 
 /// First systemd release with user-scoped encrypted credentials (`systemd-creds --user`).
@@ -83,6 +85,10 @@ pub struct Doctor {
     sockets: Vec<PathBuf>,
     /// Ports that must be bindable (80 and 443).
     ports: Vec<u16>,
+    /// The running binary.
+    exe: Option<PathBuf>,
+    /// The versioned binary layout it should run from (ADR-0052); `None` without `$HOME`.
+    installation: Option<Installation>,
     commands: Box<dyn Commands>,
 }
 
@@ -107,6 +113,8 @@ impl Doctor {
                 .candidates()
                 .to_vec(),
             ports: PUBLIC_PORTS.to_vec(),
+            exe: std::env::current_exe().ok(),
+            installation: Installation::from_env(),
             commands: Box::new(commands),
         })
     }
@@ -139,6 +147,8 @@ impl Doctor {
                     Self::with_config(config, |c| self.check_port_range(c.upstream_ports)),
                 ),
                 Check::required("clock", self.check_clock()),
+                // A manual install still works; it just cannot update itself.
+                Check::advisory("binary_layout", self.check_binary_layout()),
             ],
         }
     }
@@ -433,6 +443,42 @@ impl Doctor {
         }
     }
 
+    /// The running binary is `current` in the versioned layout (ADR-0052), which updates and
+    /// rollbacks from the UI and CLI need.
+    fn check_binary_layout(&self) -> Outcome {
+        let Some(installation) = &self.installation else {
+            return Outcome::fail(
+                "$HOME is not set, so ~/.local/lib/hoster cannot be located",
+                "run as the hoster user with its login environment",
+            );
+        };
+        let root = installation.root().display();
+        let Some(exe) = &self.exe else {
+            return Outcome::fail("cannot locate the running binary", "");
+        };
+        let Some(running) = installation.version_of(exe) else {
+            return Outcome::fail(
+                format!("{} is not inside {root}/versions", exe.display()),
+                "fine for a manual install, but self-update and rollback need the versioned \
+                 layout; install with install.sh (docs/install.md)",
+            );
+        };
+        match installation.current() {
+            Ok(Some(current)) if current == running => {
+                Outcome::Pass(format!("running {running}, the current version in {root}"))
+            }
+            Ok(Some(current)) => Outcome::fail(
+                format!("running {running}, but {root}/current is {current}"),
+                "systemctl --user restart hoster",
+            ),
+            Ok(None) => Outcome::fail(
+                format!("running {running}, but {root}/current names no installed version"),
+                format!("ln -sfn versions/{running} {root}/current"),
+            ),
+            Err(e) => Outcome::fail(e.to_string(), ""),
+        }
+    }
+
     /// Reads a sysctl below `/proc/sys`, trimmed.
     fn sysctl(&self, key: &str) -> io::Result<String> {
         Ok(std::fs::read_to_string(self.proc_sys.join(key))?
@@ -687,12 +733,21 @@ mod tests {
 
         fn with_commands(commands: FakeCommands) -> Self {
             let dir = tempfile::tempdir().unwrap();
+            // hoster v0.1.0 installed and current, running through `current`.
+            let installation = Installation::new(dir.path().join("lib/hoster"));
+            let download = dir.path().join("hoster-download");
+            std::fs::write(&download, "binary").unwrap();
+            let version = "v0.1.0".parse().unwrap();
+            installation.install(&version, &download).unwrap();
+            installation.switch(&version).unwrap();
             let doctor = Doctor {
                 uid: 1000,
                 proc_sys: dir.path().join("sys"),
                 cgroup_root: dir.path().join("cgroup"),
                 sockets: vec![dir.path().join("run/podman/podman.sock")],
                 ports: vec![0],
+                exe: Some(installation.current_link().join("hoster")),
+                installation: Some(installation),
                 commands: Box::new(commands),
             };
             let fixture = Self { dir, doctor };
@@ -1018,6 +1073,47 @@ mod tests {
         assert_eq!(parse("systemd 249"), Some(249));
         assert_eq!(parse("not systemd"), None);
         assert_eq!(parse(""), None);
+    }
+
+    #[test]
+    fn binary_outside_the_layout_only_warns() {
+        let mut fx = Fixture::new();
+        let Outcome::Pass(detail) = fx.doctor.check_binary_layout() else {
+            panic!("the fixture runs from current");
+        };
+        assert!(detail.contains("running v0.1.0"), "{detail}");
+
+        // A manual install elsewhere: a warning in the report, not a failure.
+        fx.doctor.exe = Some(fx.dir.path().join("hoster-download"));
+        let Outcome::Fail { detail, hint } = fx.doctor.check_binary_layout() else {
+            panic!("a binary outside the layout must be flagged");
+        };
+        assert!(detail.contains("is not inside"), "{detail}");
+        assert!(hint.contains("install.sh"), "{hint}");
+        let report = fx.doctor.diagnose(&Err(ConfigError::NoConfigDir));
+        let check = report
+            .checks()
+            .iter()
+            .find(|c| c.name == "binary_layout")
+            .unwrap();
+        assert_eq!(check.status, Status::Warn);
+        assert!(!check.required);
+
+        // Running a version that is not current (switched, not yet restarted).
+        let installation = fx.doctor.installation.clone().unwrap();
+        let download = fx.dir.path().join("hoster-download");
+        let newer = "v0.2.0".parse().unwrap();
+        installation.install(&newer, &download).unwrap();
+        installation.switch(&newer).unwrap();
+        fx.doctor.exe = Some(installation.binary(&"v0.1.0".parse().unwrap()));
+        let Outcome::Fail { detail, hint } = fx.doctor.check_binary_layout() else {
+            panic!("a stale binary must be flagged");
+        };
+        assert!(detail.contains("current is v0.2.0"), "{detail}");
+        assert!(hint.contains("restart"), "{hint}");
+
+        fx.doctor.installation = None;
+        assert_eq!(status(fx.doctor.check_binary_layout()), "fail");
     }
 
     #[test]

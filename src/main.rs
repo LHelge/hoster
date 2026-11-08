@@ -9,6 +9,7 @@ mod acme;
 mod config;
 mod doctor;
 mod health;
+mod installation;
 mod logging;
 mod orchestrator;
 mod ports;
@@ -33,6 +34,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::{Config, ConfigError};
 use crate::doctor::Doctor;
+use crate::installation::BuildInfo;
 use crate::logging::{LogFormat, Logging};
 use crate::store::Store;
 use crate::supervisor::Supervisor;
@@ -88,6 +90,13 @@ enum Command {
     /// Back up hoster's state.
     #[command(subcommand)]
     Backup(Backup),
+    /// Print the version, target triple and database schema of this binary. Needs no
+    /// configuration.
+    Version {
+        /// Print `{"version", "target", "schema"}` as JSON on stdout (read by `hoster rollback`).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
@@ -106,6 +115,10 @@ impl Command {
     /// a failure as one of its findings, every other command needs it to have loaded.
     async fn execute(self, config: Result<Config, ConfigError>) -> anyhow::Result<()> {
         match self {
+            Command::Version { json } => {
+                println!("{}", Self::version(json)?);
+                Ok(())
+            }
             Command::Run => Supervisor::new(config?).run().await,
             Command::Doctor { json } => {
                 let report = Doctor::from_env()?.diagnose(&config);
@@ -134,6 +147,16 @@ impl Command {
                 );
                 Ok(())
             }
+        }
+    }
+
+    /// What `hoster version [--json]` prints.
+    fn version(json: bool) -> serde_json::Result<String> {
+        let info = BuildInfo::running();
+        if json {
+            serde_json::to_string(&info)
+        } else {
+            Ok(info.to_string())
         }
     }
 }
@@ -199,6 +222,47 @@ mod tests {
             })
         );
         assert!(Cli::try_parse_from(["hoster", "backup", "db"]).is_err());
+    }
+
+    #[test]
+    fn parses_version_and_keeps_the_version_flag() {
+        assert_eq!(parse(&["version"]), Command::Version { json: false });
+        assert_eq!(
+            parse(&["version", "--json"]),
+            Command::Version { json: true }
+        );
+        for flag in ["--version", "-V"] {
+            let err = Cli::try_parse_from(["hoster", flag]).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+            assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")), "{err}");
+        }
+    }
+
+    #[test]
+    fn version_json_reports_version_target_and_schema() {
+        let json: serde_json::Value =
+            serde_json::from_str(&Command::version(true).unwrap()).unwrap();
+        let object = json.as_object().unwrap();
+        assert_eq!(
+            object.keys().collect::<Vec<_>>(),
+            ["schema", "target", "version"]
+        );
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(json["target"], env!("BUILD_TARGET_TRIPLE"));
+        assert_eq!(json["schema"], i64::from(Store::expected_schema_version()));
+        let text = Command::version(false).unwrap();
+        assert!(
+            text.starts_with(concat!("hoster ", env!("CARGO_PKG_VERSION"))),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn version_needs_no_config() {
+        Command::Version { json: true }
+            .execute(Err(ConfigError::NoConfigDir))
+            .await
+            .unwrap();
     }
 
     #[test]

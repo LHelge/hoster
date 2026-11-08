@@ -657,6 +657,7 @@ src/
   acme/              ACME task, cert storage
   registry/          generic OCI registry client (token discovery, HEAD manifest), poller
   web/               Axum app: admin UI routes, GitHub OAuth, sessions, webhook handler
+  installation/      versioned binary layout under ~/.local/lib/hoster, `hoster version` (ADR-0052)
 templates/           Askama templates (compiled in)
 assets/              vendored htmx 4.0.x + CSS (embedded via include_bytes!/rust-embed)
 ```
