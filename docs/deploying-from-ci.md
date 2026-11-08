@@ -9,6 +9,7 @@ environment the request comes from, and the stack file says which of those may d
 
 A complete workflow to copy is in
 [`examples/github-actions/release.yml`](../examples/github-actions/release.yml).
+For a static site, see [static-sites.md](static-sites.md).
 
 ## 1. One-time setup
 
