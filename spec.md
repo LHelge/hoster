@@ -181,6 +181,7 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
 | **Logs** | Tail and follow logs per container. |
 | **Certificates** | Hosts, issuer, expiry, last ACME error, DNS check. |
 | **Settings** | Registry credentials. |
+| **System** | Running version, target and schema; installed current and previous versions. "Check for updates" asks GitHub for the latest stable release only when clicked and shows its notes; **Update** installs it and restarts hoster. Rollback is `hoster rollback` over SSH (ADR-0052). |
 
 There is no break-glass login: if GitHub login is unavailable, use SSH until it is back
 (ADR-0031). Running apps and the webhook are unaffected.

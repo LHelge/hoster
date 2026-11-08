@@ -10,13 +10,18 @@ use wiremock::matchers::{body_string_contains, header as has_header, method, pat
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
+use crate::installation::Installation;
 use crate::runtime::FakeRuntime;
 use crate::stats::tests::FakeStats;
 use crate::stats::{Stats, Traffic};
+use crate::supervisor::ShutdownRequest;
+use crate::update::Updater;
+use crate::update::fake::{FakeDeployments, FakeReleases, FakeService};
 use crate::web::WebApp;
 use crate::web::certificates::tests::FakeCertificates;
 use crate::web::settings::tests::FakeRegistries;
 use crate::web::stacks::tests::FakeStacks;
+use crate::web::system::System;
 use crate::web::webhook::OidcVerifier;
 
 pub const ORIGIN: &str = "https://hoster.example.com";
@@ -87,12 +92,23 @@ impl TestApp {
         let verifier = OidcVerifier::new(ORIGIN, base.join(JWKS_PATH).unwrap()).unwrap();
         let traffic = Traffic::default();
         let stats = Arc::new(FakeStats::default());
+        let system = System::new(
+            Updater::new(
+                Installation::new(dir.path().join("lib")),
+                dir.path().join("state"),
+                Arc::new(FakeReleases::default()),
+                Arc::new(FakeDeployments::default()),
+                Arc::new(FakeService::default()),
+            ),
+            ShutdownRequest::default(),
+        );
         let app = WebApp::new(
             Auth::new(settings, store.clone(), client),
             runtime.clone(),
             certificates.clone(),
             stacks.clone(),
             registries.clone(),
+            system,
             verifier,
             store.clone(),
             Stats::new(traffic.clone(), stats.clone()),

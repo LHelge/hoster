@@ -1,10 +1,10 @@
 ---
 id: xsf
 title: "Web UI: System page with version, check for updates, release notes and Update"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-08T08:25:50.008118293Z"
-updated: "2026-11-08T09:51:12.925901259Z"
+updated: "2026-11-08T10:06:47.714251246Z"
 tags:
   - web
 depends_on:

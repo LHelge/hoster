@@ -1,0 +1,6 @@
+{#- After a successful update: hoster shuts down and systemd starts the new binary. The poll
+    keeps asking which version answers (failing while hoster is down) until the new one does;
+    that answer carries HX-Refresh, which reloads the page. -#}
+<div class="flash flash-success" role="status" hx-get="/system/version?from={{ from }}" hx-trigger="every 2s" hx-swap="none">
+  <p>Switched from {{ from }} to {{ to }}{% if let Some(snapshot) = snapshot %}; the database was snapshotted to <code>{{ snapshot }}</code>{% endif %}. Restarting&hellip; this page reloads once {{ to }} answers.</p>
+</div>

@@ -18,15 +18,17 @@ pub enum Section {
     Containers,
     Certificates,
     Settings,
+    System,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [
+    const ALL: [Section; 6] = [
         Section::Dashboard,
         Section::Stacks,
         Section::Containers,
         Section::Certificates,
         Section::Settings,
+        Section::System,
     ];
 
     fn href(self) -> &'static str {
@@ -36,6 +38,7 @@ impl Section {
             Section::Containers => "/containers",
             Section::Certificates => "/certificates",
             Section::Settings => "/settings/registries",
+            Section::System => "/system",
         }
     }
 }
@@ -48,6 +51,7 @@ impl fmt::Display for Section {
             Section::Containers => "Containers",
             Section::Certificates => "Certificates",
             Section::Settings => "Settings",
+            Section::System => "System",
         })
     }
 }

@@ -1,0 +1,17 @@
+{#- The result of "Check for updates" when a newer release exists. The release notes come from
+    GitHub and are shown as escaped, preformatted text: no HTML from the release body is ever
+    rendered. -#}
+<div class="update-available">
+  <p class="flash flash-info" role="status">{{ latest }} is available; this is {{ running }}.</p>
+  <h3>Release notes for {{ latest }}</h3>
+  <pre class="release-notes">{{ notes }}</pre>
+  {%- if let Some(reason) = blocked %}
+  <button type="button" disabled aria-describedby="update-blocked">Update to {{ latest }}</button>
+  <p id="update-blocked" class="muted">{{ reason }}</p>
+  {%- else %}
+  <form class="inline-form" hx-post="/system/update" hx-target="#update-check" hx-confirm="Update hoster to {{ latest }}? hoster restarts, dropping connections for a few seconds.">
+    <input type="hidden" name="version" value="{{ latest }}">
+    <button type="submit">Update to {{ latest }}</button>
+  </form>
+  {%- endif %}
+</div>

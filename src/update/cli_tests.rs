@@ -5,7 +5,7 @@ use std::fmt;
 use std::io;
 use std::sync::atomic::Ordering;
 
-use super::tests::{FakeReleases, Host, script, v};
+use super::fake::{FakeReleases, Host, script, v};
 use super::*;
 
 /// A console with scripted answers that records what was printed and asked.
