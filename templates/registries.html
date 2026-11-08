@@ -1,53 +1,71 @@
-{% extends "base.html" %}
-{% block title %}Registries{% endblock %}
-{% block heading %}Registries{% endblock %}
-{% block content %}
-<p class="muted">Pull credentials, one per registry host, used for podman pulls and for resolving tags to digests. Tokens are encrypted at rest and write-only. For ghcr.io use a classic personal access token with only <code>read:packages</code>, ideally of a dedicated machine account. Changing a credential redeploys nothing.</p>
-
-{%- if entries.is_empty() %}
-<p>No credentials are stored: every registry is accessed anonymously.</p>
-{%- else %}
-<div class="table-scroll"><table class="list registries">
-  <thead>
-    <tr><th scope="col">Registry</th><th scope="col">Username</th><th scope="col">Last changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
-  </thead>
-  <tbody>
+{% extends "settings_base.html" %}
+{% block settings %}
+<section class="card settings-card" aria-labelledby="settings-title">
+  <div class="settings-head">
+    <h2 id="settings-title">Registries</h2>
+    <p class="field-help">Pull credentials, one per registry host, used for podman pulls and for resolving tags to digests. Tokens are encrypted at rest and write-only. For ghcr.io use a classic personal access token with only <code>read:packages</code>, ideally of a dedicated machine account. Changing a credential redeploys nothing.</p>
+  </div>
+  {%- if entries.is_empty() %}
+  <p class="field-empty">No credentials are stored: every registry is accessed anonymously.</p>
+  {%- else %}
+  <ul class="registry-rows" aria-label="Stored credentials">
     {%- for entry in entries %}
-    <tr>
-      <td><code>{{ entry.host }}</code></td>
-      <td>{{ entry.username }}</td>
-      <td>{{ entry.changed_at }}</td>
-      <td>
+    <li class="field">
+      <div class="field-label">
+        <code class="field-name registry-host">{{ entry.host }}</code>
+        <span class="field-help">username <span class="registry-user">{{ entry.username }}</span> · last changed {{ entry.changed_at }}</span>
+      </div>
+      <div class="field-control field-actions">
         <form class="inline-form" hx-post="/settings/registries/test" hx-target="#registry-result">
           <input type="hidden" name="host" value="{{ entry.host }}">
-          <button type="submit">Test</button>
+          <button type="submit" class="ghost row-ghost" aria-label="Test {{ entry.host }}">Test</button>
         </form>
         <form class="inline-form" hx-post="/settings/registries/delete" hx-target="#registry-result" hx-confirm="Delete the credential for {{ entry.host }}?">
           <input type="hidden" name="host" value="{{ entry.host }}">
-          <button type="submit" class="danger">{{ crate::web::Icon::Remove }}Delete</button>
+          <button type="submit" class="ghost row-ghost row-danger" aria-label="Delete the credential for {{ entry.host }}">{{ crate::web::Icon::Remove }}Delete</button>
         </form>
-      </td>
-    </tr>
+      </div>
+    </li>
     {%- endfor %}
-  </tbody>
-</table></div>
-{%- endif %}
-<div id="registry-result" aria-live="polite"></div>
+  </ul>
+  {%- endif %}
+  <div id="registry-result" class="card-result" aria-live="polite"></div>
+</section>
 
-<h2>Add or replace a credential</h2>
-<form class="stack-form" hx-post="/settings/registries" hx-target="#save-result">
-  <label>Registry host <input type="text" name="host" required autocomplete="off" spellcheck="false" placeholder="ghcr.io"></label>
-  <label>Username <input type="text" name="username" required autocomplete="off" spellcheck="false"></label>
-  <label>Token <input type="password" name="token" required autocomplete="new-password"></label>
-  <button type="submit">Save</button>
-</form>
-<div id="save-result" aria-live="polite"></div>
+<section class="card settings-card" aria-labelledby="registry-add">
+  <div class="settings-head">
+    <h2 id="registry-add">Add or replace a credential</h2>
+    <p class="field-help">Saving a host that already has one replaces it.</p>
+  </div>
+  <form hx-post="/settings/registries" hx-target="#save-result">
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="registry-host">Registry host</label><span class="field-help">As in image references: ghcr.io, docker.io, registry.example.com.</span></div>
+      <div class="field-control"><input id="registry-host" type="text" name="host" required autocomplete="off" spellcheck="false" placeholder="ghcr.io"></div>
+    </div>
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="registry-username">Username</label><span class="field-help">The account the token belongs to.</span></div>
+      <div class="field-control"><input id="registry-username" type="text" name="username" required autocomplete="off" spellcheck="false"></div>
+    </div>
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="registry-token">Token</label><span class="field-help">Write-only: it is never shown again.</span></div>
+      <div class="field-control"><input id="registry-token" type="password" name="token" required autocomplete="new-password"></div>
+    </div>
+    <div class="settings-submit"><button type="submit" class="primary">Save</button></div>
+  </form>
+  <div id="save-result" class="card-result" aria-live="polite"></div>
+</section>
 
-<h2>Test a registry</h2>
-<form class="stack-form" hx-post="/settings/registries/test" hx-target="#test-result">
-  <label>Registry host <input type="text" name="host" required autocomplete="off" spellcheck="false" placeholder="docker.io"></label>
-  <p class="muted">Makes the token request the registry asks for: with its stored credential, or anonymously when none is stored.</p>
-  <button type="submit">Test</button>
-</form>
-<div id="test-result" aria-live="polite"></div>
+<section class="card settings-card" aria-labelledby="registry-test">
+  <div class="settings-head">
+    <h2 id="registry-test">Test a registry</h2>
+    <p class="field-help">Makes the token request the registry asks for.</p>
+  </div>
+  <form hx-post="/settings/registries/test" hx-target="#test-result">
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="registry-test-host">Registry host</label><span class="field-help">With its stored credential, or anonymously when none is stored.</span></div>
+      <div class="field-control field-inline"><input id="registry-test-host" type="text" name="host" required autocomplete="off" spellcheck="false" placeholder="docker.io"><button type="submit">Test</button></div>
+    </div>
+  </form>
+  <div id="test-result" class="card-result" aria-live="polite"></div>
+</section>
 {% endblock %}

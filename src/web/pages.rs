@@ -49,7 +49,7 @@ impl Section {
             Section::Dashboard => "/",
             Section::Stacks => "/stacks",
             Section::Certificates => "/certificates",
-            Section::Settings => "/settings/registries",
+            Section::Settings => "/settings/general",
             Section::System => "/system",
         }
     }
@@ -60,7 +60,7 @@ impl Section {
             Section::Dashboard => "dashboard",
             Section::Stacks => "stacks",
             Section::Certificates => "certificates",
-            Section::Settings => "settings/registries",
+            Section::Settings => "settings",
             Section::System => "system",
         }
     }

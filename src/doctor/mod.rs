@@ -845,6 +845,7 @@ mod tests {
             web: Default::default(),
             log: Default::default(),
             credentials: Default::default(),
+            source: Default::default(),
         }
     }
 

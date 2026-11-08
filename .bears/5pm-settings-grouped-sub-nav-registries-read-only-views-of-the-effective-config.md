@@ -1,10 +1,10 @@
 ---
 id: "5pm"
 title: "Settings: grouped sub-nav, registries, read-only views of the effective config"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:21:22.658708465Z"
-updated: "2026-11-08T18:21:22.658708465Z"
+updated: "2026-11-08T22:50:39.188982602Z"
 tags:
   - web
   - ui
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - xhh
 parent: "8bf"
+attempts: 1
 ---
 
 Redesign Settings after `docs/design/Settings.dc.html`. **Only registries stay editable.** Everything else is a read-only view of what hoster runs with, because config is `hoster.toml` plus `HOSTER_*` env (ADR-0024), and editing it in the UI is not adopted (epic 8bf).

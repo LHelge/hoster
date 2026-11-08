@@ -33,8 +33,10 @@ use http_body_util::BodyExt as _;
 
 use super::assets::Assets;
 use super::certificates::{AcmeDirectory, CertOverview, CertOwner, CertRow};
+use super::settings::{EffectiveConfig, Settings};
 use super::system::System;
 use crate::acme::{Backoff, DnsMismatch, DnsVerdict, Validity};
+use crate::config::ConfigSource;
 use crate::health::{HealthStats, HealthStatus};
 use crate::orchestrator::{CertStatus, RestartStats, ServiceState, ServiceStatus, StackStatus};
 use crate::registry::{RegistryCheck, RegistryCredential};
@@ -1215,7 +1217,11 @@ async fn ui_preview() {
         ("/stacks/notes/deployments/8", "Deployment: queued"),
         ("/apply", "Apply a stack file"),
         ("/certificates", "Certificates"),
+        ("/settings/general", "Settings: general"),
         ("/settings/registries", "Settings: registries"),
+        ("/settings/webhook", "Settings: deploy webhook"),
+        ("/settings/proxy", "Settings: reverse proxy"),
+        ("/settings/certificates", "Settings: certificates (ACME)"),
         ("/system", "System"),
         (
             "/containers/hoster-legacy-web-g3/logs",
@@ -1417,6 +1423,10 @@ async fn ui_preview() {
         ("/", "Empty: dashboard"),
         ("/stacks", "Empty: stacks"),
         ("/certificates", "Empty: certificates"),
+        (
+            "/settings/general",
+            "Empty: settings, public addresses not resolved",
+        ),
         ("/settings/registries", "Empty: registries"),
         ("/system", "Empty: system (not an installed layout)"),
     ] {
@@ -1443,6 +1453,51 @@ async fn ui_preview() {
     ] {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("empty", url), label, &html);
+    }
+
+    // Settings of an instance on staging with configured addresses and its own audience.
+    let mut staging = TestApp::new().await;
+    let config = EffectiveConfig::sample().with(|config| {
+        config.acme.directory_url = "https://acme-staging-v02.api.letsencrypt.org/directory".into();
+        config.acme.contact = None;
+        config.acme.public_addresses = vec![
+            "203.0.113.42".parse().unwrap(),
+            "2001:db8::42".parse().unwrap(),
+        ];
+        config.web.dev_listen = Some("127.0.0.1:8080".parse().unwrap());
+        config.podman_socket = Some("/run/user/1001/podman/podman.sock".into());
+        config.source = ConfigSource::new(
+            "/etc/hoster/hoster.toml",
+            [
+                "admin_github",
+                "acme.directory_url",
+                "acme.public_addresses",
+            ],
+        );
+    });
+    staging.app.settings = Settings::new(
+        config,
+        staging.certificates.clone(),
+        staging.registries.clone(),
+    );
+    staging.app.shell = staging.app.shell.clone().with_host("srv-01");
+    let browser = staging.sign_in().await;
+    let session = Session {
+        app: &staging,
+        browser,
+    };
+    for (slug, label) in [
+        ("general", "Settings: configured addresses, dev listener"),
+        ("certificates", "Settings: ACME staging, no contact"),
+    ] {
+        let html = session
+            .get(&format!("/settings/{slug}"), StatusCode::OK)
+            .await;
+        preview.write(
+            &format!("states/settings-{slug}-staging.html"),
+            label,
+            &html,
+        );
     }
 
     preview.finish();

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Settings · {{ nav.current }}{% endblock %}
+{% block crumb %}~/settings/{{ nav.current.slug() }}{% endblock %}
+{% block heading %}Settings{% endblock %}
+{% block content %}
+<div class="settings">
+  <nav class="settings-nav" aria-label="Settings sections">
+    {%- for group in nav.groups() %}
+    <div class="settings-group">
+      <span class="settings-group-label" id="settings-group-{{ group.label }}">{{ group.label }}</span>
+      <ul aria-labelledby="settings-group-{{ group.label }}">
+        {%- for item in group.items %}
+        <li><a href="{{ item.href }}"{% if item.current %} aria-current="page"{% endif %}>{{ item.label }}{% if let Some(note) = item.note %}<span class="settings-note">{{ note }}</span>{% endif %}</a></li>
+        {%- endfor %}
+      </ul>
+    </div>
+    {%- endfor %}
+  </nav>
+  <div class="settings-body">
+    {% block settings %}{% endblock %}
+  </div>
+</div>
+{% endblock %}
