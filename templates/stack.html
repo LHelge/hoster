@@ -2,6 +2,44 @@
 {% block title %}Stack {{ stack.name }}{% endblock %}
 {% block head %}{% include "stack_header.html" %}{% endblock %}
 {% block content %}
+<section aria-label="Key figures">
+<dl class="kpis">
+  {%- for kpi in stack.kpis %}
+  {{ kpi }}
+  {%- endfor %}
+</dl>
+</section>
+
+<section class="card slowest" aria-labelledby="slowest-title">
+  <header class="card-head">
+    <h2 id="slowest-title">Slowest routes <span class="card-count">· p95 · last {{ stack.latency_window() }}</span></h2>
+    <span class="card-note">counts since hoster started</span>
+  </header>
+  {%- if stack.slowest.is_empty() %}
+  <p class="card-body muted">{% if stack.route_rows.is_empty() %}The stack routes nothing, so there is no traffic to count.{% else %}No requests since hoster started.{% endif %}</p>
+  {%- else %}
+  <ol class="card-body slow-routes">
+    {%- for route in stack.slowest %}
+    <li>
+      <div class="slow-route-head">
+        <span class="slow-route-name">{{ route.route }}{% if !route.service.is_empty() %} <span class="muted">→ {{ route.service }}</span>{% endif %}</span>
+        <span class="slow-route-p95" title="{{ route.latency_title() }}">{{ route.p95 }}</span>
+      </div>
+      {{ route.meter }}
+      <dl class="slow-route-counts">
+        <div title="{{ route.latency_title() }}"><dt>p50</dt><dd>{{ route.p50 }}</dd></div>
+        {%- for (class, count) in route.classes %}
+        <div><dt>{{ class }}</dt><dd>{{ count }}</dd></div>
+        {%- endfor %}
+        <div><dt>upstream errors</dt><dd>{% if route.upstream_errors > 0 %}{{ crate::web::Tone::Fail.pill(route.upstream_errors) }}{% else %}0{% endif %}</dd></div>
+        <div><dt>in flight</dt><dd>{{ route.inflight }}</dd></div>
+      </dl>
+    </li>
+    {%- endfor %}
+  </ol>
+  {%- endif %}
+</section>
+
 <section class="card" aria-labelledby="services-title">
   <header class="card-head">
     <h2 id="services-title">Services <span class="card-count">· {{ stack.services.len() }}</span></h2>
@@ -25,6 +63,51 @@
     </tbody>
   </table></div>
 </section>
+
+<div class="card-pair">
+<section class="card" aria-labelledby="routes-title">
+  <header class="card-head">
+    <h2 id="routes-title">Routes <span class="card-count">· {{ stack.route_rows.len() }}</span></h2>
+    <span class="card-note">from the stack file</span>
+  </header>
+  {%- if stack.route_rows.is_empty() %}
+  <p class="card-body muted">The active revision routes nothing.</p>
+  {%- else %}
+  <ul class="card-body route-rows">
+    {%- for route in stack.route_rows %}
+    <li>
+      <span class="route-url">{{ route.url }}</span>
+      <span class="route-arrow" aria-hidden="true">→</span><span class="visually-hidden">to</span>
+      <span class="route-target">{{ route.target }}</span>
+      <span class="route-tags">
+        {%- if let Some(pill) = route.tls_pill %}<a class="route-tls" href="/certificates">{{ pill }}</a>{% else %}<span class="tag tag-ok" title="{{ route.tls_title }}">{{ route.tls }}</span>{% endif %}
+        {%- for tag in route.tags %} <span class="tag">{{ tag }}</span>{% endfor %}
+      </span>
+    </li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
+</section>
+
+<section class="card" aria-labelledby="volumes-title">
+  <header class="card-head">
+    <h2 id="volumes-title">Volumes</h2>
+    <span class="card-note">named podman volumes, kept on removal</span>
+  </header>
+  {%- if stack.mounted().count() == 0 %}
+  <p class="card-body muted">The active revision mounts no volume.{% if stack.unmounted() == 1 %} 1 from an earlier revision is listed in the <a href="#danger">danger zone</a>.{% else if stack.unmounted() > 1 %} {{ stack.unmounted() }} from earlier revisions are listed in the <a href="#danger">danger zone</a>.{% endif %}</p>
+  {%- else %}
+  <ul class="card-body volume-rows">
+    {%- for volume in stack.mounted() %}
+    <li><code>{{ volume.name }}</code> <span class="muted">→ {{ volume.mounts.join(", ") }}</span></li>
+    {%- endfor %}
+  </ul>
+  {%- if stack.unmounted() > 0 %}
+  <p class="card-foot">+ {{ stack.unmounted() }} from {% if stack.unmounted() == 1 %}an earlier revision{% else %}earlier revisions{% endif %}, listed in the <a href="#danger">danger zone</a></p>
+  {%- endif %}
+  {%- endif %}
+</section>
+</div>
 
 {%- if stack.deployable %}
 <section class="card" aria-labelledby="deploy-title">

@@ -1,7 +1,9 @@
 //! `GET /stacks/{name}`: a stack's overview tab (ADR-0054, epic 8bf), under the shared
 //! [`StackHeader`].
 //!
-//! The overview shows the services with their images and digests, the form that deploys
+//! The overview opens with the stack's KPI tiles and its slowest routes, from hoster's
+//! in-process statistics (ADR-0045), then shows the services with their images and digests, the
+//! routes and named volumes of the active revision, the form that deploys
 //! explicit digests to the CI-built services, a link to apply a new revision, the refused
 //! webhook deploys (ADR-0047) and, last, the danger zone: removing the stack once its name is
 //! typed (ADR-0030). The danger zone says what goes (containers, network, routes) and what stays
@@ -9,7 +11,11 @@
 //! volumes ticking deletes: those of every revision, as [`Orchestrator::volumes`] finds them,
 //! with where the active revision mounts each.
 //!
+//! The tiles, the slowest routes and the routes card are built in `figures.rs`.
+//!
 //! [`Orchestrator::volumes`]: crate::orchestrator::Orchestrator::volumes
+
+mod figures;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,19 +24,23 @@ use axum::Extension;
 use axum::extract::Path;
 use axum::response::{IntoResponse, Response};
 
+use self::figures::{Figures, Readings, RouteRow, SlowRoute};
 use super::frame::{StackHeader, Tab};
 use super::list::StackCard;
 use super::{Outcome, ShortDigest, Stacks, When};
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::runtime::VolumeMount;
 use crate::stack::Stack;
+use crate::stats::{Elapsed, Stats};
 use crate::store::WebhookRejection;
 use crate::web::pages::{Layout, Page, Section, Shell};
+use crate::web::ui::Kpi;
 
 impl Stacks {
     /// `GET /stacks/{name}`: one stack, with the deploy and remove forms.
     pub async fn show(
         Extension(stacks): Extension<Stacks>,
+        Extension(stats): Extension<Stats>,
         shell: Shell,
         Path(name): Path<String>,
     ) -> Response {
@@ -46,7 +56,7 @@ impl Stacks {
         Page(StackPage {
             layout,
             header: stacks.header(&status, Tab::Overview).await,
-            stack: StackView::new(&status, volumes),
+            stack: StackView::new(&status, volumes, &Readings::of(&stats).await),
         })
         .into_response()
     }
@@ -75,6 +85,12 @@ pub struct StackView {
     routes: Vec<String>,
     /// The named volumes of every revision, which removing with `delete_volumes` deletes.
     volumes: Vec<VolumeView>,
+    /// The KPI tiles.
+    kpis: Vec<Kpi>,
+    /// The routes the proxy has counted, slowest first.
+    slowest: Vec<SlowRoute>,
+    /// The routes of the active revision, for the routes card.
+    route_rows: Vec<RouteRow>,
 }
 
 impl StackView {
@@ -95,6 +111,21 @@ impl StackView {
         self.services.iter().filter(|s| s.ci_built)
     }
 
+    /// How far back the latency percentiles look.
+    fn latency_window(&self) -> Elapsed {
+        Elapsed(Stats::LATENCY_WINDOW)
+    }
+
+    /// The volumes the active revision mounts, for the volumes card.
+    fn mounted(&self) -> impl Iterator<Item = &VolumeView> {
+        self.volumes.iter().filter(|v| !v.mounts.is_empty())
+    }
+
+    /// How many volumes only earlier revisions declare.
+    fn unmounted(&self) -> usize {
+        self.volumes.iter().filter(|v| v.mounts.is_empty()).count()
+    }
+
     /// The services' names, for the danger zone's "one container per service".
     fn service_names(&self) -> String {
         self.services
@@ -106,10 +137,16 @@ impl StackView {
 }
 
 impl StackView {
-    /// The overview of `status`, whose revisions declare `volumes` (podman names).
-    fn new(status: &StackStatus, volumes: BTreeSet<String>) -> Self {
+    /// The overview of `status`, whose revisions declare `volumes` (podman names), with the
+    /// figures of `readings`.
+    fn new(status: &StackStatus, volumes: BTreeSet<String>, readings: &Readings) -> Self {
         let services: Vec<ServiceView> = status.services.iter().map(ServiceView::from).collect();
+        let stack = status.revision.toml.parse::<Stack>().ok();
+        let figures = Figures::new(status, stack.as_ref(), readings);
         Self {
+            kpis: figures.kpis,
+            slowest: figures.slowest,
+            route_rows: figures.routes,
             url: Self::url(&status.name),
             name: status.name.clone(),
             deployable: services.iter().any(|s| s.ci_built),
@@ -258,7 +295,7 @@ mod tests {
 
     #[test]
     fn the_danger_zone_names_the_services_and_routes() {
-        let view = StackView::new(&notes_status(), BTreeSet::new());
+        let view = StackView::new(&notes_status(), BTreeSet::new(), &Readings::default());
         assert_eq!(view.service_names(), "api, storage");
         assert_eq!(view.ci_built().count(), 1);
         assert_eq!(view.routes, ["notes.example.com"]);

@@ -27,6 +27,7 @@ use crate::orchestrator::{Orchestrator, ServiceState};
 use crate::runtime::ContainerRuntime;
 use crate::store::{DeploymentOutcome, DeploymentState, Store, Timestamp};
 
+pub use self::latency::Latency;
 pub use self::traffic::{
     Counts, RequestOutcome, RouteTraffic, StatusClass, TrackedRequest, Traffic, TrafficSnapshot,
 };
@@ -82,12 +83,17 @@ impl Stats {
         self.traffic.snapshot()
     }
 
+    /// How the deployments of the last [`Self::DEPLOY_HISTORY`] went, per stack, sorted by name.
+    pub async fn deployments(&self) -> anyhow::Result<Vec<DeployStats>> {
+        Ok(DeployStats::group(self.source.deployments().await?))
+    }
+
     /// Everything, as of now. A source that fails leaves its part empty and names the problem
     /// in [`Snapshot::problems`], so the rest still shows.
     pub async fn snapshot(&self) -> Snapshot {
         let mut problems = Vec::new();
-        let deployments = match self.source.deployments().await {
-            Ok(outcomes) => DeployStats::group(outcomes),
+        let deployments = match self.deployments().await {
+            Ok(deployments) => deployments,
             Err(err) => {
                 tracing::warn!(
                     error = format!("{err:#}"),

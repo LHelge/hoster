@@ -409,6 +409,15 @@ pub struct ServiceStatus {
     pub health: HealthStats,
 }
 
+impl ServiceStatus {
+    /// Whether the service runs and keeps crashing: the reconciler counts too many restarts
+    /// (ADR-0028), or liveness reports it crash looping (ADR-0038).
+    pub fn is_crash_looping(&self) -> bool {
+        matches!(self.state, ServiceState::Running { .. })
+            && (self.restarts.crash_looping || self.health.status == HealthStatus::CrashLooping)
+    }
+}
+
 /// What one service runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceState {

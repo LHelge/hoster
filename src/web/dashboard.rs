@@ -532,9 +532,7 @@ impl ServiceRow {
             health: service.health.status,
             health_detail: service.health.last.clone(),
             restarts: service.restarts.restarts,
-            crash_looping: running
-                && (service.restarts.crash_looping
-                    || service.health.status == HealthStatus::CrashLooping),
+            crash_looping: service.is_crash_looping(),
             certs,
         }
     }

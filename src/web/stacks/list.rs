@@ -27,7 +27,7 @@ use super::{DeploymentView, Outcome, ShortDigest, StackView, Stacks, When};
 use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::stack::Stack;
-use crate::stats::{Elapsed, RouteTraffic, Stats, StatusClass, TrafficSnapshot};
+use crate::stats::{Elapsed, Latency, RouteTraffic, Stats, StatusClass, TrafficSnapshot};
 use crate::store::{Deployment, DeploymentSource, DeploymentState, Timestamp};
 use crate::web::pages::{Layout, Page, Section, Shell};
 use crate::web::ui::{Pill, Tone};
@@ -493,46 +493,54 @@ impl ServiceChip {
 
     /// A running service whose probe fails, or that keeps crashing (ADR-0028, ADR-0038).
     pub(super) fn failing(service: &ServiceStatus) -> bool {
-        matches!(service.state, ServiceState::Running { .. })
-            && (service.restarts.crash_looping
-                || matches!(
-                    service.health.status,
-                    HealthStatus::Unhealthy | HealthStatus::CrashLooping
-                ))
+        service.is_crash_looping()
+            || (matches!(service.state, ServiceState::Running { .. })
+                && service.health.status == HealthStatus::Unhealthy)
     }
 }
 
-/// A stack's request statistics, over all its routes.
+/// A stack's request statistics, over all its routes. The stack overview's KPI tiles show
+/// them too, with the figures the card leaves out.
 #[derive(Debug, PartialEq, Eq)]
-struct TrafficLine {
+pub(super) struct TrafficLine {
     /// Finished requests since hoster started.
-    requests: u64,
+    pub(super) requests: u64,
+    /// Of those, the 5xx responses.
+    pub(super) server_errors: u64,
+    /// Requests in flight now.
+    pub(super) inflight: u64,
+    /// How many routes were counted.
+    pub(super) routes: usize,
     /// The p95 of the slowest route over the latency window, `-` without samples.
-    p95: String,
-    p95_tone: Tone,
+    pub(super) p95: String,
+    pub(super) p95_tone: Tone,
+    /// The p50 of that same route, `-` without samples.
+    pub(super) p50: String,
     /// The share of 5xx responses, `-` without requests.
-    errors: String,
-    errors_tone: Tone,
+    pub(super) errors: String,
+    pub(super) errors_tone: Tone,
 }
 
 impl TrafficLine {
     /// A p95 this slow is flagged.
-    const SLOW: Duration = Duration::from_secs(1);
+    pub(super) const SLOW: Duration = Duration::from_secs(1);
     /// A 5xx share of this many per mille or more is flagged.
     const FAILING_PER_MILLE: u64 = 10;
 
-    fn of<'a>(routes: impl Iterator<Item = &'a RouteTraffic>) -> Self {
-        let (requests, server_errors, p95) = routes.fold(
-            (0, 0, None::<Duration>),
-            |(requests, errors, p95), route| {
-                let counts = &route.counts;
-                (
-                    requests + counts.statuses.total(),
-                    errors + counts.statuses.get(StatusClass::ServerError),
-                    p95.max(counts.latency.p95),
-                )
-            },
-        );
+    pub(super) fn of<'a>(routes: impl Iterator<Item = &'a RouteTraffic>) -> Self {
+        let (mut requests, mut server_errors, mut inflight, mut count) = (0, 0, 0, 0);
+        let mut slowest = None::<&Latency>;
+        for route in routes {
+            let counts = &route.counts;
+            requests += counts.statuses.total();
+            server_errors += counts.statuses.get(StatusClass::ServerError);
+            inflight += counts.inflight;
+            count += 1;
+            if counts.latency.p95 > slowest.and_then(|l| l.p95) {
+                slowest = Some(&counts.latency);
+            }
+        }
+        let p95 = slowest.and_then(|l| l.p95);
         let errors = if requests == 0 {
             "-".to_owned()
         } else if server_errors == 0 {
@@ -547,6 +555,10 @@ impl TrafficLine {
         };
         TrafficLine {
             requests,
+            server_errors,
+            inflight,
+            routes: count,
+            p50: Elapsed::cell(slowest.and_then(|l| l.p50)),
             p95: Elapsed::cell(p95),
             p95_tone: if p95.is_some_and(|p| p >= Self::SLOW) {
                 Tone::Warn
