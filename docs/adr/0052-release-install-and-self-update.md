@@ -150,3 +150,16 @@ The UI requirement decides the layout. The service runs sandboxed (`ProtectSyste
   restore the previous schema exactly, so that the older binary's own migration checks pass.
 - **`docs/install.md` is rewritten** around the script and the new layout.
   `scripts/check-systemd-units.sh` follows the new `ExecStart`.
+
+## Correction (2026-11-08)
+
+`main` is now branch-protected: no direct pushes, linear history, and the CI checks are
+required. `scripts/release.sh` therefore cannot commit the version bump and push it to `main`.
+Releasing takes two steps:
+
+1. `release.sh prepare X.Y.Z` opens a `release/vX.Y.Z` PR containing the `chore(release)` bump,
+   with the git-cliff preview as its body.
+2. After that PR is merged, `release.sh tag X.Y.Z` tags the merged commit on `main` and pushes
+   only the tag.
+
+The tag is created after merging because GitHub's rebase merge rewrites commit SHAs.
