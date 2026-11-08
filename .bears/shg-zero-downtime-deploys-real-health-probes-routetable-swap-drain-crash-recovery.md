@@ -4,7 +4,7 @@ title: "Zero-downtime deploys: real health probes, RouteTable swap, drain, crash
 status: open
 priority: P1
 created: "2026-11-07T14:45:17.296793894Z"
-updated: "2026-11-07T21:35:20.244898667Z"
+updated: "2026-11-08T01:32:05.059878957Z"
 tags:
   - orchestrator
 depends_on:
@@ -13,6 +13,7 @@ depends_on:
   - pav
   - u3t
 parent: mdd
+attempts: 1
 ---
 
 ## Summary

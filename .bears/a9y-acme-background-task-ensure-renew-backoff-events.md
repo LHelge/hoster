@@ -4,7 +4,7 @@ title: "ACME background task: ensure, renew, backoff, events"
 status: open
 priority: P1
 created: "2026-11-07T14:45:17.275247781Z"
-updated: "2026-11-07T21:50:54.271308924Z"
+updated: "2026-11-08T01:32:05.050267410Z"
 tags:
   - tls
   - acme
@@ -13,6 +13,7 @@ depends_on:
   - pav
   - hft
 parent: "52q"
+attempts: 1
 ---
 
 ## Summary

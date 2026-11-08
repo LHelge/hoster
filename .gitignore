@@ -11,3 +11,4 @@
 
 # Per-slot build dirs used by parallel agent worktrees
 /target-*/
+/.claude/worktrees/
