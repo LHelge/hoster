@@ -44,6 +44,8 @@ Use [Bears](https://github.com/LHelge/bea-rs) (MCP tools) for all planning and p
   merge** so each task stays its own commit on `main`. Don't squash-merge an epic, and never make
   merge commits.
 - Work outside an epic (docs, chores, small fixes) goes on its own short-lived branch and PR.
+- Releases go through `scripts/release.sh prepare X.Y.Z`, then `tag X.Y.Z` once its PR is merged
+  (README "Cutting a release", ADR-0052). Don't bump the version or push `v*` tags by hand.
   Nothing is committed straight to `main`.
 - Use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`,
   `refactor:`, `test:`, `chore:` and so on.

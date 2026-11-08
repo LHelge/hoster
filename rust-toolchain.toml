@@ -1,6 +1,7 @@
 [toolchain]
 channel = "1.99.1"
 components = ["rustfmt", "clippy"]
-# The release binary is a static musl build (ADR-0001, .github/workflows/release.yml).
-targets = ["x86_64-unknown-linux-musl"]
+# The release binaries are static musl builds for both architectures (ADR-0001, ADR-0052,
+# .github/workflows/release.yml).
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
 profile = "minimal"

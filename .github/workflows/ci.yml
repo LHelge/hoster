@@ -71,6 +71,21 @@ jobs:
       - name: Check deploy/ systemd files
         run: scripts/check-systemd-units.sh --security
 
+  release-script:
+    name: release scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest ships shellcheck.
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      # scripts/release.sh prepare/tag against a bare local remote, with gh and git-cliff stubbed
+      # (ADR-0052).
+      - name: release.sh
+        run: scripts/test-release.sh
+
   sqlx:
     name: sqlx offline metadata is up to date
     runs-on: ubuntu-latest
