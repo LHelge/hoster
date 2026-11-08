@@ -1,6 +1,8 @@
 //! Scenario tests: the orchestrator against [`FakeRuntime`] and a real (temporary) store.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -9,6 +11,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::config::PortRange;
+use crate::health::Check;
 use crate::runtime::{ContainerInfo, ContainerState, FakeRuntime, Operation};
 use crate::secrets::{SecretKey, SecretName};
 use crate::stack::ImageRef;
@@ -62,6 +65,90 @@ impl TagResolver for FakeResolver {
     }
 }
 
+/// Answers probes by container port: a scripted result, `HTTP 200` otherwise, after `delay`.
+/// Records every probe. Probes on a held port never answer, as if the deploy task were frozen
+/// there (the "crash" of the recovery scenarios).
+#[derive(Default)]
+pub(super) struct FakeProber {
+    delay: Duration,
+    answers: StdMutex<BTreeMap<u16, Result<String, String>>>,
+    probes: StdMutex<Vec<String>>,
+    held: StdMutex<BTreeSet<u16>>,
+}
+
+impl FakeProber {
+    /// A prober whose every probe takes `delay`.
+    pub(super) fn with_delay(delay: Duration) -> Self {
+        Self {
+            delay,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn answer(&self, port: u16, result: Result<&str, &str>) {
+        let result = result.map(str::to_owned).map_err(str::to_owned);
+        self.answers.lock().unwrap().insert(port, result);
+    }
+
+    /// From now on, probes on container port `port` never answer.
+    pub(super) fn hold(&self, port: u16) {
+        self.held.lock().unwrap().insert(port);
+    }
+
+    /// The probes so far, sorted, forgetting them.
+    pub(super) fn take_probes(&self) -> Vec<String> {
+        let mut probes = std::mem::take(&mut *self.probes.lock().unwrap());
+        probes.sort();
+        probes
+    }
+
+    /// Waits until a probe on container port `port` has been made.
+    pub(super) async fn probed(&self, port: u16) {
+        let pattern = Self::pattern(port);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !self
+                .probes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains(&pattern))
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("probed within 10 s");
+    }
+
+    fn pattern(port: u16) -> String {
+        format!("container port {port} ")
+    }
+}
+
+#[async_trait]
+impl Prober for FakeProber {
+    async fn probe(&self, check: &Check) -> std::result::Result<String, String> {
+        let text = check.to_string();
+        self.probes.lock().unwrap().push(text.clone());
+        let held = self
+            .held
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|&port| text.contains(&Self::pattern(port)));
+        if held {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep(self.delay).await;
+        self.answers
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(port, _)| text.contains(&Self::pattern(**port)))
+            .map_or_else(|| Ok("HTTP 200".to_owned()), |(_, r)| r.clone())
+    }
+}
+
 pub(super) struct Harness {
     pub(super) _dir: TempDir,
     pub(super) store: Store,
@@ -71,29 +158,40 @@ pub(super) struct Harness {
     pub(super) orchestrator: Arc<Orchestrator<FakeRuntime>>,
     /// The table the orchestrator publishes, as the proxy reads it.
     pub(super) routes: Arc<ArcSwap<RouteTable>>,
+    /// Answers the health probes of deployments (and of the health monitor).
+    pub(super) prober: Arc<FakeProber>,
 }
 
+/// Settings for tests: health checks and drains take a few milliseconds.
+pub(super) fn settings(settle: Duration) -> Settings {
+    Settings {
+        settle,
+        settle_poll: Duration::from_millis(5),
+        drain_settle: Duration::from_millis(5),
+        ..Settings::default()
+    }
+}
+
+/// A harness whose health checks take `settle`: every probe answers after it, and a service
+/// without routes must stay up that long.
 pub(super) async fn harness_with(settle: Duration) -> Harness {
     let dir = TempDir::new().unwrap();
     let store = Store::open(&dir.path().join("state")).await.unwrap();
     let runtime = Arc::new(FakeRuntime::new());
     let resolver = Arc::new(FakeResolver::default());
     let ports = PortAllocator::new(store.clone(), PortRange::try_from(20000..=20015).unwrap());
-    let settings = Settings {
-        settle,
-        settle_poll: Duration::from_millis(5),
-        ..Settings::default()
-    };
     let secrets = SecretStore::new(store.clone(), &SecretKey::generate());
     let routes = Arc::<ArcSwap<RouteTable>>::default();
-    let orchestrator = Orchestrator::new(
+    let prober = Arc::new(FakeProber::with_delay(settle));
+    let orchestrator = Orchestrator::with_prober(
         store.clone(),
         Arc::clone(&runtime),
         Arc::clone(&resolver) as Arc<dyn TagResolver>,
         ports,
         secrets.clone(),
-        settings,
+        settings(settle),
         Arc::clone(&routes),
+        Arc::clone(&prober) as Arc<dyn Prober>,
     );
     Harness {
         _dir: dir,
@@ -103,6 +201,7 @@ pub(super) async fn harness_with(settle: Duration) -> Harness {
         secrets,
         orchestrator,
         routes,
+        prober,
     }
 }
 
@@ -175,13 +274,28 @@ impl Harness {
             .collect()
     }
 
+    /// The states deployment `id` went through; notes (probe results, drain timeouts) are
+    /// events within one state and left out.
     pub(super) async fn states(&self, id: DeploymentId) -> Vec<DeploymentState> {
         self.store
             .events(id)
             .await
             .unwrap()
             .into_iter()
+            .filter(|e| e.from != Some(e.to))
             .map(|e| e.to)
+            .collect()
+    }
+
+    /// The notes recorded on deployment `id`, with the state they were made in.
+    pub(super) async fn notes(&self, id: DeploymentId) -> Vec<(DeploymentState, String)> {
+        self.store
+            .events(id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.from == Some(e.to))
+            .map(|e| (e.to, e.message.unwrap_or_default()))
             .collect()
     }
 }
@@ -464,7 +578,7 @@ async fn a_container_exiting_during_the_health_check_aborts() {
     h.bootstrap().await;
     let before = h.container_names();
     let outcome = h.deploy(&[("api", 2)]).await;
-    // Crash the new container while the built-in check watches it.
+    // Crash the new container while its health check watches it.
     let runtime = Arc::clone(&h.runtime);
     tokio::spawn(async move {
         loop {
@@ -1075,6 +1189,10 @@ name = "hostertest"
 image = "ghcr.io/containerd/busybox"
 command = ["httpd", "-f", "-p", "8080"]
 
+# busybox httpd serves no /healthz, the default probe (ADR-0051).
+[services.api.health]
+tcp = { port = 8080 }
+
 [[services.api.routes]]
 host = "notes.hoster.test"
 prefix = "/api"
@@ -1083,6 +1201,9 @@ port = 8080
 [services.web]
 image = "docker.io/library/busybox:1.37"
 command = ["httpd", "-f", "-p", "80"]
+
+[services.web.health]
+tcp = { port = 80 }
 
 [[services.web.routes]]
 host = "notes.hoster.test"
@@ -1234,6 +1355,10 @@ secrets = {{ APP_TOKEN = "hostersecrets/token" }}
 [services.app.volumes]
 data = "/data"
 
+# httpd serves /www, which has no /healthz (the default probe, ADR-0051).
+[services.app.health]
+http = {{ path = "/env", port = 8080 }}
+
 [[services.app.routes]]
 host = "app.hoster.test"
 port = 8080
@@ -1241,6 +1366,9 @@ port = 8080
 [services.multi]
 image = "docker.io/library/busybox:1.37"
 command = ["sh", "-c", "mkdir -p /www && env > /www/env && exec httpd -f -p 8080 -h /www"]
+
+[services.multi.health]
+http = {{ path = "/env", port = 8080 }}
 
 [[services.multi.routes]]
 host = "multi.hoster.test"

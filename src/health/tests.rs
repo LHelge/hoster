@@ -209,7 +209,10 @@ async fn http_probe_passes_after_the_server_becomes_healthy() {
     let check = Check::for_service(&service(FAST), &ports(8080, server.port)).unwrap();
     let (runtime, id) = running().await;
     let events = Events::default();
-    check.run(&runtime, &id, &events).await.unwrap();
+    check
+        .run(&runtime, &id, &NetworkProber, &events)
+        .await
+        .unwrap();
 
     // Three 503s, then two passes in a row.
     let requests = server.requests();
@@ -248,7 +251,10 @@ async fn a_failure_resets_the_streak() {
         .unwrap()
         .with_start_period(Duration::from_millis(150));
     let (runtime, id) = running().await;
-    let err = check.run(&runtime, &id, &()).await.unwrap_err();
+    let err = check
+        .run(&runtime, &id, &NetworkProber, &())
+        .await
+        .unwrap_err();
     assert!(matches!(err, HealthError::Unhealthy { .. }), "{err:?}");
     assert!(server.requests().len() >= 3);
 }
@@ -264,7 +270,10 @@ async fn an_exact_expected_status_rejects_other_codes() {
         .unwrap()
         .with_start_period(Duration::from_millis(100));
     let (runtime, id) = running().await;
-    let err = check.run(&runtime, &id, &()).await.unwrap_err();
+    let err = check
+        .run(&runtime, &id, &NetworkProber, &())
+        .await
+        .unwrap_err();
     assert!(
         err.to_string()
             .ends_with("last result: HTTP 200, expected 204"),
@@ -281,7 +290,10 @@ async fn a_server_that_never_becomes_healthy_times_out() {
     let (runtime, id) = running().await;
     let events = Events::default();
     let started = Instant::now();
-    let err = check.run(&runtime, &id, &events).await.unwrap_err();
+    let err = check
+        .run(&runtime, &id, &NetworkProber, &events)
+        .await
+        .unwrap_err();
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(matches!(err, HealthError::Unhealthy { .. }), "{err:?}");
     let text = err.to_string();
@@ -301,7 +313,10 @@ async fn a_server_that_hangs_up_or_stays_silent_fails() {
     let check = Check::for_service(&service(FAST), &ports(8080, hangup.port))
         .unwrap()
         .with_start_period(Duration::from_millis(100));
-    let err = check.run(&runtime, &id, &()).await.unwrap_err();
+    let err = check
+        .run(&runtime, &id, &NetworkProber, &())
+        .await
+        .unwrap_err();
     assert!(
         err.to_string()
             .contains("connection closed before an HTTP status line"),
@@ -313,7 +328,10 @@ async fn a_server_that_hangs_up_or_stays_silent_fails() {
     let check = Check::for_service(&service(&toml), &ports(8080, silent.port))
         .unwrap()
         .with_start_period(Duration::from_millis(100));
-    let err = check.run(&runtime, &id, &()).await.unwrap_err();
+    let err = check
+        .run(&runtime, &id, &NetworkProber, &())
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("no answer within 30ms"), "{err}");
 }
 
@@ -329,7 +347,7 @@ async fn a_crashing_server_is_unhealthy() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         server.crash();
     };
-    let (result, ()) = tokio::join!(check.run(&runtime, &id, &events), crash);
+    let (result, ()) = tokio::join!(check.run(&runtime, &id, &NetworkProber, &events), crash);
     let dropped = |text: &str| {
         [
             "connection closed before an HTTP status line",
@@ -362,7 +380,7 @@ async fn a_container_exiting_during_the_check_aborts_early() {
         runtime.set_state(&id, ContainerState::Exited(Some(137)));
     };
     let started = Instant::now();
-    let (result, ()) = tokio::join!(check.run(&runtime, &id, &events), crash);
+    let (result, ()) = tokio::join!(check.run(&runtime, &id, &NetworkProber, &events), crash);
     assert!(started.elapsed() < Duration::from_secs(5), "aborted early");
     let err = result.unwrap_err();
     assert!(matches!(err, HealthError::Exited { .. }), "{err:?}");
@@ -389,7 +407,7 @@ async fn routed_services_default_to_get_healthz_on_the_first_route_port() {
     assert_eq!(check.start_period, DEFAULT_START_PERIOD);
     let (runtime, id) = running().await;
     // 3xx counts as healthy by default.
-    check.run(&runtime, &id, &()).await.unwrap();
+    check.run(&runtime, &id, &NetworkProber, &()).await.unwrap();
     assert_eq!(server.requests(), ["GET /healthz HTTP/1.1"]);
 }
 
@@ -402,7 +420,10 @@ async fn a_failing_default_probe_says_how_to_override_the_path() {
         .with_start_period(Duration::from_millis(50));
     let (runtime, id) = running().await;
     let events = Events::default();
-    let err = check.run(&runtime, &id, &events).await.unwrap_err();
+    let err = check
+        .run(&runtime, &id, &NetworkProber, &events)
+        .await
+        .unwrap_err();
     let text = err.to_string();
     assert!(
         text.contains("GET /healthz on container port 8080"),
@@ -424,7 +445,7 @@ async fn tcp_probe_connects() {
         format!("TCP connect to container port 9090 (127.0.0.1:{port})")
     );
     let (runtime, id) = running().await;
-    check.run(&runtime, &id, &()).await.unwrap();
+    check.run(&runtime, &id, &NetworkProber, &()).await.unwrap();
 
     let closed = ClosedPort::new();
     let check = Check::for_service(
@@ -432,7 +453,10 @@ async fn tcp_probe_connects() {
         &PortMap::from([(8080, 1), (9090, closed.port)]),
     )
     .unwrap();
-    let err = check.run(&runtime, &id, &()).await.unwrap_err();
+    let err = check
+        .run(&runtime, &id, &NetworkProber, &())
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("cannot connect"), "{err}");
 }
 
@@ -494,10 +518,13 @@ async fn services_without_routes_settle() {
         .with_start_period(Duration::from_millis(40))
         .with_interval(Duration::from_millis(5));
     let (runtime, id) = running().await;
-    check.run(&runtime, &id, &()).await.unwrap();
+    check.run(&runtime, &id, &NetworkProber, &()).await.unwrap();
 
     runtime.set_state(&id, ContainerState::Exited(Some(1)));
-    let err = check.run(&runtime, &id, &()).await.unwrap_err();
+    let err = check
+        .run(&runtime, &id, &NetworkProber, &())
+        .await
+        .unwrap_err();
     assert_eq!(
         err.to_string(),
         "container hoster-demo-app-g1 exited (1) before it became healthy"
@@ -529,7 +556,10 @@ async fn deployment_log_records_probe_results_as_events() {
         deployment.id,
         DeploymentState::HealthChecking,
     );
-    check.run(&runtime, &id, &log).await.unwrap_err();
+    check
+        .run(&runtime, &id, &NetworkProber, &log)
+        .await
+        .unwrap_err();
 
     let events = store.events(deployment.id).await.unwrap();
     let notes: Vec<_> = events

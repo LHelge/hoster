@@ -1,10 +1,10 @@
 ---
 id: xhn
 title: Deploy webhook endpoint with GitHub Actions OIDC authentication
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.329258378Z"
-updated: "2026-11-07T21:12:34.686583057Z"
+updated: "2026-11-08T01:52:24.315666848Z"
 tags:
   - web
   - security
@@ -14,6 +14,7 @@ depends_on:
   - j7u
   - "8w4"
 parent: hxh
+attempts: 1
 ---
 
 ## Summary

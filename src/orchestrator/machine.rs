@@ -76,7 +76,8 @@ pub enum Effect {
     PublishRoutes,
     /// Write every per-service current pointer in one transaction: the commit point.
     Commit,
-    /// Wait for the old upstreams to go idle (M3: completes at once).
+    /// Wait for the old upstreams to go idle: the settle delay, then their in-flight counters,
+    /// bounded by the stack's drain timeout (§5.3).
     Drain,
     /// Stop and remove the old generation, release its ports.
     CleanUp,

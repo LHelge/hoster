@@ -11,8 +11,10 @@
 //!
 //! A deployment is driven by a spawned deploy task through the pure state machine of
 //! [`machine`] (`(state, event) -> (state, effects)`); the effects are carried out by the
-//! interpreter in `engine`. Health is the built-in "running for 5 s" check and `Draining`
-//! completes at once (architecture §5.1).
+//! interpreter in `engine`: new containers start next to the old ones on fresh ports, are probed
+//! with their resolved health checks (ADR-0038), the whole stack swaps in one `RouteTable`
+//! publish plus one pointer transaction, and the old upstreams drain on their in-flight
+//! counters before they are removed (ADR-0017, ADR-0048, architecture §5).
 //!
 //! The orchestrator is also the single writer of the proxy's `ArcSwap<RouteTable>` (`routes`,
 //! architecture §6.4): desired state lives under the same lock as the slots, and every change
@@ -88,10 +90,14 @@ impl TagResolver for RegistryClient {
 pub struct Settings {
     /// Hosts no stack may route (the admin host, ADR-0031).
     pub reserved: Reserved,
-    /// The built-in health check: a new container must stay running this long (§5.1).
+    /// The health check of a service without routes and without a declared `health` table: a
+    /// new container must stay running this long (ADR-0038).
     pub settle: Duration,
-    /// How often the built-in check inspects the container.
+    /// How often that check inspects the container.
     pub settle_poll: Duration,
+    /// The wait after the swap before the old upstreams' in-flight counters are watched, so a
+    /// request that loaded the old `RouteTable` just before is counted (ADR-0035 #2, §5.3).
+    pub drain_settle: Duration,
     /// How the reconciler restarts crashed containers (ADR-0028).
     pub restart: RestartPolicy,
     /// How often live services are probed (ADR-0038).
@@ -106,6 +112,7 @@ impl Default for Settings {
             reserved: Reserved::default(),
             settle: Duration::from_secs(5),
             settle_poll: Duration::from_millis(500),
+            drain_settle: Duration::from_secs(1),
             restart: RestartPolicy::default(),
             monitor: MonitorSettings::default(),
             gap_retry_after: Duration::from_secs(5),
@@ -354,7 +361,7 @@ pub struct Orchestrator<R> {
     reconciler: Mutex<Reconciler>,
     /// Liveness of the live generations (ADR-0038).
     watchlist: Mutex<monitor::Watchlist>,
-    /// Carries out the health monitor's probes.
+    /// Carries out the health probes, of deployments and of the health monitor.
     prober: Arc<dyn Prober>,
     /// Status changes for open UI pages (architecture §3.3 #5).
     ui_events: broadcast::Sender<UiEvent>,
@@ -472,7 +479,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         )
     }
 
-    /// [`Self::new`] with the health monitor probing through `prober`.
+    /// [`Self::new`] with deployments and the health monitor probing through `prober`.
     #[expect(
         clippy::too_many_arguments,
         reason = "the orchestrator's collaborators, each injected for tests"
@@ -1270,3 +1277,5 @@ mod reconcile_tests;
 mod routes_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod zero_downtime_tests;

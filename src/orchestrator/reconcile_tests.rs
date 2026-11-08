@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::tests::{Harness, NOTES, digest, harness};
+use super::tests::{FakeProber, Harness, NOTES, digest, harness, settings};
 use super::*;
 use crate::config::PortRange;
 use crate::runtime::{
@@ -27,19 +27,18 @@ fn ports(store: &Store) -> PortAllocator {
 
 /// hoster starting again on the same store and podman.
 fn restarted(h: &Harness, restart: RestartPolicy) -> Arc<Orchestrator<FakeRuntime>> {
-    Orchestrator::new(
+    Orchestrator::with_prober(
         h.store.clone(),
         Arc::clone(&h.runtime),
         Arc::clone(&h.resolver) as Arc<dyn TagResolver>,
         ports(&h.store),
         h.secrets.clone(),
         Settings {
-            settle: Duration::from_millis(20),
-            settle_poll: Duration::from_millis(5),
             restart,
-            ..Settings::default()
+            ..settings(Duration::from_millis(20))
         },
         Arc::default(),
+        Arc::new(FakeProber::default()),
     )
 }
 

@@ -1,21 +1,28 @@
 //! The deploy task: drives one deployment through the pure machine and carries out its effects
-//! against the [`ContainerRuntime`], the port allocator and the store.
+//! against the [`ContainerRuntime`], the port allocator, the store and the published routes.
+//!
+//! The start-first path of ADR-0017 as ordered by ADR-0048: new start-first containers start next
+//! to the old ones on fresh loopback ports (`Starting`) and are probed with their resolved
+//! [`Check`]s (`HealthChecking`); stop-first services are replaced one at a time behind a 503 gap
+//! (`Replacing`); one `RouteTable` publish and one pointer transaction commit the whole stack
+//! (`Switching`); the old upstreams drain on their in-flight counters, bounded by the stack's
+//! `drain_timeout` (`Draining`); then the old generation is removed (`CleaningUp`).
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 
-use futures_util::future::try_join_all;
+use futures_util::future::{join_all, try_join_all};
 use tracing::Instrument;
 
 use super::machine::{Effect, Event};
 use super::plan::{Change, Plan, SecretVersions};
 use super::routes::Routes;
 use super::{Orchestrator, Result};
-use crate::health::Check;
+use crate::health::{Check, DeploymentLog};
 use crate::logging::LogSpan;
-use crate::routing::{DesiredStack, RouteClaims};
+use crate::routing::{DesiredStack, DrainOutcome, RouteClaims, ServiceState, Upstream};
 use crate::runtime::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, NetworkSpec, PortBinding,
     ServiceGeneration, VolumeMount, label,
@@ -92,12 +99,12 @@ pub(super) struct Run {
     generation: u32,
     /// Loopback ports reserved for the new containers, by service.
     ports: BTreeMap<Name, PortMap>,
-    /// New containers created by this deployment.
-    created: Vec<ContainerId>,
+    /// New containers created by this deployment, by service.
+    created: Vec<(Name, ContainerId)>,
     /// Old stop-first containers `Replacing` stopped (kept until clean-up).
     stopped: Vec<ContainerId>,
-    /// What the stack's routes served before `Switching` published this deployment's, put
-    /// back should the pointers fail to commit.
+    /// What the stack's routes served before `Switching` published this deployment's: put
+    /// back should the pointers fail to commit, and the old upstreams `Draining` waits for.
     served_before: Option<DesiredStack>,
 }
 
@@ -202,7 +209,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 
     /// Runs `work` unless the stack's removal starts first; `None` when it did (`work` is
-    /// dropped). Used for the waits a removal should not sit through: pulls and health checks.
+    /// dropped). Used for the waits a removal should not sit through: pulls, health checks and
+    /// the drain.
     async fn unless_removed<T>(&self, run: &Run, work: impl Future<Output = T>) -> Option<T> {
         let stack = run.target.stack().as_ref();
         let mut work = pin!(work);
@@ -284,7 +292,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             ),
             Effect::StartContainers => Some(self.start_new(run).await),
             Effect::Probe => Some(
-                match self.unless_removed(run, self.settle(&run.created)).await {
+                match self
+                    .unless_removed(run, self.probe(run, &run.created))
+                    .await
+                {
                     Some(Ok(())) => Event::Healthy,
                     Some(Err(reason)) => Event::Failed(reason),
                     None => Event::Failed(super::STACK_REMOVED.to_owned()),
@@ -294,8 +305,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             // Published by `transition`, under the lock; never returned from it.
             Effect::PublishRoutes => None,
             Effect::Commit => self.commit(run).await,
-            // M3: nothing routes to the old upstreams, so there is nothing to drain.
-            Effect::Drain => Some(Event::Drained),
+            // A removal takes every container of the stack down anyway, so it does not wait
+            // for the old upstreams to go idle.
+            Effect::Drain => Some(
+                self.unless_removed(run, self.drain(run))
+                    .await
+                    .unwrap_or(Event::Drained),
+            ),
             Effect::CleanUp => Some(self.clean_up(run).await),
             Effect::Abort { reason } => Some(self.abort(run, reason).await),
             Effect::Finish => {
@@ -488,7 +504,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 return Event::Failed(reason);
             }
             let new = run.created.last().cloned().into_iter().collect::<Vec<_>>();
-            match self.unless_removed(run, self.settle(&new)).await {
+            match self.unless_removed(run, self.probe(run, &new)).await {
                 Some(Ok(())) => {}
                 Some(Err(reason)) => return Event::Failed(reason),
                 None => return Event::Failed(super::STACK_REMOVED.to_owned()),
@@ -581,7 +597,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// `Aborting`: back to exactly how the stack was (ADR-0048).
     async fn abort(&self, run: &mut Run, reason: String) -> Event {
         let mut problems = Vec::new();
-        for id in std::mem::take(&mut run.created) {
+        for (_, id) in std::mem::take(&mut run.created) {
             if let Err(err) = self.runtime.remove(&id).await {
                 problems.push(format!("cannot remove new container {id}: {err}"));
             }
@@ -651,7 +667,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .create_container(&spec)
                 .await
                 .map_err(|err| format!("cannot create {}: {err}", spec.name))?;
-            run.created.push(id.clone());
+            run.created.push((change.service.clone(), id.clone()));
             self.runtime
                 .start(&id)
                 .await
@@ -663,19 +679,100 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         .await
     }
 
-    /// The built-in health check (§5.1, M3): every container stays running for
-    /// [`Settings::settle`](super::Settings::settle), checked concurrently.
-    async fn settle(&self, ids: &[ContainerId]) -> Result<(), String> {
-        let check = Check::settle(self.settings.settle, self.settings.settle_poll);
+    /// `HealthChecking` and `Replacing`: probes the new containers `created` concurrently, each
+    /// with its service's resolved health check (ADR-0038, ADR-0051) through the orchestrator's
+    /// [`Prober`](crate::health::Prober). Probe results are recorded as events of the
+    /// deployment; the first failure is the reason the deployment aborts.
+    async fn probe(&self, run: &Run, created: &[(Name, ContainerId)]) -> Result<(), String> {
+        let checks = created
+            .iter()
+            .map(|(service, id)| Ok((self.check(run, service)?, id)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let log = DeploymentLog::new(self.store.clone(), run.id, run.state);
         let runtime = &*self.runtime;
-        try_join_all(ids.iter().map(|id| check.run(runtime, id, &())))
-            .await
-            .map(drop)
-            .map_err(|err| err.to_string())
+        let prober = &*self.prober;
+        try_join_all(
+            checks
+                .iter()
+                .map(|(check, id)| check.run(runtime, id, prober, &log)),
+        )
+        .await
+        .map(drop)
+        .map_err(|err| err.to_string())
+    }
+
+    /// The health check of `service`'s new container on the ports this deployment reserved.
+    /// The "running for 5 s" check of a service without routes runs for
+    /// [`Settings::settle`](super::Settings::settle).
+    fn check(&self, run: &Run, service: &Name) -> Result<Check, String> {
+        let definition = &run.target.definition.services[service];
+        let ports = run.ports.get(service).cloned().unwrap_or_default();
+        let check = Check::for_service(definition, &ports)
+            .map_err(|err| format!("service {service}: {err}"))?;
+        Ok(if check.is_settle() {
+            Check::settle(self.settings.settle, self.settings.settle_poll)
+        } else {
+            check
+        })
+    }
+
+    /// `Draining` (§5.3): waits for every upstream the swap took out of the table (the old
+    /// generation of each changed service and the upstreams of removed services) to finish
+    /// its in-flight requests. Each waits the settle delay first (ADR-0035 #2) and is bounded
+    /// by the stack's `drain_timeout`; on the timeout the deployment proceeds and the
+    /// requests still in flight are cut when the old container stops. Nothing to drain (a
+    /// first deployment, unrouted or stop-first services only) completes at once.
+    async fn drain(&self, run: &Run) -> Event {
+        let old = run.old_upstreams();
+        if old.is_empty() {
+            return Event::Drained;
+        }
+        let settle = self.settings.drain_settle;
+        let timeout = run.target.definition.drain_timeout;
+        let outcomes = join_all(old.iter().map(|upstream| upstream.drain(settle, timeout))).await;
+        for (upstream, outcome) in old.iter().zip(outcomes) {
+            if let DrainOutcome::TimedOut(left) = outcome {
+                let message = format!(
+                    "drain of service {} g{} ({}) timed out after {} with {left} request(s) \
+                     in flight; they are cut",
+                    upstream.service,
+                    upstream.generation,
+                    upstream.addr,
+                    humantime::format_duration(timeout),
+                );
+                if let Err(err) = self.store.note(run.id, run.state, &message).await {
+                    tracing::warn!(deployment = %run.id, %err, "cannot record the drain timeout");
+                }
+            }
+        }
+        Event::Drained
     }
 }
 
 impl Run {
+    /// The upstreams the swap took out of the table: what the stack served before it for every
+    /// changed start-first or removed service. A stop-first service has nothing to drain: its
+    /// old container stopped when its gap opened.
+    fn old_upstreams(&self) -> Vec<Arc<Upstream>> {
+        let (Some(before), Ok(plan)) = (&self.served_before, &self.plan) else {
+            return Vec::new();
+        };
+        let retired: Vec<&str> = plan
+            .changes_with(UpdateStrategy::StartFirst)
+            .map(|c| c.service.as_ref())
+            .chain(plan.removed.iter().map(|p| p.service.as_str()))
+            .collect();
+        before
+            .services
+            .iter()
+            .filter(|(service, _)| retired.contains(&service.as_ref()))
+            .flat_map(|(_, state)| match state {
+                ServiceState::Live { upstreams } => upstreams.values().cloned().collect(),
+                ServiceState::Gap { .. } => Vec::new(),
+            })
+            .collect()
+    }
+
     /// The container spec of `change`'s new generation (architecture §8).
     fn spec(&self, change: &Change) -> Result<ContainerSpec, String> {
         let stack = self.target.stack();

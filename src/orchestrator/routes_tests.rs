@@ -470,7 +470,7 @@ name = "hosterroutes"
 
 [services.api]
 image = "ghcr.io/containerd/busybox"
-command = ["sh", "-c", "mkdir -p /www/api && echo api > /www/api/index.html && exec httpd -f -p 8080 -h /www"]
+command = ["sh", "-c", "mkdir -p /www/api && echo api > /www/api/index.html && echo ok > /www/healthz && exec httpd -f -p 8080 -h /www"]
 
 [[services.api.routes]]
 host = "notes.hoster.test"
@@ -479,7 +479,7 @@ port = 8080
 
 [services.web]
 image = "docker.io/library/busybox:1.37"
-command = ["sh", "-c", "mkdir -p /www && echo web > /www/index.html && exec httpd -f -p 80 -h /www"]
+command = ["sh", "-c", "mkdir -p /www && echo web > /www/index.html && echo ok > /www/healthz && exec httpd -f -p 80 -h /www"]
 
 [[services.web.routes]]
 host = "notes.hoster.test"
@@ -487,7 +487,7 @@ port = 80
 
 [services.storage]
 image = "docker.io/library/busybox:1.37"
-command = ["sh", "-c", "mkdir -p /www && echo s3 > /www/index.html && exec httpd -f -p 9000 -h /www"]
+command = ["sh", "-c", "mkdir -p /www && echo s3 > /www/index.html && echo ok > /www/healthz && exec httpd -f -p 9000 -h /www"]
 update = "stop-first"
 
 [[services.storage.routes]]

@@ -1,57 +1,19 @@
 //! Health monitor scenarios (ADR-0038): the orchestrator against [`FakeRuntime`], a real
 //! (temporary) store and a fake prober, with passes run at chosen instants.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::tests::{Harness, harness};
+use super::tests::{FakeProber, Harness, harness};
 use super::*;
 use crate::config::PortRange;
-use crate::health::Check;
 use crate::runtime::{ContainerState, FakeRuntime, Operation, RuntimeError};
 
 use HealthStatus as H;
-
-/// Answers probes by container port: a scripted result, `HTTP 200` otherwise. Counts probes.
-#[derive(Default)]
-struct FakeProber {
-    answers: StdMutex<BTreeMap<u16, Result<String, String>>>,
-    probes: StdMutex<Vec<String>>,
-}
-
-impl FakeProber {
-    fn answer(&self, port: u16, result: Result<&str, &str>) {
-        let result = result.map(str::to_owned).map_err(str::to_owned);
-        self.answers.lock().unwrap().insert(port, result);
-    }
-
-    fn take_probes(&self) -> Vec<String> {
-        let mut probes = std::mem::take(&mut *self.probes.lock().unwrap());
-        probes.sort();
-        probes
-    }
-}
-
-#[async_trait]
-impl Prober for FakeProber {
-    async fn probe(&self, check: &Check) -> std::result::Result<String, String> {
-        let text = check.to_string();
-        self.probes.lock().unwrap().push(text.clone());
-        self.answers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(port, _)| text.contains(&format!("container port {port} ")))
-            .map_or_else(|| Ok("HTTP 200".to_owned()), |(_, r)| r.clone())
-    }
-}
 
 /// NOTES live (api g2, web g2, storage g1), watched by a monitor probing through a fake.
 async fn monitored() -> (Harness, Arc<Orchestrator<FakeRuntime>>, Arc<FakeProber>) {

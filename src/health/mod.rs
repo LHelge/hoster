@@ -6,19 +6,15 @@
 //! - [`Check::for_service`] resolves a service's declared `health` table (or the defaults) and
 //!   its allocated [`PortMap`] into a [`Check`]: an `http` probe, a `tcp` probe, or, for a
 //!   service without routes, "running and not restarted for 5 s".
-//! - [`Check::run`] carries it out against one container until it passes, its `start_period`
-//!   runs out, or the container exits (checked with `inspect` before every probe).
+//! - [`Check::run`] carries it out against one container, through a [`Prober`], until it passes,
+//!   its `start_period` runs out, or the container exits (checked with `inspect` before every
+//!   probe and once more before a pass is reported).
 //! - Results go to a [`ProbeLog`]; [`DeploymentLog`] records them as deployment events.
 //! - After a deploy, [`Check::live`] probes a live container once, through a [`Prober`], and
 //!   [`Liveness`] turns the results into a [`HealthStatus`] (see `liveness`).
 //!
 //! hoster turns podman's restart policy off (ADR-0028), so "running at every look" is "running
 //! and not restarted".
-
-#![allow(
-    dead_code,
-    reason = "the deploy engine switches to real probes in a later task (shg)"
-)]
 
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -187,12 +183,14 @@ impl Check {
     }
 
     /// Overrides the time between probes (or inspections).
+    #[cfg(test)]
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
     }
 
     /// Overrides how long the container gets (or, for the settle check, must stay up).
+    #[cfg(test)]
     pub fn with_start_period(mut self, start_period: Duration) -> Self {
         self.start_period = start_period;
         self
@@ -212,13 +210,20 @@ impl Check {
         }
     }
 
+    /// Whether this is the "running and not restarted" check of a service without routes.
+    pub fn is_settle(&self) -> bool {
+        self.kind == Kind::Settle
+    }
+
     /// Runs the check against `container` until it passes, `start_period` runs out or the
-    /// container stops running. Probe results, and the verdict, go to `log`; a result is
-    /// logged when it differs from the previous one, so a steady failure is one event.
+    /// container stops running; each probe goes through `prober` ([`NetworkProber`] in
+    /// production). Probe results, and the verdict, go to `log`; a result is logged when it
+    /// differs from the previous one, so a steady failure is one event.
     pub async fn run<R: ContainerRuntime>(
         &self,
         runtime: &R,
         container: &ContainerId,
+        prober: &dyn Prober,
         log: &dyn ProbeLog,
     ) -> Result<(), HealthError> {
         let started = Instant::now();
@@ -231,9 +236,14 @@ impl Check {
                 return Err(err);
             }
             if self.kind != Kind::Settle {
-                let result = self.attempt().await;
+                let result = prober.probe(self).await;
                 streak = if result.is_ok() { streak + 1 } else { 0 };
                 if streak >= self.healthy_after {
+                    // A container that exited right after answering is not healthy.
+                    if let Err(err) = Self::ensure_running(runtime, container).await {
+                        log.record(&err.to_string()).await;
+                        return Err(err);
+                    }
                     log.record(&format!(
                         "health check {self} passed {streak} time(s) in a row after {}",
                         Elapsed(started.elapsed())

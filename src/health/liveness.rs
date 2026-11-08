@@ -98,6 +98,7 @@ impl Liveness {
         &self.stats
     }
 
+    #[cfg(test)]
     pub fn status(&self) -> HealthStatus {
         self.stats.status
     }

@@ -1,10 +1,10 @@
 ---
 id: shg
 title: "Zero-downtime deploys: real health probes, RouteTable swap, drain, crash recovery"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.296793894Z"
-updated: "2026-11-08T01:32:42.144805670Z"
+updated: "2026-11-08T01:53:23.438168476Z"
 tags:
   - orchestrator
 depends_on:
