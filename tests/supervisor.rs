@@ -1,5 +1,5 @@
 //! Spawns the real `hoster run` binary and checks its signal handling, systemd notifications and
-//! exit codes. Podman is a [`FakePodman`] answering the startup handshake, the proxy listens on
+//! exit codes. Podman is a [`FakePodman`] answering the startup handshake and reconciliation, the proxy listens on
 //! an ephemeral loopback port, and every other phase that needs the network is still a stub, so
 //! this runs offline.
 
@@ -16,8 +16,9 @@ use nix::unistd::Pid;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Just enough of podman's compat API for startup step 4: `/version` (used by version
-/// negotiation and the startup log) and `/_ping`, one request per connection.
+/// Just enough of podman's compat API for startup steps 4 and 5: `/version` (used by version
+/// negotiation and the startup log), `/_ping`, and empty container and network lists for the
+/// startup reconciliation; one request per connection.
 struct FakePodman;
 
 impl FakePodman {
@@ -44,11 +45,14 @@ impl FakePodman {
         while reader.read_line(&mut header).is_ok_and(|n| n > 0) && header != "\r\n" {
             header.clear();
         }
-        let path = request_line.split_whitespace().nth(1).unwrap_or("");
+        let target = request_line.split_whitespace().nth(1).unwrap_or("");
+        let path = target.split('?').next().unwrap_or("");
         let (content_type, body) = if path.ends_with("/_ping") {
             ("text/plain", "OK")
         } else if path.ends_with("/version") {
             ("application/json", Self::VERSION)
+        } else if path.ends_with("/containers/json") || path.ends_with("/networks") {
+            ("application/json", "[]")
         } else {
             ("text/plain", "")
         };

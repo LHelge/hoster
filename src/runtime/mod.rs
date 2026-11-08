@@ -80,6 +80,11 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// Removes a network. Fails with [`RuntimeError::InUse`] while containers are attached.
     fn remove_network(&self, name: &str) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
+    /// Every network labelled `hoster.managed=true`, with its name and labels.
+    fn list_managed_networks(
+        &self,
+    ) -> impl Future<Output = Result<Vec<NetworkSpec>, RuntimeError>> + Send;
+
     /// Makes `image` available locally, pulling it by digest (with the registry's credential,
     /// if one is configured) unless it is already present. Returns once the pull is complete.
     ///
@@ -170,6 +175,11 @@ pub struct NetworkSpec {
     reason = "consumed by the deploy engine as it is implemented"
 )]
 impl NetworkSpec {
+    /// Whether the network carries `hoster.managed=true`.
+    pub fn is_managed(&self) -> bool {
+        self.labels.get(label::MANAGED).is_some_and(|v| v == "true")
+    }
+
     /// `hoster-<stack>`, labelled `hoster.managed=true` and `hoster.stack=<stack>`.
     pub fn for_stack(stack: &Name) -> Self {
         Self {
@@ -202,6 +212,47 @@ impl fmt::Display for ServiceGeneration {
             "{PREFIX}-{}-{}-g{}",
             self.stack, self.service, self.generation
         )
+    }
+}
+
+/// Which generation of which service a managed container is, read from its labels.
+///
+/// Fails, with the reason, unless the container carries `hoster.managed=true`, valid
+/// `hoster.stack`, `hoster.service` and `hoster.generation` labels, and the name those labels
+/// give it. Anything else is not hoster's and is never touched.
+impl TryFrom<&ContainerInfo> for ServiceGeneration {
+    type Error = String;
+
+    fn try_from(info: &ContainerInfo) -> Result<Self, Self::Error> {
+        if !info.is_managed() {
+            return Err(format!("label {} is not `true`", label::MANAGED));
+        }
+        let get = |key: &str| {
+            info.labels
+                .get(key)
+                .ok_or_else(|| format!("label {key} is missing"))
+        };
+        let parse = |key: &str| {
+            get(key)?
+                .parse::<Name>()
+                .map_err(|err| format!("label {key}: {err}"))
+        };
+        let generation = get(label::GENERATION)?
+            .parse::<u32>()
+            .map_err(|err| format!("label {}: {err}", label::GENERATION))?;
+        let parsed = Self {
+            stack: parse(label::STACK)?,
+            service: parse(label::SERVICE)?,
+            generation,
+        };
+        let expected = parsed.to_string();
+        if info.name.trim_start_matches('/') != expected {
+            return Err(format!(
+                "its labels name it {expected}, but it is called {}",
+                info.name
+            ));
+        }
+        Ok(parsed)
     }
 }
 
@@ -559,6 +610,7 @@ pub enum Operation {
     EnsureNetwork,
     EnsureVolume,
     RemoveNetwork,
+    ListNetworks,
     PullImage,
     CreateContainer,
     Start,
@@ -577,6 +629,7 @@ impl fmt::Display for Operation {
             Self::EnsureNetwork => "ensure network",
             Self::EnsureVolume => "ensure volume",
             Self::RemoveNetwork => "remove network",
+            Self::ListNetworks => "list networks",
             Self::PullImage => "pull image",
             Self::CreateContainer => "create container",
             Self::Start => "start container",

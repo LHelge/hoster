@@ -1,10 +1,10 @@
 ---
 id: tsm
 title: Startup and periodic reconciliation
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.211279069Z"
-updated: "2026-11-08T00:20:30.221212334Z"
+updated: "2026-11-08T00:41:25.509272570Z"
 tags:
   - orchestrator
 depends_on:

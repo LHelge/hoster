@@ -13,6 +13,10 @@
 //! interpreter in `engine`. M3 has no proxy yet: health is the built-in "running for 5 s"
 //! check, `Switching` commits the per-service pointers without publishing a `RouteTable`, and
 //! `Draining` completes at once (architecture §5.1).
+//!
+//! The reconciler (`reconcile`, ADR-0028) resolves interrupted deployments and adopts, starts
+//! or removes containers at startup ([`Orchestrator::recover`]), then keeps the current
+//! generation running with backoff ([`Orchestrator::run_reconciler`]).
 
 #![allow(
     dead_code,
@@ -22,6 +26,7 @@
 mod engine;
 pub mod machine;
 mod plan;
+mod reconcile;
 
 use std::collections::BTreeMap;
 use std::pin::pin;
@@ -32,7 +37,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::Notify;
 
-use crate::ports::PortAllocator;
+use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError};
 use crate::routing::{CollisionError, Reserved, RouteClaims};
 use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, VolumeMount, label};
@@ -47,6 +52,8 @@ use engine::{Run, Target};
 use machine::Event;
 pub use plan::PlanError;
 use plan::{Plan, SecretVersions};
+use reconcile::Reconciler;
+pub use reconcile::{RestartPolicy, RestartStats};
 
 /// Resolves a third-party image's tag to the digest the registry serves for it (ADR-0025).
 /// [`RegistryClient`] in production; tests use a fake.
@@ -71,6 +78,8 @@ pub struct Settings {
     pub settle: Duration,
     /// How often the built-in check inspects the container.
     pub settle_poll: Duration,
+    /// How the reconciler restarts crashed containers (ADR-0028).
+    pub restart: RestartPolicy,
 }
 
 impl Default for Settings {
@@ -79,6 +88,7 @@ impl Default for Settings {
             reserved: Reserved::default(),
             settle: Duration::from_secs(5),
             settle_poll: Duration::from_millis(500),
+            restart: RestartPolicy::default(),
         }
     }
 }
@@ -116,6 +126,8 @@ pub enum OrchestratorError {
     Secret(#[from] SecretError),
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(transparent)]
+    Ports(#[from] PortError),
 }
 
 impl From<PlanError> for OrchestratorError {
@@ -226,6 +238,9 @@ pub struct StackStatus {
 pub struct ServiceStatus {
     pub name: String,
     pub state: ServiceState,
+    /// How often the reconciler restarted the running generation, and whether it is crash
+    /// looping (ADR-0028).
+    pub restarts: RestartStats,
 }
 
 /// What one service runs.
@@ -255,6 +270,8 @@ pub struct Orchestrator<R> {
     finished: Notify,
     /// Signalled when a stack's removal starts, so its deploy task aborts.
     removal: Notify,
+    /// Restart histories and warnings of the reconciler (ADR-0028).
+    reconciler: Mutex<Reconciler>,
 }
 
 /// The deploy slot of one stack (ADR-0040): one active deployment, one pending.
@@ -264,6 +281,45 @@ struct Slot {
     pending: Option<Run>,
     /// The stack is being removed: the active deployment aborts and nothing new is accepted.
     removing: bool,
+    /// A reconcile pass is working on the stack's containers (ADR-0028). It only takes a slot
+    /// with no active deployment, and a deployment submitted meanwhile waits as the pending one,
+    /// so the two never touch the same containers at once.
+    reconciling: bool,
+}
+
+impl Slot {
+    /// Makes the pending deployment the active one, if the slot is free for it.
+    fn promote_pending(&mut self) -> Option<Run> {
+        if self.active.is_some() || self.reconciling || self.removing {
+            return None;
+        }
+        let next = self.pending.take()?;
+        self.active = Some((next.id(), DeploymentState::Queued));
+        Some(next)
+    }
+}
+
+/// A stack's slot held by a reconcile pass ([`Orchestrator::reconcile_claim`]). Dropping it
+/// frees the slot and starts the deployment that was submitted meanwhile, if any.
+pub(super) struct ReconcileClaim<'a, R: ContainerRuntime> {
+    orchestrator: &'a Arc<Orchestrator<R>>,
+    stack: String,
+}
+
+impl<R: ContainerRuntime> Drop for ReconcileClaim<'_, R> {
+    fn drop(&mut self) {
+        let next = {
+            let mut slots = self.orchestrator.lock();
+            slots.get_mut(&self.stack).and_then(|slot| {
+                slot.reconciling = false;
+                slot.promote_pending()
+            })
+        };
+        self.orchestrator.finished.notify_waiters();
+        if let Some(next) = next {
+            tokio::spawn(Arc::clone(self.orchestrator).drive(next, Event::Dequeued));
+        }
+    }
 }
 
 /// Clears a stack's `removing` mark when [`Orchestrator::remove`] returns, also on an error. A
@@ -323,6 +379,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             slots: Mutex::default(),
             finished: Notify::new(),
             removal: Notify::new(),
+            reconciler: Mutex::default(),
         })
     }
 
@@ -484,6 +541,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             orchestrator: self,
             stack,
         };
+        self.reconciled(stack).await;
         // Wake a deploy task waiting in a health check or a pull, so it aborts now.
         self.removal.notify_waiters();
         if let Some(pending) = pending {
@@ -562,6 +620,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             orchestrator: self,
             stack: stack.as_ref(),
         };
+        self.reconciled(stack.as_ref()).await;
         let volumes = self.remove_volumes(stack).await?;
         tracing::info!(%stack, volumes = volumes.len(), "deleted the volumes of a removed stack");
         Ok(RemoveOutcome {
@@ -621,7 +680,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     .services
                     .iter()
                     .map(|(name, service)| {
-                        let state = match pointers.iter().find(|p| p.service == name.as_ref()) {
+                        let pointer = pointers.iter().find(|p| p.service == name.as_ref());
+                        let restarts = pointer
+                            .map(|p| self.restart_stats(&stack.name, &p.service, p.generation))
+                            .unwrap_or_default();
+                        let state = match pointer {
                             Some(p) => ServiceState::Running {
                                 generation: p.generation,
                                 digest: p.digest.clone(),
@@ -636,6 +699,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         ServiceStatus {
                             name: name.to_string(),
                             state,
+                            restarts,
                         }
                     })
                     .collect(),
@@ -702,8 +766,45 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self.slots.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn reconciler(&self) -> MutexGuard<'_, Reconciler> {
+        // Restart histories are plain data; a panic cannot leave them half-updated.
+        self.reconciler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn is_busy(&self, stack: &str) -> bool {
         self.lock().get(stack).is_some_and(|s| s.active.is_some())
+    }
+
+    /// Takes `stack`'s slot for a reconcile pass, unless a deployment or a removal holds it.
+    pub(super) fn reconcile_claim<'a>(
+        self: &'a Arc<Self>,
+        stack: &str,
+    ) -> Option<ReconcileClaim<'a, R>> {
+        let mut slots = self.lock();
+        let slot = slots.entry(stack.to_owned()).or_default();
+        if slot.active.is_some() || slot.removing || slot.reconciling {
+            return None;
+        }
+        slot.reconciling = true;
+        Some(ReconcileClaim {
+            orchestrator: self,
+            stack: stack.to_owned(),
+        })
+    }
+
+    /// Waits until no reconcile pass holds `stack`. Called once the stack is marked as being
+    /// removed, so no new pass can take it.
+    async fn reconciled(&self, stack: &str) {
+        loop {
+            let mut notified = pin!(self.finished.notified());
+            notified.as_mut().enable();
+            if !self.lock().get(stack).is_some_and(|s| s.reconciling) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Whether the stack's removal has started.
@@ -725,7 +826,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let slot = slots.entry(stack.to_owned()).or_default();
         if slot.removing {
             Claim::Removing
-        } else if slot.active.is_some() {
+        } else if slot.active.is_some() || slot.reconciling {
             Claim::Busy
         } else {
             slot.active = Some((id, state));
@@ -742,7 +843,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let slot = slots.entry(stack.to_owned()).or_default();
         if slot.removing {
             Enqueued::Removing(run)
-        } else if slot.active.is_none() {
+        } else if slot.active.is_none() && !slot.reconciling {
             slot.active = Some((run.id(), run.state()));
             Enqueued::Active(run)
         } else {
@@ -923,5 +1024,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 }
 
+#[cfg(test)]
+mod reconcile_tests;
 #[cfg(test)]
 mod tests;

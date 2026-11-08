@@ -13,7 +13,7 @@ use crate::runtime::{ContainerInfo, ContainerState, FakeRuntime, Operation};
 use crate::secrets::{SecretKey, SecretName};
 use crate::stack::ImageRef;
 
-const NOTES: &str = r#"
+pub(super) const NOTES: &str = r#"
 version = 1
 name = "notes"
 
@@ -44,13 +44,13 @@ host = "s3.notes.example.com"
 port = 9000
 "#;
 
-fn digest(n: u8) -> String {
+pub(super) fn digest(n: u8) -> String {
     format!("sha256:{}", format!("{n:02x}").repeat(32))
 }
 
 /// Resolves every tag to `digest(0xaa)` and counts the lookups.
 #[derive(Default)]
-struct FakeResolver {
+pub(super) struct FakeResolver {
     calls: AtomicUsize,
 }
 
@@ -62,16 +62,16 @@ impl TagResolver for FakeResolver {
     }
 }
 
-struct Harness {
-    _dir: TempDir,
-    store: Store,
-    runtime: Arc<FakeRuntime>,
-    resolver: Arc<FakeResolver>,
-    secrets: SecretStore,
-    orchestrator: Arc<Orchestrator<FakeRuntime>>,
+pub(super) struct Harness {
+    pub(super) _dir: TempDir,
+    pub(super) store: Store,
+    pub(super) runtime: Arc<FakeRuntime>,
+    pub(super) resolver: Arc<FakeResolver>,
+    pub(super) secrets: SecretStore,
+    pub(super) orchestrator: Arc<Orchestrator<FakeRuntime>>,
 }
 
-async fn harness_with(settle: Duration) -> Harness {
+pub(super) async fn harness_with(settle: Duration) -> Harness {
     let dir = TempDir::new().unwrap();
     let store = Store::open(&dir.path().join("state")).await.unwrap();
     let runtime = Arc::new(FakeRuntime::new());
@@ -101,16 +101,16 @@ async fn harness_with(settle: Duration) -> Harness {
     }
 }
 
-async fn harness() -> Harness {
+pub(super) async fn harness() -> Harness {
     harness_with(Duration::from_millis(20)).await
 }
 
 impl Harness {
-    async fn apply(&self, toml: &str) -> ApplyOutcome {
+    pub(super) async fn apply(&self, toml: &str) -> ApplyOutcome {
         self.orchestrator.apply(toml).await.unwrap()
     }
 
-    async fn deploy(&self, images: &[(&str, u8)]) -> DeployOutcome {
+    pub(super) async fn deploy(&self, images: &[(&str, u8)]) -> DeployOutcome {
         let images = images
             .iter()
             .map(|(s, d)| ((*s).to_owned(), digest(*d)))
@@ -121,7 +121,7 @@ impl Harness {
             .unwrap()
     }
 
-    async fn finish(&self, outcome: &DeployOutcome) -> Deployment {
+    pub(super) async fn finish(&self, outcome: &DeployOutcome) -> Deployment {
         tokio::time::timeout(
             Duration::from_secs(10),
             self.orchestrator.wait(outcome.deployment),
@@ -132,7 +132,7 @@ impl Harness {
     }
 
     /// Applies NOTES (storage deploys) and deploys api and web: every service at a digest.
-    async fn bootstrap(&self) {
+    pub(super) async fn bootstrap(&self) {
         let applied = self.apply(NOTES).await;
         let first = self.finish(applied.deployment.as_ref().unwrap()).await;
         assert_eq!(first.state, DeploymentState::Live, "{first:?}");
@@ -141,7 +141,7 @@ impl Harness {
         assert_eq!(second.state, DeploymentState::Live, "{second:?}");
     }
 
-    fn container_names(&self) -> Vec<String> {
+    pub(super) fn container_names(&self) -> Vec<String> {
         let mut names: Vec<_> = self
             .runtime
             .containers()
@@ -152,7 +152,7 @@ impl Harness {
         names
     }
 
-    fn container(&self, name: &str) -> ContainerInfo {
+    pub(super) fn container(&self, name: &str) -> ContainerInfo {
         self.runtime
             .containers()
             .into_iter()
@@ -160,7 +160,7 @@ impl Harness {
             .unwrap_or_else(|| panic!("no container {name}"))
     }
 
-    async fn generations(&self) -> Vec<(String, u32)> {
+    pub(super) async fn generations(&self) -> Vec<(String, u32)> {
         self.store
             .services("notes")
             .await
@@ -170,7 +170,7 @@ impl Harness {
             .collect()
     }
 
-    async fn states(&self, id: DeploymentId) -> Vec<DeploymentState> {
+    pub(super) async fn states(&self, id: DeploymentId) -> Vec<DeploymentState> {
         self.store
             .events(id)
             .await

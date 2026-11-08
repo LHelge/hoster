@@ -236,6 +236,17 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
+    async fn list_managed_networks(&self) -> Result<Vec<NetworkSpec>, RuntimeError> {
+        let mut state = self.lock();
+        state.enter(Operation::ListNetworks)?;
+        Ok(state
+            .networks
+            .values()
+            .filter(|n| n.is_managed())
+            .cloned()
+            .collect())
+    }
+
     async fn pull_image(&self, image: &PinnedImage) -> Result<(), RuntimeError> {
         let mut state = self.lock();
         state.enter(Operation::PullImage)?;

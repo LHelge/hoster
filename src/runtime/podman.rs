@@ -19,8 +19,8 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    LogsOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveVolumeOptions,
-    StopContainerOptionsBuilder,
+    ListNetworksOptionsBuilder, LogsOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
+    RemoveVolumeOptions, StopContainerOptionsBuilder,
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use futures_util::StreamExt;
@@ -596,6 +596,29 @@ impl ContainerRuntime for PodmanRuntime {
             .remove_network(name)
             .await
             .map_err(|err| call.error(err))
+    }
+
+    async fn list_managed_networks(&self) -> Result<Vec<NetworkSpec>, RuntimeError> {
+        let call = Call::new(Operation::ListNetworks, ObjectKind::Network, "list");
+        let filters = HashMap::from([("label", vec![format!("{}=true", label::MANAGED)])]);
+        let options = ListNetworksOptionsBuilder::new().filters(&filters).build();
+        let mut networks: Vec<NetworkSpec> = self
+            .docker
+            .list_networks(Some(options))
+            .await
+            .map_err(|err| call.error(err))?
+            .into_iter()
+            .filter_map(|network| {
+                Some(NetworkSpec {
+                    name: network.name?,
+                    labels: network.labels.unwrap_or_default().into_iter().collect(),
+                })
+            })
+            // The label filter is podman's; check it again rather than trust it.
+            .filter(NetworkSpec::is_managed)
+            .collect();
+        networks.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(networks)
     }
 
     async fn pull_image(&self, image: &PinnedImage) -> Result<(), RuntimeError> {

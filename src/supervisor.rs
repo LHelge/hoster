@@ -23,9 +23,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::acme::{CertMap, ChallengeMap};
 use crate::config::{Config, ProxyConfig};
+use crate::orchestrator::{Orchestrator, Settings, TagResolver};
+use crate::ports::PortAllocator;
 use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
-use crate::registry::FileCredentials;
-use crate::routing::RouteTable;
+use crate::registry::{FileCredentials, RegistryClient};
+use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
 use crate::store::Store;
@@ -392,6 +394,8 @@ pub struct Supervisor {
     challenges: ChallengeMap,
     /// The podman connection, made in startup step 4.
     runtime: Option<PodmanRuntime>,
+    /// The orchestrator, built and reconciled in startup step 5.
+    orchestrator: Option<Arc<Orchestrator<PodmanRuntime>>>,
     /// The route table the proxy reads (architecture §3.2); empty until the orchestrator
     /// publishes one.
     routes: Arc<ArcSwap<RouteTable>>,
@@ -407,6 +411,7 @@ impl Supervisor {
             certs: None,
             challenges: ChallengeMap::default(),
             runtime: None,
+            orchestrator: None,
             routes: Arc::default(),
             teardown: Teardown::default(),
         }
@@ -584,7 +589,46 @@ impl Startup for Supervisor {
                 self.certs = Some(certs);
                 Ok(())
             }
-            Phase::Reconcile | Phase::RouteTable => {
+            Phase::Reconcile => {
+                let store = self
+                    .store
+                    .clone()
+                    .context("the state store opens before reconciliation")?;
+                let runtime = self
+                    .runtime
+                    .clone()
+                    .context("podman is connected before reconciliation")?;
+                let secrets = self
+                    .secrets
+                    .clone()
+                    .context("the secret store opens before reconciliation")?;
+                let resolver = RegistryClient::new(Arc::new(FileCredentials::in_state_dir(
+                    &self.config.state_dir,
+                )))?;
+                let orchestrator = Orchestrator::new(
+                    store.clone(),
+                    Arc::new(runtime),
+                    Arc::new(resolver) as Arc<dyn TagResolver>,
+                    PortAllocator::new(store, self.config.upstream_ports),
+                    secrets,
+                    Settings {
+                        reserved: Reserved::from(&self.config),
+                        ..Settings::default()
+                    },
+                );
+                // Interrupted deployments resolved, containers adopted, started or removed
+                // (§4 step 5, §5.4); then the loop keeps them running (ADR-0028).
+                orchestrator
+                    .recover()
+                    .await
+                    .context("startup reconciliation failed")?;
+                tokio::spawn(
+                    Arc::clone(&orchestrator).run_reconciler(self.teardown.token.child_token()),
+                );
+                self.orchestrator = Some(orchestrator);
+                Ok(())
+            }
+            Phase::RouteTable => {
                 tracing::info!(%phase, step = phase.number(), "not implemented yet, skipping");
                 Ok(())
             }
