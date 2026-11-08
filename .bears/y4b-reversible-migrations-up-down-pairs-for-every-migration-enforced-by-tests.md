@@ -1,13 +1,14 @@
 ---
 id: y4b
 title: "Reversible migrations: up/down pairs for every migration, enforced by tests"
-status: open
+status: done
 priority: P1
 created: "2026-11-08T08:25:15.960144529Z"
-updated: "2026-11-08T08:25:15.960144529Z"
+updated: "2026-11-08T09:26:49.204984730Z"
 tags:
   - store
 parent: tbf
+attempts: 1
 ---
 
 ## Summary

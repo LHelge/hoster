@@ -44,6 +44,11 @@ Builds use the committed offline metadata in `.sqlx/`, so no database is needed 
 schema lives in `migrations/` and is embedded into the binary, which migrates its database at
 startup.
 
+Every migration is a reversible `<version>_<name>.up.sql` / `.down.sql` pair, so a newer binary
+can roll the schema back for an older one (ADR-0052). Create new ones with
+`sqlx migrate add -r <name>`, and make the down script restore the previous schema exactly; the
+store tests fail on a migration without a down script or a down script that does not.
+
 After adding or changing a query or a migration, regenerate `.sqlx/` against a scratch database
 and commit the result:
 

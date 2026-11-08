@@ -117,7 +117,11 @@ async fn migrations_are_idempotent_and_data_survives_reopen() {
         .fetch_one(&store.pool)
         .await
         .unwrap();
-    assert_eq!(applied, MIGRATOR.iter().count() as i64);
+    let ups = MIGRATOR
+        .iter()
+        .filter(|m| m.migration_type.is_up_migration())
+        .count();
+    assert_eq!(applied, ups as i64);
 }
 
 #[tokio::test]
@@ -947,4 +951,230 @@ async fn rejections_are_kept_per_known_stack_newest_first_and_capped() {
         ..rejection(0)
     };
     assert!(!store.record_rejection(&ghost).await.unwrap());
+}
+
+/// Every migration is reversible and every down script restores its predecessor's schema exactly
+/// (ADR-0052): what lets a newer binary roll the database back for an older one.
+mod migrations {
+    use sqlx::migrate::MigrationType;
+
+    use super::*;
+
+    /// One row of `sqlite_schema`, without `rootpage` (which depends on the file's history).
+    type SchemaRow = (String, String, String, Option<String>);
+
+    /// A fresh, empty in-memory database with the store's foreign-key setting.
+    async fn fresh() -> SqlitePool {
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap()
+    }
+
+    async fn schema(pool: &SqlitePool) -> Vec<SchemaRow> {
+        sqlx::query_as("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The schema of a fresh database migrated up to `version`.
+    async fn schema_at(version: i64) -> Vec<SchemaRow> {
+        let pool = fresh().await;
+        MIGRATOR.run_to(version, &pool).await.unwrap();
+        schema(&pool).await
+    }
+
+    fn versions() -> Vec<i64> {
+        let mut versions: Vec<i64> = MIGRATOR
+            .iter()
+            .filter(|m| m.migration_type.is_up_migration())
+            .map(|m| m.version)
+            .collect();
+        versions.sort_unstable();
+        versions
+    }
+
+    #[test]
+    fn every_up_migration_has_a_down() {
+        assert!(!versions().is_empty());
+        for migration in MIGRATOR.iter() {
+            assert_ne!(
+                migration.migration_type,
+                MigrationType::Simple,
+                "migration {} ({}) is not reversible; create migrations with `sqlx migrate add -r`",
+                migration.version,
+                migration.description,
+            );
+        }
+        let downs: BTreeSet<i64> = MIGRATOR
+            .iter()
+            .filter(|m| m.migration_type == MigrationType::ReversibleDown)
+            .map(|m| m.version)
+            .collect();
+        let ups: BTreeSet<i64> = versions().into_iter().collect();
+        assert_eq!(ups, downs, "up and down migrations must pair by version");
+    }
+
+    #[tokio::test]
+    async fn undoing_everything_and_migrating_again_round_trips() {
+        let pool = fresh().await;
+        MIGRATOR.run(&pool).await.unwrap();
+        let migrated = schema(&pool).await;
+        MIGRATOR.undo(&pool, 0).await.unwrap();
+        assert_eq!(schema(&pool).await, schema_at(0).await);
+        MIGRATOR.run(&pool).await.unwrap();
+        assert_eq!(schema(&pool).await, migrated);
+    }
+
+    #[tokio::test]
+    async fn each_down_restores_its_predecessor_exactly() {
+        let versions = versions();
+        for (i, &version) in versions.iter().enumerate() {
+            let previous = if i == 0 { 0 } else { versions[i - 1] };
+            let pool = fresh().await;
+            MIGRATOR.run(&pool).await.unwrap();
+            MIGRATOR.undo(&pool, previous).await.unwrap();
+            assert_eq!(
+                schema(&pool).await,
+                schema_at(previous).await,
+                "undoing down to {previous} (through {version}) does not restore its schema"
+            );
+        }
+    }
+
+    /// A row in every table of the latest schema, with every later-added column set, so the
+    /// down scripts run against the data a real rollback would meet.
+    const POPULATE: &str = "
+        INSERT INTO stacks (name, last_generation, created_at, updated_at, removed_at)
+            VALUES ('notes', 2, 1, 1, NULL), ('gone', 1, 1, 1, 5);
+        INSERT INTO stack_revisions (id, stack, revision, toml, hash, created_at)
+            VALUES (1, 'notes', 1, 'x', 'h', 1), (2, 'gone', 1, 'y', 'h', 1);
+        INSERT INTO deployments (id, stack, revision_id, generation, state, source, created_at,
+                updated_at, committed_at, finished_at, source_repository, source_sha,
+                source_ref, source_run_id, source_actor, source_tag)
+            VALUES (1, 'notes', 1, 1, 'succeeded', 'webhook', 1, 1, 1, 1, 'o/r', 'abc',
+                'refs/heads/main', '42', 'me', 'v1'),
+                (2, 'notes', 1, 2, 'pulling', 'ui', 2, 2, NULL, NULL, NULL, NULL, NULL, NULL,
+                NULL, NULL);
+        INSERT INTO deployment_targets VALUES (1, 'api', 'sha256:aa');
+        INSERT INTO deployment_events (deployment_id, from_state, to_state, message, at)
+            VALUES (1, NULL, 'pending', NULL, 1), (2, NULL, 'pending', NULL, 2);
+        INSERT INTO services VALUES ('notes', 'api', 1, 'sha256:aa', 'cfg', 1, 1);
+        INSERT INTO service_ports VALUES ('notes', 'api', 8080, 20000);
+        INSERT INTO port_allocations VALUES (20000, 'notes', 'api', 8080, 1, 1);
+        INSERT INTO kv VALUES ('cursor', '20000', 1);
+        INSERT INTO sessions VALUES ('t', 'c', 'me', 1, 1, 1, 2);
+        INSERT INTO oauth_logins VALUES ('s', 'v', 1);
+        INSERT INTO revision_images VALUES (1, 'db', 'sha256:cc');
+        INSERT INTO secrets VALUES ('pw', zeroblob(24), x'00', 1, 1);
+        INSERT INTO webhook_tokens VALUES ('jti', 2);
+        INSERT INTO webhook_rejections (stack, reason, repository, repository_id, git_ref,
+                actor, run_id, at)
+            VALUES ('notes', 'ref', 'o/r', '1', 'refs/heads/x', 'me', '43', 1);
+        INSERT INTO images VALUES ('docker.io/library/postgres', 'sha256:cc', 1);
+    ";
+
+    #[tokio::test]
+    async fn undoing_a_populated_database_keeps_it_consistent() {
+        let (_dir, store) = open().await;
+        let pool = &store.pool;
+        sqlx::raw_sql(POPULATE).execute(pool).await.unwrap();
+        for &version in versions().iter().rev() {
+            let previous = versions()
+                .into_iter()
+                .rfind(|&v| v < version)
+                .unwrap_or_default();
+            MIGRATOR.undo(pool, previous).await.unwrap();
+            assert_eq!(
+                store.schema_version().await.unwrap(),
+                SchemaVersion::from(previous)
+            );
+            // (table, rowid, parent, fkid) of each row whose parent is gone.
+            let violations: Vec<(String, Option<i64>, String, i64)> =
+                sqlx::query_as("PRAGMA foreign_key_check")
+                    .fetch_all(pool)
+                    .await
+                    .unwrap();
+            assert!(
+                violations.is_empty(),
+                "after undo to {previous}: {violations:?}"
+            );
+            let integrity: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+            assert_eq!(integrity, ["ok"], "after undo to {previous}");
+            if previous >= 1 {
+                // The rows the older schema can hold survive the rollback.
+                let stacks: i64 = sqlx::query_scalar("SELECT count(*) FROM stacks")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+                let deployments: i64 = sqlx::query_scalar("SELECT count(*) FROM deployments")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+                assert_eq!((stacks, deployments), (2, 2), "after undo to {previous}");
+            }
+        }
+        // And the emptied database migrates up again.
+        MIGRATOR.run(pool).await.unwrap();
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            Store::expected_schema_version()
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn schema_versions_are_reported() {
+        let latest = *versions().last().unwrap();
+        assert_eq!(i64::from(Store::expected_schema_version()), latest);
+
+        let (dir, store) = open().await;
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            Store::expected_schema_version()
+        );
+        MIGRATOR.undo(&store.pool, 3).await.unwrap();
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            SchemaVersion::from(3)
+        );
+        let read_only = Store::open_read_only(&dir.path().join("state"))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_only.schema_version().await.unwrap(),
+            SchemaVersion::from(3)
+        );
+        read_only.close().await;
+        MIGRATOR.undo(&store.pool, 0).await.unwrap();
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            SchemaVersion::default()
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_unmigrated_database_is_at_version_zero() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(Store::FILE_NAME);
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let conn = sqlx::ConnectOptions::connect(&options).await.unwrap();
+        sqlx::Connection::close(conn).await.unwrap();
+        let store = Store::open_read_only(dir.path()).await.unwrap();
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            SchemaVersion::default()
+        );
+    }
 }

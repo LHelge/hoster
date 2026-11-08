@@ -319,6 +319,8 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
 
 1. Parse config (`~/.config/hoster/hoster.toml` + `HOSTER_*` env, ADR-0024) and initialize tracing.
 2. Open the SQLite state store (sqlx pool, WAL mode) and run the embedded `sqlx::migrate!()` migrations.
+   Every migration is a reversible `.up.sql` / `.down.sql` pair (`sqlx migrate add -r`), so a newer
+   binary can undo the schema for an older one (ADR-0052).
 3. Load the certificates on disk into `CertMap`. Expired ones are skipped and queued for
    issuance.
 4. Connect to podman, run `negotiate_version()` and `ping()`. The socket comes from the same

@@ -57,5 +57,7 @@ Use [Bears](https://github.com/LHelge/bea-rs) (MCP tools) for all planning and p
 - Behaviour lives on types and traits, not in free functions.
 - Use the built-in traits (`From`/`TryFrom`, `FromStr`, `Display`, `Default`, `AsRef`, …) instead
   of ad-hoc `to_x()` / `from_x()` conversion functions.
+- Every migration is reversible: create it with `sqlx migrate add -r <name>` and write a
+  `.down.sql` that restores the previous schema exactly (ADR-0052; the store tests enforce it).
 - Keep modules deep: a small, narrow public API that hides a substantial implementation. Avoid
   many thin modules that expose their internals.

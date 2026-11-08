@@ -113,6 +113,29 @@ impl fmt::Display for DeploymentId {
     }
 }
 
+/// A database schema version: the version of the newest migration applied, `0` for an empty
+/// database. Migration versions are the numeric prefixes of the files in `migrations/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct SchemaVersion(i64);
+
+impl From<i64> for SchemaVersion {
+    fn from(version: i64) -> Self {
+        Self(version)
+    }
+}
+
+impl From<SchemaVersion> for i64 {
+    fn from(version: SchemaVersion) -> Self {
+        version.0
+    }
+}
+
+impl fmt::Display for SchemaVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// SHA-256 of a stack file's text, lowercase hex.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, sqlx::Type)]
 #[sqlx(transparent)]
