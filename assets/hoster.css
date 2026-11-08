@@ -1073,8 +1073,36 @@ td.row-actions a:hover { background: var(--hover); text-decoration: none; }
   .secret-fields { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* Deployment history */
-.deployments .digest { white-space: nowrap; }
+/* Stack deployments tab and a deployment's page (src/web/stacks/deployments.rs) */
+table.deployments { min-width: 900px; }
+table.deployments td { vertical-align: middle; }
+.deploy-trigger { font-size: 12px; }
+.deploy-commit { display: block; margin-top: 2px; color: var(--muted); font: 11.5px/1.5 var(--mono); }
+.deploy-commit code { color: var(--p95); font-size: inherit; }
+.deploy-repo { overflow-wrap: anywhere; }
+.deploy-digests { font: 12px/1.6 var(--mono); }
+.deploy-digests .digest { display: block; white-space: nowrap; }
+.deploy-digests code { color: var(--text-2); font-size: inherit; }
+.deploy-duration { max-width: 320px; font-size: 12px; }
+.deploy-why { color: var(--muted); font: 12px/1.5 var(--mono); overflow-wrap: anywhere; }
+.row-ghost { min-height: 30px; padding: 0 10px; font: 500 12px/1.2 var(--mono); }
+#cancel-result:empty, #redeploy-result:empty { display: none; }
+.deployment-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.deployment-title h2 { font: 600 15px/1.3 var(--mono); }
+.deployment-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 18px; margin: 0; font: 12px/1.6 var(--mono); }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+dl.kv code { font-size: inherit; }
+dl.kv code.wrap { overflow-wrap: anywhere; }
+table.events { min-width: 640px; }
+table.events .shrink { width: 1%; white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .row-ghost { min-height: 44px; }
+  dl.kv { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  dl.kv dd { margin-bottom: 8px; }
+}
 
 /* Dashboard */
 ul.warnings { margin: 0 0 1rem; padding: 0; list-style: none; }

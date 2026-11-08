@@ -1,41 +1,50 @@
 {% extends "base.html" %}
-{% block title %}Deployments of {{ stack }}{% endblock %}
-{% block crumb %}<a href="/stacks">~/stacks</a>/<a href="{{ stack_url }}">{{ stack }}</a>/deployments{% endblock %}
-{% block heading %}Deployments of <a href="{{ stack_url }}">{{ stack }}</a>{% endblock %}
+{% block title %}Deployments of {{ header.name }}{% endblock %}
+{% block head %}{% include "stack_header.html" %}{% endblock %}
 {% block content %}
-<p class="muted">The newest deployments first. Redeploying one that went live rolls the stack back to its digests and stack revision.</p>
-<div id="redeploy-result" aria-live="polite"></div>
-{%- if deployments.is_empty() %}
-<p>No deployments yet.</p>
-{%- else %}
-<div class="table-scroll"><table class="list deployments">
-  <thead>
-    <tr><th scope="col">#</th><th scope="col">State</th><th scope="col">Source</th><th scope="col">Digests</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col">Reason</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
-  </thead>
-  <tbody>
-    {%- for deployment in deployments %}
-    <tr>
-      <td><a href="{{ deployment.url }}">{{ deployment.id }}</a></td>
-      <td>{{ deployment.state }}</td>
-      <td>{{ deployment.source }}</td>
-      <td>
-        {%- for (service, short, digest) in deployment.digests %}
-        <span class="digest">{{ service }} <code title="{{ digest }}">{{ short }}</code></span>{% if !loop.last %}<br>{% endif %}
-        {%- endfor %}
-      </td>
-      <td>{{ deployment.started }}</td>
-      <td>{{ deployment.duration }}{% if !deployment.finished %} <span class="muted">(running)</span>{% endif %}</td>
-      <td>{% if let Some(error) = deployment.error %}{{ error }}{% endif %}</td>
-      <td>
-        {%- if let Some(url) = deployment.redeploy_url %}
-        <form class="inline-form" hx-post="{{ url }}" hx-target="#redeploy-result" hx-confirm="Redeploy deployment {{ deployment.id }}? Its digests and stack revision become the running ones again.">
-          <button type="submit">{{ crate::web::Icon::Redeploy }}Redeploy</button>
-        </form>
-        {%- endif %}
-      </td>
-    </tr>
-    {%- endfor %}
-  </tbody>
-</table></div>
-{%- endif %}
+<section class="card" id="deployments" aria-labelledby="deployments-title">
+  <header class="card-head">
+    <h2 id="deployments-title">Deployments <span class="card-count">· {{ deployments.len() }}{% if deployments.len() as u32 == limit %} newest{% endif %}</span></h2>
+    <span class="card-note">newest first · rollback re-uses pinned image digests</span>
+  </header>
+  <div id="redeploy-result" class="card-result" aria-live="polite"></div>
+  {%- if deployments.is_empty() %}
+  <p class="card-body muted">No deployments yet. Applying a stack file, a deploy from CI or the digest poller starts one.</p>
+  {%- else %}
+  <div class="table-scroll"><table class="list deployments">
+    <thead>
+      <tr><th scope="col">Status</th><th scope="col">#</th><th scope="col">Trigger</th><th scope="col">Digests</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+    </thead>
+    <tbody>
+      {%- for deployment in deployments %}
+      <tr>
+        <td>{{ deployment.status }}</td>
+        <td class="mono"><a href="{{ deployment.url }}">#{{ deployment.id }}</a></td>
+        <td class="deploy-trigger"><span class="mono">{{ deployment.trigger.source }}</span>
+          {%- if let Some(commit) = deployment.trigger.commit %}
+          <span class="deploy-commit"><code title="{{ commit.sha }}">{{ commit.short }}</code> <span class="deploy-repo">{{ commit.repository }}</span></span>
+          {%- endif %}</td>
+        <td class="deploy-digests">
+          {%- for (service, short, digest) in deployment.digests %}
+          <span class="digest">{{ service }} <code title="{{ digest }}">{{ short }}</code></span>
+          {%- endfor %}
+        </td>
+        <td class="mono nowrap"><time datetime="{{ deployment.started_at }}" title="{{ deployment.started_at }}">{{ deployment.started_ago }}</time></td>
+        <td class="deploy-duration"><span class="mono nowrap">{{ deployment.duration }}</span>
+          {%- if let Some(phase) = deployment.phase %}<span class="deploy-why"> · {{ phase }}</span>{% endif %}
+          {%- if let Some(error) = deployment.error %}<span class="deploy-why"> · {{ error }}</span>{% endif %}</td>
+        <td class="row-actions">
+          {%- if let Some(redeploy) = deployment.redeploy %}
+          <form class="inline-form row-form" hx-post="{{ redeploy.url }}" hx-target="#redeploy-result" hx-confirm="{{ redeploy.confirm }}">
+            <button type="submit" class="ghost row-ghost" title="{{ redeploy.title() }}">{{ crate::web::Icon::Redeploy }}{{ redeploy.label() }}<span class="visually-hidden"> deployment {{ deployment.id }}</span></button>
+          </form>
+          {%- endif %}
+        </td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table></div>
+  {%- endif %}
+  <p class="card-foot">A rollback also restores the stack revision it ran, so tags that moved since do not matter. A redeploy during a deployment queues behind it.</p>
+</section>
 {% endblock %}

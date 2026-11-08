@@ -1352,7 +1352,10 @@ async fn the_deployment_page_follows_a_running_deployment_until_it_ends() {
             .await,
     )
     .await;
-    assert!(html.contains("<h1>Deployment 7 of"), "{html}");
+    assert!(
+        html.contains(r#"<h2 id="deployment-title">Deployment #7</h2>"#),
+        "{html}"
+    );
     assert!(
         html.contains(
             r#"hx-sse:connect="/stacks/notes/deployments/7/events" hx-swap="innerHTML" hx-sse:close="end""#
@@ -1368,7 +1371,7 @@ async fn the_deployment_page_follows_a_running_deployment_until_it_ends() {
     )
     .await;
     assert!(
-        partial.starts_with(r#"<section id="deployment-status">"#),
+        partial.starts_with(r#"<div id="deployment-status" class="deployment-status">"#),
         "{partial}"
     );
     assert!(
@@ -1377,7 +1380,7 @@ async fn the_deployment_page_follows_a_running_deployment_until_it_ends() {
     );
     assert!(
         partial.contains(&format!(
-            r#"<span class="pill pill-ok">{}Live</span>"#,
+            r#"<span class="pill pill-ok" title="Went live">{}live</span>"#,
             crate::web::Icon::Ok
         )),
         "{partial}"

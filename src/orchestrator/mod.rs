@@ -319,8 +319,8 @@ const UI_EVENTS_CAPACITY: usize = 256;
 /// Why a deployment ended when its stack was removed under it.
 const STACK_REMOVED: &str = "stack removed";
 
-/// Why a cancelled deployment failed.
-const CANCELLED: &str = "cancelled";
+/// Why a cancelled deployment failed: its `error`, which the UI shows as "cancelled".
+pub const CANCELLED: &str = "cancelled";
 
 /// A request to remove a stack (ADR-0030).
 ///

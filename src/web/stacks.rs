@@ -38,7 +38,6 @@ use similar::{ChangeTag, TextDiff};
 use tokio::sync::broadcast;
 
 use super::pages::{FlashKind, Layout, Page, Section, Shell};
-use super::ui::Pill;
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, PinChange,
     RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent, WebhookDeploy,
@@ -46,7 +45,6 @@ use crate::orchestrator::{
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
 use crate::stack::{Diagnostic, StackError};
-use crate::stats::Elapsed;
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
     Timestamp, WebhookRejection,
@@ -462,56 +460,6 @@ impl Stacks {
             Err(err) => Outcome::from(err).into_response(),
         }
     }
-
-    /// `GET /stacks/{name}/deployments/{id}`: one deployment, followed until it ends.
-    pub async fn deployment_page(
-        Extension(stacks): Extension<Stacks>,
-        shell: Shell,
-        Path((name, id)): Path<(String, String)>,
-    ) -> Response {
-        let layout = shell.layout(Section::Stacks);
-        match stacks.lookup(&name, &id).await {
-            Ok(deployment) => Page(DeploymentPage { layout, deployment }).into_response(),
-            Err(outcome) => outcome.page(layout),
-        }
-    }
-
-    /// `GET /stacks/{name}/deployments/{id}/status`: the deployment's status partial, the
-    /// one the page's live stream sends (see `deployments.rs`).
-    pub async fn deployment_status(
-        Extension(stacks): Extension<Stacks>,
-        Path((name, id)): Path<(String, String)>,
-    ) -> Response {
-        match stacks.lookup(&name, &id).await {
-            Ok(deployment) => Page(DeploymentStatus { deployment }).into_response(),
-            Err(outcome) => outcome.into_response(),
-        }
-    }
-
-    /// `POST /stacks/{name}/deployments/{id}/cancel`: cancels the deployment if it has not
-    /// reached `Switching` (ADR-0040). The page's status partial follows the abort.
-    pub async fn cancel(
-        Extension(stacks): Extension<Stacks>,
-        Path((name, id)): Path<(String, String)>,
-    ) -> Response {
-        let id = match DeploymentView::parse_id(&id) {
-            Ok(id) => id,
-            Err(outcome) => return outcome.into_response(),
-        };
-        match stacks.0.cancel(&name, id).await {
-            Ok(()) => Outcome::success(format!(
-                "Cancelling deployment {id}: it aborts and puts {name} back as it was."
-            ))
-            .into_response(),
-            Err(err) => Outcome::from(err).into_response(),
-        }
-    }
-
-    pub(super) async fn lookup(&self, stack: &str, id: &str) -> Result<DeploymentView, Outcome> {
-        let id = DeploymentView::parse_id(id)?;
-        let (deployment, events) = self.0.deployment(stack, id).await?;
-        Ok(DeploymentView::new(&deployment, &events))
-    }
 }
 
 /// The stack file of an apply form: the uploaded file if one was chosen, else the pasted text.
@@ -862,123 +810,6 @@ impl fmt::Display for When {
     }
 }
 
-/// A deployment with its transitions, as its page shows it.
-#[derive(Debug)]
-pub struct DeploymentView {
-    id: String,
-    stack: String,
-    stack_url: String,
-    url: String,
-    state: Pill,
-    source: String,
-    generation: Option<u32>,
-    error: Option<String>,
-    target: Vec<(String, String)>,
-    /// Where a webhook deployment came from, as (label, value) rows.
-    provenance: Vec<(&'static str, String)>,
-    events: Vec<EventView>,
-    created_at: String,
-    finished_at: Option<String>,
-    /// Whether it is over; a running one polls for its status.
-    finished: bool,
-    /// Whether it may still be cancelled: active and before `Switching` (ADR-0040).
-    cancellable: bool,
-    /// Whether it went live, so it can be redeployed as a rollback (ADR-0041).
-    redeployable: bool,
-    /// How long it took, or has been running.
-    duration: String,
-}
-
-impl DeploymentView {
-    pub(super) fn url(stack: &str, id: DeploymentId) -> String {
-        format!("/stacks/{stack}/deployments/{id}")
-    }
-
-    fn parse_id(id: &str) -> Result<DeploymentId, Outcome> {
-        id.parse()
-            .map_err(|_| Outcome::error(StatusCode::NOT_FOUND, format!("No deployment {id}.")))
-    }
-
-    fn new(deployment: &Deployment, events: &[DeploymentEvent]) -> Self {
-        Self {
-            id: deployment.id.to_string(),
-            stack: deployment.stack.clone(),
-            stack_url: StackView::url(&deployment.stack),
-            url: Self::url(&deployment.stack, deployment.id),
-            state: Pill::from(deployment.state),
-            source: deployment.source.to_string(),
-            generation: deployment.generation,
-            error: deployment.error.clone(),
-            target: deployment
-                .target
-                .iter()
-                .map(|(service, digest)| (service.clone(), digest.clone()))
-                .collect(),
-            provenance: deployment
-                .provenance
-                .as_ref()
-                .map(|p| {
-                    let mut rows = vec![
-                        ("Repository", p.repository.clone()),
-                        ("Ref", p.git_ref.clone()),
-                        ("Commit", p.sha.clone()),
-                        ("Run", p.run_id.clone()),
-                        ("Actor", p.actor.clone()),
-                    ];
-                    if let Some(tag) = &p.tag {
-                        rows.push(("Tag", tag.clone()));
-                    }
-                    rows
-                })
-                .unwrap_or_default(),
-            events: events.iter().map(EventView::from).collect(),
-            created_at: When(deployment.created_at).to_string(),
-            finished_at: deployment.finished_at.map(|t| When(t).to_string()),
-            finished: deployment.state.is_terminal(),
-            cancellable: deployment.state.is_cancellable(),
-            redeployable: deployment.state.is_redeployable(),
-            duration: Elapsed(deployment.duration()).to_string(),
-        }
-    }
-
-    /// The live progress stream (SSE) the page follows while the deployment runs.
-    pub fn events_url(&self) -> String {
-        format!("{}/events", self.url)
-    }
-
-    pub fn redeploy_url(&self) -> String {
-        format!("{}/redeploy", self.url)
-    }
-
-    pub fn history_url(&self) -> String {
-        format!("{}/deployments", self.stack_url)
-    }
-
-    pub fn cancel_url(&self) -> String {
-        format!("{}/cancel", self.url)
-    }
-}
-
-/// One state transition.
-#[derive(Debug)]
-struct EventView {
-    from: String,
-    to: String,
-    message: String,
-    at: String,
-}
-
-impl From<&DeploymentEvent> for EventView {
-    fn from(event: &DeploymentEvent) -> Self {
-        Self {
-            from: event.from.map(|s| s.to_string()).unwrap_or_default(),
-            to: event.to.to_string(),
-            message: event.message.clone().unwrap_or_default(),
-            at: When(event.at).to_string(),
-        }
-    }
-}
-
 /// What applying a file would do, with the file itself for the confirm form.
 #[derive(Template)]
 #[template(path = "apply_preview.html")]
@@ -1138,21 +969,6 @@ pub struct ApplyPage {
     layout: Layout,
 }
 
-/// `GET /stacks/{name}/deployments/{id}`.
-#[derive(Template)]
-#[template(path = "deployment.html")]
-pub struct DeploymentPage {
-    layout: Layout,
-    deployment: DeploymentView,
-}
-
-/// `GET /stacks/{name}/deployments/{id}/status`.
-#[derive(Template)]
-#[template(path = "deployment_status.html")]
-pub struct DeploymentStatus {
-    deployment: DeploymentView,
-}
-
 /// A read-only page that could not be shown; the reason is in the flash.
 #[derive(Template)]
 #[template(path = "error.html")]
@@ -1167,6 +983,7 @@ mod list;
 mod logs;
 mod overview;
 
+pub use deployments::DeploymentView;
 pub(super) use overview::StackView;
 
 #[cfg(test)]

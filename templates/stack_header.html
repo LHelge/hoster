@@ -1,6 +1,6 @@
 <header class="page-head stack-head">
   <div class="page-title">
-    <nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/{% if header.crumb_tail().is_empty() %}{{ header.name }}{% else %}<a href="{{ header.url }}">{{ header.name }}</a>{{ header.crumb_tail() }}{% endif %}</nav>
+    <nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/{% if let Some(id) = header.deployment %}<a href="{{ header.url }}">{{ header.name }}</a>/<a href="{{ header.url }}/deployments">deployments</a>/{{ id }}{% else if header.crumb_tail().is_empty() %}{{ header.name }}{% else %}<a href="{{ header.url }}">{{ header.name }}</a>{{ header.crumb_tail() }}{% endif %}</nav>
     <div class="stack-title">
       <h1>{{ header.name }}</h1>
       {{ header.pill }}
@@ -12,7 +12,7 @@
       {%- endif %}
       {%- if let Some(last) = header.last %}
       <span>{% if header.active.is_some() %}last {% endif %}<a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} · {{ last.source }}
-        {%- if let Some((short, sha, repository)) = last.commit %} <code title="{{ sha }}">{{ short }}</code> <span class="stack-meta-repo">{{ repository }}</span>{% endif %}
+        {%- if let Some(commit) = last.commit %} <code title="{{ commit.sha }}">{{ commit.short }}</code> <span class="stack-meta-repo">{{ commit.repository }}</span>{% endif %}
         · <time datetime="{{ last.at }}" title="{{ last.at }}">{{ last.ago }}</time></span>
       {%- else if header.active.is_none() %}
       <span>no deployments yet</span>
@@ -40,7 +40,7 @@
   <nav class="tabs" aria-label="Stack sections">
     <div role="tablist">
       {%- for tab in header.tabs() %}
-      <a role="tab" href="{{ tab.href }}" aria-selected="{{ tab.current }}"{% if tab.current %} aria-current="page"{% endif %}>{{ tab.label }}</a>
+      <a role="tab" href="{{ tab.href }}" aria-selected="{{ tab.current }}"{% if tab.page %} aria-current="page"{% endif %}>{{ tab.label }}</a>
       {%- endfor %}
     </div>
   </nav>

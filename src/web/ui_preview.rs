@@ -367,7 +367,8 @@ impl Fixtures {
     }
 
     /// The history of `notes`: live (with transitions), a failed webhook deploy (with
-    /// provenance), one in progress, a superseded one and a no-op.
+    /// provenance), one in progress, one queued behind it, a rejected one, a superseded one, a
+    /// no-op and an older one that went live with warnings.
     fn deployments() -> Vec<(Deployment, Vec<DeploymentEvent>)> {
         let event = |from, to, message: Option<&str>, at| DeploymentEvent {
             from,
@@ -375,7 +376,9 @@ impl Fixtures {
             message: message.map(str::to_owned),
             at,
         };
-        let live = Self::deployment("notes", 3, DeploymentState::Live, 2 * DAY);
+        let mut live = Self::deployment("notes", 3, DeploymentState::Live, 2 * DAY);
+        live.source = DeploymentSource::Webhook;
+        live.provenance = Some(Self::provenance());
         let t = live.created_at;
         let s = Duration::from_secs;
         let live_events = vec![
@@ -470,7 +473,7 @@ impl Fixtures {
         ];
         let running = Self::deployment(
             "notes",
-            6,
+            7,
             DeploymentState::HealthChecking,
             Duration::from_secs(20),
         );
@@ -496,11 +499,63 @@ impl Fixtures {
                 r + s(9),
             ),
         ];
-        let superseded = Self::deployment("notes", 5, DeploymentState::Superseded, 3 * HOUR);
+        let superseded = Self::deployment("notes", 6, DeploymentState::Superseded, 3 * HOUR);
+        let mut cancelled = Self::deployment("notes", 5, DeploymentState::Failed, 5 * HOUR);
+        cancelled.source = DeploymentSource::Manual;
+        cancelled.error = Some(crate::orchestrator::CANCELLED.into());
         let mut noop = Self::deployment("notes", 2, DeploymentState::Noop, 3 * DAY);
         noop.source = DeploymentSource::Poller;
+        // An older deployment that went live, with warnings, which the history offers to roll
+        // back to.
+        let mut first = Self::deployment("notes", 1, DeploymentState::LiveWithWarnings, 5 * DAY);
+        first.source = DeploymentSource::Manual;
+        first.target =
+            DigestSet::from([("api".into(), digest(7)), ("storage".into(), digest(0xaa))]);
+        first.finished_at = Some(first.created_at + Duration::from_secs(72));
+        let w = first.created_at;
+        let first_events = vec![
+            event(None, DeploymentState::Received, None, w),
+            event(
+                Some(DeploymentState::Received),
+                DeploymentState::Pulling,
+                None,
+                w + s(1),
+            ),
+            event(
+                Some(DeploymentState::Pulling),
+                DeploymentState::Switching,
+                None,
+                w + s(64),
+            ),
+            event(
+                Some(DeploymentState::Switching),
+                DeploymentState::LiveWithWarnings,
+                Some("the old api container did not stop within 30 s and was killed"),
+                w + s(72),
+            ),
+        ];
+        // Waiting behind the running deployment.
+        let mut queued =
+            Self::deployment("notes", 8, DeploymentState::Queued, Duration::from_secs(5));
+        queued.source = DeploymentSource::Poller;
+        // Refused before anything ran.
+        let mut rejected = Self::deployment(
+            "notes",
+            9,
+            DeploymentState::Rejected,
+            Duration::from_secs(2),
+        );
+        rejected.revision = None;
+        rejected.generation = None;
+        rejected.target = DigestSet::default();
+        rejected.finished_at = Some(rejected.created_at);
+        rejected.error = Some("stack file: service `api` has no image".into());
         vec![
+            (first, first_events),
+            (queued, Vec::new()),
+            (rejected, Vec::new()),
             (noop, Vec::new()),
+            (cancelled, Vec::new()),
             (live, live_events),
             (failed, failed_events),
             (superseded, Vec::new()),
@@ -1071,7 +1126,13 @@ async fn ui_preview() {
             "/stacks/notes/deployments/4",
             "Deployment: failed webhook deploy",
         ),
-        ("/stacks/notes/deployments/6", "Deployment: in progress"),
+        ("/stacks/notes/deployments/7", "Deployment: in progress"),
+        (
+            "/stacks/notes/deployments/1",
+            "Deployment: older live with warnings (roll back)",
+        ),
+        ("/stacks/notes/deployments/9", "Deployment: rejected"),
+        ("/stacks/notes/deployments/8", "Deployment: queued"),
         ("/apply", "Apply a stack file"),
         ("/certificates", "Certificates"),
         ("/settings/registries", "Settings: registries"),

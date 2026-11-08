@@ -32,7 +32,7 @@
       <p>
         {%- if let Some((id, state, url)) = card.active %}<a href="{{ url }}">#{{ id }}</a> running: {{ state }}
         {%- else if let Some(last) = card.last %}<a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} <span class="muted">{{ last.source }}</span>
-          {%- if let Some((short, sha, repository)) = last.commit %} <code title="{{ sha }}">{{ short }}</code> <span class="stack-card-repo">{{ repository }}</span>{% endif %}
+          {%- if let Some(commit) = last.commit %} <code title="{{ commit.sha }}">{{ commit.short }}</code> <span class="stack-card-repo">{{ commit.repository }}</span>{% endif %}
           <time class="muted" datetime="{{ last.at }}" title="{{ last.at }}">{{ last.ago }}</time>
         {%- else %}<span class="muted">no deployments yet</span>{% endif %}
         {%- if let Some(queued) = card.queued %} <span class="muted">· #{{ queued }} queued</span>{% endif %}
