@@ -496,10 +496,15 @@ impl Harness {
 
     /// Publishes a table in which `web` runs on `upstream` instead, as a deploy's swap does.
     fn swap_web(&self, upstream: Arc<Upstream>) {
+        self.swap("web", upstream);
+    }
+
+    /// Publishes a table in which `service` runs live on `upstream`, as a deploy's swap does.
+    fn swap(&self, service: &str, upstream: Arc<Upstream>) {
         let mut desired = self.desired.clone();
         let site = desired.get_mut(&name("site")).unwrap();
         site.services.insert(
-            name("web"),
+            name(service),
             crate::routing::ServiceState::Live {
                 upstreams: BTreeMap::from([(8080, upstream)]),
             },
@@ -770,6 +775,29 @@ async fn a_service_in_its_gap_answers_503_with_retry_after() {
     assert_eq!(reply.status, 503);
     assert_eq!(reply.header("retry-after"), Some("7"));
     assert_eq!(reply.text(), "503 Service Unavailable\n");
+}
+
+#[tokio::test]
+async fn a_service_answers_503_during_its_gap_and_200_after_the_swap() {
+    let h = Harness::start().await;
+    let reply = h.get("gap.example.com", "/during").await;
+    assert_eq!(reply.status, 503);
+    assert_eq!(reply.header("retry-after"), Some("7"));
+
+    // The deploy's commit points the service at its new, healthy container.
+    h.swap(
+        "gapped",
+        Arc::new(Upstream::loopback(
+            h.web_port,
+            name("site"),
+            name("gapped"),
+            2,
+        )),
+    );
+    let reply = h.get("gap.example.com", "/after").await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.header("retry-after"), None);
+    assert_eq!(reply.json()["path"], "/after");
 }
 
 #[tokio::test]

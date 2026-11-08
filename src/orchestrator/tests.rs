@@ -126,9 +126,23 @@ impl FakeProber {
         self.answers.lock().unwrap().insert(port, result);
     }
 
-    /// From now on, probes on container port `port` never answer.
+    /// From now on, probes on container port `port` do not answer until it is
+    /// [`release`](Self::release)d.
     pub(super) fn hold(&self, port: u16) {
         self.held.lock().unwrap().insert(port);
+    }
+
+    /// Probes on container port `port`, held or not, answer again.
+    pub(super) fn release(&self, port: u16) {
+        self.held.lock().unwrap().remove(&port);
+    }
+
+    fn is_held(&self, text: &str) -> bool {
+        self.held
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|&port| text.contains(&Self::pattern(port)))
     }
 
     /// The probes so far, sorted, forgetting them.
@@ -166,14 +180,8 @@ impl Prober for FakeProber {
     async fn probe(&self, check: &Check) -> std::result::Result<String, String> {
         let text = check.to_string();
         self.probes.lock().unwrap().push(text.clone());
-        let held = self
-            .held
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|&port| text.contains(&Self::pattern(port)));
-        if held {
-            std::future::pending::<()>().await;
+        while self.is_held(&text) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
         tokio::time::sleep(self.delay).await;
         self.answers

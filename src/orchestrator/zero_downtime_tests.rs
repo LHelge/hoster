@@ -368,6 +368,7 @@ async fn a_failing_stop_first_service_aborts_the_whole_stack() {
         h.generations().await,
         [("api".into(), 2), ("storage".into(), 1), ("web".into(), 2)]
     );
+    h.assert_one_generation_each(&h.routes).await;
 }
 
 #[tokio::test]
@@ -407,6 +408,252 @@ async fn a_mixed_deployment_swaps_every_service_in_one_publish() {
             "hoster-notes-web-g2"
         ]
     );
+    h.assert_one_generation_each(&h.routes).await;
+}
+
+/// `probed()` with a second stop-first service, `db` (TCP probe on 5432, its own host), which
+/// sorts before storage and so is replaced first.
+fn two_stop_first() -> String {
+    probed().replace(
+        "[services.storage]",
+        "[services.db]\nimage = \"docker.io/library/postgres:17\"\nupdate = \"stop-first\"\n\n\
+         [services.db.volumes]\npg = \"/var/lib/postgresql\"\n\n\
+         [services.db.health]\ntcp = { port = 5432 }\ninterval = \"10ms\"\nstart_period = \"200ms\"\n\n\
+         [[services.db.routes]]\nhost = \"db.notes.example.com\"\nport = 5432\n\n\
+         [services.storage]",
+    )
+}
+
+/// `toml` with db's and storage's config changed: one deployment replaces both stop-first
+/// services.
+fn both_stop_first_changed(toml: &str) -> String {
+    storage_changed(toml).replace(
+        "pg = \"/var/lib/postgresql\"",
+        "pg = \"/var/lib/postgresql\"\n\n[services.db.env]\nC = \"1\"",
+    )
+}
+
+fn db(routes: &ArcSwap<RouteTable>) -> Arc<Upstream> {
+    upstream(routes, "db.notes.example.com", "/").expect("db is routed")
+}
+
+impl Harness {
+    /// Every service of the stack runs exactly one container, of the generation its pointer
+    /// names, and every routed service is served by that generation.
+    async fn assert_one_generation_each(&self, routes: &ArcSwap<RouteTable>) {
+        let containers = self.runtime.containers();
+        for pointer in self.store.services("notes").await.unwrap() {
+            let prefix = format!("hoster-notes-{}-g", pointer.service);
+            let own: Vec<_> = containers
+                .iter()
+                .filter(|c| c.name.starts_with(&prefix))
+                .collect();
+            assert_eq!(own.len(), 1, "{}: {own:?}", pointer.service);
+            assert_eq!(
+                own[0].name,
+                format!("{prefix}{}", pointer.generation),
+                "{}",
+                pointer.service
+            );
+            assert!(own[0].state.is_running(), "{} not running", own[0].name);
+            if let Some(&host_port) = pointer.ports.values().next() {
+                let (host, path) = match pointer.service.as_str() {
+                    "api" => ("notes.example.com", "/api/notes"),
+                    "web" => ("notes.example.com", "/"),
+                    "storage" => ("s3.notes.example.com", "/bucket"),
+                    "db" => ("db.notes.example.com", "/"),
+                    other => panic!("no known route for {other}"),
+                };
+                let served = upstream(routes, host, path)
+                    .unwrap_or_else(|| panic!("{} is not served", pointer.service));
+                assert_eq!(
+                    (served.generation, served.addr.port()),
+                    (pointer.generation, host_port),
+                    "{}",
+                    pointer.service
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_stop_first_service_is_replaced_behind_its_gap() {
+    let h = harness().await;
+    h.bootstrap().await;
+    let old = storage(&h.routes);
+    h.prober.take_probes();
+    // The new container's probe does not answer until the gap has been looked at.
+    h.prober.hold(9000);
+    let applied = h.apply(&storage_changed(NOTES)).await;
+    assert_eq!(applied.changed, ["storage"]);
+    let id = applied.deployment.as_ref().unwrap().deployment;
+
+    // The new container is probed while the old one is stopped, kept, and its routes answer 503.
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(9000).await;
+    assert!(matches!(
+        h.routes
+            .load()
+            .lookup("s3.notes.example.com", "/bucket")
+            .unwrap()
+            .target,
+        Target::Unavailable { .. }
+    ));
+    let g1 = h.container("hoster-notes-storage-g1");
+    assert!(!g1.state.is_running(), "{g1:?}");
+    assert!(h.container("hoster-notes-storage-g3").state.is_running());
+
+    // The old container is removed in CleaningUp, after the swap.
+    h.prober.release(9000);
+    let live = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    assert_eq!(
+        h.states(live.id).await,
+        [
+            S::Received,
+            S::Validating,
+            S::Pulling,
+            S::Starting,
+            S::HealthChecking,
+            S::Replacing,
+            S::Switching,
+            S::Draining,
+            S::CleaningUp,
+            S::Live
+        ]
+    );
+    let new = storage(&h.routes);
+    assert_eq!(new.generation, 3);
+    assert!(!Arc::ptr_eq(&old, &new));
+    assert_eq!(
+        h.container_names(),
+        [
+            "hoster-notes-api-g2",
+            "hoster-notes-storage-g3",
+            "hoster-notes-web-g2"
+        ]
+    );
+    h.assert_one_generation_each(&h.routes).await;
+}
+
+#[tokio::test]
+async fn a_start_first_only_deployment_passes_through_replacing_without_effects() {
+    let h = harness().await;
+    h.bootstrap().await;
+    let old_storage = storage(&h.routes);
+    let calls = h.runtime.calls().len();
+    let live = h.finish(&h.deploy(&[("api", 2)]).await).await;
+    assert_eq!(live.state, S::Live);
+    assert!(h.states(live.id).await.contains(&S::Replacing));
+    // The stop-first service was never touched; the only stop is api's old generation in
+    // CleaningUp.
+    assert!(Arc::ptr_eq(&storage(&h.routes), &old_storage));
+    let stops = h.runtime.calls()[calls..]
+        .iter()
+        .filter(|c| **c == Operation::Stop)
+        .count();
+    assert_eq!(stops, 1);
+    h.assert_one_generation_each(&h.routes).await;
+}
+
+#[tokio::test]
+async fn a_second_failing_stop_first_service_restarts_the_first_one() {
+    let h = harness().await;
+    bootstrap_with(&h, &two_stop_first()).await;
+    let old_db = db(&h.routes);
+    let old_storage = storage(&h.routes);
+    let before = h.container_names();
+    assert_eq!(
+        before,
+        [
+            "hoster-notes-api-g2",
+            "hoster-notes-db-g1",
+            "hoster-notes-storage-g1",
+            "hoster-notes-web-g2"
+        ]
+    );
+    h.prober
+        .answer(9000, Err("cannot connect: connection refused"));
+
+    let applied = h.apply(&both_stop_first_changed(&two_stop_first())).await;
+    assert_eq!(applied.changed, ["db", "storage"]);
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    assert!(h.states(failed.id).await.contains(&S::Replacing));
+    // db was replaced (stopped, new one started and healthy) before storage failed.
+    let probes = h.prober.take_probes();
+    assert!(
+        probes.iter().any(|p| p.contains("container port 5432")),
+        "{probes:?}"
+    );
+    let calls = h.runtime.calls();
+    assert!(
+        calls.iter().filter(|c| **c == Operation::Stop).count() >= 2,
+        "{calls:?}"
+    );
+
+    // Both old containers run again, both new ones are gone, and the old upstreams are back.
+    assert_eq!(h.container_names(), before);
+    assert!(Arc::ptr_eq(&db(&h.routes), &old_db));
+    assert!(Arc::ptr_eq(&storage(&h.routes), &old_storage));
+    assert_eq!(
+        h.generations().await,
+        [
+            ("api".into(), 2),
+            ("db".into(), 1),
+            ("storage".into(), 1),
+            ("web".into(), 2)
+        ]
+    );
+    h.assert_one_generation_each(&h.routes).await;
+    assert_eq!(h.store.port_allocations().await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn the_first_stop_first_service_stays_in_its_gap_until_the_commit() {
+    let h = harness().await;
+    bootstrap_with(&h, &two_stop_first()).await;
+    h.prober.take_probes();
+    h.prober.hold(9000);
+    let applied = h.apply(&both_stop_first_changed(&two_stop_first())).await;
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(9000).await;
+
+    // db's new generation is healthy but not routed before the single swap; both are in a gap.
+    let table = h.routes.load();
+    for host in ["db.notes.example.com", "s3.notes.example.com"] {
+        assert!(
+            matches!(
+                table.lookup(host, "/").unwrap().target,
+                Target::Unavailable { .. }
+            ),
+            "{host}"
+        );
+    }
+    assert!(h.container("hoster-notes-db-g3").state.is_running());
+    assert!(!h.container("hoster-notes-db-g1").state.is_running());
+    assert!(!h.container("hoster-notes-storage-g1").state.is_running());
+
+    // storage passes; the commit routes both new generations at once.
+    h.prober.release(9000);
+    let live = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    assert_eq!(
+        (db(&h.routes).generation, storage(&h.routes).generation),
+        (3, 3)
+    );
+    assert_eq!(
+        h.container_names(),
+        [
+            "hoster-notes-api-g2",
+            "hoster-notes-db-g3",
+            "hoster-notes-storage-g3",
+            "hoster-notes-web-g2"
+        ]
+    );
+    h.assert_one_generation_each(&h.routes).await;
 }
 
 // Crash at each state, then restart (architecture §5.4).

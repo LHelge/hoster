@@ -1,10 +1,10 @@
 ---
 id: v2h
 title: "stop-first: Replacing step, proxy gap (503 + Retry-After), abort restores old container"
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.301373014Z"
-updated: "2026-11-08T02:09:30.256632980Z"
+updated: "2026-11-08T02:21:07.680100462Z"
 tags:
   - orchestrator
 depends_on:
