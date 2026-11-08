@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stack detail · gitea</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0;background:#1e1e2e}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+a{color:#89b4fa;text-decoration:none}a:hover{color:#b4befe}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+table{border-collapse:collapse;width:100%}
+th{text-align:left;font-weight:500;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#9399b2;padding:10px 14px;border-bottom:1px solid #313244;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #26263a;font-size:13px;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+button,input{font:inherit}
+button{cursor:pointer}
+button:disabled{cursor:not-allowed}
+.nav a:hover{background:#313244}
+.ghost:hover{background:#313244}
+</style>
+</helmet>
+<div style="min-height: 100vh; display: flex; flex-wrap: wrap; background: #1e1e2e; color: #cdd6f4; font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<nav aria-label="Main" style="flex: 1 1 232px; background: #181825; border-right: 1px solid #313244; padding: 20px 14px; display: flex; flex-direction: column; gap: 22px">
+  <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px">
+    <div aria-hidden="true" style="width: 30px; height: 30px; border-radius: 8px; background: {{accent}}; display: flex; align-items: center; justify-content: center; color: #11111b">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+    </div>
+    <div style="display: flex; flex-direction: column; line-height: 1.25">
+      <span class="mono" style="font-weight: 700; font-size: 15px">[app name]</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">v0.14.2 · srv-01</span>
+    </div>
+  </div>
+  <div class="nav" style="display: flex; flex-direction: column; gap: 2px">
+    <a href="Main.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>
+      Dashboard
+    </a>
+    <a href="Stacks.dc.html" aria-current="page" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; background: #313244; color: #cdd6f4; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+      Stacks
+      <span class="mono" style="margin-left: auto; font-size: 11px; color: #a6adc8">9</span>
+    </a>
+    <a href="Certificates.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+      Certificates
+      <span class="mono" aria-label="1 failing" style="margin-left: auto; font-size: 11px; font-weight: 700; color: #11111b; background: #f38ba8; border-radius: 9px; padding: 1px 7px">1</span>
+    </a>
+    <a href="Settings.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>
+      Settings
+    </a>
+    <a href="System.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"></rect><rect x="2" y="13" width="20" height="8" rx="2"></rect><path d="M6 7h.01M6 17h.01"></path></svg>
+      System
+      <span class="mono" style="margin-left: auto; font-size: 10px; color: #89b4fa; border: 1px solid #89b4fa; border-radius: 9px; padding: 0 6px">update</span>
+    </a>
+  </div>
+  <div style="flex-grow: 1"></div>
+  <div style="background: #1e1e2e; border: 1px solid #313244; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px">
+    <div class="mono" style="font-size: 11px; color: #9399b2; letter-spacing: .06em">HOST · srv-01</div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">cpu</span><span>23%</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 23%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">mem</span><span>11.2 / 32 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 35%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">disk</span><span>412 / 1000 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 41%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px; border-top: 1px solid #313244; padding: 14px 4px 0">
+    <div aria-hidden="true" class="mono" style="width: 32px; height: 32px; border-radius: 50%; background: #45475a; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px">A</div>
+    <div style="display: flex; flex-direction: column; line-height: 1.3; min-width: 0">
+      <span style="font-weight: 500">admin</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">session · 6h left</span>
+    </div>
+    <button aria-label="Log out" style="margin-left: auto; width: 44px; height: 44px; border-radius: 8px; border: 1px solid #313244; background: transparent; color: #bac2de; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></svg>
+    </button>
+  </div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px 56px; display: flex; flex-direction: column; gap: 20px">
+  <header style="display: flex; flex-direction: column; gap: 14px">
+    <div class="mono" style="font-size: 12px; color: #9399b2"><a href="Stacks.dc.html">~/stacks</a>/gitea</div>
+    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px">
+      <div style="display: flex; flex-direction: column; gap: 10px; min-width: 0">
+        <div style="display: flex; align-items: center; gap: 12px">
+          <h1 class="mono" style="margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.02em">gitea</h1>
+          <span class="mono" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 10px; border-radius: 10px; color: #a6e3a1; background: #a6e3a11a"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: #a6e3a1"></span>running · 3/3 healthy</span>
+        </div>
+        <div class="mono" style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; font-size: 12px; color: #a6adc8">
+          <span>homelab/stacks · gitea/compose.yml</span>
+          <span style="color: #cba6f7; background: #cba6f71a; padding: 1px 7px; border-radius: 4px">main</span>
+          <span><span style="color: #f9e2af">4e0b7d1</span> · deployed 2h ago via webhook</span>
+          <span style="display: inline-flex; align-items: center; gap: 8px">
+            <button role="switch" aria-checked="{{autoOn}}" aria-label="Auto-deploy on push" onClick="{{toggleAuto}}" style="width: 34px; height: 20px; border-radius: 10px; border: 0; padding: 2px; display: flex; {{autoTrack}}"><span aria-hidden="true" style="width: 16px; height: 16px; border-radius: 50%; background: #11111b; display: block"></span></button>
+            auto-deploy on push
+          </span>
+        </div>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 8px">
+        <button style="height: 40px; padding: 0 16px; border-radius: 8px; border: 0; background: {{accent}}; color: #11111b; font-weight: 600; display: inline-flex; align-items: center; gap: 8px">
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"></path><path d="M21 3v5h-5"></path></svg>
+          Redeploy
+        </button>
+        <button class="ghost" style="height: 40px; padding: 0 14px; border-radius: 8px; border: 1px solid #45475a; background: transparent; color: #cdd6f4">Pull &amp; restart</button>
+        <button class="ghost" style="height: 40px; padding: 0 14px; border-radius: 8px; border: 1px solid #45475a; background: transparent; color: #cdd6f4">Stop</button>
+      </div>
+    </div>
+    <div role="tablist" aria-label="Stack sections" class="mono" style="display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid #313244; font-size: 13px">
+      <a role="tab" aria-selected="true" href="#overview" style="padding: 10px 14px; color: #cdd6f4; border-bottom: 2px solid {{accent}}; margin-bottom: -1px">overview</a>
+      <a role="tab" aria-selected="false" href="StackLogs.dc.html" style="padding: 10px 14px; color: #a6adc8">logs</a>
+      <a role="tab" aria-selected="false" href="#env" style="padding: 10px 14px; color: #a6adc8">environment <span style="color: #fab387">•</span></a>
+      <a role="tab" aria-selected="false" href="#deploys" style="padding: 10px 14px; color: #a6adc8">deployments</a>
+      <a role="tab" aria-selected="false" href="#danger" style="padding: 10px 14px; color: #a6adc8">danger zone</a>
+    </div>
+  </header>
+
+  <section id="overview" aria-label="Key metrics" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px">
+    <sc-for list="{{kpis}}" as="k" hint-placeholder-count="6">
+      <div style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px">
+        <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">{{k.label}}</span>
+        <span class="mono" style="font-size: 21px; font-weight: 600">{{k.value}}</span>
+        <span class="mono" style="font-size: 11px; color: #a6adc8">{{k.sub}}</span>
+      </div>
+    </sc-for>
+  </section>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 16px">
+    <section style="flex: 3 1 480px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 16px 18px">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 14px">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Responses by status <span class="mono" style="color: #9399b2; font-weight: 400">· 24h</span></h2>
+        <div class="mono" style="display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #a6adc8">
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #a6e3a1"></span>2xx 581,204</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #89b4fa"></span>3xx 9,812</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #fab387"></span>4xx 4,770</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #f38ba8"></span>5xx 118</span>
+        </div>
+      </div>
+      <div role="img" aria-label="Hourly responses by status class for gitea over 24 hours" style="height: 150px; display: flex; align-items: flex-end; gap: 4px; border-bottom: 1px solid #313244; background-image: linear-gradient(#26263a 1px, transparent 1px); background-size: 100% 50px">
+        <sc-for list="{{bars}}" as="b" hint-placeholder-count="24">
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+            <div style="height: {{b.h5}}px; background: #f38ba8; border-radius: 2px 2px 0 0"></div>
+            <div style="height: {{b.h4}}px; background: #fab387"></div>
+            <div style="height: {{b.h3}}px; background: #89b4fa"></div>
+            <div style="height: {{b.h2}}px; background: #a6e3a1; opacity: .85"></div>
+          </div>
+        </sc-for>
+      </div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 10px; color: #9399b2; margin-top: 6px"><span>-24h</span><span>-12h</span><span>now</span></div>
+    </section>
+    <section style="flex: 2 1 340px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 16px 18px">
+      <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 14px">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Slowest routes <span class="mono" style="color: #9399b2; font-weight: 400">· p95 · 24h</span></h2>
+      </div>
+      <div class="mono" style="display: flex; flex-direction: column; gap: 11px; font-size: 12px">
+        <sc-for list="{{routes}}" as="r" hint-placeholder-count="5">
+          <div style="display: flex; flex-direction: column; gap: 5px">
+            <div style="display: flex; justify-content: space-between; gap: 10px"><span style="color: #bac2de; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{r.path}}</span><span>{{r.p95}}</span></div>
+            <div style="height: 4px; background: #313244; border-radius: 2px"><div style="height: 100%; border-radius: 2px; background: #f9e2af; width: {{r.pct}}%"></div></div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+  </div>
+
+  <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+    <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+      <h2 style="margin: 0; font-size: 14px; font-weight: 600">Services <span class="mono" style="color: #9399b2; font-weight: 400">· 3 containers</span></h2>
+      <span class="mono" style="font-size: 12px; color: #9399b2">compose project: gitea</span>
+    </div>
+    <div style="overflow-x: auto">
+      <table style="min-width: 1020px">
+        <thead><tr><th>Service</th><th>Image</th><th>State</th><th style="text-align: right">CPU</th><th>Memory</th><th style="text-align: right">Restarts</th><th>Ports</th><th>Up</th><th style="text-align: right">Actions</th></tr></thead>
+        <tbody>
+          <sc-for list="{{services}}" as="v" hint-placeholder-count="3">
+            <tr>
+              <td class="mono" style="font-weight: 600">{{v.name}}</td>
+              <td class="mono" style="font-size: 12px"><div style="color: #bac2de">{{v.image}}</div><div style="color: #9399b2; font-size: 11px">{{v.digest}}</div></td>
+              <td><span class="mono" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #a6e3a1"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: #a6e3a1"></span>{{v.state}}</span></td>
+              <td class="mono" style="text-align: right">{{v.cpu}}</td>
+              <td class="mono" style="font-size: 12px; min-width: 150px"><div style="display: flex; justify-content: space-between"><span>{{v.mem}}</span><span style="color: #9399b2">{{v.lim}}</span></div><div style="height: 3px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="height: 100%; border-radius: 2px; background: #94e2d5; width: {{v.memPct}}%"></div></div></td>
+              <td class="mono" style="text-align: right; color: #a6adc8">{{v.restarts}}</td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{v.ports}}</td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{v.up}}</td>
+              <td style="text-align: right; white-space: nowrap">
+                <a href="StackLogs.dc.html" class="mono" style="font-size: 12px; padding: 6px 8px">logs</a>
+                <button class="mono ghost" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: #89b4fa; border-radius: 6px">exec</button>
+                <button class="mono ghost" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: #89b4fa; border-radius: 6px">restart</button>
+              </td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 16px">
+    <section style="flex: 3 1 480px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px">
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Routes</h2>
+        <button class="mono ghost" style="font-size: 12px; padding: 6px 10px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; border-radius: 6px">+ add domain</button>
+      </div>
+      <div style="display: flex; flex-direction: column">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 14px 18px; border-bottom: 1px solid #26263a">
+          <span class="mono" style="font-size: 13px; color: #89b4fa">https://git.example.net</span>
+          <span class="mono" aria-hidden="true" style="color: #9399b2">→</span>
+          <span class="mono" style="font-size: 13px">gitea:3000</span>
+          <span style="margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px" class="mono">
+            <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; color: #a6e3a1; background: #a6e3a11a">tls · 61d left</span>
+            <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; color: #bac2de; background: #313244">http→https</span>
+            <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; color: #bac2de; background: #313244">hsts</span>
+            <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; color: #bac2de; background: #313244">gzip</span>
+          </span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 14px 18px">
+          <span class="mono" style="font-size: 13px; color: #89b4fa">https://git.example.net/api/actions</span>
+          <span class="mono" aria-hidden="true" style="color: #9399b2">→</span>
+          <span class="mono" style="font-size: 13px">gitea:3000</span>
+          <span style="margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px" class="mono">
+            <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; color: #bac2de; background: #313244">ip allow · 10.0.0.0/8</span>
+            <span style="font-size: 11px; padding: 2px 8px; border-radius: 6px; color: #bac2de; background: #313244">timeout 300s</span>
+          </span>
+        </div>
+      </div>
+    </section>
+    <section style="flex: 2 1 320px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px">
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Volumes</h2>
+        <span class="mono" style="font-size: 12px; color: #9399b2">8.6 GB total</span>
+      </div>
+      <div class="mono" style="display: flex; flex-direction: column; font-size: 12px">
+        <div style="display: flex; justify-content: space-between; gap: 10px; padding: 12px 18px; border-bottom: 1px solid #26263a"><span>gitea_data <span style="color: #9399b2">→ /data</span></span><span style="color: #a6adc8">8.2 GB</span></div>
+        <div style="display: flex; justify-content: space-between; gap: 10px; padding: 12px 18px; border-bottom: 1px solid #26263a"><span>gitea_pg <span style="color: #9399b2">→ /var/lib/postgresql/data</span></span><span style="color: #a6adc8">412 MB</span></div>
+        <div style="display: flex; justify-content: space-between; gap: 10px; padding: 12px 18px"><span>runner_cache <span style="color: #9399b2">→ /cache</span></span><span style="color: #a6adc8">1.0 GB</span></div>
+      </div>
+    </section>
+  </div>
+
+  <section id="env" style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+      <h2 style="margin: 0; font-size: 14px; font-weight: 600">Environment &amp; secrets</h2>
+      <div style="display: flex; gap: 8px">
+        <button class="mono ghost" style="font-size: 12px; padding: 7px 10px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; border-radius: 6px">edit as .env</button>
+        <button class="mono ghost" style="font-size: 12px; padding: 7px 10px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; border-radius: 6px">+ variable</button>
+      </div>
+    </div>
+    <div class="mono" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 18px; background: #fab38714; border-bottom: 1px solid #313244; font-size: 12px; color: #fab387">
+      <span>1 change not deployed · RUNNER_LABELS edited 4 min ago</span>
+      <button style="margin-left: auto; font-size: 12px; padding: 5px 10px; border-radius: 6px; border: 1px solid #fab387; background: transparent; color: #fab387" class="mono">redeploy to apply</button>
+    </div>
+    <div style="overflow-x: auto">
+      <table style="min-width: 760px">
+        <thead><tr><th>Key</th><th>Value</th><th>Service</th><th>Type</th><th></th></tr></thead>
+        <tbody>
+          <sc-for list="{{env}}" as="e" hint-placeholder-count="6">
+            <tr>
+              <td class="mono" style="font-weight: 500">{{e.key}}</td>
+              <td class="mono" style="font-size: 12px; color: {{e.vc}}; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{e.shown}}</td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{e.svc}}</td>
+              <td><span class="mono" style="font-size: 11px; padding: 2px 8px; border-radius: 6px; {{e.tag}}">{{e.type}}</span></td>
+              <td style="text-align: right; white-space: nowrap">
+                <sc-if value="{{e.secret}}" hint-placeholder-val="{{false}}">
+                  <button class="mono ghost" aria-pressed="{{e.revOn}}" onClick="{{e.toggle}}" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: #89b4fa; border-radius: 6px">{{e.revLabel}}</button>
+                </sc-if>
+                <button class="mono ghost" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: #89b4fa; border-radius: 6px">edit</button>
+              </td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+    <div class="mono" style="padding: 12px 18px; font-size: 11px; color: #9399b2; border-top: 1px solid #313244">secrets are encrypted at rest and injected at container start · values from the repo's .env.example are shown as defaults</div>
+  </section>
+
+  <section id="deploys" style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+    <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+      <h2 style="margin: 0; font-size: 14px; font-weight: 600">Deployments</h2>
+      <span class="mono" style="font-size: 12px; color: #9399b2">keeps last 20 · rollback re-uses pinned image digests</span>
+    </div>
+    <div style="overflow-x: auto">
+      <table style="min-width: 820px">
+        <thead><tr><th>Status</th><th>Commit</th><th>Trigger</th><th>Started</th><th style="text-align: right">Duration</th><th style="text-align: right"></th></tr></thead>
+        <tbody>
+          <sc-for list="{{deploys}}" as="d" hint-placeholder-count="5">
+            <tr>
+              <td><span class="mono" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: {{d.c}}"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: {{d.c}}"></span>{{d.status}}</span></td>
+              <td><span class="mono" style="color: #f9e2af; font-size: 12px">{{d.sha}}</span> <span style="color: #bac2de">{{d.msg}}</span></td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{d.trigger}}</td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{d.when}}</td>
+              <td class="mono" style="font-size: 12px; text-align: right">{{d.dur}}</td>
+              <td style="text-align: right; white-space: nowrap"><button class="mono ghost" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: #89b4fa; border-radius: 6px">build log</button><sc-if value="{{d.canRollback}}" hint-placeholder-val="{{true}}"><button class="mono ghost" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: #89b4fa; border-radius: 6px">rollback</button></sc-if></td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="danger" style="border: 1px solid #f38ba866; border-radius: 10px; background: #f38ba80a">
+    <div style="padding: 14px 18px; border-bottom: 1px solid #f38ba833">
+      <h2 style="margin: 0; font-size: 14px; font-weight: 600; color: #f38ba8">Danger zone</h2>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 16px 32px; padding: 18px; align-items: flex-end">
+      <div style="flex: 1 1 360px; display: flex; flex-direction: column; gap: 10px">
+        <div style="font-weight: 600">Remove stack</div>
+        <p style="margin: 0; color: #bac2de; font-size: 13px; line-height: 1.5">Stops and removes all 3 containers, the routes for git.example.net and the stored secrets. The certificate is kept until it expires.</p>
+        <label class="mono" style="display: flex; align-items: center; gap: 10px; font-size: 12px; color: #cdd6f4">
+          <input type="checkbox" checked="{{delVols}}" onChange="{{toggleVols}}" style="width: 16px; height: 16px; accent-color: #f38ba8">
+          also delete volumes (gitea_data, gitea_pg, runner_cache · 8.6 GB)
+        </label>
+      </div>
+      <div style="flex: 1 1 320px; display: flex; flex-direction: column; gap: 8px">
+        <label for="confirm" class="mono" style="font-size: 12px; color: #a6adc8">type <span style="color: #cdd6f4">gitea</span> to confirm</label>
+        <div style="display: flex; gap: 8px">
+          <input id="confirm" value="{{confirm}}" onInput="{{onConfirm}}" autocomplete="off" class="mono" style="flex: 1; min-width: 0; height: 40px; padding: 0 12px; background: #11111b; border: 1px solid #45475a; border-radius: 8px; color: #cdd6f4; font-size: 13px; outline: none">
+          <button disabled="{{removeDisabled}}" style="height: 40px; padding: 0 16px; border-radius: 8px; font-weight: 600; {{removeStyle}}">Remove stack</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#cba6f7","options":["#cba6f7","#89b4fa","#94e2d5","#fab387"]},"$preview":{"width":1440,"height":2760}}'>
+class Component extends DCLogic {
+  constructor(props) { super(props); this.state = { auto: true, revealed: {}, confirm: '', delVols: false }; }
+  renderVals() {
+    const accent = this.props.accent ?? '#cba6f7';
+    const kpis = [
+      { label: 'REQ/MIN', value: '412', sub: 'peak 1,020 at 19:00' },
+      { label: 'P50', value: '21 ms', sub: '▼ 3 ms vs 7d' },
+      { label: 'P95', value: '118 ms', sub: 'slo 300 ms · ok' },
+      { label: '5XX RATE', value: '0.02%', sub: '118 of 595,904' },
+      { label: 'UPTIME · 30D', value: '99.98%', sub: '1 restart' },
+      { label: 'EGRESS · 24H', value: '3.1 GB', sub: 'clones + lfs' }
+    ];
+    const load = [30,24,20,18,16,20,32,50,66,72,78,80,76,82,86,84,80,88,94,90,80,66,52,40];
+    const bars = load.map((v, i) => {
+      const t = v * 1.48; const h5 = i === 9 ? 3 : 0.6; const h4 = t * 0.03, h3 = t * 0.02;
+      return { h2: Math.max(0, t - h5 - h4 - h3).toFixed(1), h3: h3.toFixed(1), h4: h4.toFixed(1), h5: h5.toFixed(1) };
+    });
+    const routes = [
+      ['GET /{owner}/{repo}/archive/*', '2.4 s', 100], ['POST /{owner}/{repo}.git/git-upload-pack', '1.1 s', 46],
+      ['GET /api/v1/repos/search', '310 ms', 13], ['GET /{owner}/{repo}/src/branch/*', '190 ms', 8], ['POST /user/login', '140 ms', 6]
+    ].map(([path, p95, pct]) => ({ path, p95, pct }));
+    const services = [
+      { name: 'gitea', image: 'docker.io/gitea/gitea:1.23.4-rootless', digest: 'sha256:9f1c…a20e', state: 'healthy', cpu: '4.1%', mem: '312 MB', lim: '/ 1 GB', memPct: 31, restarts: '0', ports: '3000 (http) · 2222 → :22', up: '2h 04m' },
+      { name: 'postgres', image: 'docker.io/library/postgres:16-alpine', digest: 'sha256:44d0…7bc1', state: 'healthy', cpu: '0.8%', mem: '96 MB', lim: '/ 512 MB', memPct: 19, restarts: '0', ports: 'internal', up: '12d 6h' },
+      { name: 'runner', image: 'docker.io/gitea/act_runner:0.2.11', digest: 'sha256:c3e8…01ff', state: 'running', cpu: '0.2%', mem: '41 MB', lim: '/ 2 GB', memPct: 2, restarts: '1', ports: '—', up: '2h 03m' }
+    ];
+    const rv = this.state.revealed;
+    const envRaw = [
+      ['GITEA__server__ROOT_URL', 'https://git.example.net/', 'gitea', 'var'],
+      ['GITEA__server__SSH_PORT', '2222', 'gitea', 'var'],
+      ['GITEA__database__DB_TYPE', 'postgres', 'gitea', 'var'],
+      ['GITEA__database__PASSWD', 'pg-7Yt2q9vKcL3m', 'gitea', 'secret'],
+      ['POSTGRES_PASSWORD', 'pg-7Yt2q9vKcL3m', 'postgres', 'secret'],
+      ['GITEA_RUNNER_REGISTRATION_TOKEN', 'rTk_02f9c1ad84be47', 'runner', 'secret'],
+      ['GITEA_RUNNER_LABELS', 'ubuntu-latest:docker://node:20-bookworm', 'runner', 'changed']
+    ];
+    const env = envRaw.map(([key, val, svc, type]) => {
+      const secret = type === 'secret'; const open = !!rv[key];
+      return { key, svc, type: type === 'changed' ? 'var · changed' : type, secret,
+        shown: secret && !open ? '••••••••••••••••' : val,
+        vc: secret && !open ? '#9399b2' : '#cdd6f4',
+        tag: type === 'secret' ? 'color: #cba6f7; background: #cba6f71a' : type === 'changed' ? 'color: #fab387; background: #fab3871f' : 'color: #bac2de; background: #313244',
+        revOn: open ? 'true' : 'false', revLabel: open ? 'hide' : 'reveal',
+        toggle: () => this.setState({ revealed: { ...rv, [key]: !open } }) };
+    });
+    const dc = { ok: '#a6e3a1', failed: '#f38ba8', rolled: '#9399b2' };
+    const deploys = [
+      ['ok', 'succeeded', '4e0b7d1', 'gitea 1.23.4, enable actions runner cache', 'webhook · push', 'today 03:14', '41 s', false],
+      ['failed', 'failed', 'd2a9b03', 'gitea 1.23.4', 'webhook · push', 'today 03:02', '1m 12s · healthcheck', false],
+      ['ok', 'succeeded', '81fe6c4', 'move runner to dedicated network', 'manual · admin', 'Oct 29 21:40', '33 s', true],
+      ['ok', 'succeeded', '3b0c2d9', 'gitea 1.23.3', 'webhook · push', 'Oct 18 07:55', '48 s', true],
+      ['rolled', 'superseded', 'f19a7e0', 'add runner service', 'webhook · push', 'Oct 02 19:12', '1m 04s', true]
+    ].map(([k, status, sha, msg, trigger, when, dur, canRollback]) => ({ c: dc[k], status, sha, msg, trigger, when, dur, canRollback }));
+    const ok = this.state.confirm === 'gitea';
+    return {
+      accent, kpis, bars, routes, services, env, deploys,
+      autoOn: this.state.auto ? 'true' : 'false',
+      autoTrack: this.state.auto ? 'background: #a6e3a1; justify-content: flex-end' : 'background: #45475a; justify-content: flex-start',
+      toggleAuto: () => this.setState({ auto: !this.state.auto }),
+      delVols: this.state.delVols, toggleVols: () => this.setState({ delVols: !this.state.delVols }),
+      confirm: this.state.confirm, onConfirm: (e) => this.setState({ confirm: e.target.value }),
+      removeDisabled: !ok,
+      removeStyle: ok ? 'border: 0; background: #f38ba8; color: #11111b' : 'border: 1px solid #45475a; background: transparent; color: #9399b2'
+    };
+  }
+}
+</script>
+</body>
+</html>

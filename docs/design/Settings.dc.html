@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settings</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0;background:#1e1e2e}
+*{box-sizing:border-box}
+a{color:#89b4fa;text-decoration:none}a:hover{color:#b4befe}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+button,input,select,textarea{font:inherit}
+button,select{cursor:pointer}
+input,select,textarea{background:#11111b;border:1px solid #45475a;border-radius:8px;color:#cdd6f4;outline:none}
+input:focus,select:focus,textarea:focus{border-color:#cba6f7}
+.nav a:hover{background:#313244}
+.ghost:hover{background:#313244}
+.field{display:flex;flex-wrap:wrap;gap:8px 32px;padding:18px 20px;border-bottom:1px solid #26263a}
+.field:last-child{border-bottom:0}
+.lbl{flex:1 1 240px;display:flex;flex-direction:column;gap:4px}
+.ctl{flex:2 1 320px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.help{font-size:12px;color:#9399b2;line-height:1.5}
+</style>
+</helmet>
+<div style="min-height: 100vh; display: flex; flex-wrap: wrap; background: #1e1e2e; color: #cdd6f4; font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<nav aria-label="Main" style="flex: 1 1 232px; background: #181825; border-right: 1px solid #313244; padding: 20px 14px; display: flex; flex-direction: column; gap: 22px">
+  <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px">
+    <div aria-hidden="true" style="width: 30px; height: 30px; border-radius: 8px; background: {{accent}}; display: flex; align-items: center; justify-content: center; color: #11111b">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+    </div>
+    <div style="display: flex; flex-direction: column; line-height: 1.25">
+      <span class="mono" style="font-weight: 700; font-size: 15px">[app name]</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">v0.14.2 · srv-01</span>
+    </div>
+  </div>
+  <div class="nav" style="display: flex; flex-direction: column; gap: 2px">
+    <a href="Main.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>
+      Dashboard
+    </a>
+    <a href="Stacks.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+      Stacks
+      <span class="mono" style="margin-left: auto; font-size: 11px; color: #a6adc8">9</span>
+    </a>
+    <a href="Certificates.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+      Certificates
+      <span class="mono" aria-label="1 failing" style="margin-left: auto; font-size: 11px; font-weight: 700; color: #11111b; background: #f38ba8; border-radius: 9px; padding: 1px 7px">1</span>
+    </a>
+    <a href="Settings.dc.html" aria-current="page" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; background: #313244; color: #cdd6f4; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>
+      Settings
+    </a>
+    <a href="System.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"></rect><rect x="2" y="13" width="20" height="8" rx="2"></rect><path d="M6 7h.01M6 17h.01"></path></svg>
+      System
+      <span class="mono" style="margin-left: auto; font-size: 10px; color: #89b4fa; border: 1px solid #89b4fa; border-radius: 9px; padding: 0 6px">update</span>
+    </a>
+  </div>
+  <div style="flex-grow: 1"></div>
+  <div style="background: #1e1e2e; border: 1px solid #313244; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px">
+    <div class="mono" style="font-size: 11px; color: #9399b2; letter-spacing: .06em">HOST · srv-01</div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">cpu</span><span>23%</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 23%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">mem</span><span>11.2 / 32 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 35%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">disk</span><span>412 / 1000 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 41%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px; border-top: 1px solid #313244; padding: 14px 4px 0">
+    <div aria-hidden="true" class="mono" style="width: 32px; height: 32px; border-radius: 50%; background: #45475a; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px">A</div>
+    <div style="display: flex; flex-direction: column; line-height: 1.3; min-width: 0">
+      <span style="font-weight: 500">admin</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">session · 6h left</span>
+    </div>
+    <button aria-label="Log out" style="margin-left: auto; width: 44px; height: 44px; border-radius: 8px; border: 1px solid #313244; background: transparent; color: #bac2de; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></svg>
+    </button>
+  </div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px 48px; display: flex; flex-direction: column; gap: 22px">
+  <header>
+    <div class="mono" style="font-size: 12px; color: #9399b2">~/settings/{{secId}}</div>
+    <h1 style="margin: 4px 0 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em">Settings</h1>
+  </header>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
+    <nav aria-label="Settings sections" class="mono" style="flex: 1 1 200px; max-width: 260px; display: flex; flex-direction: column; gap: 14px; font-size: 13px">
+      <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+        <div style="display: flex; flex-direction: column; gap: 2px">
+          <span style="font-size: 10px; letter-spacing: .08em; color: #9399b2; padding: 0 10px 4px">{{g.label}}</span>
+          <sc-for list="{{g.items}}" as="s" hint-placeholder-count="3">
+            <button aria-current="{{s.cur}}" onClick="{{s.pick}}" class="ghost" style="text-align: left; border: 0; border-radius: 7px; padding: 8px 10px; font-size: 13px; font-family: 'JetBrains Mono', monospace; display: flex; justify-content: space-between; gap: 8px; {{s.style}}">{{s.label}}<span style="color: {{s.noteC}}; font-size: 11px">{{s.note}}</span></button>
+          </sc-for>
+        </div>
+      </sc-for>
+    </nav>
+
+    <div style="flex: 999 1 480px; min-width: 0; display: flex; flex-direction: column; gap: 16px">
+
+      <sc-if value="{{isGeneral}}" hint-placeholder-val="{{false}}">
+        <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+          <div style="padding: 16px 20px; border-bottom: 1px solid #313244"><h2 style="margin: 0; font-size: 16px; font-weight: 600">General</h2><p class="help" style="margin: 4px 0 0">Identity of this instance and how long it keeps data.</p></div>
+          <div class="field"><div class="lbl"><label for="g-name" style="font-weight: 500">Instance name</label><span class="help">Shown in the sidebar and in notifications.</span></div><div class="ctl"><input id="g-name" value="srv-01" class="mono" style="height: 40px; padding: 0 12px; font-size: 13px"></div></div>
+          <div class="field"><div class="lbl"><label for="g-url" style="font-weight: 500">Dashboard URL</label><span class="help">Where this UI is served. Used for webhook callbacks.</span></div><div class="ctl"><input id="g-url" value="https://deploy.example.net" class="mono" style="height: 40px; padding: 0 12px; font-size: 13px"></div></div>
+          <div class="field"><div class="lbl"><span style="font-weight: 500">Public addresses</span><span class="help">Detected at start-up. DNS checks compare against these.</span></div><div class="ctl mono" style="font-size: 13px"><span>203.0.113.42 <span style="color: #9399b2">· ipv4 · detected</span></span><span>2001:db8::42 <span style="color: #9399b2">· ipv6 · detected</span></span></div></div>
+          <div class="field"><div class="lbl"><label for="g-ret" style="font-weight: 500">Metrics retention</label><span class="help">Request stats per stack. Raw access logs follow the proxy setting.</span></div><div class="ctl"><select id="g-ret" class="mono" style="height: 40px; padding: 0 10px; font-size: 13px; max-width: 220px"><option>7 days</option><option selected>30 days</option><option>90 days</option></select></div></div>
+        </section>
+      </sc-if>
+
+      <sc-if value="{{isGit}}" hint-placeholder-val="{{false}}">
+        <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+          <div style="padding: 16px 20px; border-bottom: 1px solid #313244"><h2 style="margin: 0; font-size: 16px; font-weight: 600">Source control</h2><p class="help" style="margin: 4px 0 0">How stacks are pulled from GitHub and when they redeploy.</p></div>
+          <div class="field"><div class="lbl"><span style="font-weight: 500">GitHub App</span><span class="help">Read access to repositories and push webhooks.</span></div><div class="ctl"><div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid #313244; border-radius: 8px; background: #1e1e2e"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1"></span><span class="mono" style="font-size: 13px">connected · srv-01-deployer</span><span class="mono" style="font-size: 12px; color: #9399b2">installed on homelab, plausible</span><button class="ghost mono" style="margin-left: auto; font-size: 12px; padding: 6px 10px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; border-radius: 6px">manage</button></div></div></div>
+          <div class="field"><div class="lbl"><label for="s-hook" style="font-weight: 500">Webhook URL</label><span class="help">Paste into repos that are not covered by the app.</span></div><div class="ctl"><div style="display: flex; gap: 8px"><input id="s-hook" readonly value="https://deploy.example.net/hooks/github" class="mono" style="flex: 1; min-width: 0; height: 40px; padding: 0 12px; font-size: 13px; color: #a6adc8"><button class="ghost mono" style="height: 40px; padding: 0 12px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; border-radius: 8px; font-size: 12px">copy</button></div></div></div>
+          <div class="field"><div class="lbl"><label for="s-sec" style="font-weight: 500">Webhook secret</label><span class="help">HMAC-SHA256 signature check on every delivery.</span></div><div class="ctl"><div style="display: flex; gap: 8px"><input id="s-sec" type="password" value="whsec_000000000000" class="mono" style="flex: 1; min-width: 0; height: 40px; padding: 0 12px; font-size: 13px"><button class="ghost mono" style="height: 40px; padding: 0 12px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; border-radius: 8px; font-size: 12px">rotate</button></div></div></div>
+          <div class="field"><div class="lbl"><label for="s-poll" style="font-weight: 500">Polling fallback</label><span class="help">Check for new commits when webhooks are not delivered.</span></div><div class="ctl"><select id="s-poll" class="mono" style="height: 40px; padding: 0 10px; font-size: 13px; max-width: 220px"><option>off</option><option selected>every 5 min</option><option>every 15 min</option><option>hourly</option></select></div></div>
+        </section>
+      </sc-if>
+
+      <sc-if value="{{isProxy}}" hint-placeholder-val="{{false}}">
+        <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+          <div style="padding: 16px 20px; border-bottom: 1px solid #313244"><h2 style="margin: 0; font-size: 16px; font-weight: 600">Reverse proxy</h2><p class="help" style="margin: 4px 0 0">Defaults for every route. Stacks can override per domain.</p></div>
+          <div class="field"><div class="lbl"><span style="font-weight: 500">Listen ports</span><span class="help">Changing these restarts the proxy; open connections drain first.</span></div><div class="ctl"><div style="display: flex; flex-wrap: wrap; gap: 12px"><label class="mono" style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a6adc8">http <input value="80" style="width: 90px; height: 40px; padding: 0 10px; font-size: 13px" class="mono"></label><label class="mono" style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a6adc8">https <input value="443" style="width: 90px; height: 40px; padding: 0 10px; font-size: 13px" class="mono"></label></div></div></div>
+          <div class="field"><div class="lbl"><span style="font-weight: 500">Redirect HTTP to HTTPS</span><span class="help">ACME challenge paths are always served over HTTP.</span></div><div class="ctl"><button role="switch" aria-checked="true" aria-label="Redirect HTTP to HTTPS" style="width: 40px; height: 22px; border-radius: 11px; border: 0; padding: 3px; display: flex; justify-content: flex-end; background: #a6e3a1"><span aria-hidden="true" style="width: 16px; height: 16px; border-radius: 50%; background: #11111b"></span></button></div></div>
+          <div class="field"><div class="lbl"><label for="p-unk" style="font-weight: 500">Unknown hosts</label><span class="help">What to answer when the Host header matches no route.</span></div><div class="ctl"><select id="p-unk" class="mono" style="height: 40px; padding: 0 10px; font-size: 13px; max-width: 280px"><option>close connection</option><option selected>404 page</option><option>redirect to dashboard</option></select></div></div>
+          <div class="field"><div class="lbl"><label for="p-trust" style="font-weight: 500">Trusted proxies</label><span class="help">X-Forwarded-For is honoured only from these ranges. One CIDR per line.</span></div><div class="ctl"><textarea id="p-trust" rows="3" class="mono" style="padding: 10px 12px; font-size: 13px; resize: vertical">10.0.0.0/8
+192.168.1.0/24</textarea></div></div>
+        </section>
+      </sc-if>
+
+      <sc-if value="{{isAcme}}" hint-placeholder-val="{{true}}">
+        <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+          <div style="padding: 16px 20px; border-bottom: 1px solid #313244"><h2 style="margin: 0; font-size: 16px; font-weight: 600">Certificates (ACME)</h2><p class="help" style="margin: 4px 0 0">Applies to every certificate issued for routed domains.</p></div>
+          <div class="field"><div class="lbl"><label for="a-mail" style="font-weight: 500">Account email</label><span class="help">The CA sends expiry warnings here.</span></div><div class="ctl"><input id="a-mail" type="email" value="certs@example.net" class="mono" style="height: 40px; padding: 0 12px; font-size: 13px"></div></div>
+          <div class="field">
+            <div class="lbl"><span style="font-weight: 500">Certificate authority</span><span class="help">Use staging while testing; it has far higher rate limits but browsers do not trust it.</span></div>
+            <div class="ctl" role="radiogroup" aria-label="Certificate authority">
+              <sc-for list="{{cas}}" as="c" hint-placeholder-count="3">
+                <label style="display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border-radius: 8px; cursor: pointer; {{c.box}}">
+                  <input type="radio" name="ca" checked="{{c.on}}" onChange="{{c.pick}}" style="margin-top: 3px; accent-color: {{accent}}">
+                  <span style="display: flex; flex-direction: column; gap: 2px"><span style="font-weight: 500">{{c.label}}</span><span class="mono" style="font-size: 11px; color: #9399b2">{{c.url}}</span></span>
+                </label>
+              </sc-for>
+            </div>
+          </div>
+          <div class="field"><div class="lbl"><label for="a-key" style="font-weight: 500">Key type</label></div><div class="ctl"><select id="a-key" class="mono" style="height: 40px; padding: 0 10px; font-size: 13px; max-width: 220px"><option selected>ecdsa p-256</option><option>ecdsa p-384</option><option>rsa 2048</option><option>rsa 4096</option></select></div></div>
+          <div class="field"><div class="lbl"><label for="a-ren" style="font-weight: 500">Renew when</label><span class="help">Days left before a renewal is attempted. Retries back off from 1 h to 12 h.</span></div><div class="ctl"><div style="display: flex; align-items: center; gap: 10px"><input id="a-ren" value="30" class="mono" style="width: 90px; height: 40px; padding: 0 12px; font-size: 13px"><span class="mono" style="font-size: 12px; color: #a6adc8">days left</span></div></div></div>
+          <div class="field"><div class="lbl"><span style="font-weight: 500">DNS-01 provider</span><span class="help">Needed for wildcards and for hosts not reachable from the internet.</span></div><div class="ctl"><select aria-label="DNS provider" class="mono" style="height: 40px; padding: 0 10px; font-size: 13px; max-width: 280px"><option selected>cloudflare</option><option>hetzner</option><option>route53</option><option>rfc2136</option><option>none</option></select><div style="display: flex; gap: 8px"><input aria-label="Cloudflare API token" type="password" value="cf_000000000000000000" class="mono" style="flex: 1; min-width: 0; height: 40px; padding: 0 12px; font-size: 13px"><button class="ghost mono" style="height: 40px; padding: 0 12px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; border-radius: 8px; font-size: 12px">test token</button></div><span class="mono" style="font-size: 12px; color: #a6e3a1">✓ token can edit zone example.net</span></div></div>
+        </section>
+      </sc-if>
+
+      <sc-if value="{{isOther}}" hint-placeholder-val="{{false}}">
+        <section style="background: #181825; border: 1px dashed #45475a; border-radius: 10px; padding: 40px 20px; text-align: center; display: flex; flex-direction: column; gap: 6px">
+          <h2 style="margin: 0; font-size: 16px; font-weight: 600">{{secLabel}}</h2>
+          <p class="help mono" style="margin: 0">[fields for this section not drawn yet]</p>
+        </section>
+      </sc-if>
+
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; background: #181825; border: 1px solid #313244; border-radius: 10px">
+        <span class="mono" style="font-size: 12px; color: #fab387">● 1 unsaved change</span>
+        <span style="flex-grow: 1"></span>
+        <button class="ghost" style="height: 40px; padding: 0 14px; border-radius: 8px; border: 1px solid #45475a; background: transparent; color: #cdd6f4">Discard</button>
+        <button style="height: 40px; padding: 0 18px; border-radius: 8px; border: 0; background: {{accent}}; color: #11111b; font-weight: 600">Save changes</button>
+      </div>
+    </div>
+  </div>
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#cba6f7","options":["#cba6f7","#89b4fa","#94e2d5","#fab387"]},"$preview":{"width":1440,"height":1400}}'>
+class Component extends DCLogic {
+  constructor(props) { super(props); this.state = { sec: 'acme', ca: 'prod' }; }
+  renderVals() {
+    const accent = this.props.accent ?? '#cba6f7';
+    const sec = this.state.sec;
+    const mk = (id, label, note, noteC) => {
+      const on = sec === id;
+      return { id, label, note: note || '', noteC: noteC || '#9399b2', cur: on ? 'page' : 'false', pick: () => this.setState({ sec: id }),
+        style: on ? 'background: #313244; color: #cdd6f4' : 'background: transparent; color: #a6adc8' };
+    };
+    const groups = [
+      { label: 'INSTANCE', items: [mk('general', 'general'), mk('users', 'users & tokens', '2'), mk('notify', 'notifications')] },
+      { label: 'DEPLOY', items: [mk('git', 'source control', '●', '#a6e3a1'), mk('registry', 'registries', '2'), mk('defaults', 'stack defaults')] },
+      { label: 'NETWORK', items: [mk('proxy', 'reverse proxy'), mk('acme', 'certificates', '●', '#fab387')] },
+      { label: 'DATA', items: [mk('backup', 'backups')] }
+    ];
+    const all = groups.flatMap((g) => g.items);
+    const cur = all.find((i) => i.id === sec);
+    const cas = [
+      ['prod', "Let's Encrypt", 'acme-v02.api.letsencrypt.org/directory'],
+      ['staging', "Let's Encrypt staging", 'acme-staging-v02.api.letsencrypt.org/directory'],
+      ['custom', 'Custom ACME directory', 'e.g. step-ca or ZeroSSL']
+    ].map(([id, label, url]) => {
+      const on = this.state.ca === id;
+      return { label, url, on, pick: () => this.setState({ ca: id }),
+        box: on ? 'border: 1px solid ' + accent + '; background: #1e1e2e' : 'border: 1px solid #313244; background: transparent' };
+    });
+    return {
+      accent, groups, cas, secId: sec, secLabel: cur ? cur.label : '',
+      isGeneral: sec === 'general', isGit: sec === 'git', isProxy: sec === 'proxy', isAcme: sec === 'acme',
+      isOther: ['general', 'git', 'proxy', 'acme'].indexOf(sec) === -1
+    };
+  }
+}
+</script>
+</body>
+</html>

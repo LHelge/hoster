@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>System</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0;background:#1e1e2e}
+*{box-sizing:border-box}
+a{color:#89b4fa;text-decoration:none}a:hover{color:#b4befe}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+table{border-collapse:collapse;width:100%}
+th{text-align:left;font-weight:500;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#9399b2;padding:10px 14px;border-bottom:1px solid #313244;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #26263a;font-size:13px;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+button,select,input{font:inherit}
+button,select{cursor:pointer}
+.nav a:hover{background:#313244}
+.ghost:hover{background:#313244}
+</style>
+</helmet>
+<div style="min-height: 100vh; display: flex; flex-wrap: wrap; background: #1e1e2e; color: #cdd6f4; font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<nav aria-label="Main" style="flex: 1 1 232px; background: #181825; border-right: 1px solid #313244; padding: 20px 14px; display: flex; flex-direction: column; gap: 22px">
+  <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px">
+    <div aria-hidden="true" style="width: 30px; height: 30px; border-radius: 8px; background: {{accent}}; display: flex; align-items: center; justify-content: center; color: #11111b">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+    </div>
+    <div style="display: flex; flex-direction: column; line-height: 1.25">
+      <span class="mono" style="font-weight: 700; font-size: 15px">[app name]</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">v0.14.2 · srv-01</span>
+    </div>
+  </div>
+  <div class="nav" style="display: flex; flex-direction: column; gap: 2px">
+    <a href="Main.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>
+      Dashboard
+    </a>
+    <a href="Stacks.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+      Stacks
+      <span class="mono" style="margin-left: auto; font-size: 11px; color: #a6adc8">9</span>
+    </a>
+    <a href="Certificates.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+      Certificates
+      <span class="mono" aria-label="1 failing" style="margin-left: auto; font-size: 11px; font-weight: 700; color: #11111b; background: #f38ba8; border-radius: 9px; padding: 1px 7px">1</span>
+    </a>
+    <a href="Settings.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>
+      Settings
+    </a>
+    <a href="System.dc.html" aria-current="page" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; background: #313244; color: #cdd6f4; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"></rect><rect x="2" y="13" width="20" height="8" rx="2"></rect><path d="M6 7h.01M6 17h.01"></path></svg>
+      System
+      <span class="mono" style="margin-left: auto; font-size: 10px; color: #89b4fa; border: 1px solid #89b4fa; border-radius: 9px; padding: 0 6px">update</span>
+    </a>
+  </div>
+  <div style="flex-grow: 1"></div>
+  <div style="background: #1e1e2e; border: 1px solid #313244; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px">
+    <div class="mono" style="font-size: 11px; color: #9399b2; letter-spacing: .06em">HOST · srv-01</div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">cpu</span><span>23%</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 23%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">mem</span><span>11.2 / 32 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 35%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">disk</span><span>412 / 1000 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 41%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px; border-top: 1px solid #313244; padding: 14px 4px 0">
+    <div aria-hidden="true" class="mono" style="width: 32px; height: 32px; border-radius: 50%; background: #45475a; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px">A</div>
+    <div style="display: flex; flex-direction: column; line-height: 1.3; min-width: 0">
+      <span style="font-weight: 500">admin</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">session · 6h left</span>
+    </div>
+    <button aria-label="Log out" style="margin-left: auto; width: 44px; height: 44px; border-radius: 8px; border: 1px solid #313244; background: transparent; color: #bac2de; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></svg>
+    </button>
+  </div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px 48px; display: flex; flex-direction: column; gap: 20px">
+  <header style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
+    <div>
+      <div class="mono" style="font-size: 12px; color: #9399b2">~/system</div>
+      <h1 style="margin: 4px 0 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em">System</h1>
+    </div>
+    <div class="mono" style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 12px; color: #a6adc8">
+      <span>last checked {{checked}}</span>
+      <button class="ghost" onClick="{{check}}" style="height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; font-size: 12px; font-family: 'JetBrains Mono', monospace">check for updates</button>
+    </div>
+  </header>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 16px">
+    <section style="flex: 1 1 320px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 18px 20px; display: flex; flex-direction: column; gap: 16px">
+      <div style="display: flex; flex-direction: column; gap: 4px">
+        <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">RUNNING</span>
+        <span class="mono" style="font-size: 30px; font-weight: 700; letter-spacing: -0.02em">v0.14.2</span>
+        <span class="mono" style="font-size: 12px; color: #a6adc8">8c1f2e0 · built Oct 30 · up 9d 4h</span>
+      </div>
+      <div style="border-top: 1px solid #26263a; padding-top: 14px; display: flex; flex-direction: column; gap: 4px">
+        <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">PREVIOUS</span>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px">
+          <span class="mono" style="font-size: 16px; font-weight: 600; color: #bac2de">v0.14.1</span>
+          <button class="ghost mono" style="height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; font-size: 12px">roll back</button>
+        </div>
+        <span class="mono" style="font-size: 12px; color: #9399b2">image kept · config snapshot from Oct 30 18:02</span>
+      </div>
+      <label class="mono" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; color: #a6adc8; border-top: 1px solid #26263a; padding-top: 14px">release channel
+        <select style="height: 34px; background: #11111b; color: #cdd6f4; border: 1px solid #45475a; border-radius: 8px; padding: 0 8px; font-size: 12px; font-family: 'JetBrains Mono', monospace"><option selected>stable</option><option>beta</option><option>nightly</option></select>
+      </label>
+    </section>
+
+    <section style="flex: 2 1 520px; min-width: 0; background: #181825; border: 1px solid #89b4fa66; border-radius: 10px; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px">
+        <div style="display: flex; flex-direction: column; gap: 4px">
+          <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #89b4fa">UPDATE AVAILABLE</span>
+          <span class="mono" style="font-size: 24px; font-weight: 700">v0.15.0 <span style="font-size: 12px; font-weight: 400; color: #9399b2">· stable · released Nov 6</span></span>
+        </div>
+        <a href="#" class="mono" style="font-size: 12px">full changelog ↗</a>
+      </div>
+      <ul style="margin: 0; padding: 0 0 0 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #bac2de; line-height: 1.5">
+        <li>Per-route rate limiting and IP allow lists in the proxy</li>
+        <li>DNS-01 support for Hetzner and RFC 2136</li>
+        <li>Rollback now restores the previous stack env alongside image digests</li>
+        <li>Fixes access-log rotation leaking file handles</li>
+      </ul>
+      <div class="mono" style="font-size: 12px; color: #f9e2af; background: #f9e2af14; border: 1px solid #f9e2af40; border-radius: 8px; padding: 10px 12px">migration: proxy config moves to schema v3 · converted automatically, a backup is written first</div>
+      <sc-if value="{{idle}}" hint-placeholder-val="{{true}}">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px">
+          <label class="mono" style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #cdd6f4"><input type="checkbox" checked style="width: 16px; height: 16px; accent-color: {{accent}}"> snapshot config &amp; database first</label>
+          <span style="flex-grow: 1"></span>
+          <button onClick="{{apply}}" style="height: 40px; padding: 0 18px; border-radius: 8px; border: 0; background: {{accent}}; color: #11111b; font-weight: 600">Apply update</button>
+        </div>
+        <span class="mono" style="font-size: 11px; color: #9399b2">running stacks and the proxy keep serving; this dashboard reconnects in ~10 s</span>
+      </sc-if>
+      <sc-if value="{{running}}" hint-placeholder-val="{{false}}">
+        <ol class="mono" style="list-style: none; margin: 0; padding: 12px 14px; background: #11111b; border: 1px solid #313244; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px">
+          <li style="color: #a6e3a1">✓ snapshot written · /var/lib/[app]/backups/2026-11-08T18-49.tar.zst</li>
+          <li style="color: #a6e3a1">✓ pulled ghcr.io/[owner]/[app]:0.15.0 · 38.2 MB</li>
+          <li style="color: #89b4fa">● starting new instance alongside current…</li>
+          <li style="color: #9399b2">○ health check /healthz</li>
+          <li style="color: #9399b2">○ hand over listeners and stop v0.14.2</li>
+        </ol>
+      </sc-if>
+    </section>
+  </div>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 16px">
+    <section style="flex: 1 1 380px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px">
+      <div style="padding: 14px 18px; border-bottom: 1px solid #313244"><h2 style="margin: 0; font-size: 14px; font-weight: 600">Host</h2></div>
+      <dl class="mono" style="margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0; font-size: 12px">
+        <sc-for list="{{host}}" as="h" hint-placeholder-count="10">
+          <dt style="padding: 9px 18px; color: #9399b2; border-bottom: 1px solid #26263a">{{h.k}}</dt>
+          <dd style="margin: 0; padding: 9px 18px; border-bottom: 1px solid #26263a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{h.v}}</dd>
+        </sc-for>
+      </dl>
+    </section>
+
+    <section style="flex: 2 1 520px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px">
+      <div style="padding: 14px 18px; border-bottom: 1px solid #313244"><h2 style="margin: 0; font-size: 14px; font-weight: 600">Update history</h2></div>
+      <div style="overflow-x: auto">
+        <table style="min-width: 520px">
+          <thead><tr><th>Version</th><th>Applied</th><th>Result</th><th style="text-align: right">Downtime</th></tr></thead>
+          <tbody>
+            <sc-for list="{{history}}" as="u" hint-placeholder-count="5">
+              <tr>
+                <td class="mono" style="font-size: 12px">{{u.v}}</td>
+                <td class="mono" style="font-size: 12px; color: #a6adc8">{{u.when}}</td>
+                <td class="mono" style="font-size: 12px; color: {{u.c}}">{{u.result}}</td>
+                <td class="mono" style="font-size: 12px; text-align: right; color: #a6adc8">{{u.down}}</td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+      <h2 style="margin: 0; font-size: 14px; font-weight: 600">Images &amp; storage</h2>
+      <button class="mono" style="height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid #fab387; background: transparent; color: #fab387; font-size: 12px">prune unused · 4 images · 3.1 GB</button>
+    </div>
+    <div style="padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid #313244">
+      <div role="img" aria-label="Storage used: volumes 46.2 GB, images 18.4 GB, build cache 2.1 GB, logs 1.3 GB" style="display: flex; height: 10px; border-radius: 5px; overflow: hidden; gap: 2px; background: #313244">
+        <div style="width: 46%; background: #89b4fa"></div>
+        <div style="width: 18%; background: #cba6f7"></div>
+        <div style="width: 3%; background: #f9e2af"></div>
+        <div style="width: 2%; background: #94e2d5"></div>
+      </div>
+      <div class="mono" style="display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: #a6adc8">
+        <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #89b4fa"></span>volumes 46.2 GB</span>
+        <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #cba6f7"></span>images 18.4 GB</span>
+        <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #f9e2af"></span>build cache 2.1 GB</span>
+        <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #94e2d5"></span>logs 1.3 GB</span>
+        <span style="margin-left: auto; color: #9399b2">of 100 GB on /var/lib/containers</span>
+      </div>
+    </div>
+    <div style="overflow-x: auto">
+      <table style="min-width: 860px">
+        <thead><tr><th>Image</th><th>Used by</th><th style="text-align: right">Size</th><th>Pulled</th><th>Digest</th><th></th></tr></thead>
+        <tbody>
+          <sc-for list="{{images}}" as="i" hint-placeholder-count="8">
+            <tr>
+              <td class="mono" style="font-size: 12px">{{i.ref}}</td>
+              <td class="mono" style="font-size: 12px; color: {{i.uc}}">{{i.used}}</td>
+              <td class="mono" style="font-size: 12px; text-align: right">{{i.size}}</td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{i.when}}</td>
+              <td class="mono" style="font-size: 11px; color: #9399b2">{{i.digest}}</td>
+              <td style="text-align: right"><button class="ghost mono" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: {{i.ac}}; border-radius: 6px">{{i.action}}</button></td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#cba6f7","options":["#cba6f7","#89b4fa","#94e2d5","#fab387"]},"$preview":{"width":1440,"height":1700}}'>
+class Component extends DCLogic {
+  constructor(props) { super(props); this.state = { phase: 'idle', checked: '12 min ago' }; }
+  renderVals() {
+    const accent = this.props.accent ?? '#cba6f7';
+    const host = [
+      ['hostname', 'srv-01'], ['os', 'Debian 13 (trixie)'], ['kernel', '6.12.48-amd64'], ['arch', 'x86_64 · 8 vCPU'],
+      ['memory', '32 GB · 11.2 GB used'], ['runtime', 'podman 5.4.2 · rootless'], ['cgroups', 'v2 · systemd'],
+      ['public ip', '203.0.113.42 · 2001:db8::42'], ['data dir', '/var/lib/[app]'], ['uptime', '41d 7h']
+    ].map(([k, v]) => ({ k, v }));
+    const history = [
+      ['v0.14.1 → v0.14.2', 'Oct 30 18:02', '✓ applied', '#a6e3a1', '0 s'],
+      ['v0.14.0 → v0.14.1', 'Oct 12 21:15', '✓ applied', '#a6e3a1', '0 s'],
+      ['v0.13.4 → v0.14.0', 'Sep 28 09:41', '↺ rolled back · health check', '#fab387', '2 s'],
+      ['v0.13.4 → v0.14.0', 'Sep 28 10:20', '✓ applied (retry)', '#a6e3a1', '0 s'],
+      ['v0.13.3 → v0.13.4', 'Sep 09 19:03', '✓ applied', '#a6e3a1', '0 s']
+    ].map(([v, when, result, c, down]) => ({ v, when, result, c, down }));
+    const images = [
+      ['docker.io/gitea/gitea:1.23.4-rootless', 'gitea', '181 MB', '2h ago', 'sha256:9f1c…a20e'],
+      ['ghcr.io/immich-app/immich-server:v1.131.0', 'immich', '1.62 GB', '3d ago', 'sha256:0be4…19c2'],
+      ['ghcr.io/immich-app/immich-machine-learning:v1.131.0', 'immich', '3.84 GB', '3d ago', 'sha256:77a1…e0d9'],
+      ['ghcr.io/plausible/community-edition:v2.1.4', 'plausible', '212 MB', '5d ago', 'sha256:51cf…a771'],
+      ['docker.io/library/postgres:16-alpine', 'gitea, outline, paperless, plausible', '274 MB', '12d ago', 'sha256:44d0…7bc1'],
+      ['docker.io/gitea/gitea:1.23.3-rootless', '', '179 MB', '21d ago', 'sha256:1d02…b6aa'],
+      ['ghcr.io/immich-app/immich-machine-learning:v1.129.2', '', '2.71 GB', '24d ago', 'sha256:c90e…3f41'],
+      ['docker.io/outlinewiki/outline:0.81.1', '', '168 MB', '31d ago', 'sha256:e3a8…0c17'],
+      ['<none>:<none>', '', '62 MB', '40d ago', 'sha256:aa19…5d03']
+    ].map(([ref, used, size, when, digest]) => ({
+      ref, size, when, digest,
+      used: used || 'unused', uc: used ? '#bac2de' : '#fab387',
+      action: used ? 'inspect' : 'remove', ac: used ? '#89b4fa' : '#fab387'
+    }));
+    const p = this.state.phase;
+    return {
+      accent, host, history, images, checked: this.state.checked,
+      idle: p === 'idle', running: p === 'running',
+      apply: () => this.setState({ phase: 'running' }),
+      check: () => this.setState({ checked: 'just now' })
+    };
+  }
+}
+</script>
+</body>
+</html>
