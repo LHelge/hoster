@@ -18,7 +18,7 @@ mod image;
 mod raw;
 mod route;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
@@ -136,6 +136,24 @@ pub struct Service {
     pub user: Option<String>,
     pub read_only: bool,
     pub routes: Vec<Route>,
+}
+
+impl Service {
+    /// The plain environment hoster gives the container: `env`, plus `PORT=<container port>`
+    /// for a routed service with exactly one distinct container port across its routes, unless
+    /// `env` sets `PORT` itself (ADR-0051). A secret mapped to `PORT` also counts as setting it,
+    /// so the container never gets the name twice. Secrets are added at container create, never
+    /// here.
+    pub fn container_env(&self) -> BTreeMap<String, String> {
+        let mut env = self.env.clone();
+        let ports: BTreeSet<u16> = self.routes.iter().map(|r| r.port).collect();
+        if let [port] = ports.into_iter().collect::<Vec<_>>()[..]
+            && !self.secrets.contains_key("PORT")
+        {
+            env.entry("PORT".into()).or_insert_with(|| port.to_string());
+        }
+        env
+    }
 }
 
 /// How a service is replaced on deploy (ADR-0039).

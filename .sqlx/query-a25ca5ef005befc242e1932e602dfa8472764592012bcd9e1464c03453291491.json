@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO secrets (name, nonce, ciphertext, created_at, updated_at)\n             VALUES (?, ?, ?, ?, ?)\n             ON CONFLICT (name) DO UPDATE SET nonce = excluded.nonce,\n                                              ciphertext = excluded.ciphertext,\n                                              updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "a25ca5ef005befc242e1932e602dfa8472764592012bcd9e1464c03453291491"
+}

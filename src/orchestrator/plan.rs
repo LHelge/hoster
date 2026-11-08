@@ -8,17 +8,24 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
+use crate::secrets::SecretVersion;
 use crate::stack::{Digest, Name, PinnedImage, Probe, Service, Stack, UpdateStrategy};
 use crate::store::{DigestSet, PortMap, ServicePointer};
 
+/// The current version of each secret a stack references, by secret name. A secret that is not
+/// set has no entry; its services hash it as `null` and are rejected in `Validating`.
+pub type SecretVersions = BTreeMap<String, SecretVersion>;
+
 /// SHA-256 over a service's resolved spec, everything but the image digest: the second half of
-/// the idempotency key (ADR-0029). Secret *versions* join it with the secret store (`ax3`);
-/// until then a secret contributes its reference.
+/// the idempotency key (ADR-0029). It covers the container environment including the injected
+/// `PORT` (ADR-0051), the *versions* of the secrets it references (never their values),
+/// command, volumes, update strategy, health and routes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConfigHash(String);
 
-impl From<&Service> for ConfigHash {
-    fn from(service: &Service) -> Self {
+impl ConfigHash {
+    /// The hash of `service` with the secret versions `secrets`.
+    pub fn new(service: &Service, secrets: &SecretVersions) -> Self {
         let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let opt_millis = |d: Option<Duration>| d.map(millis);
         let health = service.health.as_ref().map(|h| {
@@ -57,12 +64,20 @@ impl From<&Service> for ConfigHash {
                 })
             })
             .collect();
+        let secret_refs: BTreeMap<&str, Value> = service
+            .secrets
+            .iter()
+            .map(|(env, name)| {
+                let version = secrets.get(name).map(ToString::to_string);
+                (env.as_str(), json!({"name": name, "version": version}))
+            })
+            .collect();
         let spec = json!({
             "image": format!("{}/{}", service.image.registry(), service.image.repository()),
             "command": service.command,
             "entrypoint": service.entrypoint,
-            "env": service.env,
-            "secrets": service.secrets,
+            "env": service.container_env(),
+            "secrets": secret_refs,
             "volumes": service.volumes,
             "health": health,
             "update": format!("{:?}", service.update),
@@ -155,6 +170,7 @@ impl Plan {
         revision_images: &DigestSet,
         requested: &DigestSet,
         running: &[ServicePointer],
+        secrets: &SecretVersions,
     ) -> Result<Self, PlanError> {
         if let Some(unknown) = requested
             .keys()
@@ -181,7 +197,7 @@ impl Plan {
                 service: name.to_string(),
                 message,
             })?;
-            let config = ConfigHash::from(service);
+            let config = ConfigHash::new(service, secrets);
             match current {
                 Some(p) if p.digest == digest.as_ref() && p.config_hash == config.as_ref() => {
                     plan.unchanged.push(p.clone());
@@ -262,7 +278,8 @@ update = "stop-first"
             service: service.into(),
             generation,
             digest: digest(d),
-            config_hash: ConfigHash::from(&stack.services[&name]).to_string(),
+            config_hash: ConfigHash::new(&stack.services[&name], &SecretVersions::new())
+                .to_string(),
             ports: PortMap::new(),
         }
     }
@@ -275,7 +292,7 @@ update = "stop-first"
     fn first_deploy_changes_every_service_with_a_digest() {
         let s = stack(STACK);
         let requested = DigestSet::from([("api".into(), digest(1))]);
-        let plan = Plan::new(&s, &pins(), &requested, &[]).unwrap();
+        let plan = Plan::new(&s, &pins(), &requested, &[], &SecretVersions::new()).unwrap();
         let names: Vec<_> = plan.changes.iter().map(|c| c.service.to_string()).collect();
         assert_eq!(names, ["api", "storage"]);
         assert!(plan.awaiting.is_empty());
@@ -285,7 +302,7 @@ update = "stop-first"
     #[test]
     fn ci_service_without_digest_awaits_its_first() {
         let s = stack(STACK);
-        let plan = Plan::new(&s, &pins(), &DigestSet::new(), &[]).unwrap();
+        let plan = Plan::new(&s, &pins(), &DigestSet::new(), &[], &SecretVersions::new()).unwrap();
         assert_eq!(plan.awaiting, ["api".parse::<Name>().unwrap()]);
         assert_eq!(plan.changes.len(), 1);
     }
@@ -295,13 +312,19 @@ update = "stop-first"
         let s = stack(STACK);
         let running = [pointer(&s, "api", 1, 3), pointer(&s, "storage", 9, 2)];
         let requested = DigestSet::from([("api".into(), digest(1))]);
-        let plan = Plan::new(&s, &pins(), &requested, &running).unwrap();
+        let plan = Plan::new(&s, &pins(), &requested, &running, &SecretVersions::new()).unwrap();
         assert!(plan.is_noop());
         // Without a requested digest, CI-built services keep theirs.
         assert!(
-            Plan::new(&s, &pins(), &DigestSet::new(), &running)
-                .unwrap()
-                .is_noop()
+            Plan::new(
+                &s,
+                &pins(),
+                &DigestSet::new(),
+                &running,
+                &SecretVersions::new()
+            )
+            .unwrap()
+            .is_noop()
         );
     }
 
@@ -310,7 +333,7 @@ update = "stop-first"
         let s = stack(STACK);
         let running = [pointer(&s, "api", 1, 3), pointer(&s, "storage", 9, 2)];
         let requested = DigestSet::from([("api".into(), digest(2))]);
-        let plan = Plan::new(&s, &pins(), &requested, &running).unwrap();
+        let plan = Plan::new(&s, &pins(), &requested, &running, &SecretVersions::new()).unwrap();
         assert_eq!(plan.changes.len(), 1);
         assert_eq!(plan.changes[0].service.as_ref(), "api");
         assert_eq!(plan.changes[0].previous.as_ref().unwrap().generation, 3);
@@ -325,7 +348,14 @@ update = "stop-first"
             "update = \"stop-first\"",
             "update = \"stop-first\"\nenv = { A = \"1\" }",
         ));
-        let plan = Plan::new(&edited, &pins(), &DigestSet::new(), &running).unwrap();
+        let plan = Plan::new(
+            &edited,
+            &pins(),
+            &DigestSet::new(),
+            &running,
+            &SecretVersions::new(),
+        )
+        .unwrap();
         assert_eq!(plan.changes.len(), 1);
         assert_eq!(plan.changes[0].service.as_ref(), "storage");
         assert_eq!(plan.changes[0].update, UpdateStrategy::StopFirst);
@@ -339,7 +369,14 @@ update = "stop-first"
             service: "old".into(),
             ..running[0].clone()
         });
-        let plan = Plan::new(&s, &pins(), &DigestSet::new(), &running).unwrap();
+        let plan = Plan::new(
+            &s,
+            &pins(),
+            &DigestSet::new(),
+            &running,
+            &SecretVersions::new(),
+        )
+        .unwrap();
         assert!(!plan.is_noop());
         assert_eq!(plan.removed[0].service, "old");
     }
@@ -349,25 +386,83 @@ update = "stop-first"
         let s = stack(STACK);
         let requested = DigestSet::from([("nope".into(), digest(1))]);
         assert_eq!(
-            Plan::new(&s, &pins(), &requested, &[]),
+            Plan::new(&s, &pins(), &requested, &[], &SecretVersions::new()),
             Err(PlanError::UnknownService("nope".into()))
         );
     }
 
+    fn hash(stack: &Stack, service: &str, secrets: &SecretVersions) -> ConfigHash {
+        ConfigHash::new(&stack.services[&service.parse::<Name>().unwrap()], secrets)
+    }
+
     #[test]
     fn config_hash_ignores_the_digest_but_not_the_spec() {
+        let none = SecretVersions::new();
         let a = stack(STACK);
         let b = stack(STACK);
-        let api: Name = "api".parse().unwrap();
-        assert_eq!(
-            ConfigHash::from(&a.services[&api]),
-            ConfigHash::from(&b.services[&api])
-        );
+        assert_eq!(hash(&a, "api", &none), hash(&b, "api", &none));
         let c = stack(&STACK.replace("port = 8080", "port = 8081"));
-        assert_ne!(
-            ConfigHash::from(&a.services[&api]),
-            ConfigHash::from(&c.services[&api])
+        assert_ne!(hash(&a, "api", &none), hash(&c, "api", &none));
+        assert_eq!(hash(&a, "api", &none).as_ref().len(), 64);
+    }
+
+    #[test]
+    fn config_hash_covers_the_injected_port() {
+        let none = SecretVersions::new();
+        let injected = stack(STACK);
+        // Setting `PORT` explicitly to the injected value is the same container environment.
+        let explicit = stack(&STACK.replace(
+            "image = \"ghcr.io/acme/notes-api\"",
+            "image = \"ghcr.io/acme/notes-api\"\nenv = { PORT = \"8080\" }",
+        ));
+        assert_eq!(hash(&injected, "api", &none), hash(&explicit, "api", &none));
+        let other = stack(&STACK.replace(
+            "image = \"ghcr.io/acme/notes-api\"",
+            "image = \"ghcr.io/acme/notes-api\"\nenv = { PORT = \"9999\" }",
+        ));
+        assert_ne!(hash(&injected, "api", &none), hash(&other, "api", &none));
+    }
+
+    #[test]
+    fn config_hash_follows_secret_versions_not_just_names() {
+        let s = stack(&STACK.replace(
+            "image = \"ghcr.io/acme/notes-api\"",
+            "image = \"ghcr.io/acme/notes-api\"\nsecrets = { DB = \"notes/db\" }",
+        ));
+        let version = |n: u8| {
+            let sealed = crate::store::SealedSecret {
+                name: "notes/db".into(),
+                nonce: vec![n; 24],
+                ciphertext: Vec::new(),
+                created_at: crate::store::Timestamp::now(),
+                updated_at: crate::store::Timestamp::now(),
+            };
+            SecretVersions::from([("notes/db".into(), SecretVersion::from(&sealed))])
+        };
+        let unset = hash(&s, "api", &SecretVersions::new());
+        let v1 = hash(&s, "api", &version(1));
+        let v2 = hash(&s, "api", &version(2));
+        assert_ne!(unset, v1);
+        assert_ne!(v1, v2);
+        assert_eq!(v1, hash(&s, "api", &version(1)));
+        // Other services do not reference the secret.
+        assert_eq!(
+            hash(&s, "storage", &SecretVersions::new()),
+            hash(&s, "storage", &version(1))
         );
-        assert_eq!(ConfigHash::from(&a.services[&api]).as_ref().len(), 64);
+
+        // A replaced secret changes only the services that use it.
+        let running = [
+            ServicePointer {
+                config_hash: v1.to_string(),
+                ..pointer(&s, "api", 1, 3)
+            },
+            pointer(&s, "storage", 9, 2),
+        ];
+        let plan = Plan::new(&s, &pins(), &DigestSet::new(), &running, &version(1)).unwrap();
+        assert!(plan.is_noop());
+        let plan = Plan::new(&s, &pins(), &DigestSet::new(), &running, &version(2)).unwrap();
+        let names: Vec<_> = plan.changes.iter().map(|c| c.service.to_string()).collect();
+        assert_eq!(names, ["api"]);
     }
 }

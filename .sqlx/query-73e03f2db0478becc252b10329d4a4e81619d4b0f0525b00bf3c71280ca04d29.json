@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT name, nonce, ciphertext,\n                      created_at AS \"created_at: Timestamp\",\n                      updated_at AS \"updated_at: Timestamp\"\n               FROM secrets WHERE name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "secrets",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "nonce",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "secrets",
+            "name": "nonce"
+          }
+        }
+      },
+      {
+        "name": "ciphertext",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "secrets",
+            "name": "ciphertext"
+          }
+        }
+      },
+      {
+        "name": "created_at: Timestamp",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "secrets",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at: Timestamp",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "secrets",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "73e03f2db0478becc252b10329d4a4e81619d4b0f0525b00bf3c71280ca04d29"
+}

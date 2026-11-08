@@ -38,6 +38,9 @@ Environment=HOSTER_ADMIN_GITHUB=<your-github-handle>
 # Keep the files 0600; set these in the drop-in too:
 #   LoadCredential=github_client_id:%h/.config/hoster/github_client_id
 #   LoadCredential=github_client_secret:%h/.config/hoster/github_client_secret
+# Optionally, the secret-store key (ADR-0029) as the credential `secret_key` (one line of base64,
+# 32 bytes) instead of the generated key file, e.g. from systemd-creds (systemd >= 256):
+#   LoadCredentialEncrypted=secret_key:%h/.config/hoster/secret_key.cred
 
 Restart=always
 RestartSec=2s

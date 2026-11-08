@@ -15,6 +15,7 @@
     reason = "the Store API is consumed by the orchestrator and web UI"
 )]
 
+mod secrets;
 mod sessions;
 mod types;
 
@@ -38,8 +39,8 @@ use thiserror::Error;
 )]
 pub use types::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState,
-    DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, RevisionId, ServicePointer,
-    SessionRecord, Stack, StackRevision, Timestamp,
+    DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, RevisionId, SealedSecret,
+    SecretEntry, ServicePointer, SessionRecord, Stack, StackRevision, Timestamp,
 };
 
 /// The embedded migrations from `migrations/`.

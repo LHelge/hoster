@@ -745,6 +745,7 @@ mod tests {
 
     fn config(state_dir: PathBuf, ports: RangeInclusive<u16>) -> Config {
         Config {
+            secret_key_file: state_dir.with_file_name("secret.key"),
             state_dir,
             admin_host: "hoster.example.com".parse().unwrap(),
             admin_github: "octocat".parse().unwrap(),

@@ -1,10 +1,10 @@
 ---
 id: ax3
 title: Env, secrets and named volumes in deployed containers
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.207836167Z"
-updated: "2026-11-08T00:01:39.953531805Z"
+updated: "2026-11-08T00:21:38.714688105Z"
 tags:
   - orchestrator
 depends_on:

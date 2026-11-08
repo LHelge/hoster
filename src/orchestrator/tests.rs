@@ -10,6 +10,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::config::PortRange;
 use crate::runtime::{ContainerInfo, ContainerState, FakeRuntime, Operation};
+use crate::secrets::{SecretKey, SecretName};
 use crate::stack::ImageRef;
 
 const NOTES: &str = r#"
@@ -66,6 +67,7 @@ struct Harness {
     store: Store,
     runtime: Arc<FakeRuntime>,
     resolver: Arc<FakeResolver>,
+    secrets: SecretStore,
     orchestrator: Arc<Orchestrator<FakeRuntime>>,
 }
 
@@ -80,11 +82,13 @@ async fn harness_with(settle: Duration) -> Harness {
         settle_poll: Duration::from_millis(5),
         ..Settings::default()
     };
+    let secrets = SecretStore::new(store.clone(), &SecretKey::generate());
     let orchestrator = Orchestrator::new(
         store.clone(),
         Arc::clone(&runtime),
         Arc::clone(&resolver) as Arc<dyn TagResolver>,
         ports,
+        secrets.clone(),
         settings,
     );
     Harness {
@@ -92,6 +96,7 @@ async fn harness_with(settle: Duration) -> Harness {
         store,
         runtime,
         resolver,
+        secrets,
         orchestrator,
     }
 }
@@ -635,6 +640,180 @@ async fn remove_deletes_containers_network_and_records() {
     ));
 }
 
+/// A stack whose api reads a secret, plus a two-port service and an unrouted worker.
+const WITH_SECRETS: &str = r#"
+version = 1
+name = "notes"
+
+[services.api]
+image = "ghcr.io/acme/notes-api"
+env = { LOG = "info" }
+secrets = { DATABASE_URL = "notes/database-url" }
+
+[[services.api.routes]]
+host = "notes.example.com"
+port = 8080
+
+[services.multi]
+image = "ghcr.io/acme/notes-multi"
+
+[[services.multi.routes]]
+host = "multi.notes.example.com"
+port = 8080
+
+[[services.multi.routes]]
+host = "multi.notes.example.com"
+prefix = "/admin"
+port = 9090
+
+[services.worker]
+image = "ghcr.io/acme/notes-worker"
+"#;
+
+impl Harness {
+    async fn set_secret(&self, name: &str, value: &str) {
+        self.secrets
+            .set(&name.parse::<SecretName>().unwrap(), &value.into())
+            .await
+            .unwrap();
+    }
+
+    fn spec_of(&self, name: &str) -> crate::runtime::ContainerSpec {
+        self.runtime.spec(&self.container(name).id).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn secrets_are_injected_at_create_and_port_only_for_one_container_port() {
+    let h = harness().await;
+    h.set_secret("notes/database-url", "postgres://s3cret")
+        .await;
+    h.apply(WITH_SECRETS).await;
+    let deployed = h.deploy(&[("api", 1), ("multi", 1), ("worker", 1)]).await;
+    assert_eq!(h.finish(&deployed).await.state, S::Live);
+
+    let api = h.spec_of("hoster-notes-api-g1");
+    assert_eq!(api.secrets["DATABASE_URL"].expose(), "postgres://s3cret");
+    assert!(!api.env.contains_key("DATABASE_URL"));
+    assert_eq!(api.env["LOG"], "info");
+    assert_eq!(api.env["PORT"], "8080");
+    // Nothing that prints a spec shows the value.
+    assert!(!format!("{api:?}").contains("s3cret"));
+    let events = h.store.events(deployed.deployment).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|e| !e.message.as_deref().unwrap_or("").contains("s3cret"))
+    );
+
+    // Two distinct container ports, or none: no `PORT`.
+    assert!(!h.spec_of("hoster-notes-multi-g1").env.contains_key("PORT"));
+    assert!(h.spec_of("hoster-notes-worker-g1").env.is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_secret_rejects_the_deployment_naming_the_secret() {
+    let h = harness().await;
+    h.apply(WITH_SECRETS).await;
+    let deployed = h.deploy(&[("api", 1)]).await;
+    let rejected = h.finish(&deployed).await;
+    assert_eq!(rejected.state, S::Rejected, "{rejected:?}");
+    let error = rejected.error.unwrap();
+    assert!(error.contains("notes/database-url"), "{error}");
+    assert!(error.contains("api"), "{error}");
+    assert!(h.runtime.containers().is_empty());
+    assert!(h.store.port_allocations().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn replacing_a_secret_changes_the_config_hash_of_its_services_only() {
+    let h = harness().await;
+    h.set_secret("notes/database-url", "postgres://one").await;
+    h.apply(WITH_SECRETS).await;
+    let first = h.deploy(&[("api", 1), ("multi", 1), ("worker", 1)]).await;
+    assert_eq!(h.finish(&first).await.state, S::Live);
+
+    // Same digests, same secret: nothing to do.
+    assert_eq!(h.deploy(&[("api", 1)]).await.state, S::Noop);
+
+    h.set_secret("notes/database-url", "postgres://two").await;
+    let second = h.deploy(&[]).await;
+    assert_eq!(h.finish(&second).await.state, S::Live);
+    let generations = h.generations().await;
+    assert_eq!(
+        generations,
+        [("api".into(), 2), ("multi".into(), 1), ("worker".into(), 1)]
+    );
+    let api = h.spec_of("hoster-notes-api-g2");
+    assert_eq!(api.secrets["DATABASE_URL"].expose(), "postgres://two");
+}
+
+#[tokio::test]
+async fn volumes_are_created_labelled_before_their_container_and_kept_on_removal() {
+    let h = harness().await;
+    h.bootstrap().await;
+    let volumes = h.runtime.volumes();
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].name, "hoster-notes-data");
+    assert_eq!(volumes[0].labels[label::MANAGED], "true");
+    assert_eq!(volumes[0].labels[label::STACK], "notes");
+    let calls = h.runtime.calls();
+    let ensure = calls
+        .iter()
+        .position(|c| *c == Operation::EnsureVolume)
+        .unwrap();
+    assert!(calls[ensure + 1..].contains(&Operation::CreateContainer));
+
+    h.orchestrator.remove("notes").await.unwrap();
+    assert!(h.runtime.containers().is_empty());
+    assert_eq!(h.runtime.volumes(), volumes);
+}
+
+#[tokio::test]
+async fn a_volume_that_cannot_be_created_fails_the_deploy() {
+    let h = harness().await;
+    h.runtime.fail_always(
+        Operation::EnsureVolume,
+        RuntimeError::Api {
+            operation: Operation::EnsureVolume,
+            message: "disk full".into(),
+        },
+    );
+    let applied = h.apply(NOTES).await;
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    assert!(failed.error.unwrap().contains("hoster-notes-data"));
+    assert!(h.runtime.containers().is_empty());
+}
+
+/// `hoster-<stack>-<volume>` is ambiguous when names contain `-`: stack `a-b` volume `c` and stack
+/// `a` volume `b-c` are both `hoster-a-b-c`. The second stack must not mount the first's data.
+#[tokio::test]
+async fn a_volume_labelled_for_another_stack_is_never_mounted() {
+    let h = harness().await;
+    let stack = |name: &str, volume: &str| {
+        format!(
+            "version = 1\nname = \"{name}\"\n\n[services.db]\n\
+             image = \"docker.io/library/postgres:17\"\nupdate = \"stop-first\"\n\n\
+             [services.db.volumes]\n{volume} = \"/data\"\n"
+        )
+    };
+    let first = h.apply(&stack("a-b", "c")).await;
+    let first = h.finish(first.deployment.as_ref().unwrap()).await;
+    assert_eq!(first.state, S::Live, "{first:?}");
+
+    let second = h.apply(&stack("a", "b-c")).await;
+    let second = h.finish(second.deployment.as_ref().unwrap()).await;
+    assert_eq!(second.state, S::Failed, "{second:?}");
+    let error = second.error.unwrap();
+    assert!(error.contains("hoster-a-b-c"), "{error}");
+    assert!(error.contains("stack a-b"), "{error}");
+    let volumes = h.runtime.volumes();
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].labels[label::STACK], "a-b");
+    assert_eq!(h.runtime.containers().len(), 1);
+}
+
 /// Deploys the stack-format example (with public stand-in images) against a real rootless
 /// podman and the real registries. Run with `HOSTER_PODMAN_TESTS=1 cargo test`.
 #[tokio::test]
@@ -697,6 +876,7 @@ data = "/data"
         Arc::clone(&runtime),
         registry,
         PortAllocator::new(store.clone(), PortRange::try_from(28000..=28015).unwrap()),
+        SecretStore::new(store.clone(), &crate::secrets::SecretKey::generate()),
         Settings::default(),
     );
     let applied = orchestrator.apply(EXAMPLE).await.unwrap();
@@ -759,4 +939,124 @@ async fn deploy_work_logs_inside_the_deployment_and_service_spans() {
         ]),
         "{started}"
     );
+}
+
+/// Secrets, `PORT` and a volume on a real rootless podman: the app writes its environment and a
+/// run counter kept in its volume to files it serves over HTTP. Run with
+/// `HOSTER_PODMAN_TESTS=1 cargo test`.
+#[tokio::test]
+async fn secrets_port_and_volumes_on_real_podman() {
+    use crate::registry::Anonymous;
+    use crate::runtime::{PodmanRuntime, PodmanSocket};
+    use std::io::{Read as _, Write as _};
+
+    if !std::env::var("HOSTER_PODMAN_TESTS").is_ok_and(|v| v == "1") {
+        eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to deploy on rootless podman");
+        return;
+    }
+    const SERVE: &str = "mkdir -p /www && echo run >> /data/runs && cp /data/runs /www/runs \
+                         && env > /www/env && exec httpd -f -p 8080 -h /www";
+    let stack = format!(
+        r#"
+version = 1
+name = "hostersecrets"
+
+[services.app]
+image = "docker.io/library/busybox:1.37"
+command = ["sh", "-c", "{SERVE}"]
+update = "stop-first"
+secrets = {{ APP_TOKEN = "hostersecrets/token" }}
+
+[services.app.volumes]
+data = "/data"
+
+[[services.app.routes]]
+host = "app.hoster.test"
+port = 8080
+
+[services.multi]
+image = "docker.io/library/busybox:1.37"
+command = ["sh", "-c", "mkdir -p /www && env > /www/env && exec httpd -f -p 8080 -h /www"]
+
+[[services.multi.routes]]
+host = "multi.hoster.test"
+port = 8080
+
+[[services.multi.routes]]
+host = "multi.hoster.test"
+prefix = "/admin"
+port = 9090
+"#
+    );
+    let get = |port: u16, path: &str| -> String {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(stream, "GET {path} HTTP/1.0\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(&dir.path().join("state")).await.unwrap();
+    let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(std::path::PathBuf::from);
+    let runtime = Arc::new(
+        PodmanRuntime::connect(&PodmanSocket::from_env(socket.as_deref()))
+            .await
+            .expect("connect to rootless podman"),
+    );
+    let secrets = SecretStore::new(store.clone(), &SecretKey::generate());
+    let token: SecretName = "hostersecrets/token".parse().unwrap();
+    secrets.set(&token, &"first-token".into()).await.unwrap();
+    let orchestrator = Orchestrator::new(
+        store.clone(),
+        Arc::clone(&runtime),
+        Arc::new(RegistryClient::new(Arc::new(Anonymous)).unwrap()),
+        PortAllocator::new(store.clone(), PortRange::try_from(28100..=28115).unwrap()),
+        secrets.clone(),
+        Settings::default(),
+    );
+    let port_of = |pointers: &[crate::store::ServicePointer], service: &str, container: u16| {
+        pointers
+            .iter()
+            .find(|p| p.service == service)
+            .unwrap()
+            .ports[&container]
+    };
+
+    let applied = orchestrator.apply(&stack).await.unwrap();
+    let first = orchestrator
+        .wait(applied.deployment.unwrap().deployment)
+        .await
+        .unwrap();
+    let pointers = store.services("hostersecrets").await.unwrap();
+    let app_env = get(port_of(&pointers, "app", 8080), "/env");
+    let multi_env = get(port_of(&pointers, "multi", 8080), "/env");
+
+    // A replaced secret redeploys app; its volume keeps the first run's data.
+    secrets.set(&token, &"second-token".into()).await.unwrap();
+    let redeployed = orchestrator
+        .deploy("hostersecrets", DigestSet::new(), DeploymentSource::Manual)
+        .await
+        .unwrap();
+    let second = orchestrator.wait(redeployed.deployment).await.unwrap();
+    let pointers = store.services("hostersecrets").await.unwrap();
+    let app_env_2 = get(port_of(&pointers, "app", 8080), "/env");
+    let runs = get(port_of(&pointers, "app", 8080), "/runs");
+    let removed = orchestrator.remove("hostersecrets").await;
+    let volume_kept = std::process::Command::new("podman")
+        .args(["volume", "exists", "hoster-hostersecrets-data"])
+        .status()
+        .is_ok_and(|s| s.success());
+    let _ = std::process::Command::new("podman")
+        .args(["volume", "rm", "--force", "hoster-hostersecrets-data"])
+        .status();
+
+    assert_eq!(first.state, S::Live, "{first:?}");
+    assert_eq!(second.state, S::Live, "{second:?}");
+    assert!(app_env.contains("APP_TOKEN=first-token"), "{app_env}");
+    assert!(app_env.contains("PORT=8080"), "{app_env}");
+    assert!(!multi_env.contains("PORT="), "{multi_env}");
+    assert!(app_env_2.contains("APP_TOKEN=second-token"), "{app_env_2}");
+    assert_eq!(runs.matches("run").count(), 2, "{runs}");
+    assert_eq!(removed.unwrap().containers, 2);
+    assert!(volume_kept, "the volume survives stack removal");
 }

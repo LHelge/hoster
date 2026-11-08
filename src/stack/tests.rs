@@ -849,6 +849,56 @@ fn strip_prefix_on_root_warns() {
 }
 
 #[test]
+fn volumes_with_start_first_warn() {
+    let with_volume = format!("{MINIMAL}\n[services.app.volumes]\ndata = \"/data\"\n");
+    let parsed = parse(&with_volume).unwrap();
+    assert_eq!(parsed.warnings.len(), 1, "{:?}", parsed.warnings);
+    assert_eq!(parsed.warnings[0].path.to_string(), "services.app.volumes");
+    assert!(parsed.warnings[0].message.contains("stop-first"));
+
+    let stop_first = with_volume.replace(
+        "image = \"ghcr.io/acme/app\"",
+        "image = \"ghcr.io/acme/app\"\nupdate = \"stop-first\"",
+    );
+    assert!(parse(&stop_first).unwrap().warnings.is_empty());
+}
+
+#[test]
+fn container_env_adds_port_for_one_container_port_only() {
+    let env = |source: &str| app(&parse(source).unwrap().stack).container_env();
+    assert_eq!(env(MINIMAL)["PORT"], "8080");
+
+    // `env` wins over the injected value.
+    let own = MINIMAL.replace(
+        "image = \"ghcr.io/acme/app\"",
+        "image = \"ghcr.io/acme/app\"\nenv = { PORT = \"3000\", A = \"1\" }",
+    );
+    let own = env(&own);
+    assert_eq!(own["PORT"], "3000");
+    assert_eq!(own["A"], "1");
+
+    // A secret named `PORT` sets it too: no duplicate entry.
+    let secret = format!("{MINIMAL}\n[services.app.secrets]\nPORT = \"demo/port\"\n");
+    assert!(!env(&secret).contains_key("PORT"));
+
+    // Two routes, same port: still one distinct port.
+    let same = format!(
+        "{MINIMAL}\n[[services.app.routes]]\nhost = \"demo.example.com\"\nprefix = \"/b\"\nport = 8080\n"
+    );
+    assert_eq!(env(&same)["PORT"], "8080");
+
+    // Two distinct ports: nothing.
+    let multi = format!(
+        "{MINIMAL}\n[[services.app.routes]]\nhost = \"demo.example.com\"\nprefix = \"/b\"\nport = 9090\n"
+    );
+    assert!(!env(&multi).contains_key("PORT"));
+
+    // No routes: nothing.
+    let unrouted = "version = 1\nname = \"demo\"\n[services.app]\nimage = \"ghcr.io/acme/app\"\n";
+    assert!(env(unrouted).is_empty());
+}
+
+#[test]
 fn errors_carry_location_and_path() {
     let source = MINIMAL.replace("demo.example.com", "Demo.example.com");
     let err = parse(&source).unwrap_err();

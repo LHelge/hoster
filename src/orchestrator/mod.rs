@@ -36,6 +36,7 @@ use crate::ports::PortAllocator;
 use crate::registry::{RegistryClient, RegistryError};
 use crate::routing::{CollisionError, Reserved, RouteClaims};
 use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, label};
+use crate::secrets::{SecretError, SecretStore};
 use crate::stack::{Diagnostic, ImageRef, Name, PinnedImage, Stack, StackError};
 use crate::store::{
     Deployment, DeploymentId, DeploymentSource, DeploymentState, DigestSet, NewDeployment,
@@ -44,8 +45,8 @@ use crate::store::{
 
 use engine::{Run, Target};
 use machine::Event;
-use plan::Plan;
 pub use plan::PlanError;
+use plan::{Plan, SecretVersions};
 
 /// Resolves a third-party image's tag to the digest the registry serves for it (ADR-0025).
 /// [`RegistryClient`] in production; tests use a fake.
@@ -107,6 +108,8 @@ pub enum OrchestratorError {
     StackBusy(String),
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
+    #[error(transparent)]
+    Secret(#[from] SecretError),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -193,6 +196,8 @@ pub struct Orchestrator<R> {
     runtime: Arc<R>,
     resolver: Arc<dyn TagResolver>,
     ports: PortAllocator,
+    /// App secrets, injected at container create (ADR-0029).
+    secrets: SecretStore,
     settings: Settings,
     slots: Mutex<BTreeMap<String, Slot>>,
     /// Signalled whenever a deployment leaves its stack's slot.
@@ -226,6 +231,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         runtime: Arc<R>,
         resolver: Arc<dyn TagResolver>,
         ports: PortAllocator,
+        secrets: SecretStore,
         settings: Settings,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -233,6 +239,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             runtime,
             resolver,
             ports,
+            secrets,
             settings,
             slots: Mutex::default(),
             finished: Notify::new(),
@@ -252,7 +259,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let revision = self.store.add_pinned_revision(&name, toml, &images).await?;
         tracing::info!(stack = %name, revision = revision.revision, "applied stack revision");
         let running = self.store.services(&name).await?;
-        let plan = Plan::new(&definition, &images, &DigestSet::new(), &running)?;
+        let secrets = self.secret_versions(&definition).await?;
+        let plan = Plan::new(&definition, &images, &DigestSet::new(), &running, &secrets)?;
         let changed = plan
             .changes
             .iter()
@@ -543,7 +551,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     ) -> Result<DeployOutcome> {
         let stack = target.stack().to_string();
         let running = self.store.services(&stack).await?;
-        let digests = target.plan(&running)?.target();
+        let secrets = self.secret_versions(target.definition()).await?;
+        let digests = target.plan(&running, &secrets)?.target();
         let record = self
             .store
             .create_deployment(&NewDeployment {
@@ -646,6 +655,20 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
         }
         Ok(others)
+    }
+
+    /// The current versions of every secret `stack` references; unset ones are left out.
+    async fn secret_versions(&self, stack: &Stack) -> Result<SecretVersions> {
+        let mut versions = SecretVersions::new();
+        for name in stack.services.values().flat_map(|s| s.secrets.values()) {
+            if versions.contains_key(name) {
+                continue;
+            }
+            if let Some(version) = self.secrets.version(name).await? {
+                versions.insert(name.clone(), version);
+            }
+        }
+        Ok(versions)
     }
 
     /// Pins every third-party image: a digest in the file is kept, a tag is resolved

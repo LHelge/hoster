@@ -490,6 +490,18 @@ impl RawService {
             secrets.insert(key, value.into_inner());
         }
 
+        if self.update == UpdateStrategy::StartFirst
+            && let Some(first) = self.volumes.values().next()
+        {
+            // ADR-0030, ADR-0039: during a start-first deploy two instances mount the volume.
+            v.warn(
+                &path.key("volumes"),
+                first.span(),
+                "this service has volumes but uses `update = \"start-first\"`: during a deploy the \
+                 old and the new container mount the same volume at once; set \
+                 `update = \"stop-first\"` unless the app is safe with that",
+            );
+        }
         let mut volumes = BTreeMap::new();
         let mut mount_paths = BTreeSet::new();
         for (key, target) in self.volumes {

@@ -353,6 +353,26 @@ pub struct SessionRecord {
     pub expires_at: Timestamp,
 }
 
+/// One secret as the store keeps it: sealed under the secret-store key (ADR-0029). Only
+/// `secrets::SecretStore` opens it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedSecret {
+    pub name: String,
+    /// 24 random bytes, fresh for every write.
+    pub nonce: Vec<u8>,
+    /// The XChaCha20-Poly1305 ciphertext, tag included.
+    pub ciphertext: Vec<u8>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+/// A secret's name and when it last changed: everything the UI may show of it (ADR-0029).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretEntry {
+    pub name: String,
+    pub updated_at: Timestamp,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

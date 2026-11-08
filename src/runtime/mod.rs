@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime};
 use futures_util::stream::BoxStream;
 
 use crate::registry::CredentialError;
+use crate::secrets::SecretValue;
 use crate::stack::{DEFAULT_STOP_TIMEOUT, Name, PinnedImage};
 use crate::store::DeploymentId;
 
@@ -65,6 +66,15 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     fn ensure_network(
         &self,
         network: &NetworkSpec,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + Send;
+
+    /// Creates the named volume unless one with that name exists (idempotent). An existing volume
+    /// is used as it is, labelled or not, so a volume restored by hand keeps its data (ADR-0030),
+    /// unless it is labelled for another stack ([`VolumeSpec::check_existing`]).
+    /// Volumes are never removed by the runtime: stack removal keeps them.
+    fn ensure_volume(
+        &self,
+        volume: &VolumeSpec,
     ) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
     /// Removes a network. Fails with [`RuntimeError::InUse`] while containers are attached.
@@ -208,6 +218,9 @@ pub struct ContainerSpec {
     pub command: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub env: BTreeMap<String, String>,
+    /// Environment variables from the secret store (ADR-0029), kept apart from `env` so that
+    /// `Debug` (and anything logging a spec) never shows their values.
+    pub secrets: BTreeMap<String, SecretValue>,
     pub labels: Labels,
     /// The stack network to join, and the alias (the service name) to join it with. Both are
     /// derived from the [`ServiceGeneration`] by [`ContainerSpec::new`] and cannot be set from
@@ -256,6 +269,7 @@ impl ContainerSpec {
             command: None,
             entrypoint: None,
             env: BTreeMap::new(),
+            secrets: BTreeMap::new(),
             labels,
             network: NetworkSpec::for_stack(&generation.stack).name,
             network_alias: generation.service.to_string(),
@@ -291,13 +305,61 @@ impl PortBinding {
     pub const HOST_IP: Ipv4Addr = Ipv4Addr::LOCALHOST;
 }
 
+/// A stack's named podman volume (`hoster-<stack>-<volume>`, ADR-0030), labelled
+/// `hoster.managed=true` and `hoster.stack=<stack>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeSpec {
+    pub name: String,
+    pub labels: Labels,
+}
+
+impl VolumeSpec {
+    /// The volume `volume` of `stack`.
+    pub fn for_stack(stack: &Name, volume: &Name) -> Self {
+        Self {
+            name: format!("{PREFIX}-{stack}-{volume}"),
+            labels: Labels::from([
+                (label::MANAGED.into(), "true".into()),
+                (label::STACK.into(), stack.to_string()),
+            ]),
+        }
+    }
+
+    /// Whether an existing volume of this name, with `labels`, may be used. One that hoster
+    /// labelled for another stack may not: `hoster-<stack>-<volume>` is ambiguous when names
+    /// contain `-` (stack `a-b`, volume `c` and stack `a`, volume `b-c`), and one stack must
+    /// never mount another's data. An unlabelled volume is used as it is, with a warning, since
+    /// it may hold data restored by hand (ADR-0030, docs/backup.md).
+    pub fn check_existing<'a>(
+        &self,
+        labels: impl IntoIterator<Item = (&'a String, &'a String)>,
+    ) -> Result<(), RuntimeError> {
+        let owner = labels
+            .into_iter()
+            .find_map(|(k, v)| (k == label::STACK).then_some(v));
+        match owner {
+            Some(owner) if Some(owner) != self.labels.get(label::STACK) => {
+                Err(RuntimeError::Conflict {
+                    kind: ObjectKind::Volume,
+                    name: format!("{} (it belongs to stack {owner})", self.name),
+                })
+            }
+            Some(_) => Ok(()),
+            None => {
+                tracing::warn!(volume = %self.name, "using an existing volume hoster did not label");
+                Ok(())
+            }
+        }
+    }
+}
+
 /// A named podman volume (`hoster-<stack>-<volume>`, ADR-0030) mounted at `target`.
 ///
 /// Built only through [`VolumeMount::named`], so it can never be a bind mount of a host path
 /// (ADR-0019).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeMount {
-    volume: String,
+    volume: VolumeSpec,
     target: String,
 }
 
@@ -325,13 +387,18 @@ impl VolumeMount {
             ));
         }
         Ok(Self {
-            volume: format!("{PREFIX}-{stack}-{volume}"),
+            volume: VolumeSpec::for_stack(stack, &volume),
             target: target.to_owned(),
         })
     }
 
     /// The podman volume name, `hoster-<stack>-<volume>`.
     pub fn volume(&self) -> &str {
+        &self.volume.name
+    }
+
+    /// The volume to create before the container that mounts it.
+    pub fn spec(&self) -> &VolumeSpec {
         &self.volume
     }
 
@@ -485,6 +552,7 @@ impl fmt::Display for LogStream {
 pub enum Operation {
     Connect,
     EnsureNetwork,
+    EnsureVolume,
     RemoveNetwork,
     PullImage,
     CreateContainer,
@@ -501,6 +569,7 @@ impl fmt::Display for Operation {
         f.write_str(match self {
             Self::Connect => "connect",
             Self::EnsureNetwork => "ensure network",
+            Self::EnsureVolume => "ensure volume",
             Self::RemoveNetwork => "remove network",
             Self::PullImage => "pull image",
             Self::CreateContainer => "create container",
@@ -519,6 +588,7 @@ impl fmt::Display for Operation {
 #[allow(dead_code, reason = "named by the fake runtime and podman operations")]
 pub enum ObjectKind {
     Network,
+    Volume,
     Container,
     Image,
 }
@@ -527,6 +597,7 @@ impl fmt::Display for ObjectKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Network => "network",
+            Self::Volume => "volume",
             Self::Container => "container",
             Self::Image => "image",
         })

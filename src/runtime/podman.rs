@@ -15,7 +15,7 @@ use bollard::errors::Error as BollardError;
 use bollard::models::{
     ContainerCreateBody, ContainerInspectResponse, ContainerSummary, EndpointSettings, HostConfig,
     HostConfigLogConfig, Mount, MountType, NetworkCreateRequest, NetworkingConfig, PortMap,
-    PortSummaryTypeEnum, RestartPolicy, RestartPolicyNameEnum,
+    PortSummaryTypeEnum, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
@@ -30,7 +30,7 @@ use time::format_description::well_known::Rfc3339;
 use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
     LogOptions, LogStream, NetworkSpec, ObjectKind, Operation, PortBinding, PublishedPort,
-    RuntimeError, label,
+    RuntimeError, VolumeSpec, label,
 };
 use crate::registry::{Anonymous, RegistryCredential, RegistryCredentials};
 use crate::stack::PinnedImage;
@@ -376,7 +376,18 @@ impl From<&ContainerSpec> for ContainerCreateBody {
             image: Some(spec.image.to_string()),
             cmd: spec.command.clone(),
             entrypoint: spec.entrypoint.clone(),
-            env: Some(spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
+            // Secrets last: the stack format already rejects a name set in both (ADR-0029).
+            env: Some(
+                spec.env
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .chain(
+                        spec.secrets
+                            .iter()
+                            .map(|(k, v)| format!("{k}={}", v.expose())),
+                    )
+                    .collect(),
+            ),
             labels: Some(spec.labels.clone().into_iter().collect()),
             user: spec.user.clone(),
             exposed_ports: Some(exposed),
@@ -544,6 +555,30 @@ impl ContainerRuntime for PodmanRuntime {
             ..NetworkCreateRequest::default()
         };
         match self.docker.create_network(request).await {
+            Ok(_) => Ok(()),
+            // Created concurrently since the inspect: that is the state we wanted.
+            Err(BollardError::DockerResponseServerError {
+                status_code: 409, ..
+            }) => Ok(()),
+            Err(err) => Err(call.error(err)),
+        }
+    }
+
+    async fn ensure_volume(&self, volume: &VolumeSpec) -> Result<(), RuntimeError> {
+        let call = Call::new(Operation::EnsureVolume, ObjectKind::Volume, &volume.name);
+        match self.docker.inspect_volume(&volume.name).await {
+            Ok(existing) => return volume.check_existing(&existing.labels),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {}
+            Err(err) => return Err(call.error(err)),
+        }
+        let request = VolumeCreateRequest {
+            name: Some(volume.name.clone()),
+            labels: Some(volume.labels.clone().into_iter().collect()),
+            ..VolumeCreateRequest::default()
+        };
+        match self.docker.create_volume(request).await {
             Ok(_) => Ok(()),
             // Created concurrently since the inspect: that is the state we wanted.
             Err(BollardError::DockerResponseServerError {
@@ -1232,6 +1267,12 @@ mod tests {
         spec.command = Some(vec!["httpd".into(), "-f".into()]);
         spec.entrypoint = Some(vec!["/bin/sh".into()]);
         spec.env.insert("FOO".into(), "bar=baz".into());
+        spec.secrets
+            .insert("DATABASE_URL".into(), "postgres://s3cret".into());
+        assert!(
+            !format!("{spec:?}").contains("s3cret"),
+            "Debug leaks secrets"
+        );
         spec.user = Some("1000:1000".into());
         spec.read_only = true;
         spec.stop_timeout = Duration::from_secs(25);
@@ -1257,7 +1298,13 @@ mod tests {
         );
         assert_eq!(body.cmd, spec.command);
         assert_eq!(body.entrypoint, spec.entrypoint);
-        assert_eq!(body.env, Some(vec!["FOO=bar=baz".to_owned()]));
+        assert_eq!(
+            body.env,
+            Some(vec![
+                "FOO=bar=baz".to_owned(),
+                "DATABASE_URL=postgres://s3cret".to_owned()
+            ])
+        );
         assert_eq!(body.user.as_deref(), Some("1000:1000"));
         assert_eq!(body.stop_timeout, Some(25));
         assert_eq!(

@@ -1,8 +1,9 @@
 //! [`FakeRuntime`]: an in-memory [`ContainerRuntime`] for deploy-engine and reconciler tests.
 //!
 //! It models just enough of podman to catch ordering mistakes: containers need their image
-//! pulled and their network present, names are unique, networks with containers cannot be
-//! removed. Failures are injected per [`Operation`], and every call is recorded.
+//! pulled and their network and volumes present, names are unique, networks with containers
+//! cannot be removed, and volumes are never removed. Failures are injected per [`Operation`],
+//! and every call is recorded.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
@@ -14,7 +15,7 @@ use tokio::sync::mpsc;
 
 use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
-    LogOptions, NetworkSpec, ObjectKind, Operation, RuntimeError,
+    LogOptions, NetworkSpec, ObjectKind, Operation, RuntimeError, VolumeSpec,
 };
 use crate::stack::PinnedImage;
 
@@ -27,6 +28,7 @@ pub struct FakeRuntime {
 #[derive(Debug, Default)]
 struct State {
     networks: BTreeMap<String, NetworkSpec>,
+    volumes: BTreeMap<String, VolumeSpec>,
     images: BTreeSet<String>,
     containers: BTreeMap<ContainerId, FakeContainer>,
     next_id: u64,
@@ -139,6 +141,11 @@ impl FakeRuntime {
         self.lock().networks.values().cloned().collect()
     }
 
+    /// Every volume ever created (volumes are never removed).
+    pub fn volumes(&self) -> Vec<VolumeSpec> {
+        self.lock().volumes.values().cloned().collect()
+    }
+
     pub fn has_image(&self, image: &PinnedImage) -> bool {
         self.lock().images.contains(&image.to_string())
     }
@@ -193,6 +200,18 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
+    async fn ensure_volume(&self, volume: &VolumeSpec) -> Result<(), RuntimeError> {
+        let mut state = self.lock();
+        state.enter(Operation::EnsureVolume)?;
+        match state.volumes.get(&volume.name) {
+            Some(existing) => volume.check_existing(&existing.labels),
+            None => {
+                state.volumes.insert(volume.name.clone(), volume.clone());
+                Ok(())
+            }
+        }
+    }
+
     async fn remove_network(&self, name: &str) -> Result<(), RuntimeError> {
         let mut state = self.lock();
         state.enter(Operation::RemoveNetwork)?;
@@ -233,6 +252,16 @@ impl ContainerRuntime for FakeRuntime {
             return Err(RuntimeError::NotFound {
                 kind: ObjectKind::Network,
                 name: spec.network.clone(),
+            });
+        }
+        if let Some(missing) = spec
+            .volumes
+            .iter()
+            .find(|v| !state.volumes.contains_key(v.volume()))
+        {
+            return Err(RuntimeError::NotFound {
+                kind: ObjectKind::Volume,
+                name: missing.volume().to_owned(),
             });
         }
         if state.containers.values().any(|c| c.spec.name == spec.name) {
@@ -368,6 +397,7 @@ mod tests {
             command: None,
             entrypoint: None,
             env: BTreeMap::new(),
+            secrets: BTreeMap::new(),
             labels: Labels::from([
                 (label::MANAGED.into(), "true".into()),
                 (label::STACK.into(), "notes".into()),

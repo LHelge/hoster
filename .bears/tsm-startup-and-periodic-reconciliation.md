@@ -1,15 +1,16 @@
 ---
 id: tsm
 title: Startup and periodic reconciliation
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.211279069Z"
-updated: "2026-11-07T14:45:17.211279069Z"
+updated: "2026-11-08T00:20:30.221212334Z"
 tags:
   - orchestrator
 depends_on:
   - "8w4"
 parent: ame
+attempts: 1
 ---
 
 ## Summary

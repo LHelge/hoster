@@ -15,6 +15,7 @@ mod proxy;
 mod registry;
 mod routing;
 mod runtime;
+mod secrets;
 mod stack;
 mod store;
 mod supervisor;

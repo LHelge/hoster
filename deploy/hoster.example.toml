@@ -33,6 +33,12 @@ admin_host = "hoster.example.com"
 # Must be absolute. Default: $XDG_DATA_HOME/hoster (~/.local/share/hoster).
 # state_dir = "/home/hoster/.local/share/hoster"
 
+# The secret-store key file (ADR-0029): generated (mode 0600) on first start, unless the systemd
+# credential `secret_key` supplies the key (LoadCredential[Encrypted]=secret_key:... in the unit;
+# one line of base64 holding 32 bytes). Must be absolute and outside state_dir. Back it up
+# separately from the database. Default: $XDG_CONFIG_HOME/hoster/secret.key.
+# secret_key_file = "/home/hoster/.config/hoster/secret.key"
+
 # The rootless podman API socket, provided by the hoster user's `podman.socket` unit (ADR-0023).
 # Must be absolute. Default: $XDG_RUNTIME_DIR/podman/podman.sock, then
 # /run/user/$UID/podman/podman.sock. Rootful sockets and $DOCKER_HOST are never used.

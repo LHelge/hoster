@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::machine::{Effect, Event};
-use super::plan::{Change, Plan};
+use super::plan::{Change, Plan, SecretVersions};
 use super::{Orchestrator, Result};
 use crate::logging::LogSpan;
 use crate::routing::RouteClaims;
@@ -57,9 +57,23 @@ impl Target {
         self.revision.id
     }
 
-    /// Compares the target with what runs.
-    pub(super) fn plan(&self, running: &[ServicePointer]) -> Result<Plan, super::PlanError> {
-        Plan::new(&self.definition, &self.pins, &self.requested, running)
+    pub(super) fn definition(&self) -> &Stack {
+        &self.definition
+    }
+
+    /// Compares the target with what runs, given the current `secrets` versions.
+    pub(super) fn plan(
+        &self,
+        running: &[ServicePointer],
+        secrets: &SecretVersions,
+    ) -> Result<Plan, super::PlanError> {
+        Plan::new(
+            &self.definition,
+            &self.pins,
+            &self.requested,
+            running,
+            secrets,
+        )
     }
 }
 
@@ -215,9 +229,16 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// `Received`: (re)compares the target with the current pointers (§5.2). A queued
     /// deployment is re-planned against what runs by now, so its record is brought up to date.
     pub(super) async fn check_running(&self, run: &mut Run) -> Event {
-        let plan = match self.store.services(&run.stack_name()).await {
-            Ok(running) => run.target.plan(&running).map_err(|e| e.to_string()),
-            Err(err) => Err(err.to_string()),
+        let plan = match (
+            self.store.services(&run.stack_name()).await,
+            self.secret_versions(&run.target.definition).await,
+        ) {
+            (Ok(running), Ok(secrets)) => run
+                .target
+                .plan(&running, &secrets)
+                .map_err(|e| e.to_string()),
+            (Err(err), _) => Err(err.to_string()),
+            (_, Err(err)) => Err(err.to_string()),
         };
         run.plan = plan;
         if let Ok(plan) = &run.plan {
@@ -255,6 +276,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         {
             return Event::Invalid(err.to_string());
         }
+        if let Err(reason) = self.check_secrets(run).await {
+            return Event::Invalid(reason);
+        }
         run.generation = match self.store.assign_generation(run.id).await {
             Ok(generation) => generation,
             Err(err) => return Event::Invalid(err.to_string()),
@@ -291,6 +315,27 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
         }
         Event::Validated
+    }
+
+    /// Every secret a changed service references must be set (ADR-0029). The message names the
+    /// secret, never a value.
+    async fn check_secrets(&self, run: &Run) -> Result<(), String> {
+        for change in &run.plan().changes {
+            let service = &run.target.definition.services[&change.service];
+            for (env, secret) in &service.secrets {
+                match self.secrets.version(secret).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return Err(format!(
+                            "service {}: secret `{secret}` (for {env}) is not set",
+                            change.service
+                        ));
+                    }
+                    Err(err) => return Err(format!("service {}: {err}", change.service)),
+                }
+            }
+        }
+        Ok(())
     }
 
     /// `Pulling`: every changed image, by digest.
@@ -477,6 +522,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
     /// Creates and starts the new container of `change`; it is recorded in `run.created`
     /// as soon as it exists, so an abort removes it.
+    ///
+    /// Secrets are read from the store here, at create time, and go into the spec's redacted
+    /// `secrets` map only. Volumes are created first if they do not exist yet (ADR-0030).
     async fn create_and_start(&self, run: &mut Run, change: &Change) -> Result<(), String> {
         let span = LogSpan::service(
             run.target.stack().as_ref(),
@@ -484,7 +532,28 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             run.generation,
         );
         async {
-            let spec = run.spec(change)?;
+            let mut spec = run.spec(change)?;
+            let service = &run.target.definition.services[&change.service];
+            for (env, secret) in &service.secrets {
+                match self.secrets.reveal(secret).await {
+                    Ok(Some((value, _))) => {
+                        spec.secrets.insert(env.clone(), value);
+                    }
+                    Ok(None) => {
+                        return Err(format!(
+                            "cannot create {}: secret `{secret}` (for {env}) is not set",
+                            spec.name
+                        ));
+                    }
+                    Err(err) => return Err(format!("cannot create {}: {err}", spec.name)),
+                }
+            }
+            for volume in &spec.volumes {
+                self.runtime
+                    .ensure_volume(volume.spec())
+                    .await
+                    .map_err(|err| format!("cannot create volume {}: {err}", volume.volume()))?;
+            }
             let id = self
                 .runtime
                 .create_container(&spec)
@@ -546,17 +615,12 @@ impl Run {
         let mut spec = ContainerSpec::new(&generation, self.id, change.image.clone());
         spec.command = service.command.clone();
         spec.entrypoint = service.entrypoint.clone();
-        spec.env = service.env.clone();
+        // `env` plus the injected `PORT` (ADR-0051), exactly what the config hash covers.
+        spec.env = service.container_env();
         spec.user = service.user.clone();
         spec.read_only = service.read_only;
         spec.stop_timeout = service.stop_timeout;
         let ports = self.ports.get(&change.service).cloned().unwrap_or_default();
-        // ADR-0051: a single-port routed service learns its port as `PORT`.
-        if let [(container_port, _)] = ports.iter().collect::<Vec<_>>()[..] {
-            spec.env
-                .entry("PORT".into())
-                .or_insert_with(|| container_port.to_string());
-        }
         spec.ports = ports
             .into_iter()
             .map(|(container_port, host_port)| PortBinding {

@@ -53,6 +53,10 @@ pub struct Config {
     /// Where hoster keeps SQLite, certificates, the ACME account and the admin socket.
     /// Defaults to `$XDG_DATA_HOME/hoster` (ADR-0023).
     pub state_dir: PathBuf,
+    /// The secret-store key file (ADR-0029), generated on first start unless the systemd
+    /// credential `secret_key` supplies the key. Defaults to `$XDG_CONFIG_HOME/hoster/secret.key`;
+    /// it must not be inside `state_dir`, next to the database it unlocks.
+    pub secret_key_file: PathBuf,
     /// The reserved admin host serving the web UI and the deploy webhook (ADR-0031).
     pub admin_host: Hostname,
     /// The admin's GitHub handle, from `HOSTER_ADMIN_GITHUB` only.
@@ -277,6 +281,9 @@ impl Config {
         if let Some(state_dir) = dirs.state_dir() {
             figment = figment.merge(Serialized::default("state_dir", state_dir));
         }
+        if let Some(key_file) = dirs.secret_key_file() {
+            figment = figment.merge(Serialized::default("secret_key_file", key_file));
+        }
         let figment = figment.merge(file).merge(EnvOverrides::new());
 
         // A file that cannot be read or parsed hides every key; report only that, rather than
@@ -302,6 +309,12 @@ impl Config {
                 "not set, and neither $XDG_DATA_HOME nor $HOME is set to derive it from",
             ));
         }
+        if !figment.contains("secret_key_file") {
+            problems.push(Problem::new(
+                "secret_key_file",
+                "not set, and neither $XDG_CONFIG_HOME nor $HOME is set to derive it from",
+            ));
+        }
 
         let config = match figment.extract::<Config>() {
             Ok(config) => Some(config),
@@ -310,7 +323,11 @@ impl Config {
                     errors
                         .into_iter()
                         // Already reported above with a better message.
-                        .filter(|e| !is_missing(e, ADMIN_GITHUB_KEY) && !is_missing(e, "state_dir"))
+                        .filter(|e| {
+                            !is_missing(e, ADMIN_GITHUB_KEY)
+                                && !is_missing(e, "state_dir")
+                                && !is_missing(e, "secret_key_file")
+                        })
                         .map(Problem::from),
                 );
                 None
@@ -352,6 +369,15 @@ impl Config {
         let mut problems = Vec::new();
         if !self.state_dir.is_absolute() {
             problems.push(Problem::new("state_dir", "must be an absolute path"));
+        }
+        if !self.secret_key_file.is_absolute() {
+            problems.push(Problem::new("secret_key_file", "must be an absolute path"));
+        } else if self.secret_key_file.starts_with(&self.state_dir) {
+            problems.push(Problem::new(
+                "secret_key_file",
+                "must not be inside state_dir: the key would sit next to the database it unlocks \
+                 (ADR-0029)",
+            ));
         }
         if let Some(socket) = &self.podman_socket
             && !socket.is_absolute()
@@ -485,6 +511,7 @@ impl EnvOverrides {
     /// Every key (after `__` → `.`) whose value is a string, path or hostname.
     const STRING_KEYS: &[&str] = &[
         "state_dir",
+        "secret_key_file",
         "admin_host",
         "podman_socket",
         ADMIN_GITHUB_KEY,
@@ -662,6 +689,12 @@ impl XdgDirs {
     fn state_dir(&self) -> Option<PathBuf> {
         self.data_home.as_ref().map(|dir| dir.join("hoster"))
     }
+
+    fn secret_key_file(&self) -> Option<PathBuf> {
+        self.config_home
+            .as_ref()
+            .map(|dir| dir.join("hoster").join("secret.key"))
+    }
 }
 
 /// Secret sources kept outside the configuration (ADR-0024): systemd credentials in
@@ -672,6 +705,14 @@ pub struct Credentials {
 }
 
 impl Credentials {
+    /// The credentials in `dir`, as if `$CREDENTIALS_DIRECTORY` named it.
+    #[cfg(test)]
+    pub fn in_dir(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: Some(dir.into()),
+        }
+    }
+
     fn from_env() -> Self {
         Self {
             dir: std::env::var_os("CREDENTIALS_DIRECTORY")
@@ -1023,6 +1064,32 @@ mod tests {
             assert_eq!(config.upstream_ports.to_string(), "20000-29999");
             assert_eq!(config.upstream_ports.len(), 10000);
             assert_eq!(config.webhook_audience(), "https://hoster.example.com");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn secret_key_file_defaults_to_the_config_dir_and_stays_out_of_state_dir() {
+        Jail::expect_with(|jail| {
+            with_admin(jail);
+            jail.set_env("XDG_CONFIG_HOME", jail.directory().join("cfg").display());
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(
+                config.secret_key_file,
+                jail.directory().join("cfg/hoster/secret.key")
+            );
+            let inside = format!(
+                "{MINIMAL}secret_key_file = \"{}\"\n",
+                jail.directory().join("data/hoster/secret.key").display()
+            );
+            assert!(has_problem(
+                &invalid(load(jail, &inside)),
+                "secret_key_file"
+            ));
+            assert!(has_problem(
+                &invalid(load(jail, &format!("{MINIMAL}secret_key_file = \"key\"\n"))),
+                "secret_key_file"
+            ));
             Ok(())
         });
     }

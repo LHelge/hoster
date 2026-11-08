@@ -27,6 +27,7 @@ use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
 use crate::registry::FileCredentials;
 use crate::routing::RouteTable;
 use crate::runtime::{PodmanRuntime, PodmanSocket};
+use crate::secrets::SecretStore;
 use crate::store::Store;
 use crate::web::{Listen, WebApp, WebServer};
 
@@ -378,6 +379,13 @@ pub struct Supervisor {
     config: Config,
     /// The state store, opened in startup step 2.
     store: Option<Store>,
+    /// The secret store (ADR-0029), opened with the state store; its key is generated on the
+    /// first start.
+    #[allow(
+        dead_code,
+        reason = "handed to the orchestrator and web UI when they are wired"
+    )]
+    secrets: Option<SecretStore>,
     /// The certificates served by SNI, loaded from disk in startup step 3.
     certs: Option<CertMap>,
     /// The HTTP-01 challenges the `:80` listener answers; the ACME task fills it.
@@ -395,6 +403,7 @@ impl Supervisor {
         Supervisor {
             config,
             store: None,
+            secrets: None,
             certs: None,
             challenges: ChallengeMap::default(),
             runtime: None,
@@ -520,6 +529,14 @@ impl Startup for Supervisor {
             Phase::StateStore => {
                 let store = Store::open(&self.config.state_dir).await?;
                 tracing::info!(path = %store.path().display(), "state store ready");
+                let secrets = SecretStore::open(
+                    store.clone(),
+                    &self.config.secret_key_file,
+                    &self.config.credentials,
+                )
+                .await
+                .context("cannot open the secret store")?;
+                self.secrets = Some(secrets);
                 self.store = Some(store);
                 Ok(())
             }
