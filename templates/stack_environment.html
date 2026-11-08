@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Environment of {{ header.name }}{% endblock %}
+{% block head %}{% include "stack_header.html" %}{% endblock %}
+{% block content %}
+{%- let (vars, secrets) = env.counts() %}
+<section class="card" id="env" aria-labelledby="env-title">
+  <header class="card-head">
+    <h2 id="env-title">Environment &amp; secrets <span class="card-count">· {{ vars }} {% if vars == 1 %}variable{% else %}variables{% endif %} · {{ secrets }} {% if secrets == 1 %}secret{% else %}secrets{% endif %}</span></h2>
+    <span class="card-note">from the stack file of revision {{ env.revision }}</span>
+  </header>
+  {%- if let Some(error) = env.error %}
+  <p class="card-body card-error">Cannot read the active revision's stack file, so only the stored secrets are listed: {{ error }}</p>
+  {%- endif %}
+  {%- if env.rows.is_empty() %}
+  <p class="card-body muted">The active revision sets no environment variables and references no secrets, and the stack has no stored secrets.</p>
+  {%- else %}
+  <div class="table-scroll"><table class="list env">
+    <thead>
+      <tr><th scope="col">Key</th><th scope="col">Value</th><th scope="col">Service</th><th scope="col">Type</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+    </thead>
+    <tbody>
+      {%- for row in env.rows %}
+      <tr>
+        <td>{% if let Some(key) = row.key %}<code class="env-key">{{ key }}</code>{% else %}<span class="muted" aria-hidden="true" title="No service of the active revision references this secret">—</span><span class="visually-hidden">not referenced by any service</span>{% endif %}</td>
+        {%- if let Some(secret) = row.value.secret() %}
+        <td><code class="env-secret">{{ row.value.text() }}</code>
+          {%- if let Some((ago, at)) = secret.changed %}<span class="env-changed">set <time datetime="{{ at }}" title="{{ at }}">{{ ago }}</time></span>
+          {%- else %} {{ crate::web::Tone::Warn.pill("not set") }}{% endif %}</td>
+        {%- else %}
+        <td><code class="wrap env-value">{{ row.value.text() }}</code>{% if row.value.injected() %}<span class="env-changed">added by hoster: the route's port</span>{% endif %}</td>
+        {%- endif %}
+        <td>{% if let Some(service) = row.service %}<span class="mono env-service">{{ service }}</span>{% else %}<span class="mono env-service muted">no service</span>{% endif %}</td>
+        <td><span class="tag{% if row.value.secret().is_none() %} tag-neutral{% endif %} env-type">{{ row.value }}</span></td>
+        <td class="row-actions">
+          {%- if let Some(secret) = row.value.secret() %}
+          <a class="mono" href="?set={{ secret.name }}#set-secret">{% if secret.changed.is_some() %}replace{% else %}set{% endif %}<span class="visually-hidden"> {{ row.value.text() }}</span></a>
+          {%- if secret.changed.is_some() %}
+          <form class="inline-form row-form" hx-post="{{ action }}/delete" hx-target="#delete-result"{% if !secret.referenced %} hx-confirm="Delete {{ row.value.text() }}?"{% endif %}>
+            <input type="hidden" name="name" value="{{ secret.name }}">
+            <button type="submit" class="row-button row-danger">delete<span class="visually-hidden"> {{ row.value.text() }}</span></button>
+          </form>
+          {%- endif %}
+          {%- else %}
+          <span class="muted" title="Variables change through the stack file">—</span>
+          {%- endif %}
+        </td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table></div>
+  {%- endif %}
+  <div id="delete-result" class="card-result" aria-live="polite"></div>
+  <p class="card-foot">Variables come from the stack file's <code>env</code> and change only with it: apply a new revision. Secrets are encrypted at rest and write-only, so their values are never shown again; a service gets one as a variable through <code>secrets = { ENV_NAME = "{{ header.name }}/&lt;name&gt;" }</code>.</p>
+</section>
+
+<section class="card" id="set-secret" aria-labelledby="set-secret-title">
+  <header class="card-head">
+    <h2 id="set-secret-title">Set a secret</h2>
+    <span class="card-note">setting an existing name replaces its value</span>
+  </header>
+  <form id="secret-form" class="card-body secret-form" hx-post="{{ action }}" hx-target="#secret-result">
+    <div class="secret-fields">
+      <div class="secret-field">
+        <label for="secret-name">Name<span class="visually-hidden"> (without the {{ header.name }}/ prefix, which is added for you)</span></label>
+        <div class="secret-name"><span class="secret-prefix" aria-hidden="true">{{ header.name }}/</span><input id="secret-name" type="text" name="name" required autocomplete="off" spellcheck="false" placeholder="db-url" list="secret-names"{% if !prefill.is_empty() %} value="{{ prefill }}"{% endif %}></div>
+        <datalist id="secret-names">
+          {%- for name in names %}
+          <option value="{{ name }}">
+          {%- endfor %}
+        </datalist>
+      </div>
+      <div class="secret-field">
+        <label for="secret-value">Value</label>
+        <textarea id="secret-value" name="value" rows="3" required autocomplete="off" spellcheck="false"></textarea>
+      </div>
+    </div>
+    <p class="muted">You review the services that will be redeployed before anything is saved.</p>
+    <button type="submit" class="primary">Review</button>
+  </form>
+  <div id="secret-result" class="card-result" aria-live="polite"></div>
+</section>
+{% endblock %}

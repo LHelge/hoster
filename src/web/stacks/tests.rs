@@ -20,6 +20,8 @@ name = "notes"
 
 [services.api]
 image = "ghcr.io/acme/notes-api"
+env = { RUST_LOG = "info,notes=debug" }
+secrets = { DATABASE_URL = "notes/db", S3_SECRET_KEY = "notes/missing" }
 
 [[services.api.routes]]
 host = "notes.example.com"
@@ -27,6 +29,7 @@ port = 8080
 
 [services.storage]
 image = "docker.io/rustfs/rustfs:1.0.0"
+env = { RUSTFS_ADDRESS = ":9000" }
 "#;
 
 pub(super) fn digest(n: u8) -> String {
@@ -704,7 +707,7 @@ async fn the_stack_header_has_the_status_deployments_actions_and_tabs() {
     for (href, label, current) in [
         ("/stacks/notes", "overview", true),
         ("/stacks/notes/logs", "logs", false),
-        ("/stacks/notes/secrets", "environment", false),
+        ("/stacks/notes/environment", "environment", false),
         ("/stacks/notes/deployments", "deployments", false),
     ] {
         let current = if current {
@@ -1568,7 +1571,10 @@ async fn stack_page_offers_reresolve_and_secrets() {
         html.contains(r#"hx-post="/stacks/notes/reresolve/preview""#),
         "{html}"
     );
-    assert!(html.contains(r#"href="/stacks/notes/secrets""#), "{html}");
+    assert!(
+        html.contains(r#"href="/stacks/notes/environment""#),
+        "{html}"
+    );
 }
 
 #[tokio::test]

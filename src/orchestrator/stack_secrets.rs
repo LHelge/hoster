@@ -15,7 +15,7 @@ use crate::secrets::{SecretError, SecretName, SecretValue};
 use crate::stack::Stack;
 use crate::store::{DeploymentSource, DigestSet, StackRevision, Timestamp};
 
-/// One secret of a stack, as its Secrets page lists it.
+/// One secret of a stack, as its environment tab lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackSecret {
     /// The name within the stack: `db` for the secret `notes/db`.

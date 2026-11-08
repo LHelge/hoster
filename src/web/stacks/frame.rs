@@ -57,7 +57,7 @@ impl Tab {
         match self {
             Tab::Overview => "",
             Tab::Logs => "/logs",
-            Tab::Environment => "/secrets",
+            Tab::Environment => "/environment",
             Tab::Deployments => "/deployments",
         }
     }
