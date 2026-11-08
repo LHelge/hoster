@@ -36,8 +36,15 @@ Use [Bears](https://github.com/LHelge/bea-rs) (MCP tools) for all planning and p
 
 ## Git
 
-- Work on a feature branch per task, rebased on `main`, and merge through a PR so history stays
-  linear (no merge commits).
+- **One branch per epic, one commit per task.** Name the branch `epic/<epic-id>-<slug>` (e.g.
+  `epic/tbf-release-install-update`). Each Bears task in the epic lands as exactly one
+  Conventional Commit on that branch, with `Bears: <task-id>` in the body. Squash fixups and
+  review fixes into the task's commit before pushing.
+- Keep the epic branch rebased on `main`, and open one PR per epic. Merge it with a **rebase
+  merge** so each task stays its own commit on `main`. Don't squash-merge an epic, and never make
+  merge commits.
+- Work outside an epic (docs, chores, small fixes) goes on its own short-lived branch and PR.
+  Nothing is committed straight to `main`.
 - Use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`,
   `refactor:`, `test:`, `chore:` and so on.
 - Run `cargo fmt` and `cargo clippy --all-targets -- -D warnings` before every commit, and make
