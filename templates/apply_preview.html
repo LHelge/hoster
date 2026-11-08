@@ -37,6 +37,6 @@
   <form class="stack-form" hx-post="/apply" hx-target="#apply-result">
     <input type="hidden" name="toml" value="{{ toml }}">
     <p class="muted">Tags are resolved again when you confirm.</p>
-    <button type="submit">{% if changed.is_empty() %}Apply{% else %}Apply and redeploy {{ changed.len() }} service{% if changed.len() != 1 %}s{% endif %}{% endif %}</button>
+    <button type="submit">{{ crate::web::Icon::Apply }}{% if changed.is_empty() %}Apply{% else %}Apply and redeploy {{ changed.len() }} service{% if changed.len() != 1 %}s{% endif %}{% endif %}</button>
   </form>
 </section>

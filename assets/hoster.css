@@ -176,3 +176,15 @@ pre.release-notes {
   overflow-wrap: anywhere;
 }
 button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Icons (ADR-0053): an inline <svg> that <use>s a symbol of the sprite. It is sized to the text
+   and drawn in currentColor, so it follows links, buttons, badges and dark mode. */
+.icon {
+  display: inline-block;
+  width: 1.1em;
+  height: 1.1em;
+  margin-inline-end: 0.35em;
+  vertical-align: -0.2em;
+  flex-shrink: 0;
+}
+.badge .icon, .state-failed .icon { width: 1em; height: 1em; margin-inline-end: 0.25em; vertical-align: -0.15em; }

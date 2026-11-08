@@ -1,7 +1,7 @@
 {%- if dns.state == "ok" -%}
-<span class="badge badge-ok">ok</span>
+<span class="badge badge-ok">{{ crate::web::Icon::Ok }}ok</span>
 {%- else if dns.state == "mismatch" -%}
-<span class="badge badge-error">mismatch</span>
+<span class="badge badge-error">{{ crate::web::Icon::Warning }}mismatch</span>
 <span class="dns-detail">resolves to {% if dns.observed.is_empty() %}nothing{% else %}<code>{{ dns.observed }}</code>{% endif %}; hoster is <code>{{ dns.expected }}</code></span>
 {%- else if dns.state == "unknown" -%}
 <span class="muted">cannot compare: hoster's public addresses are unknown</span>

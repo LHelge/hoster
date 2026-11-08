@@ -51,7 +51,7 @@
   <label>{{ service.name }} <input type="text" name="digest.{{ service.name }}" placeholder="sha256:…" size="40" autocomplete="off" spellcheck="false"></label>
   {%- endif %}{% endfor %}
   <p class="muted">Services left empty keep the digest they run.</p>
-  <button type="submit">Deploy</button>
+  <button type="submit">{{ crate::web::Icon::Deploy }}Deploy</button>
 </form>
 <div id="deploy-result" aria-live="polite"></div>
 {%- endif %}
@@ -85,7 +85,7 @@
   <p>Removes the stack's containers, network and routes. Its revisions and deployment history are kept, and so are its named volumes unless you delete them.</p>
   <label>Type <strong>{{ stack.name }}</strong> to confirm <input type="text" name="confirm" required autocomplete="off" spellcheck="false"></label>
   <label><input type="checkbox" name="delete_volumes"> Also delete the stack's volumes and their data</label>
-  <button type="submit" class="danger">Remove stack</button>
+  <button type="submit" class="danger">{{ crate::web::Icon::Remove }}Remove stack</button>
 </form>
 <div id="remove-result" aria-live="polite"></div>
 {% endblock %}

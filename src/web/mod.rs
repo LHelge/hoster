@@ -13,14 +13,15 @@
 //! Pingora reaches the app on a 0600 Unix socket in the state directory (ADR-0031); a loopback
 //! TCP listener (`web.dev_listen`) exists for local development only.
 //!
-//! Every response carries strict security headers ([`SecurityHeaders`]). All scripts and styles
-//! are embedded and served from `/assets/` (see `assets.rs`), so the CSP needs no exceptions.
+//! Every response carries strict security headers ([`SecurityHeaders`]). All scripts, styles and
+//! icons are embedded and served from `/assets/` (see `assets.rs`), so the CSP needs no exceptions.
 
 mod assets;
 mod auth;
 mod certificates;
 mod containers;
 mod dashboard;
+mod icons;
 mod pages;
 mod settings;
 mod stacks;
@@ -58,6 +59,7 @@ use self::auth::Auth;
 use self::certificates::{CertificateAccess, CertificateControl, Certificates};
 use self::containers::{ContainerSource, Containers};
 use self::dashboard::Dashboard;
+pub(crate) use self::icons::Icon;
 use self::settings::{Registries, RegistryControl};
 use self::stacks::{StackControl, Stacks};
 use self::system::System;

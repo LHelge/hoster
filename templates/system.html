@@ -16,7 +16,7 @@
 <h2>Updates</h2>
 <p class="muted">hoster asks GitHub for the latest stable release only when you click the button; it never checks in the background. Updating downloads the release's binary for this architecture, verifies it against the release's <code>SHA256SUMS</code>, snapshots the database and restarts hoster, which drops connections for a few seconds.</p>
 <form class="inline-form" hx-post="/system/check" hx-target="#update-check">
-  <button type="submit">Check for updates</button>
+  <button type="submit">{{ crate::web::Icon::CheckUpdates }}Check for updates</button>
 </form>
 <div id="update-check" aria-live="polite"></div>
 

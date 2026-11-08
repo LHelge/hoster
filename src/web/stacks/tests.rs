@@ -568,7 +568,10 @@ async fn stacks_list_shows_services_digests_revision_and_last_deploy() {
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
     assert!(
-        html.contains(r#"<a href="/stacks" aria-current="page">Stacks</a>"#),
+        html.contains(&format!(
+            r#"<a href="/stacks" aria-current="page">{}Stacks</a>"#,
+            crate::web::Icon::Stacks
+        )),
         "{html}"
     );
     assert!(
