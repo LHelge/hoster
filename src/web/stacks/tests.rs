@@ -109,6 +109,7 @@ pub enum Call {
     /// pages never show it).
     SetSecret(String, String, String),
     DeleteSecret(String, String),
+    Cancel(String, DeploymentId),
 }
 
 /// The value the secret fakes hold; it must never appear in a page.
@@ -334,6 +335,19 @@ impl StackControl for FakeStacks {
             .find(|(d, _)| d.id == id && d.stack == stack)
             .cloned()
             .ok_or(OrchestratorError::UnknownDeployment(id))
+    }
+
+    async fn cancel(&self, stack: &str, id: DeploymentId) -> Result<(), OrchestratorError> {
+        self.record(Call::Cancel(stack.into(), id));
+        let (deployment, _) = self.deployment(stack, id).await?;
+        if deployment.state.is_cancellable() {
+            Ok(())
+        } else {
+            Err(OrchestratorError::NotCancellable {
+                id,
+                state: deployment.state,
+            })
+        }
     }
 
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {
@@ -865,6 +879,82 @@ async fn the_deployment_page_follows_a_running_deployment_until_it_ends() {
         let response = app.get(path, Some(&browser.cookie)).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+#[tokio::test]
+async fn a_deployment_before_switching_can_be_cancelled_from_its_page() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    app.stacks
+        .deployments
+        .lock()
+        .unwrap()
+        .push((deployment(7, DeploymentState::Pulling), Vec::new()));
+
+    let html = body(
+        app.get("/stacks/notes/deployments/7", Some(&browser.cookie))
+            .await,
+    )
+    .await;
+    assert!(
+        html.contains(
+            r##"hx-post="/stacks/notes/deployments/7/cancel" hx-target="#cancel-result""##
+        ),
+        "{html}"
+    );
+    assert!(html.contains(r#"<div id="cancel-result"></div>"#), "{html}");
+
+    let response = app
+        .send(post(
+            "/stacks/notes/deployments/7/cancel",
+            &browser,
+            FORM,
+            String::new(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        body(response).await.contains("Cancelling deployment 7"),
+        "the answer says what happens"
+    );
+    assert_eq!(
+        app.stacks.calls(),
+        [Call::Cancel("notes".into(), DeploymentId::from(7))]
+    );
+
+    // From `Switching` on, there is no button, and a late request is refused.
+    app.stacks.deployments.lock().unwrap()[0].0 = deployment(7, DeploymentState::Switching);
+    let partial = body(
+        app.get("/stacks/notes/deployments/7/status", Some(&browser.cookie))
+            .await,
+    )
+    .await;
+    assert!(!partial.contains("/cancel"), "{partial}");
+    let late = app
+        .send(post(
+            "/stacks/notes/deployments/7/cancel",
+            &browser,
+            FORM,
+            String::new(),
+        ))
+        .await;
+    assert_eq!(late.status(), StatusCode::CONFLICT);
+    assert!(
+        body(late)
+            .await
+            .contains("cannot be cancelled: it is Switching"),
+        "the refusal names the state"
+    );
+
+    let missing = app
+        .send(post(
+            "/stacks/notes/deployments/x/cancel",
+            &browser,
+            FORM,
+            String::new(),
+        ))
+        .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------------------------

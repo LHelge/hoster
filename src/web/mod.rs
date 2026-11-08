@@ -195,6 +195,10 @@ impl WebApp {
                 "/stacks/{name}/deployments/{id}/status",
                 get(Stacks::deployment_status),
             )
+            .route(
+                "/stacks/{name}/deployments/{id}/cancel",
+                post(Stacks::cancel),
+            )
             .route("/apply", get(Stacks::apply_form).post(Stacks::apply))
             .route("/apply/preview", post(Stacks::preview))
             .layer(Extension(self.stacks.clone()))

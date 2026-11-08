@@ -19,7 +19,7 @@ use tracing::Instrument;
 use super::machine::{Effect, Event};
 use super::plan::{Change, Plan, SecretVersions};
 use super::routes::Routes;
-use super::{Orchestrator, Result};
+use super::{Interruption, Orchestrator, Result};
 use crate::health::{Check, DeploymentLog};
 use crate::logging::LogSpan;
 use crate::routing::{DesiredStack, DrainOutcome, RouteClaims, ServiceState, Upstream};
@@ -179,8 +179,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
         };
         for effect in effects {
-            if let Some(event) = self.cancelled(run, &effect) {
-                tracing::info!(deployment = %run.id, "stack is being removed; aborting the deployment");
+            if let Some(event) = self.interrupted(run, &effect) {
+                tracing::info!(deployment = %run.id, reason = %event, "deployment interrupted; aborting it");
                 return Some(event);
             }
             if let Some(event) = self.execute(run, effect).await {
@@ -190,44 +190,54 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         None
     }
 
-    /// While the stack is being removed, the work of a state before the commit point is skipped
-    /// and replaced by the event that ends the deployment: `Validating` rejects, the later
-    /// states abort (which undoes what the deployment did). From `Switching` on the
-    /// deployment runs to its end, since committed pointers cannot be undone (ADR-0048).
-    fn cancelled(&self, run: &Run, effect: &Effect) -> Option<Event> {
-        let reason = || super::STACK_REMOVED.to_owned();
-        let event = match effect {
-            Effect::Validate => Event::Invalid(reason()),
+    /// While the stack is being removed or the deployment is cancelled, the work of a state
+    /// before the commit point is skipped and replaced by the event that ends the deployment:
+    /// the later states abort (which undoes what the deployment did), and a removal also
+    /// rejects in `Validating`. A cancelled deployment validates first, so that it ends in
+    /// `Aborting` as ADR-0040 says. From `Switching` on the deployment runs to its end, since
+    /// committed pointers cannot be undone (ADR-0048).
+    fn interrupted(&self, run: &Run, effect: &Effect) -> Option<Event> {
+        let interruption = self.interruption(run.target.stack().as_ref(), run.id)?;
+        match effect {
+            Effect::Validate if interruption == Interruption::Removal => {
+                Some(Event::Invalid(interruption.to_string()))
+            }
             Effect::PullImages
             | Effect::StartContainers
             | Effect::Probe
-            | Effect::ReplaceStopFirst => Event::Failed(reason()),
-            _ => return None,
-        };
-        self.is_removing(run.target.stack().as_ref())
-            .then_some(event)
+            | Effect::ReplaceStopFirst => Some(Event::Failed(interruption.to_string())),
+            _ => None,
+        }
     }
 
-    /// Runs `work` unless the stack's removal starts first; `None` when it did (`work` is
-    /// dropped). Used for the waits a removal should not sit through: pulls, health checks and
-    /// the drain.
-    async fn unless_removed<T>(&self, run: &Run, work: impl Future<Output = T>) -> Option<T> {
+    /// Runs `work` unless the stack's removal starts or the deployment is cancelled first;
+    /// `Err` when one did (`work` is dropped). Used for the waits an interruption should not
+    /// sit through: pulls, health checks and the drain.
+    async fn unless_interrupted<T>(
+        &self,
+        run: &Run,
+        work: impl Future<Output = T>,
+    ) -> std::result::Result<T, Interruption> {
         let stack = run.target.stack().as_ref();
         let mut work = pin!(work);
         loop {
-            let mut removal = pin!(self.removal.notified());
-            removal.as_mut().enable();
-            if self.is_removing(stack) {
-                return None;
+            let mut interrupt = pin!(self.interrupt.notified());
+            interrupt.as_mut().enable();
+            if let Some(interruption) = self.interruption(stack, run.id) {
+                return Err(interruption);
             }
             tokio::select! {
-                out = &mut work => return Some(out),
-                () = &mut removal => {}
+                out = &mut work => return Ok(out),
+                () = &mut interrupt => {}
             }
         }
     }
 
     /// Applies the pure transition function and updates the in-memory slot, under the lock.
+    ///
+    /// An interrupted deployment (ADR-0040) whose work in a state before the commit point
+    /// succeeded fails instead, decided in the same critical section that records the new state:
+    /// a cancel accepted before `Switching` is never lost to a deployment moving on into it.
     ///
     /// On `Switching` it also publishes the `RouteTable` in that same critical section
     /// (ADR-0035 #1, ADR-0050): every changed service on its new upstreams, removed services
@@ -238,13 +248,21 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         run: &mut Run,
         event: Event,
     ) -> std::result::Result<Vec<Effect>, super::machine::InvalidTransition> {
+        let mut state = self.lock();
+        let slot = state.slots.get_mut(run.target.stack().as_ref());
+        let event = match (&event, slot.as_ref().and_then(|s| s.interruption(run.id))) {
+            (
+                Event::Pulled | Event::Started | Event::Healthy | Event::Replaced,
+                Some(interruption),
+            ) => Event::Failed(interruption.to_string()),
+            _ => event,
+        };
         let transition = run.state.on(event)?;
         // The store logs the persisted transition (target `hoster::deploy`) at `info`.
         tracing::debug!(deployment = %run.id, from = %run.state, to = %transition.to, "deployment transition");
         run.state = transition.to;
         let mut effects = transition.effects;
-        let mut state = self.lock();
-        if let Some(slot) = state.slots.get_mut(run.target.stack().as_ref())
+        if let Some(slot) = slot
             && let Some((id, active)) = &mut slot.active
             && *id == run.id
         {
@@ -286,19 +304,19 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             Effect::CheckRunning => Some(self.check_running(run).await),
             Effect::Validate => Some(self.validate(run).await),
             Effect::PullImages => Some(
-                self.unless_removed(run, self.pull(run))
+                self.unless_interrupted(run, self.pull(run))
                     .await
-                    .unwrap_or_else(|| Event::Failed(super::STACK_REMOVED.to_owned())),
+                    .unwrap_or_else(|interruption| Event::Failed(interruption.to_string())),
             ),
             Effect::StartContainers => Some(self.start_new(run).await),
             Effect::Probe => Some(
                 match self
-                    .unless_removed(run, self.probe(run, &run.created))
+                    .unless_interrupted(run, self.probe(run, &run.created))
                     .await
                 {
-                    Some(Ok(())) => Event::Healthy,
-                    Some(Err(reason)) => Event::Failed(reason),
-                    None => Event::Failed(super::STACK_REMOVED.to_owned()),
+                    Ok(Ok(())) => Event::Healthy,
+                    Ok(Err(reason)) => Event::Failed(reason),
+                    Err(interruption) => Event::Failed(interruption.to_string()),
                 },
             ),
             Effect::ReplaceStopFirst => Some(self.replace_stop_first(run).await),
@@ -308,7 +326,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             // A removal takes every container of the stack down anyway, so it does not wait
             // for the old upstreams to go idle.
             Effect::Drain => Some(
-                self.unless_removed(run, self.drain(run))
+                self.unless_interrupted(run, self.drain(run))
                     .await
                     .unwrap_or(Event::Drained),
             ),
@@ -439,6 +457,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let mut images: Vec<_> = run.plan().changes.iter().map(|c| &c.image).collect();
         images.dedup();
         for image in images {
+            // Every stack shares the pull limit (ADR-0040); the wait for a permit is part of the
+            // pull, so an interruption ends it too.
+            let _permit = self
+                .pulls
+                .acquire()
+                .await
+                .expect("the pull semaphore is never closed");
             if let Err(err) = self.runtime.pull_image(image).await {
                 return Event::Failed(format!("cannot pull {image}: {err}"));
             }
@@ -504,10 +529,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 return Event::Failed(reason);
             }
             let new = run.created.last().cloned().into_iter().collect::<Vec<_>>();
-            match self.unless_removed(run, self.probe(run, &new)).await {
-                Some(Ok(())) => {}
-                Some(Err(reason)) => return Event::Failed(reason),
-                None => return Event::Failed(super::STACK_REMOVED.to_owned()),
+            match self.unless_interrupted(run, self.probe(run, &new)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => return Event::Failed(reason),
+                Err(interruption) => return Event::Failed(interruption.to_string()),
             }
         }
         Event::Replaced

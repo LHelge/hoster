@@ -6,7 +6,8 @@
 //! [`preview`](Orchestrator::preview) and [`apply`](Orchestrator::apply),
 //! [`deploy`](Orchestrator::deploy) and [`deploy_webhook`](Orchestrator::deploy_webhook),
 //! [`remove`](Orchestrator::remove) (see [`RemoveStack`]),
-//! [`rollback`](Orchestrator::rollback), [`status`](Orchestrator::status) and
+//! [`rollback`](Orchestrator::rollback), [`cancel`](Orchestrator::cancel),
+//! [`status`](Orchestrator::status) and
 //! [`deployment`](Orchestrator::deployment), each answering with a typed result. The per-stack deploy slots live in one `std::sync::Mutex`, held only for
 //! in-memory work, never across an `.await`.
 //!
@@ -49,6 +50,7 @@ mod routes;
 mod stack_secrets;
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::pin::pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -56,7 +58,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, Semaphore, broadcast};
 
 use crate::health::{HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
 use crate::ports::{PortAllocator, PortError};
@@ -125,6 +127,8 @@ pub struct Settings {
     pub monitor: MonitorSettings,
     /// The `Retry-After` of a stop-first service's routes during its gap (ADR-0048).
     pub gap_retry_after: Duration,
+    /// How many image pulls run at once, over every stack (ADR-0040).
+    pub pull_limit: usize,
 }
 
 impl Default for Settings {
@@ -137,6 +141,7 @@ impl Default for Settings {
             restart: RestartPolicy::default(),
             monitor: MonitorSettings::default(),
             gap_retry_after: Duration::from_secs(5),
+            pull_limit: 2,
         }
     }
 }
@@ -172,6 +177,11 @@ pub enum OrchestratorError {
     StackBusy(String),
     #[error("stack {0} is being removed")]
     Removing(String),
+    #[error("deployment {id} cannot be cancelled: it is {state}")]
+    NotCancellable {
+        id: DeploymentId,
+        state: DeploymentState,
+    },
     #[error(
         "stack {stack} is at revision {active} now, not revision {expected}; review the change again"
     )]
@@ -294,6 +304,9 @@ const UI_EVENTS_CAPACITY: usize = 256;
 /// Why a deployment ended when its stack was removed under it.
 const STACK_REMOVED: &str = "stack removed";
 
+/// Why a cancelled deployment failed.
+const CANCELLED: &str = "cancelled";
+
 /// A request to remove a stack (ADR-0030).
 ///
 /// Named volumes are kept unless `delete_volumes` is set, and deleting them needs an explicit
@@ -407,8 +420,11 @@ pub struct Orchestrator<R> {
     state: Mutex<State>,
     /// Signalled whenever a deployment leaves its stack's slot.
     finished: Notify,
-    /// Signalled when a stack's removal starts, so its deploy task aborts.
-    removal: Notify,
+    /// Signalled when a stack's removal starts or a deployment is cancelled, so the deploy
+    /// task stops waiting and aborts.
+    interrupt: Notify,
+    /// Bounds the image pulls running at once, over every stack (ADR-0040).
+    pulls: Semaphore,
     /// Restart histories and warnings of the reconciler (ADR-0028).
     reconciler: Mutex<Reconciler>,
     /// Liveness of the live generations (ADR-0038).
@@ -440,9 +456,40 @@ struct Slot {
     /// with no active deployment, and a deployment submitted meanwhile waits as the pending one,
     /// so the two never touch the same containers at once.
     reconciling: bool,
+    /// The active deployment asked to be cancelled (ADR-0040); it aborts before `Switching`.
+    cancelled: Option<DeploymentId>,
+}
+
+/// Why a deployment must stop before its commit point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interruption {
+    /// The stack is being removed.
+    Removal,
+    /// The deployment was cancelled.
+    Cancel,
+}
+
+impl fmt::Display for Interruption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Removal => STACK_REMOVED,
+            Self::Cancel => CANCELLED,
+        })
+    }
 }
 
 impl Slot {
+    /// Whether deployment `id` must stop before its commit point, and why.
+    fn interruption(&self, id: DeploymentId) -> Option<Interruption> {
+        if self.removing {
+            Some(Interruption::Removal)
+        } else if self.cancelled == Some(id) {
+            Some(Interruption::Cancel)
+        } else {
+            None
+        }
+    }
+
     /// Makes the pending deployment the active one, if the slot is free for it.
     fn promote_pending(&mut self) -> Option<Run> {
         if self.active.is_some() || self.reconciling || self.removing {
@@ -552,6 +599,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         prober: Arc<dyn Prober>,
     ) -> Arc<Self> {
         let routes = Routes::new(routes, settings.reserved.clone(), settings.gap_retry_after);
+        let pulls = Semaphore::new(settings.pull_limit.max(1));
         Arc::new(Self {
             store,
             runtime,
@@ -565,7 +613,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 certs: CertHosts::default(),
             }),
             finished: Notify::new(),
-            removal: Notify::new(),
+            interrupt: Notify::new(),
+            pulls,
             reconciler: Mutex::default(),
             watchlist: Mutex::default(),
             prober,
@@ -940,7 +989,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         };
         self.reconciled(stack).await;
         // Wake a deploy task waiting in a health check or a pull, so it aborts now.
-        self.removal.notify_waiters();
+        self.interrupt.notify_waiters();
         if let Some(pending) = pending {
             self.store
                 .transition(
@@ -1067,6 +1116,45 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
         }
         Ok(removed)
+    }
+
+    /// Cancels `stack`'s active deployment `id` (ADR-0040). Allowed before `Switching` only:
+    /// the deployment stops at its next step, or wakes from the pull or health check it waits
+    /// in, and goes through `Aborting`, which puts the stack back as it was, to `Failed`. Use
+    /// [`wait`](Self::wait) to follow it to its end. A queued deployment, or one that reached
+    /// `Switching` or ended, cannot be cancelled.
+    #[tracing::instrument(skip(self))]
+    pub async fn cancel(&self, stack: &str, id: DeploymentId) -> Result<()> {
+        let deployment = self
+            .store
+            .deployment(id)
+            .await?
+            .filter(|d| d.stack == stack)
+            .ok_or(OrchestratorError::UnknownDeployment(id))?;
+        {
+            let mut state = self.lock();
+            let slot = state.slots.get_mut(stack);
+            if slot.as_ref().is_some_and(|s| s.removing) {
+                return Err(OrchestratorError::Removing(stack.to_owned()));
+            }
+            // The slot's state is the live one; the record may lag behind it by a step.
+            let refuse = |state| OrchestratorError::NotCancellable { id, state };
+            match slot {
+                Some(slot) => match slot.active {
+                    Some((active, state)) if active == id => {
+                        if !state.is_cancellable() {
+                            return Err(refuse(state));
+                        }
+                        slot.cancelled = Some(id);
+                    }
+                    _ => return Err(refuse(deployment.state)),
+                },
+                None => return Err(refuse(deployment.state)),
+            }
+        }
+        tracing::info!(stack, deployment = %id, "cancelling the deployment");
+        self.interrupt.notify_waiters();
+        Ok(())
     }
 
     /// Every stack with its active revision, services and deployments.
@@ -1253,6 +1341,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self.lock().slots.get(stack).is_some_and(|s| s.removing)
     }
 
+    /// Whether deployment `id` of `stack` must stop before its commit point, and why.
+    fn interruption(&self, stack: &str, id: DeploymentId) -> Option<Interruption> {
+        self.lock().slots.get(stack)?.interruption(id)
+    }
+
     /// Whether `id` is the active or pending deployment of `stack`.
     fn holds(&self, stack: &str, id: DeploymentId) -> bool {
         self.lock().slots.get(stack).is_some_and(|s| {
@@ -1385,6 +1478,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             let slot = state.slots.entry(stack.to_owned()).or_default();
             if slot.active.is_some_and(|(a, _)| a == id) {
                 slot.active = None;
+                slot.cancelled = None;
                 let next = slot.pending.take();
                 if let Some(next) = &next {
                     slot.active = Some((next.id(), DeploymentState::Queued));
@@ -1483,6 +1577,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
 #[cfg(test)]
 mod monitor_tests;
+#[cfg(test)]
+mod queue_tests;
 #[cfg(test)]
 mod reconcile_tests;
 #[cfg(test)]

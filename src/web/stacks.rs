@@ -86,6 +86,9 @@ pub trait StackControl: Send + Sync + 'static {
         id: DeploymentId,
     ) -> Result<(Deployment, Vec<DeploymentEvent>), OrchestratorError>;
 
+    /// See [`Orchestrator::cancel`].
+    async fn cancel(&self, stack: &str, id: DeploymentId) -> Result<(), OrchestratorError>;
+
     /// See [`Orchestrator::reresolve_preview`].
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError>;
 
@@ -161,6 +164,10 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         id: DeploymentId,
     ) -> Result<(Deployment, Vec<DeploymentEvent>), OrchestratorError> {
         Orchestrator::deployment(self, stack, id).await
+    }
+
+    async fn cancel(&self, stack: &str, id: DeploymentId) -> Result<(), OrchestratorError> {
+        Orchestrator::cancel(self, stack, id).await
     }
 
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {
@@ -454,10 +461,27 @@ impl Stacks {
         }
     }
 
+    /// `POST /stacks/{name}/deployments/{id}/cancel`: cancels the deployment if it has not
+    /// reached `Switching` (ADR-0040). The page's status partial follows the abort.
+    pub async fn cancel(
+        Extension(stacks): Extension<Stacks>,
+        Path((name, id)): Path<(String, String)>,
+    ) -> Response {
+        let id = match DeploymentView::parse_id(&id) {
+            Ok(id) => id,
+            Err(outcome) => return outcome.into_response(),
+        };
+        match stacks.0.cancel(&name, id).await {
+            Ok(()) => Outcome::success(format!(
+                "Cancelling deployment {id}: it aborts and puts {name} back as it was."
+            ))
+            .into_response(),
+            Err(err) => Outcome::from(err).into_response(),
+        }
+    }
+
     pub(super) async fn lookup(&self, stack: &str, id: &str) -> Result<DeploymentView, Outcome> {
-        let id: DeploymentId = id
-            .parse()
-            .map_err(|_| Outcome::error(StatusCode::NOT_FOUND, format!("No deployment {id}.")))?;
+        let id = DeploymentView::parse_id(id)?;
         let (deployment, events) = self.0.deployment(stack, id).await?;
         Ok(DeploymentView::new(&deployment, &events))
     }
@@ -687,7 +711,10 @@ impl From<OrchestratorError> for Outcome {
             | E::Digest { .. }
             | E::NotRedeployable { .. }
             | E::VolumeConfirmation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            E::StackBusy(_) | E::Removing(_) | E::RevisionChanged { .. } => StatusCode::CONFLICT,
+            E::StackBusy(_)
+            | E::Removing(_)
+            | E::RevisionChanged { .. }
+            | E::NotCancellable { .. } => StatusCode::CONFLICT,
             E::Runtime(_) => StatusCode::BAD_GATEWAY,
             E::Secret(_) | E::Store(_) | E::Ports(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -994,11 +1021,18 @@ pub struct DeploymentView {
     finished_at: Option<String>,
     /// Whether it is over; a running one polls for its status.
     finished: bool,
+    /// Whether it may still be cancelled: active and before `Switching` (ADR-0040).
+    cancellable: bool,
 }
 
 impl DeploymentView {
     pub(super) fn url(stack: &str, id: DeploymentId) -> String {
         format!("/stacks/{stack}/deployments/{id}")
+    }
+
+    fn parse_id(id: &str) -> Result<DeploymentId, Outcome> {
+        id.parse()
+            .map_err(|_| Outcome::error(StatusCode::NOT_FOUND, format!("No deployment {id}.")))
     }
 
     fn new(deployment: &Deployment, events: &[DeploymentEvent]) -> Self {
@@ -1037,11 +1071,16 @@ impl DeploymentView {
             created_at: When(deployment.created_at).to_string(),
             finished_at: deployment.finished_at.map(|t| When(t).to_string()),
             finished: deployment.state.is_terminal(),
+            cancellable: deployment.state.is_cancellable(),
         }
     }
 
     pub fn status_url(&self) -> String {
         format!("{}/status", self.url)
+    }
+
+    pub fn cancel_url(&self) -> String {
+        format!("{}/cancel", self.url)
     }
 }
 

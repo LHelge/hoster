@@ -1,10 +1,10 @@
 ---
 id: "9ra"
 title: In-process statistics for the web UI (no metrics endpoint)
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-07T14:45:17.364354719Z"
-updated: "2026-11-07T19:32:45.180456559Z"
+updated: "2026-11-08T02:14:55.544022465Z"
 tags:
   - observability
 depends_on:
@@ -12,6 +12,7 @@ depends_on:
   - a9y
   - ej8
 parent: "6gn"
+attempts: 1
 ---
 
 ## Summary

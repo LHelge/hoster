@@ -3,4 +3,5 @@
 {% block content %}
 <h1>Deployment {{ deployment.id }} of <a href="{{ deployment.stack_url }}">{{ deployment.stack }}</a></h1>
 {% include "deployment_status.html" %}
+<div id="cancel-result"></div>
 {% endblock %}

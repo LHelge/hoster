@@ -182,6 +182,20 @@ impl DeploymentState {
         )
     }
 
+    /// Whether an active deployment in this state may still be cancelled (ADR-0040): it has
+    /// not reached `Switching`, the commit point, and can abort back to how the stack was.
+    pub fn is_cancellable(self) -> bool {
+        matches!(
+            self,
+            Self::Received
+                | Self::Validating
+                | Self::Pulling
+                | Self::Starting
+                | Self::HealthChecking
+                | Self::Replacing
+        )
+    }
+
     /// Whether reaching this state is worth a warning in the log: the deployment did not go
     /// (entirely) as planned.
     fn is_trouble(self) -> bool {

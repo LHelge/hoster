@@ -3,6 +3,11 @@
     <strong>{{ deployment.state }}</strong>
     {%- if deployment.finished %}{% if let Some(at) = deployment.finished_at %} at {{ at }}{% endif %}{% else %} <span class="muted">(in progress; this updates by itself, or <a href="{{ deployment.url }}">reload</a>)</span>{% endif %}
   </p>
+  {%- if deployment.cancellable %}
+  <form class="inline-form" hx-post="{{ deployment.cancel_url() }}" hx-target="#cancel-result" hx-confirm="Cancel deployment {{ deployment.id }}? It aborts and the stack stays as it was.">
+    <button type="submit">Cancel deployment</button>
+  </form>
+  {%- endif %}
   {%- if let Some(error) = deployment.error %}
   <p class="flash flash-error">{{ error }}</p>
   {%- endif %}

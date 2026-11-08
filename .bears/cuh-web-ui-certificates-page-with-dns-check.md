@@ -1,10 +1,10 @@
 ---
 id: cuh
 title: "Web UI: certificates page with DNS check"
-status: open
+status: in_progress
 priority: P3
 created: "2026-11-07T14:45:17.279477441Z"
-updated: "2026-11-07T21:50:54.280578169Z"
+updated: "2026-11-08T02:18:25.247035784Z"
 tags:
   - web
   - tls
@@ -12,6 +12,7 @@ depends_on:
   - a9y
   - "3g2"
 parent: "52q"
+attempts: 1
 ---
 
 ## Summary
