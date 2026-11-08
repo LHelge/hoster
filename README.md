@@ -3,8 +3,9 @@
 A single-binary deployment orchestrator for one VPS: rootless podman, an embedded Pingora reverse
 proxy with ACME certificates, zero-downtime deploys by image digest, and a small web admin UI.
 
-See [spec.md](spec.md) for what it does and [docs/](docs/) for the architecture and the decision
-records.
+**Documentation: <https://docs.hoster.lhelge.se>**, built from [site/](site/) with
+[aphid](https://aphid.lhelge.se). See [spec.md](spec.md) for the specification and [docs/](docs/)
+for the architecture and the decision records.
 
 ## Quick start
 
@@ -18,7 +19,7 @@ The script installs podman if needed, creates the `hoster` user, installs the bi
 systemd user unit, and prints the few steps left to you (your GitHub handle, an OAuth App,
 `admin_host` and the ACME contact) before you start the service. It never starts hoster itself,
 and re-running it is safe. Add `--dry-run` to see what it would do. Updates come from the admin
-UI or `hoster update`. See [docs/install.md](docs/install.md) for what the script does, updates,
+UI or `hoster update`. See [Installing hoster](https://docs.hoster.lhelge.se/wiki/install/) for what the script does, updates,
 rollback and recovery.
 
 ## Development
@@ -109,13 +110,18 @@ match `Cargo.toml` or isn't on `main`, tests and builds static musl binaries for
 `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (natively, on GitHub's ARM runner),
 and publishes them with one `SHA256SUMS`, the `deploy/` files and `install.sh` as a GitHub
 release. The release notes are git-cliff's grouping of the Conventional Commits since the previous
-tag (`cliff.toml`); `chore(release)` commits are left out. See [docs/install.md](docs/install.md).
+tag (`cliff.toml`); `chore(release)` commits are left out. See [Installing hoster](https://docs.hoster.lhelge.se/wiki/install/).
+
+The same run builds the documentation site in `site/` with aphid. On a tag it packs the site into
+an nginx image (`site/Dockerfile`), pushes `ghcr.io/lhelge/hoster-docs` and deploys it to
+<https://docs.hoster.lhelge.se> through hoster's own deploy webhook. Run `aphid` in `site/` to
+preview it on <http://localhost:3000> with live reload.
 
 App repositories deploy to hoster from their own release workflows with a GitHub Actions OIDC
-token; see [docs/deploying-from-ci.md](docs/deploying-from-ci.md) and the example in
+token; see [Deploying from CI](https://docs.hoster.lhelge.se/wiki/deploying-from-ci/) and the example in
 [examples/github-actions/release.yml](examples/github-actions/release.yml).
 Static sites are packed into an nginx image and deployed the same way; see
-[docs/static-sites.md](docs/static-sites.md).
+[Hosting a static site](https://docs.hoster.lhelge.se/wiki/static-sites/).
 
 ## License
 

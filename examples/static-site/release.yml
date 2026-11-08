@@ -3,8 +3,8 @@
 # Copy it to `.github/workflows/release.yml` in the site repository, next to the Dockerfile and
 # default.conf from this directory, and adjust the `env` block. On every push to `main` it builds
 # the site with aphid, packs it into an nginx image, pushes it to ghcr and posts the digest to
-# hoster's deploy webhook with the job's OIDC token. See docs/static-sites.md and
-# docs/deploying-from-ci.md in the hoster repository.
+# hoster's deploy webhook with the job's OIDC token. See https://docs.hoster.lhelge.se/wiki/static-sites/ and
+# https://docs.hoster.lhelge.se/wiki/deploying-from-ci/.
 #
 # The stack file must allow this repository and ref, e.g.
 #

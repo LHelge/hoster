@@ -95,8 +95,8 @@ impl Signer {
     }
 }
 
-/// docs/deploying-from-ci.md, whose example token claims these tests sign.
-const GUIDE: &str = include_str!("../../../docs/deploying-from-ci.md");
+/// site/content/wiki/deploying-from-ci.md, whose example token claims these tests sign.
+const GUIDE: &str = include_str!("../../../site/content/wiki/deploying-from-ci.md");
 
 /// The claims example in [`GUIDE`]: the code block after its `oidc-claims-example` marker. It
 /// is shaped like GitHub's documented example token, for a tag push of `acme/notes`

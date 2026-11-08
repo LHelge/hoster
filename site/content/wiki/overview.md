@@ -1,0 +1,52 @@
+---
+title: How hoster works
+category: Getting Started
+---
+
+hoster runs container images that GitHub CI has already built and pushed to ghcr. It runs them as
+**stacks** of one or more containers under rootless podman and puts them on the internet behind a
+TLS-terminating reverse proxy that it embeds and configures itself. Everything is one binary under
+systemd on one VPS.
+
+# Concepts
+
+| Term | Meaning |
+|---|---|
+| **Stack** | A named unit of deployment: one or more services, one podman network, a set of routes. Defined in a [[stack-format|stack file]]. |
+| **Service** | One container within a stack: image, env, volumes, routes, health check. |
+| **Route** | `(host, prefix) → service:port`, with `strip_prefix` and timeouts. A (host, prefix) pair is owned by exactly one stack. |
+| **Digest** | The immutable `sha256:` content address of an image. hoster deploys digests, never bare tags. |
+| **Deployment** | One attempt to bring a stack to a new set of digests or a new configuration, with its history of steps. |
+
+# From a release to running containers
+
+1. **Once per VPS:** [[install]] hoster, give it a GitHub OAuth App and an admin hostname, and
+   point DNS for that hostname and every app hostname at the VPS.
+2. **Once per app:** in the admin UI, choose **Stacks → New stack** and paste the stack file.
+   hoster validates it, shows what will change and applies it. It starts issuing certificates for
+   the new hostnames right away. Allow the app's repository to deploy with a `[deploy]` rule.
+3. **Every release:** the app's workflow pushes the image and posts its digest to
+   `/hooks/deploy` with the job's OIDC token ([[deploying-from-ci]]). hoster then:
+   1. pulls `image@digest` and starts the new container next to the old one,
+   2. health-checks it on its own loopback port,
+   3. swaps the routing table atomically, so new requests go to the new container,
+   4. drains in-flight requests to the old container, then removes it.
+
+If a step before the swap fails, the new container is removed and the old one keeps serving. If
+the webhook never arrives, the ghcr poller notices the tracked tag's new digest and starts the
+same deploy. Both triggers are idempotent: a digest that is already running deploys nothing.
+
+# The admin UI
+
+| Page | What you see and do |
+|---|---|
+| **Dashboard** | Every stack and service: running digest, health, last deploy outcome, certificate expiry. |
+| **Stack** | Services, routes and generations. Apply a new revision of the stack file (with a diff), manage secrets, see the `[deploy]` rule and refused webhook attempts, redeploy, remove the stack. |
+| **Deployments** | History per stack, with each step and failure reasons. "Redeploy this one" is the rollback. |
+| **Logs** | Tail and follow logs per container. |
+| **Certificates** | Hosts, issuer, expiry, the last ACME error and the DNS check. |
+| **Settings** | Registry credentials for private images. |
+| **System** | The running version; check for updates, read the release notes and update. |
+
+Login is GitHub OAuth, and only the GitHub account named in the configuration gets in. Apps never
+get access to podman, and a container is only reachable from outside through a declared route.

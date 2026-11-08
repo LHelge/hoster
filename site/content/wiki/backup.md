@@ -1,14 +1,17 @@
-# Backing up and restoring hoster
+---
+title: Backing up and restoring
+category: Operations
+---
 
-hoster v1 does not run backups itself (ADR-0030). This page lists what to back up, how to take
+hoster v1 does not run backups itself ([ADR-0030](https://github.com/LHelge/hoster/blob/main/docs/adr/0030-named-volumes-and-documented-backups.md)). This page lists what to back up, how to take
 each piece consistently, and how to restore a host from it. Built-in scheduled backups are a
 later milestone.
 
 Paths below assume the defaults: the state directory `~/.local/share/hoster` and the config
-directory `~/.config/hoster` of the `hoster` user (ADR-0023, ADR-0024). If you set `state_dir`,
+directory `~/.config/hoster` of the `hoster` user ([ADR-0023](https://github.com/LHelge/hoster/blob/main/docs/adr/0023-systemd-user-service-with-linger.md), [ADR-0024](https://github.com/LHelge/hoster/blob/main/docs/adr/0024-config-toml-with-env-overrides.md)). If you set `state_dir`,
 use that instead. Run every command as the `hoster` user.
 
-## What to back up
+# What to back up
 
 | What | Where | Needed? | How |
 | --- | --- | --- | --- |
@@ -19,10 +22,10 @@ use that instead. Run every command as the `hoster` user.
 | Certificates | `<state_dir>/certs/` | Optional | Copy the directory |
 | App volumes | podman volumes `hoster-<stack>-<volume>` | Per app | `podman volume export` |
 
-### State database
+## State database
 
 The database holds stacks and their revisions, deployment history, port allocations, sessions and
-the encrypted secrets (ADR-0022, ADR-0029). Never copy `hoster.db` with `cp` while hoster runs:
+the encrypted secrets ([ADR-0022](https://github.com/LHelge/hoster/blob/main/docs/adr/0022-sqlite-via-sqlx-state-store.md), [ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). Never copy `hoster.db` with `cp` while hoster runs:
 the newest writes may still be in `hoster.db-wal`, and a plain copy can be torn. Use:
 
 ```sh
@@ -41,24 +44,24 @@ snapshot is one read transaction and does not block hoster's writes for long. Th
 The snapshot is a single self-contained SQLite file (no `-wal`/`-shm`). It contains the secrets
 encrypted, so it is useless without the key, and the key is useless without it.
 
-Self-update and rollback (ADR-0052) take the same kind of snapshot automatically, into the state
+Self-update and rollback ([ADR-0052](https://github.com/LHelge/hoster/blob/main/docs/adr/0052-release-install-and-self-update.md)) take the same kind of snapshot automatically, into the state
 directory: `hoster-pre-update-<from>-to-<to>-<unix time>.db` before switching to a new version
 and `hoster-pre-rollback-<from>-to-<to>-<unix time>.db` before undoing the schema. hoster does
 not delete them; remove old ones by hand once the new version runs well.
 
-### Secret-store key
+## Secret-store key
 
-The key that encrypts secrets lives outside the state directory on purpose (ADR-0029): either a
+The key that encrypts secrets lives outside the state directory on purpose ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)): either a
 `0600` key file in `~/.config/hoster/` or a user-scoped systemd credential. **Back it up
 separately from the database**, for example in a password manager or on different storage. If
 you lose it, every secret (app secrets and registry credentials) has to be set again; there is
 no recovery. If someone gets both the key and a database backup, they have every secret.
 
-### ACME account and certificates
+## ACME account and certificates
 
 `acme/account.json` is the ACME account key and `certs/<host>/` holds each certificate and its
-private key (docs/architecture.md §7.4). Both are optional: without them hoster registers a new
-account and re-issues certificates when the stacks are applied (ADR-0036). Keeping them avoids
+private key ([architecture §7.4](https://github.com/LHelge/hoster/blob/main/docs/architecture.md)). Both are optional: without them hoster registers a new
+account and re-issues certificates when the stacks are applied ([ADR-0036](https://github.com/LHelge/hoster/blob/main/docs/adr/0036-certificates-issued-at-apply-non-blocking.md)). Keeping them avoids
 hitting Let's Encrypt rate limits after a restore, which matters if you host many hostnames.
 They are plain files that are written atomically, so copying them while hoster runs is fine:
 
@@ -68,9 +71,9 @@ tar -C ~/.local/share/hoster -czf ~/backups/hoster-tls.tar.gz acme certs
 
 They contain private keys; keep the archive `0600`.
 
-### Volumes
+## Volumes
 
-App data lives in named podman volumes `hoster-<stack>-<volume>` (ADR-0030). They are kept when
+App data lives in named podman volumes `hoster-<stack>-<volume>` ([ADR-0030](https://github.com/LHelge/hoster/blob/main/docs/adr/0030-named-volumes-and-documented-backups.md)). They are kept when
 a stack is removed. List them and export each one:
 
 ```sh
@@ -82,11 +85,11 @@ podman volume export hoster-<stack>-<volume> --output ~/backups/hoster-<stack>-<
 continuously, consistency is the app's concern: stop the service first, or use the app's own dump
 tool (for example `pg_dump` via `podman exec`) and back up the dump instead.
 
-## Restoring
+# Restoring
 
 To restore onto a fresh host (or the same host after a loss):
 
-1. **Set up the host** as in [install.md](install.md): the `hoster` user, linger, the sysctl,
+1. **Set up the host** as in [[install]]: the `hoster` user, linger, the sysctl,
    `podman.socket`, the binary and the systemd unit. Run `hoster doctor`.
 2. **Restore the configuration**: `hoster.toml`, the OAuth client secret, and the
    **secret-store key** file (mode `0600`) or the systemd credential, exactly as before.
@@ -117,7 +120,7 @@ To restore onto a fresh host (or the same host after a loss):
 
 7. **Start hoster**: `systemctl --user start hoster`. On startup it checks the database's
    integrity, migrates it if the binary is newer, and reconciles: the services recorded in the
-   database are started again from their image digests (ADR-0028). Images are pulled from the
+   database are started again from their image digests ([ADR-0028](https://github.com/LHelge/hoster/blob/main/docs/adr/0028-hoster-reconciles-container-restarts.md)). Images are pulled from the
    registry, so the registry credentials (in the restored database) must still be valid.
 8. **Check** the admin UI: the stacks, their latest deployments and the secret names are there,
    and the apps answer on their hostnames. If DNS now points at a new IP, update it first;

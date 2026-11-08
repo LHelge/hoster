@@ -3,7 +3,7 @@
 # Copy it to `.github/workflows/release.yml` in the app repository and adjust the `env` block.
 # On every `v*` tag it builds the image, pushes it to ghcr and posts the pushed digest to
 # hoster's deploy webhook, authenticated with the job's GitHub Actions OIDC token. No secret is
-# needed. See docs/deploying-from-ci.md in the hoster repository.
+# needed. See https://docs.hoster.lhelge.se/wiki/deploying-from-ci/.
 #
 # The stack file must allow this repository, e.g.
 #

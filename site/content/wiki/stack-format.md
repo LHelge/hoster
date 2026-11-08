@@ -1,13 +1,14 @@
-# Stack definition format (draft)
-
-Status: draft, 2026-11-07.
+---
+title: Stack file format
+category: Reference
+---
 
 Every field follows from an accepted ADR.
 
-## 1. Format choice: TOML
+# 1. Format choice: TOML
 
 A stack is described in one **TOML** file, conventionally `<stack>.stack.toml`. It lives in the
-app's repository and is applied through the web UI (ADR-0027).
+app's repository and is applied through the web UI ([ADR-0027](https://github.com/LHelge/hoster/blob/main/docs/adr/0027-stacks-applied-via-ui-webhooks-carry-digests.md)).
 
 **Why TOML:**
 
@@ -22,7 +23,7 @@ app's repository and is applied through the web UI (ADR-0027).
 - **Not compose-shaped on purpose.** A YAML file that looks like `docker-compose.yml` would invite
   people to paste compose files and expect compose semantics (`build:`, `depends_on`, `ports:`,
   `privileged:`). hoster's model is different: routes instead of ports, and a deliberately narrow
-  security surface (ADR-0019). A different format makes that obvious.
+  security surface ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)). A different format makes that obvious.
 
 **Alternatives considered:**
 
@@ -36,9 +37,9 @@ app's repository and is applied through the web UI (ADR-0027).
 **Downside accepted:** deeply nested arrays of tables (`[[services.api.routes]]`) are verbose.
 Inline tables are allowed where they read better.
 
-## 2. Schema
+# 2. Schema
 
-### 2.1 Top level
+## 2.1 Top level
 
 ```toml
 version = 1          # required; schema version, integer
@@ -53,48 +54,48 @@ name = "notes"       # required; stack name
 | `version` | integer | yes | Must be `1`. |
 | `name` | string | yes | `^[a-z][a-z0-9-]{0,30}$`. Unique per hoster instance. Used in network and container names (`hoster-<name>`, `hoster-<name>-<svc>-g<n>`). |
 | `services` | table of service | yes | At least one. Keys are service names: `^[a-z][a-z0-9-]{0,30}$`. The key is also the DNS alias on the stack network. |
-| `drain_timeout` | duration | no | Default `30s`. Upper bound for draining old upstreams (ADR-0017). |
-| `deploy` | table | no | Who may deploy this stack through the webhook (§2.5, ADR-0047). Without it, the stack can only be deployed from the UI. |
+| `drain_timeout` | duration | no | Default `30s`. Upper bound for draining old upstreams ([ADR-0017](https://github.com/LHelge/hoster/blob/main/docs/adr/0017-zero-downtime-deploy-sequence.md)). |
+| `deploy` | table | no | Who may deploy this stack through the webhook (§2.5, [ADR-0047](https://github.com/LHelge/hoster/blob/main/docs/adr/0047-oidc-authenticated-deploy-webhook.md)). Without it, the stack can only be deployed from the UI. |
 
-### 2.2 Service
+## 2.2 Service
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `image` | string | yes | Repository reference **without a tag** for CI-built images, e.g. `ghcr.io/acme/notes-api`, whose digest comes from the deploy. Third-party images may use `repo:tag`, `repo:tag@sha256:…` or `repo@sha256:…`. A tag without a digest is **resolved to a digest when the stack is applied**, stored in the stack revision and shown in the apply diff (ADR-0025). |
-| `track` | string | no | Tag the ghcr poller watches for this service, e.g. `"main"` or `"latest"`. Only for CI-built `ghcr.io` images. The poller deploys only when the tag's digest changes (ADR-0043). |
+| `image` | string | yes | Repository reference **without a tag** for CI-built images, e.g. `ghcr.io/acme/notes-api`, whose digest comes from the deploy. Third-party images may use `repo:tag`, `repo:tag@sha256:…` or `repo@sha256:…`. A tag without a digest is **resolved to a digest when the stack is applied**, stored in the stack revision and shown in the apply diff ([ADR-0025](https://github.com/LHelge/hoster/blob/main/docs/adr/0025-registry-credentials-and-image-references.md)). |
+| `track` | string | no | Tag the ghcr poller watches for this service, e.g. `"main"` or `"latest"`. Only for CI-built `ghcr.io` images. The poller deploys only when the tag's digest changes ([ADR-0043](https://github.com/LHelge/hoster/blob/main/docs/adr/0043-edge-triggered-poller.md)). |
 | `command` | array of string | no | Overrides the image `CMD`. |
 | `entrypoint` | array of string | no | Overrides the image `ENTRYPOINT`. |
-| `env` | table string → string | no | Plain, non-secret environment variables. For a routed service with exactly one distinct container port, hoster adds `PORT=<that port>` unless `env` (or `secrets`) sets `PORT` itself (ADR-0051). A service whose routes use two or more different container ports, or that has no routes, gets no `PORT`; set what it needs in `env`. The injected value is part of the service's config hash, so changing the route's `port` redeploys the service. |
-| `secrets` | table string → string | no | Env var name → secret name `<stack>/<name>` in hoster's encrypted secret store (ADR-0029). The value never appears in the stack file. Values are injected as environment variables at container create; a deployment that references a secret which is not set is rejected, naming the secret (never its value). Replacing a secret changes its version, which is part of the service's config hash. |
-| `volumes` | table string → string | no | Volume name → mount path. Named podman volumes `hoster-<stack>-<volume>` only, kept on stack removal (ADR-0030). Host bind mounts are not expressible (ADR-0019). hoster creates each volume on first use, labelled `hoster.managed=true` and `hoster.stack=<stack>`, and refuses to mount an existing one labelled for another stack. Validation warns when a service with volumes uses `update = "start-first"`, since old and new containers would mount the volume at the same time during a deploy (ADR-0039). |
-| `health` | table | no | See §2.4 (ADR-0038, ADR-0051). Defaults: HTTP `GET /healthz` on the first route's container port for routed services, "running for 5 s" for others. Services whose health endpoint is elsewhere (including prefix-mounted ones) declare it. |
-| `update` | string | no | `"start-first"` (default; zero-downtime) or `"stop-first"` (for services that cannot run twice; short outage with 503 + `Retry-After`) (ADR-0039). |
+| `env` | table string → string | no | Plain, non-secret environment variables. For a routed service with exactly one distinct container port, hoster adds `PORT=<that port>` unless `env` (or `secrets`) sets `PORT` itself ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). A service whose routes use two or more different container ports, or that has no routes, gets no `PORT`; set what it needs in `env`. The injected value is part of the service's config hash, so changing the route's `port` redeploys the service. |
+| `secrets` | table string → string | no | Env var name → secret name `<stack>/<name>` in hoster's encrypted secret store ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). The value never appears in the stack file. Values are injected as environment variables at container create; a deployment that references a secret which is not set is rejected, naming the secret (never its value). Replacing a secret changes its version, which is part of the service's config hash. |
+| `volumes` | table string → string | no | Volume name → mount path. Named podman volumes `hoster-<stack>-<volume>` only, kept on stack removal ([ADR-0030](https://github.com/LHelge/hoster/blob/main/docs/adr/0030-named-volumes-and-documented-backups.md)). Host bind mounts are not expressible ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)). hoster creates each volume on first use, labelled `hoster.managed=true` and `hoster.stack=<stack>`, and refuses to mount an existing one labelled for another stack. Validation warns when a service with volumes uses `update = "start-first"`, since old and new containers would mount the volume at the same time during a deploy ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
+| `health` | table | no | See §2.4 ([ADR-0038](https://github.com/LHelge/hoster/blob/main/docs/adr/0038-host-driven-health-probes-no-limits-v1.md), [ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). Defaults: HTTP `GET /healthz` on the first route's container port for routed services, "running for 5 s" for others. Services whose health endpoint is elsewhere (including prefix-mounted ones) declare it. |
+| `update` | string | no | `"start-first"` (default; zero-downtime) or `"stop-first"` (for services that cannot run twice; short outage with 503 + `Retry-After`) ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
 | `stop_timeout` | duration | no | Default `10s`. SIGTERM → SIGKILL grace period. |
 | `user` | string | no | `uid[:gid]` inside the container. |
 | `read_only` | bool | no | Default `false`. Read-only root filesystem. |
-| `routes` | array of route | no | Zero or more. If empty, the service publishes no ports (ADR-0007). |
+| `routes` | array of route | no | Zero or more. If empty, the service publishes no ports ([ADR-0007](https://github.com/LHelge/hoster/blob/main/docs/adr/0007-route-model-and-loopback-only-publishing.md)). |
 
 There are intentionally **no** fields for `ports`, `privileged`, `network_mode`, `cap_add`,
-`devices`, bind mounts, or the podman socket (ADR-0007, ADR-0019).
+`devices`, bind mounts, or the podman socket ([ADR-0007](https://github.com/LHelge/hoster/blob/main/docs/adr/0007-route-model-and-loopback-only-publishing.md), [ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)).
 
-### 2.3 Route
+## 2.3 Route
 
 | Field | Type | Required | Default | Rules |
 |---|---|---|---|---|
-| `host` | string | yes | — | A lowercase FQDN, without port or scheme. No wildcards (ADR-0016). Must resolve to the VPS for ACME. |
-| `prefix` | string | no | `"/"` | Must start with `/`. No trailing `/` except the root. No `?`, `#`, `//`, `.` or `..` segments. Normalized into segments for matching and collision checks (ADR-0009). |
-| `strip_prefix` | bool | no | `false` | Remove the matched prefix before forwarding (ADR-0010). Has no effect on `/`; validation warns if it is set there. |
-| `port` | integer | yes | — | Container port, 1–65535, i.e. the port the app listens on inside the container. hoster allocates the host port and binds it on `127.0.0.1`; the app never sees it. **The app must bind `0.0.0.0` or `::`, not `127.0.0.1`:** rootless port forwarding cannot reach a loopback-bound listener. Single-port services also receive it as `PORT` (see `env`). Host-level redirects (`www` → apex) are not expressible in v1 (ADR-0051); declare both hosts as routes or redirect in the app. |
-| `timeouts` | table | no | hoster defaults | `connect`, `read`, `write`, `idle` as durations (ADR-0011). |
+| `host` | string | yes | — | A lowercase FQDN, without port or scheme. No wildcards ([ADR-0016](https://github.com/LHelge/hoster/blob/main/docs/adr/0016-persist-acme-state-defer-dns01.md)). Must resolve to the VPS for ACME. |
+| `prefix` | string | no | `"/"` | Must start with `/`. No trailing `/` except the root. No `?`, `#`, `//`, `.` or `..` segments. Normalized into segments for matching and collision checks ([ADR-0009](https://github.com/LHelge/hoster/blob/main/docs/adr/0009-host-and-longest-segment-prefix-routing.md)). |
+| `strip_prefix` | bool | no | `false` | Remove the matched prefix before forwarding ([ADR-0010](https://github.com/LHelge/hoster/blob/main/docs/adr/0010-prefix-preservation-and-forwarded-headers.md)). Has no effect on `/`; validation warns if it is set there. |
+| `port` | integer | yes | — | Container port, 1–65535, i.e. the port the app listens on inside the container. hoster allocates the host port and binds it on `127.0.0.1`; the app never sees it. **The app must bind `0.0.0.0` or `::`, not `127.0.0.1`:** rootless port forwarding cannot reach a loopback-bound listener. Single-port services also receive it as `PORT` (see `env`). Host-level redirects (`www` → apex) are not expressible in v1 ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)); declare both hosts as routes or redirect in the app. |
+| `timeouts` | table | no | hoster defaults | `connect`, `read`, `write`, `idle` as durations ([ADR-0011](https://github.com/LHelge/hoster/blob/main/docs/adr/0011-streaming-bodies-and-per-route-timeouts.md)). |
 
 **Validation (a deploy or apply fails as a whole):**
 
 - Duplicate (host, prefix) inside the stack → error.
-- (host, prefix) owned by another stack → error (ADR-0012).
+- (host, prefix) owned by another stack → error ([ADR-0012](https://github.com/LHelge/hoster/blob/main/docs/adr/0012-reject-cross-stack-route-collisions.md)).
 - More than one service of the same stack on the same (host, prefix) → error, same as a duplicate.
 - Durations parse as humantime strings: `"500ms"`, `"30s"`, `"5m"`.
 
-### 2.4 Health check (ADR-0038)
+## 2.4 Health check (ADR-0038)
 
 ```toml
 [services.api.health]
@@ -107,7 +108,7 @@ start_period = "30s"  # give up and abort the deploy after this
 
 hoster runs the probe from the host against the container's allocated `127.0.0.1` port. Without a
 `health` table, a routed service is probed with `GET /healthz` on its first route's container port,
-expecting 2xx–3xx (ADR-0051); set `health.http.path` when the endpoint differs, e.g. `/api/healthz`
+expecting 2xx–3xx ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)); set `health.http.path` when the endpoint differs, e.g. `/api/healthz`
 for a service mounted under a preserved prefix. Services without routes have no loopback port. For
 them v1 uses "running and not restarted for 5 s", and `health` is not allowed on non-routed
 services.
@@ -118,7 +119,7 @@ must be percent-encoded. HTTP probes do not follow redirects, so a 3xx answer is
 deploy aborts as soon as the container exits during the check. Probe results (each change, and the
 verdict) are recorded as deployment events.
 
-### 2.5 Deploy authorization (ADR-0047)
+## 2.5 Deploy authorization (ADR-0047)
 
 ```toml
 [deploy]
@@ -136,9 +137,9 @@ job_workflow_ref = "acme/notes/.github/workflows/release.yml@refs/heads/main"  #
 | `job_workflow_ref` | string | no | Exact match. Use it to require a specific reusable or release workflow. |
 
 A webhook may only deploy services whose `image` is in a repository the token's repo publishes
-to. The digest-ownership check from ADR-0042 still applies.
+to. The digest-ownership check from [ADR-0042](https://github.com/LHelge/hoster/blob/main/docs/adr/0042-webhook-endpoint-payload-and-replay.md) still applies.
 
-## 3. Worked example: Rust API at `/api`, nginx frontend at `/`, rustfs on `s3.`
+# 3. Worked example: Rust API at `/api`, nginx frontend at `/`, rustfs on `s3.`
 
 `notes.stack.toml` in the `acme/notes` repository:
 
@@ -227,7 +228,7 @@ port = 9000
 timeouts = { read = "10m", write = "10m", idle = "10m" }   # large objects, streamed (ADR-0011)
 ```
 
-### 3.1 What hoster does with it
+## 3.1 What hoster does with it
 
 **Podman objects** (generation 7 shown, ports from the allocator):
 
@@ -253,7 +254,7 @@ timeouts = { read = "10m", write = "10m", idle = "10m" }   # large objects, stre
 | `GET https://notes.example.com/` | web | `/` |
 | `GET https://notes.example.com/app.js` | web | `/app.js` |
 | `GET https://notes.example.com/api/notes?limit=10` | api | `/api/notes?limit=10`, `Host: notes.example.com` |
-| `GET https://notes.example.com/apiary` | web (segment boundary, ADR-0009) | `/apiary` |
+| `GET https://notes.example.com/apiary` | web (segment boundary, [ADR-0009](https://github.com/LHelge/hoster/blob/main/docs/adr/0009-host-and-longest-segment-prefix-routing.md)) | `/apiary` |
 | `PUT https://s3.notes.example.com/attachments/abc.png` | storage | `/attachments/abc.png`, `Host: s3.notes.example.com`, signature intact |
 
 **Certificates:** one each for `notes.example.com` and `s3.notes.example.com`, through HTTP-01.
@@ -264,9 +265,9 @@ timeouts = { read = "10m", write = "10m", idle = "10m" }   # large objects, stre
   are untouched, because their digests are unchanged.
 - Applying a revision whose `storage` tag resolves to a new digest (or pressing "re-resolve
   tags") redeploys `storage` stop-first, which causes a short storage outage. The file says so
-  explicitly (ADR-0039).
+  explicitly ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)).
 
-## 4. Versioning
+# 4. Versioning
 
 `version = 1` is required. Breaking schema changes bump the version. hoster rejects unknown fields
 (`deny_unknown_fields`), so typos fail loudly instead of being ignored. A compatibility policy for

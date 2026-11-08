@@ -165,7 +165,7 @@ pub enum UpdateError {
     },
     #[error(
         "{failure}; restoring the snapshot {} failed as well, so the hoster service is left \
-         stopped: restore it by hand (see the manual rollback in docs/install.md)",
+         stopped: restore it by hand (see the manual rollback at https://docs.hoster.lhelge.se/wiki/install/#manual-recovery)",
         snapshot.display()
     )]
     Restore {

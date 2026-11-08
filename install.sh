@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs hoster on a Linux host with systemd, or brings an existing install up to date
-# (ADR-0052, docs/install.md):
+# (ADR-0052, https://docs.hoster.lhelge.se/wiki/install/):
 #
 #   curl -fsSL https://github.com/LHelge/hoster/releases/latest/download/install.sh | sudo bash
 #   curl -fsSL .../install.sh | sudo bash -s -- --version v0.2.0 --dry-run
@@ -202,7 +202,7 @@ hoster_binary() {
                 ;;
             -1)
                 if [ "$EXPLICIT_VERSION" = 1 ]; then
-                    die "$RELEASE_TAG is older than the current $current; switching back would not downgrade the database schema. Use \`hoster rollback\` (docs/install.md)."
+                    die "$RELEASE_TAG is older than the current $current; switching back would not downgrade the database schema. Use \`hoster rollback\` (https://docs.hoster.lhelge.se/wiki/install/)."
                 fi
                 ok "keeping $current, which is newer than the latest stable release $RELEASE_TAG"
                 printf '%s\n' "$current"
@@ -369,7 +369,7 @@ Options:
                     directory to check the release, changes nothing)
   -h, --help        show this help
 
-See https://github.com/LHelge/hoster/blob/main/docs/install.md
+See https://docs.hoster.lhelge.se/wiki/install/
 EOF
 }
 
@@ -564,7 +564,7 @@ finish the setup as the hoster user, in a session with its own user bus:
      HOSTER_ADMIN_GITHUB=<your-github-handle> ~/.local/lib/hoster/current/hoster doctor
      systemctl --user enable --now hoster
 
-See https://github.com/LHelge/hoster/blob/main/docs/install.md
+See https://docs.hoster.lhelge.se/wiki/install/
 EOF
     if [ -n "$before" ] && [ "$before" != "$current" ]; then
         cat << EOF

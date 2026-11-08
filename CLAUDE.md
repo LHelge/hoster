@@ -13,7 +13,12 @@ The documentation is ~45k tokens in total. Don't read it all; the Bears task is 
    names. Read ADRs individually (they are 20–90 lines each) and architecture.md by section with
    `offset`/`limit` or grep for the `## N.` heading — never the whole file or all ADRs.
 3. **If unfamiliar with the project:** `spec.md` once (~3k tokens) for the user-facing picture;
-   `docs/stack-format.md` when touching stack parsing, routing or deploys.
+   `site/content/wiki/stack-format.md` when touching stack parsing, routing or deploys.
+
+The user-facing guides (install, stack format, deploying from CI, static sites, backup) are the
+aphid site in `site/content/wiki/`, published at https://docs.hoster.lhelge.se. Link between them
+with `[[slug]]` or `[[slug#anchor|text]]`; `aphid build` in `site/` fails on a broken one.
+`docs/` holds the internal design docs (ADRs, architecture, open questions, spikes).
 4. **Don't read** `docs/open-questions.md` unless you are raising a new question; it is history.
    `docs/architecture.md` §1 ("Verified against") is reference material for library behaviour,
    useful only when writing code against Pingora, bollard, instant-acme or the registry API.

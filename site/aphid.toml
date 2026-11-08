@@ -1,0 +1,27 @@
+# The documentation site at https://docs.hoster.lhelge.se, built with aphid
+# (https://aphid.lhelge.se) and released as an nginx image by .github/workflows/release.yml.
+# `aphid` in this directory serves it on :3000 with live reload; `aphid build` renders dist/.
+title = "hoster"
+base_url = "https://docs.hoster.lhelge.se"
+description = "A single-binary deployment orchestrator for one VPS"
+wiki_default_category = "Other"
+
+[[wiki_categories]]
+name = "Getting Started"
+description = "What hoster is, and how to set it up on a VPS."
+
+[[wiki_categories]]
+name = "Guides"
+description = "Deploying apps and static sites from GitHub Actions."
+
+[[wiki_categories]]
+name = "Reference"
+description = "The stack file, field by field."
+
+[[wiki_categories]]
+name = "Operations"
+description = "Backups, restores and recovery."
+
+[[socials]]
+platform = "GitHub"
+url = "https://github.com/LHelge/hoster"

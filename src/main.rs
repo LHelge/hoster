@@ -110,7 +110,7 @@ enum Command {
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 enum Backup {
     /// Write a consistent snapshot of the SQLite state store, safe while hoster runs
-    /// (`VACUUM INTO`). Back up the secret-store key separately; see docs/backup.md.
+    /// (`VACUUM INTO`). Back up the secret-store key separately; see https://docs.hoster.lhelge.se/wiki/backup/.
     Db {
         /// The snapshot file to create; it must not exist yet.
         #[arg(value_name = "FILE")]

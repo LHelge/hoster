@@ -1,22 +1,25 @@
-# Deploying from CI
+---
+title: Deploying from CI
+category: Guides
+---
 
 This guide is for an app repository that wants its GitHub Actions release workflow to deploy to
 hoster. The workflow builds and pushes the image, takes the digest from the push step, asks
 GitHub for an OIDC token meant for hoster, and posts the digest to hoster's deploy webhook.
 No deploy secret is stored in CI: the token proves which repository, ref, workflow and
 environment the request comes from, and the stack file says which of those may deploy
-(ADR-0003, ADR-0042, ADR-0047).
+([ADR-0003](https://github.com/LHelge/hoster/blob/main/docs/adr/0003-images-built-in-ci-pushed-to-ghcr.md), [ADR-0042](https://github.com/LHelge/hoster/blob/main/docs/adr/0042-webhook-endpoint-payload-and-replay.md), [ADR-0047](https://github.com/LHelge/hoster/blob/main/docs/adr/0047-oidc-authenticated-deploy-webhook.md)).
 
 A complete workflow to copy is in
-[`examples/github-actions/release.yml`](../examples/github-actions/release.yml).
-For a static site, see [static-sites.md](static-sites.md).
+[`examples/github-actions/release.yml`](https://github.com/LHelge/hoster/blob/main/examples/github-actions/release.yml).
+For a static site, see [[static-sites]].
 
-## 1. One-time setup
+# 1. One-time setup
 
-### 1.1 The stack file names the image repository
+## 1.1 The stack file names the image repository
 
 The service's `image` is the repository the workflow pushes to, **without a tag**
-(stack-format.md §2.2):
+([[stack-format#2-2-service|Stack file format, §2.2]]):
 
 ```toml
 [services.api]
@@ -28,9 +31,9 @@ deploys, so a webhook can never start an image from somewhere else. Image names 
 lowercase; if the GitHub owner or repository name has capitals, lowercase them in both places.
 
 If the package is private, enter a classic PAT with `read:packages` under
-**Settings → Registries** (ADR-0025). The OIDC token does not authorize pulls.
+**Settings → Registries** ([ADR-0025](https://github.com/LHelge/hoster/blob/main/docs/adr/0025-registry-credentials-and-image-references.md)). The OIDC token does not authorize pulls.
 
-### 1.2 Find the repository id
+## 1.2 Find the repository id
 
 hoster matches the repository by its numeric id, which stays the same when the repository is
 renamed or transferred. Any of these gives it:
@@ -40,10 +43,10 @@ renamed or transferred. Any of these gives it:
 - the **Refused webhook deploys** table on the stack page: send one deploy before adding the
   rule (the attempt is refused with `403`) and copy the `repository_id` column.
 
-### 1.3 Allow the repository in the stack's `[deploy]` rule
+## 1.3 Allow the repository in the stack's `[deploy]` rule
 
 Without a `[deploy]` section, a stack can only be deployed from the UI. Add one and apply the
-new revision in the UI (stack-format.md §2.5):
+new revision in the UI ([[stack-format#2-5-deploy-authorization-adr-0047|Stack file format, §2.5]]):
 
 ```toml
 [deploy]
@@ -60,11 +63,11 @@ environment = "production"         # optional: exact match on the token's `envir
   app repository, the claim ends in the ref that triggered it (`…/release.yml@refs/tags/v1.4.2`),
   so it changes with every release; use `refs` and `environment` instead.
 
-### 1.4 Protect the deploy with a GitHub environment (recommended)
+## 1.4 Protect the deploy with a GitHub environment (recommended)
 
 The `[deploy]` rule decides which tokens hoster accepts. A GitHub environment decides which jobs
 can get such a token in the first place. Together they keep a pushed branch or an edited workflow
-from deploying production (ADR-0047).
+from deploying production ([ADR-0047](https://github.com/LHelge/hoster/blob/main/docs/adr/0047-oidc-authenticated-deploy-webhook.md)).
 
 In the app repository, under **Settings → Environments → New environment**, create
 `production` and set:
@@ -79,9 +82,9 @@ Then let the release job use it (`environment: production`, see the example) and
 hoster with `environment = "production"`. Also protect who can create `v*` tags, with a tag
 ruleset under **Settings → Rules → Rulesets**.
 
-## 2. The release workflow
+# 2. The release workflow
 
-### 2.1 Permissions
+## 2.1 Permissions
 
 ```yaml
 permissions:
@@ -93,7 +96,7 @@ permissions:
 Without `id-token: write`, the `ACTIONS_ID_TOKEN_REQUEST_*` variables are not set and the token
 request fails.
 
-### 2.2 Build, push and capture the digest
+## 2.2 Build, push and capture the digest
 
 `docker/build-push-action` pushes the image and outputs its digest as `steps.<id>.outputs.digest`
 (`sha256:…`). That digest, not a tag, is what hoster deploys, so a tag moved later changes
@@ -109,7 +112,7 @@ nothing:
     tags: ${{ steps.meta.outputs.tags }}
 ```
 
-### 2.3 Request the token with hoster's audience
+## 2.3 Request the token with hoster's audience
 
 The token's `aud` must equal hoster's configured audience: `https://<admin_host>` by default, or
 `[webhook] audience` in `hoster.toml` (`HOSTER_WEBHOOK__AUDIENCE`). Request it from the runner's
@@ -126,7 +129,7 @@ echo "::add-mask::$token"
 few minutes and hoster accepts each one **once**: request a fresh one for every POST, including
 retries.
 
-### 2.4 Send the webhook
+## 2.4 Send the webhook
 
 ```sh
 body=$(jq -nc --arg d "$DIGEST" --arg t "$GITHUB_REF_NAME" \
@@ -148,15 +151,15 @@ The body (at most 64 KiB):
 | `tag` | no | Informational, shown in the deploy history. Any text up to 256 characters. |
 
 Unknown fields are refused, and `stack_file` is reserved: stack files are applied in the UI
-(ADR-0027). Repository, commit, ref, run id and actor in the deploy history come from the
+([ADR-0027](https://github.com/LHelge/hoster/blob/main/docs/adr/0027-stacks-applied-via-ui-webhooks-carry-digests.md)). Repository, commit, ref, run id and actor in the deploy history come from the
 verified token, not from the body.
 
-### 2.5 Answers
+## 2.5 Answers
 
 | Status | Body | Meaning |
 |---|---|---|
-| `202` | `{"result":"accepted","deployment_id":"8","state":"Received"}` | A deployment started, or was queued behind the running one (`"state":"Queued"`, ADR-0040). Follow it at `/stacks/<stack>/deployments/<id>`. |
-| `200` | `{"result":"noop","deployment_id":"7"}` | The stack already runs these digests with this configuration (ADR-0029). |
+| `202` | `{"result":"accepted","deployment_id":"8","state":"Received"}` | A deployment started, or was queued behind the running one (`"state":"Queued"`, [ADR-0040](https://github.com/LHelge/hoster/blob/main/docs/adr/0040-deploy-concurrency-and-coalescing.md)). Follow it at `/stacks/<stack>/deployments/<id>`. |
+| `200` | `{"result":"noop","deployment_id":"7"}` | The stack already runs these digests with this configuration ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). |
 | `400` | `{"error":…}` | The body is not valid JSON of the shape above. |
 | `401` | `{"error":"invalid token"}` | Missing, malformed, expired, wrong audience, wrong signature, or already used. The reason is only in hoster's log. |
 | `403` | `{"error":"not allowed to deploy this stack"}` | The stack has no `[deploy]` rule, does not exist, or the rule does not match the token. For a stack that exists, the attempt and its claims are listed on its page. |
@@ -168,10 +171,10 @@ verified token, not from the body.
 | `500` | `{"error":"internal error"}` | hoster failed internally; the cause is in its log. |
 
 The `202` means the deployment was accepted, not that it went live: a failed health check aborts
-it and leaves the old containers serving (ADR-0017). Watch the deployment page or the stack's
+it and leaves the old containers serving ([ADR-0017](https://github.com/LHelge/hoster/blob/main/docs/adr/0017-zero-downtime-deploy-sequence.md)). Watch the deployment page or the stack's
 history.
 
-## 3. What hoster checks in the token
+# 3. What hoster checks in the token
 
 hoster verifies the RS256 signature against GitHub's published keys, then `iss`
 (`https://token.actions.githubusercontent.com`), `aud`, `exp`/`nbf`/`iat` with 60 s of clock
@@ -224,7 +227,7 @@ example):
 The stack page's refused-attempts table shows `repository`, `repository_id`, `ref`,
 `environment` and `workflow_ref` of each refused token, never the token itself.
 
-## 4. Troubleshooting
+# 4. Troubleshooting
 
 - **The token request fails:** the job lacks `permissions: id-token: write`, or the workflow runs
   from a fork's pull request, which never gets an OIDC token.
