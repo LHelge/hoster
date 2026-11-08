@@ -67,7 +67,7 @@ use tokio::sync::{Notify, RwLock, Semaphore, broadcast};
 
 use crate::health::{HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
 use crate::ports::{PortAllocator, PortError};
-use crate::registry::{RegistryClient, RegistryError};
+use crate::registry::{RegistryClient, RegistryError, TrackedService};
 use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
 use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, VolumeMount, label};
 use crate::secrets::{SecretError, SecretStore};
@@ -820,6 +820,53 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             None,
         )
         .await
+    }
+
+    /// Every service whose active revision sets `track` (ADR-0043), with the tracked tag on its
+    /// image and the digest it runs, `None` when it has never run. Only CI-built images are
+    /// tracked; the stack validation already refuses `track` on anything else.
+    pub async fn tracked(&self) -> Result<Vec<TrackedService>> {
+        let mut tracked = Vec::new();
+        for stack in self.store.stacks().await? {
+            let Some(revision) = self.store.latest_revision(&stack.name).await? else {
+                continue;
+            };
+            let definition: Stack = revision.toml.parse()?;
+            let running: BTreeMap<String, String> = self
+                .store
+                .services(&stack.name)
+                .await?
+                .into_iter()
+                .map(|pointer| (pointer.service, pointer.digest))
+                .collect();
+            for (name, service) in &definition.services {
+                let Some(tag) = &service.track else { continue };
+                if !service.image.is_ci_built() {
+                    continue;
+                }
+                let image = service.image.clone().with_tag(tag).map_err(|message| {
+                    OrchestratorError::Resolve {
+                        service: name.to_string(),
+                        message,
+                    }
+                })?;
+                let running = running
+                    .get(name.as_ref())
+                    .map(|digest| digest.parse::<Digest>())
+                    .transpose()
+                    .map_err(|message| OrchestratorError::Digest {
+                        service: name.to_string(),
+                        message,
+                    })?;
+                tracked.push(TrackedService {
+                    stack: stack.name.clone(),
+                    service: name.to_string(),
+                    image,
+                    running,
+                });
+            }
+        }
+        Ok(tracked)
     }
 
     /// A deploy from the webhook (ADR-0042, ADR-0047): the caller must match the stack's
@@ -1591,6 +1638,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 mod gc_tests;
 #[cfg(test)]
 mod monitor_tests;
+#[cfg(test)]
+mod poller_tests;
 #[cfg(test)]
 mod queue_tests;
 #[cfg(test)]

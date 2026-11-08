@@ -2,10 +2,10 @@
 id: hxh
 title: "M7: Webhook and digest poller"
 type: epic
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.145566088Z"
-updated: "2026-11-07T14:45:17.145566088Z"
+updated: "2026-11-08T02:45:53.405507913Z"
 ---
 
 ## Scope

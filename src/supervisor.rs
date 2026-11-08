@@ -26,7 +26,7 @@ use crate::config::{Config, ProxyConfig};
 use crate::orchestrator::{Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
 use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
-use crate::registry::{RegistryClient, StoredCredentials};
+use crate::registry::{Poller, RegistryClient, StoredCredentials};
 use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
@@ -732,6 +732,14 @@ impl Startup for Supervisor {
                     dns.clone(),
                 );
                 tokio::spawn(acme.run(commands, events_tx, self.teardown.token.child_token()));
+                // The digest poller: deploys tracked tags when they move (ADR-0043, ADR-0051).
+                let poller = Poller::new(
+                    Box::new(Arc::clone(&orchestrator)),
+                    registry.client.clone() as Arc<dyn TagResolver>,
+                    Arc::new(store.clone()),
+                    &self.config.poller,
+                );
+                tokio::spawn(poller.run(self.teardown.token.child_token()));
 
                 let web = WebApp::from_config(
                     &self.config,

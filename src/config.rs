@@ -186,10 +186,6 @@ impl Default for Timeouts {
 /// Digest poller settings (ADR-0043).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-#[allow(
-    dead_code,
-    reason = "fields are consumed by the subsystems as they are implemented"
-)]
 pub struct PollerConfig {
     /// Time between polls of tracked tags (jitter is added on top).
     #[serde(with = "humantime_serde")]

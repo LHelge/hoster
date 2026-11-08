@@ -1,10 +1,10 @@
 ---
 id: "68p"
 title: Edge-triggered digest poller
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.344348469Z"
-updated: "2026-11-08T02:32:19.457447723Z"
+updated: "2026-11-08T02:45:53.405332831Z"
 tags:
   - registry
   - orchestrator

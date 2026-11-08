@@ -11,6 +11,7 @@
 )]
 mod client;
 mod credentials;
+mod poller;
 
 #[allow(
     unused_imports,
@@ -21,3 +22,4 @@ pub use credentials::{
     Anonymous, CredentialError, RegistryCredential, RegistryCredentials, RegistryEntry,
     RegistryHost, StoredCredentials,
 };
+pub use poller::{Poller, TrackedService};
