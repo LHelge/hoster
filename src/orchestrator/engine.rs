@@ -11,10 +11,11 @@ use tracing::Instrument;
 
 use super::machine::{Effect, Event};
 use super::plan::{Change, Plan, SecretVersions};
+use super::routes::Routes;
 use super::{Orchestrator, Result};
 use crate::health::Check;
 use crate::logging::LogSpan;
-use crate::routing::RouteClaims;
+use crate::routing::{DesiredStack, RouteClaims};
 use crate::runtime::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, NetworkSpec, PortBinding,
     ServiceGeneration, VolumeMount, label,
@@ -95,6 +96,9 @@ pub(super) struct Run {
     created: Vec<ContainerId>,
     /// Old stop-first containers `Replacing` stopped (kept until clean-up).
     stopped: Vec<ContainerId>,
+    /// What the stack's routes served before `Switching` published this deployment's, put
+    /// back should the pointers fail to commit.
+    served_before: Option<DesiredStack>,
 }
 
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -112,6 +116,7 @@ impl Run {
             ports: BTreeMap::new(),
             created: Vec::new(),
             stopped: Vec::new(),
+            served_before: None,
         }
     }
 
@@ -214,7 +219,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
     }
 
-    /// Applies the pure transition function and updates the in-memory slot.
+    /// Applies the pure transition function and updates the in-memory slot, under the lock.
+    ///
+    /// On `Switching` it also publishes the `RouteTable` in that same critical section
+    /// (ADR-0035 #1, ADR-0050): every changed service on its new upstreams, removed services
+    /// gone. [`Effect::PublishRoutes`] is carried out here and not returned; the
+    /// [`Effect::Commit`] that writes the pointers follows it in the returned effects.
     fn transition(
         &self,
         run: &mut Run,
@@ -224,14 +234,36 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         // The store logs the persisted transition (target `hoster::deploy`) at `info`.
         tracing::debug!(deployment = %run.id, from = %run.state, to = %transition.to, "deployment transition");
         run.state = transition.to;
-        let mut slots = self.lock();
-        if let Some(slot) = slots.get_mut(run.target.stack().as_ref())
-            && let Some((id, state)) = &mut slot.active
+        let mut effects = transition.effects;
+        let mut state = self.lock();
+        if let Some(slot) = state.slots.get_mut(run.target.stack().as_ref())
+            && let Some((id, active)) = &mut slot.active
             && *id == run.id
         {
-            *state = transition.to;
+            *active = transition.to;
         }
-        Ok(transition.effects)
+        if effects.contains(&Effect::PublishRoutes) {
+            effects.retain(|effect| *effect != Effect::PublishRoutes);
+            if let Ok(plan) = &run.plan {
+                let stack = run.target.stack();
+                let live = plan.changes.iter().map(|change| {
+                    let ports = run.ports.get(&change.service).cloned().unwrap_or_default();
+                    let upstreams =
+                        Routes::loopback(stack, &change.service, run.generation, &ports);
+                    (change.service.clone(), upstreams)
+                });
+                let removed: Vec<Name> = plan
+                    .removed
+                    .iter()
+                    .filter_map(|pointer| pointer.service.parse().ok())
+                    .collect();
+                run.served_before =
+                    state
+                        .routes
+                        .commit(Arc::clone(&run.target.definition), live, &removed);
+            }
+        }
+        Ok(effects)
     }
 
     /// The interpreter: carries out one effect.
@@ -259,7 +291,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 },
             ),
             Effect::ReplaceStopFirst => Some(self.replace_stop_first(run).await),
-            // M3: there is no proxy to publish a RouteTable to (§5.1).
+            // Published by `transition`, under the lock; never returned from it.
             Effect::PublishRoutes => None,
             Effect::Commit => self.commit(run).await,
             // M3: nothing routes to the old upstreams, so there is nothing to drain.
@@ -436,6 +468,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let stop_timeout = |service: &Name| definition.services[service].stop_timeout;
         for change in &changes {
             if let Some(previous) = &change.previous {
+                // The service's routes answer 503 + Retry-After until the commit or the abort.
+                self.lock()
+                    .routes
+                    .open_gap(run.target.stack(), &change.service);
                 let old = generation_of(&containers, run.target.stack(), previous);
                 for container in old.into_iter().filter(|c| c.state.is_running()) {
                     if let Err(err) = self
@@ -463,8 +499,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
     /// `Switching`: the commit point, one transaction writing every changed service's pointer
     /// (§5.4). A failure here is fatal for the run: it halts in `Switching`, which crash
-    /// recovery treats like `HealthChecking`.
-    async fn commit(self: &Arc<Self>, run: &Run) -> Option<Event> {
+    /// recovery treats like `HealthChecking`. The old pointers stay authoritative, and the
+    /// reconciler retires the new generation, so the routes go back to the old upstreams.
+    async fn commit(self: &Arc<Self>, run: &mut Run) -> Option<Event> {
         let pointers: Vec<ServicePointer> = run
             .plan()
             .changes
@@ -484,6 +521,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             Ok(()) => Some(Event::Switched),
             Err(err) => {
                 tracing::error!(deployment = %run.id, %err, "cannot commit the per-service pointers; halting");
+                self.lock()
+                    .routes
+                    .revert(run.target.stack(), run.served_before.take());
                 self.release(&run.stack_name(), run.id);
                 None
             }
@@ -551,6 +591,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 problems.push(format!("cannot restart old container {id}: {err}"));
             }
         }
+        // The stopped stop-first services serve from their old upstreams again.
+        self.lock().routes.close_gaps(run.target.stack());
         self.release_ports(run).await;
         if problems.is_empty() {
             Event::Aborted(reason)

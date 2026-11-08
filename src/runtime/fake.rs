@@ -6,12 +6,12 @@
 //! is recorded.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
@@ -37,6 +37,40 @@ struct State {
     /// Failures returned on every call until cleared.
     fail_always: HashMap<Operation, RuntimeError>,
     calls: Vec<Operation>,
+    /// Pulls of images whose reference contains the pattern wait at the hold.
+    holds: Vec<(String, Arc<PullHold>)>,
+}
+
+/// A point where pulls wait until the test releases them ([`FakeRuntime::hold_pulls`]), for
+/// tests that interleave concurrent deployments deterministically.
+#[derive(Debug)]
+pub struct PullHold {
+    /// One permit per pull that reached the hold.
+    arrived: Semaphore,
+    /// Closed on release.
+    open: Semaphore,
+}
+
+impl PullHold {
+    /// Waits until a pull is waiting at the hold.
+    pub async fn reached(&self) {
+        self.arrived
+            .acquire()
+            .await
+            .expect("the arrival semaphore is never closed")
+            .forget();
+    }
+
+    /// Lets every waiting and later pull through.
+    pub fn release(&self) {
+        self.open.close();
+    }
+
+    async fn pass(&self) {
+        self.arrived.add_permits(1);
+        // Closed means released; a permit is never added.
+        let _ = self.open.acquire().await;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +158,19 @@ impl FakeRuntime {
     /// Makes every call of `operation` fail with `error` until [`Self::clear_failures`].
     pub fn fail_always(&self, operation: Operation, error: RuntimeError) {
         self.lock().fail_always.insert(operation, error);
+    }
+
+    /// Makes every pull of an image whose reference contains `pattern` wait until the returned
+    /// hold is released.
+    pub fn hold_pulls(&self, pattern: &str) -> Arc<PullHold> {
+        let hold = Arc::new(PullHold {
+            arrived: Semaphore::new(0),
+            open: Semaphore::new(0),
+        });
+        self.lock()
+            .holds
+            .push((pattern.to_owned(), Arc::clone(&hold)));
+        hold
     }
 
     pub fn clear_failures(&self) {
@@ -248,6 +295,16 @@ impl ContainerRuntime for FakeRuntime {
     }
 
     async fn pull_image(&self, image: &PinnedImage) -> Result<(), RuntimeError> {
+        let reference = image.to_string();
+        let hold = self
+            .lock()
+            .holds
+            .iter()
+            .find(|(pattern, _)| reference.contains(pattern.as_str()))
+            .map(|(_, hold)| Arc::clone(hold));
+        if let Some(hold) = hold {
+            hold.pass().await;
+        }
         let mut state = self.lock();
         state.enter(Operation::PullImage)?;
         state.images.insert(image.to_string());

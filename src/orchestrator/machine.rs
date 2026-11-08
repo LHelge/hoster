@@ -4,8 +4,8 @@
 //! [`DeploymentState::on`] is the whole machine. It knows nothing about podman, the store or the
 //! proxy: each transition says which [`Effect`]s to run, and the deploy task's interpreter runs
 //! them and feeds the [`Event`] they produce back in. The states, edges and effects are final;
-//! milestones only change how an effect is carried out (M3: the built-in health check, no
-//! `RouteTable` publish, immediate drain; M6: real probes, the swap and the inflight drain).
+//! milestones only change how an effect is carried out (M3: the built-in health check and an
+//! immediate drain; M6: real probes and the inflight drain).
 
 use std::fmt;
 
@@ -71,7 +71,8 @@ pub enum Effect {
     Probe,
     /// Replace the stop-first services one at a time (ADR-0048).
     ReplaceStopFirst,
-    /// Publish the `RouteTable` pointing at the new upstreams (M3: nothing to publish).
+    /// Publish the `RouteTable` pointing at the new upstreams (done by the orchestrator under
+    /// its lock, in the same call that applies the transition).
     PublishRoutes,
     /// Write every per-service current pointer in one transaction: the commit point.
     Commit,

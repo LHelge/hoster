@@ -1,10 +1,10 @@
 ---
 id: pav
 title: Publish RouteTable from the orchestrator actor on deploy, remove and reconcile
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.245274308Z"
-updated: "2026-11-08T00:41:44.416020019Z"
+updated: "2026-11-08T01:04:06.844985103Z"
 tags:
   - orchestrator
   - routing

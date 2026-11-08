@@ -611,6 +611,7 @@ impl Startup for Supervisor {
                         reserved: Reserved::from(&self.config),
                         ..Settings::default()
                     },
+                    Arc::clone(&self.routes),
                 );
                 // Interrupted deployments resolved, containers adopted, started or removed
                 // (§4 step 5, §5.4); then the loop keeps them running (ADR-0028).
@@ -629,7 +630,15 @@ impl Startup for Supervisor {
                 Ok(())
             }
             Phase::RouteTable => {
-                tracing::info!(%phase, step = phase.number(), "not implemented yet, skipping");
+                // Published before the proxy starts, so its first request sees the routes.
+                let version = self
+                    .orchestrator
+                    .as_ref()
+                    .context("the orchestrator is built before the route table")?
+                    .restore_routes()
+                    .await
+                    .context("building the route table")?;
+                tracing::info!(version, "route table published");
                 Ok(())
             }
             Phase::Services => {

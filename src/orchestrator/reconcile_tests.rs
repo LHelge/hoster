@@ -39,6 +39,7 @@ fn restarted(h: &Harness, restart: RestartPolicy) -> Arc<Orchestrator<FakeRuntim
             restart,
             ..Settings::default()
         },
+        Arc::default(),
     )
 }
 
@@ -430,7 +431,7 @@ async fn stacks_with_an_active_deployment_are_skipped() {
         ContainerState::Exited(Some(1))
     );
 
-    orchestrator.lock().remove("notes");
+    orchestrator.lock().slots.remove("notes");
     let report = orchestrator.reconcile().await.unwrap();
     assert_eq!(report.started, ["hoster-notes-api-g2"]);
     assert_eq!(report.removed, ["hoster-notes-api-g7"]);
@@ -626,6 +627,7 @@ async fn stacks_being_removed_are_skipped() {
     let h = bootstrapped().await;
     h.orchestrator
         .lock()
+        .slots
         .entry("notes".into())
         .or_default()
         .removing = true;

@@ -11,9 +11,13 @@
 //!
 //! A deployment is driven by a spawned deploy task through the pure state machine of
 //! [`machine`] (`(state, event) -> (state, effects)`); the effects are carried out by the
-//! interpreter in `engine`. M3 has no proxy yet: health is the built-in "running for 5 s"
-//! check, `Switching` commits the per-service pointers without publishing a `RouteTable`, and
-//! `Draining` completes at once (architecture §5.1).
+//! interpreter in `engine`. Health is the built-in "running for 5 s" check and `Draining`
+//! completes at once (architecture §5.1).
+//!
+//! The orchestrator is also the single writer of the proxy's `ArcSwap<RouteTable>` (`routes`,
+//! architecture §6.4): desired state lives under the same lock as the slots, and every change
+//! (a deployment's commit, a stop-first gap, a removal, the startup restore) rebuilds and
+//! publishes the whole table inside that critical section.
 //!
 //! The reconciler (`reconcile`, ADR-0028) resolves interrupted deployments and adopts, starts
 //! or removes containers at startup ([`Orchestrator::recover`]), then keeps the current
@@ -33,12 +37,14 @@ pub mod machine;
 mod monitor;
 mod plan;
 mod reconcile;
+mod routes;
 
 use std::collections::BTreeMap;
 use std::pin::pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast};
@@ -46,7 +52,7 @@ use tokio::sync::{Notify, broadcast};
 use crate::health::{HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
 use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError};
-use crate::routing::{CollisionError, Reserved, RouteClaims};
+use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
 use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, VolumeMount, label};
 use crate::secrets::{SecretError, SecretStore};
 use crate::stack::{Diagnostic, ImageRef, Name, PinnedImage, Stack, StackError};
@@ -61,6 +67,7 @@ pub use plan::PlanError;
 use plan::{Plan, SecretVersions};
 use reconcile::Reconciler;
 pub use reconcile::{RestartPolicy, RestartStats};
+use routes::Routes;
 
 /// Resolves a third-party image's tag to the digest the registry serves for it (ADR-0025).
 /// [`RegistryClient`] in production; tests use a fake.
@@ -89,6 +96,8 @@ pub struct Settings {
     pub restart: RestartPolicy,
     /// How often live services are probed (ADR-0038).
     pub monitor: MonitorSettings,
+    /// The `Retry-After` of a stop-first service's routes during its gap (ADR-0048).
+    pub gap_retry_after: Duration,
 }
 
 impl Default for Settings {
@@ -99,6 +108,7 @@ impl Default for Settings {
             settle_poll: Duration::from_millis(500),
             restart: RestartPolicy::default(),
             monitor: MonitorSettings::default(),
+            gap_retry_after: Duration::from_secs(5),
         }
     }
 }
@@ -334,7 +344,8 @@ pub struct Orchestrator<R> {
     /// App secrets, injected at container create (ADR-0029).
     secrets: SecretStore,
     settings: Settings,
-    slots: Mutex<BTreeMap<String, Slot>>,
+    /// Desired state and the deploy slots, behind the one lock (ADR-0050).
+    state: Mutex<State>,
     /// Signalled whenever a deployment leaves its stack's slot.
     finished: Notify,
     /// Signalled when a stack's removal starts, so its deploy task aborts.
@@ -347,6 +358,14 @@ pub struct Orchestrator<R> {
     prober: Arc<dyn Prober>,
     /// Status changes for open UI pages (architecture §3.3 #5).
     ui_events: broadcast::Sender<UiEvent>,
+}
+
+/// What the orchestrator's lock guards: only in-memory data, never held across an `.await`.
+struct State {
+    /// The deploy slot of each stack.
+    slots: BTreeMap<String, Slot>,
+    /// Desired state and the `RouteTable` published from it (architecture §6.4).
+    routes: Routes,
 }
 
 /// The deploy slot of one stack (ADR-0040): one active deployment, one pending.
@@ -384,8 +403,8 @@ pub(super) struct ReconcileClaim<'a, R: ContainerRuntime> {
 impl<R: ContainerRuntime> Drop for ReconcileClaim<'_, R> {
     fn drop(&mut self) {
         let next = {
-            let mut slots = self.orchestrator.lock();
-            slots.get_mut(&self.stack).and_then(|slot| {
+            let mut state = self.orchestrator.lock();
+            state.slots.get_mut(&self.stack).and_then(|slot| {
                 slot.reconciling = false;
                 slot.promote_pending()
             })
@@ -399,19 +418,15 @@ impl<R: ContainerRuntime> Drop for ReconcileClaim<'_, R> {
 
 /// Clears a stack's `removing` mark when [`Orchestrator::remove`] returns, also on an error. A
 /// finished removal has dropped the slot already.
-struct Removal<'a, R> {
+struct Removal<'a, R: ContainerRuntime> {
     orchestrator: &'a Orchestrator<R>,
     stack: &'a str,
 }
 
-impl<R> Drop for Removal<'_, R> {
+impl<R: ContainerRuntime> Drop for Removal<'_, R> {
     fn drop(&mut self) {
-        let mut slots = self
-            .orchestrator
-            .slots
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(slot) = slots.get_mut(self.stack) {
+        let mut state = self.orchestrator.lock();
+        if let Some(slot) = state.slots.get_mut(self.stack) {
             slot.removing = false;
         }
     }
@@ -443,6 +458,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         ports: PortAllocator,
         secrets: SecretStore,
         settings: Settings,
+        routes: Arc<ArcSwap<RouteTable>>,
     ) -> Arc<Self> {
         Self::with_prober(
             store,
@@ -451,11 +467,16 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             ports,
             secrets,
             settings,
+            routes,
             Arc::new(NetworkProber),
         )
     }
 
     /// [`Self::new`] with the health monitor probing through `prober`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the orchestrator's collaborators, each injected for tests"
+    )]
     pub fn with_prober(
         store: Store,
         runtime: Arc<R>,
@@ -463,8 +484,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         ports: PortAllocator,
         secrets: SecretStore,
         settings: Settings,
+        routes: Arc<ArcSwap<RouteTable>>,
         prober: Arc<dyn Prober>,
     ) -> Arc<Self> {
+        let routes = Routes::new(routes, settings.reserved.clone(), settings.gap_retry_after);
         Arc::new(Self {
             store,
             runtime,
@@ -472,7 +495,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             ports,
             secrets,
             settings,
-            slots: Mutex::default(),
+            state: Mutex::new(State {
+                slots: BTreeMap::new(),
+                routes,
+            }),
             finished: Notify::new(),
             removal: Notify::new(),
             reconciler: Mutex::default(),
@@ -689,8 +715,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             return Err(unknown());
         }
         let (active, pending) = {
-            let mut slots = self.lock();
-            let slot = slots.entry(stack.to_owned()).or_default();
+            let mut state = self.lock();
+            let slot = state.slots.entry(stack.to_owned()).or_default();
             if slot.removing {
                 return Err(OrchestratorError::Removing(stack.to_owned()));
             }
@@ -748,7 +774,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             Vec::new()
         };
         self.store.remove_stack(stack).await?;
-        self.lock().remove(stack);
+        {
+            // The routes go with the slot, in one critical section.
+            let mut state = self.lock();
+            state.slots.remove(stack);
+            state.routes.remove(&name);
+        }
         tracing::info!(
             stack,
             containers = containers.len(),
@@ -765,8 +796,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// as being removed meanwhile, so an apply cannot start a deployment that mounts them.
     async fn remove_leftover_volumes(&self, stack: &Name) -> Result<RemoveOutcome> {
         {
-            let mut slots = self.lock();
-            let slot = slots.entry(stack.to_string()).or_default();
+            let mut state = self.lock();
+            let slot = state.slots.entry(stack.to_string()).or_default();
             if slot.removing {
                 return Err(OrchestratorError::Removing(stack.to_string()));
             }
@@ -886,8 +917,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     )
                 });
             let (active, queued) = {
-                let slots = self.lock();
-                let slot = slots.get(&stack.name);
+                let state = self.lock();
+                let slot = state.slots.get(&stack.name);
                 (
                     slot.and_then(|s| s.active),
                     slot.and_then(|s| s.pending.as_ref().map(Run::id)),
@@ -943,9 +974,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     // Deploy slots
     // -----------------------------------------------------------------------------------------
 
-    fn lock(&self) -> MutexGuard<'_, BTreeMap<String, Slot>> {
-        // Slots hold plain data; a panic cannot leave them half-updated.
-        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, State> {
+        // The state is plain data, changed only in short non-awaiting sections; a panic cannot
+        // leave it half-updated.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn reconciler(&self) -> MutexGuard<'_, Reconciler> {
@@ -963,7 +995,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 
     fn is_busy(&self, stack: &str) -> bool {
-        self.lock().get(stack).is_some_and(|s| s.active.is_some())
+        self.lock()
+            .slots
+            .get(stack)
+            .is_some_and(|s| s.active.is_some())
     }
 
     /// Takes `stack`'s slot for a reconcile pass, unless a deployment or a removal holds it.
@@ -971,8 +1006,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self: &'a Arc<Self>,
         stack: &str,
     ) -> Option<ReconcileClaim<'a, R>> {
-        let mut slots = self.lock();
-        let slot = slots.entry(stack.to_owned()).or_default();
+        let mut state = self.lock();
+        let slot = state.slots.entry(stack.to_owned()).or_default();
         if slot.active.is_some() || slot.removing || slot.reconciling {
             return None;
         }
@@ -989,7 +1024,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         loop {
             let mut notified = pin!(self.finished.notified());
             notified.as_mut().enable();
-            if !self.lock().get(stack).is_some_and(|s| s.reconciling) {
+            if !self.lock().slots.get(stack).is_some_and(|s| s.reconciling) {
                 return;
             }
             notified.await;
@@ -998,12 +1033,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
     /// Whether the stack's removal has started.
     fn is_removing(&self, stack: &str) -> bool {
-        self.lock().get(stack).is_some_and(|s| s.removing)
+        self.lock().slots.get(stack).is_some_and(|s| s.removing)
     }
 
     /// Whether `id` is the active or pending deployment of `stack`.
     fn holds(&self, stack: &str, id: DeploymentId) -> bool {
-        self.lock().get(stack).is_some_and(|s| {
+        self.lock().slots.get(stack).is_some_and(|s| {
             s.active.is_some_and(|(a, _)| a == id)
                 || s.pending.as_ref().is_some_and(|p| p.id() == id)
         })
@@ -1011,8 +1046,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
     /// Takes the stack's slot for `id` if it is free.
     fn claim(&self, stack: &str, id: DeploymentId, state: DeploymentState) -> Claim {
-        let mut slots = self.lock();
-        let slot = slots.entry(stack.to_owned()).or_default();
+        let mut guard = self.lock();
+        let slot = guard.slots.entry(stack.to_owned()).or_default();
         if slot.removing {
             Claim::Removing
         } else if slot.active.is_some() || slot.reconciling {
@@ -1028,8 +1063,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// deployment could end between the check and the insert and leave `run` pending forever
     /// behind nothing.
     fn enqueue(&self, stack: &str, run: Run) -> Enqueued {
-        let mut slots = self.lock();
-        let slot = slots.entry(stack.to_owned()).or_default();
+        let mut state = self.lock();
+        let slot = state.slots.entry(stack.to_owned()).or_default();
         if slot.removing {
             Enqueued::Removing(run)
         } else if slot.active.is_none() && !slot.reconciling {
@@ -1123,8 +1158,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// Frees the stack's slot after `id` and starts the pending deployment, if any.
     fn release(self: &Arc<Self>, stack: &str, id: DeploymentId) {
         let next = {
-            let mut slots = self.lock();
-            let slot = slots.entry(stack.to_owned()).or_default();
+            let mut state = self.lock();
+            if let Ok(name) = stack.parse::<Name>() {
+                // A deployment ends with no gap open; one left by a failed run closes here.
+                state.routes.close_gaps(&name);
+            }
+            let slot = state.slots.entry(stack.to_owned()).or_default();
             if slot.active.is_some_and(|(a, _)| a == id) {
                 slot.active = None;
                 let next = slot.pending.take();
@@ -1153,7 +1192,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         Ok(())
     }
 
-    /// The active definitions of every stack except `name`.
+    /// The definitions of every stack except `name` whose routes are claimed: each one's active
+    /// revision, and the definition its routes are served from now, if that is an older one
+    /// (a route stays owned until the deployment that drops it commits).
     async fn other_stacks(&self, name: &Name) -> Result<Vec<Stack>> {
         let mut others = Vec::new();
         for stack in self.store.stacks().await? {
@@ -1169,6 +1210,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 }
             }
         }
+        let state = self.lock();
+        let served = state
+            .routes
+            .definitions()
+            .filter(|served| served.name != *name && !others.contains(served))
+            .cloned()
+            .collect::<Vec<_>>();
+        others.extend(served);
         Ok(others)
     }
 
@@ -1217,5 +1266,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 mod monitor_tests;
 #[cfg(test)]
 mod reconcile_tests;
+#[cfg(test)]
+mod routes_tests;
 #[cfg(test)]
 mod tests;

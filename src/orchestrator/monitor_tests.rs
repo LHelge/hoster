@@ -69,6 +69,7 @@ async fn monitored() -> (Harness, Arc<Orchestrator<FakeRuntime>>, Arc<FakeProber
             settle_poll: Duration::from_millis(5),
             ..Settings::default()
         },
+        Arc::default(),
         Arc::clone(&prober) as Arc<dyn Prober>,
     );
     (h, orchestrator, prober)
@@ -284,6 +285,7 @@ fn on_interval(
             },
             ..Settings::default()
         },
+        Arc::default(),
         Arc::clone(prober) as Arc<dyn Prober>,
     )
 }
@@ -331,6 +333,7 @@ async fn a_held_stack_keeps_its_status_and_is_looked_at_again_a_refresh_later() 
     // refresh after this pass rather than at a probe time already gone by.
     orchestrator
         .lock()
+        .slots
         .entry("notes".into())
         .or_default()
         .removing = true;

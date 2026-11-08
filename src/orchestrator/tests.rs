@@ -69,6 +69,8 @@ pub(super) struct Harness {
     pub(super) resolver: Arc<FakeResolver>,
     pub(super) secrets: SecretStore,
     pub(super) orchestrator: Arc<Orchestrator<FakeRuntime>>,
+    /// The table the orchestrator publishes, as the proxy reads it.
+    pub(super) routes: Arc<ArcSwap<RouteTable>>,
 }
 
 pub(super) async fn harness_with(settle: Duration) -> Harness {
@@ -83,6 +85,7 @@ pub(super) async fn harness_with(settle: Duration) -> Harness {
         ..Settings::default()
     };
     let secrets = SecretStore::new(store.clone(), &SecretKey::generate());
+    let routes = Arc::<ArcSwap<RouteTable>>::default();
     let orchestrator = Orchestrator::new(
         store.clone(),
         Arc::clone(&runtime),
@@ -90,6 +93,7 @@ pub(super) async fn harness_with(settle: Duration) -> Harness {
         ports,
         secrets.clone(),
         settings,
+        Arc::clone(&routes),
     );
     Harness {
         _dir: dir,
@@ -98,6 +102,7 @@ pub(super) async fn harness_with(settle: Duration) -> Harness {
         resolver,
         secrets,
         orchestrator,
+        routes,
     }
 }
 
@@ -1113,6 +1118,7 @@ data = "/data"
         PortAllocator::new(store.clone(), PortRange::try_from(28000..=28015).unwrap()),
         SecretStore::new(store.clone(), &crate::secrets::SecretKey::generate()),
         Settings::default(),
+        Arc::default(),
     );
     let applied = orchestrator.apply(EXAMPLE).await.unwrap();
     let first = orchestrator
@@ -1271,6 +1277,7 @@ port = 9090
         PortAllocator::new(store.clone(), PortRange::try_from(28100..=28115).unwrap()),
         secrets.clone(),
         Settings::default(),
+        Arc::default(),
     );
     let port_of = |pointers: &[crate::store::ServicePointer], service: &str, container: u16| {
         pointers
