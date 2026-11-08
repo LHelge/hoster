@@ -1,10 +1,10 @@
 ---
 id: yzq
 title: Rollback and image/container garbage collection
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.310490069Z"
-updated: "2026-11-08T02:14:37.709748924Z"
+updated: "2026-11-08T02:42:00.779541128Z"
 tags:
   - orchestrator
 depends_on:

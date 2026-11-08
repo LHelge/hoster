@@ -95,6 +95,16 @@ pub trait ContainerRuntime: Send + Sync + 'static {
         image: &PinnedImage,
     ) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
+    /// Removes the local image `image` (by its `registry/repository@digest` reference), for
+    /// image garbage collection (ADR-0041). Not forced: fails with [`RuntimeError::InUse`] while
+    /// a container (running or not) uses it, and with [`RuntimeError::NotFound`] when it is not
+    /// present. When other references name the image too (a tag, another digest), podman only
+    /// drops this name and keeps the image; that counts as success.
+    fn remove_image(
+        &self,
+        image: &PinnedImage,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + Send;
+
     /// Creates (but does not start) a container. Fails with [`RuntimeError::Conflict`] when the
     /// name is taken, e.g. by a leftover of an interrupted deploy.
     fn create_container(
@@ -612,6 +622,7 @@ pub enum Operation {
     RemoveNetwork,
     ListNetworks,
     PullImage,
+    RemoveImage,
     CreateContainer,
     Start,
     Stop,
@@ -631,6 +642,7 @@ impl fmt::Display for Operation {
             Self::RemoveNetwork => "remove network",
             Self::ListNetworks => "list networks",
             Self::PullImage => "pull image",
+            Self::RemoveImage => "remove image",
             Self::CreateContainer => "create container",
             Self::Start => "start container",
             Self::Stop => "stop container",

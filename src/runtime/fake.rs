@@ -39,10 +39,13 @@ struct State {
     calls: Vec<Operation>,
     /// Pulls of images whose reference contains the pattern wait at the hold.
     holds: Vec<(String, Arc<PullHold>)>,
+    /// Removals of images whose reference contains the pattern wait at the hold.
+    removal_holds: Vec<(String, Arc<PullHold>)>,
 }
 
-/// A point where pulls wait until the test releases them ([`FakeRuntime::hold_pulls`]), for
-/// tests that interleave concurrent deployments deterministically.
+/// A point where pulls (or image removals) wait until the test releases them
+/// ([`FakeRuntime::hold_pulls`], [`FakeRuntime::hold_image_removals`]), for tests that
+/// interleave concurrent work deterministically.
 #[derive(Debug)]
 pub struct PullHold {
     /// One permit per pull that reached the hold.
@@ -173,6 +176,19 @@ impl FakeRuntime {
         hold
     }
 
+    /// Makes every removal of an image whose reference contains `pattern` wait, before it
+    /// changes anything, until the returned hold is released.
+    pub fn hold_image_removals(&self, pattern: &str) -> Arc<PullHold> {
+        let hold = Arc::new(PullHold {
+            arrived: Semaphore::new(0),
+            open: Semaphore::new(0),
+        });
+        self.lock()
+            .removal_holds
+            .push((pattern.to_owned(), Arc::clone(&hold)));
+        hold
+    }
+
     pub fn clear_failures(&self) {
         let mut state = self.lock();
         state.fail_next.clear();
@@ -200,6 +216,11 @@ impl FakeRuntime {
 
     pub fn has_image(&self, image: &PinnedImage) -> bool {
         self.lock().images.contains(&image.to_string())
+    }
+
+    /// Every image present, by its `registry/repository@digest` reference.
+    pub fn images(&self) -> Vec<String> {
+        self.lock().images.iter().cloned().collect()
     }
 
     /// Every container, managed or not.
@@ -308,6 +329,39 @@ impl ContainerRuntime for FakeRuntime {
         let mut state = self.lock();
         state.enter(Operation::PullImage)?;
         state.images.insert(image.to_string());
+        Ok(())
+    }
+
+    async fn remove_image(&self, image: &PinnedImage) -> Result<(), RuntimeError> {
+        let reference = image.to_string();
+        let hold = self
+            .lock()
+            .removal_holds
+            .iter()
+            .find(|(pattern, _)| reference.contains(pattern.as_str()))
+            .map(|(_, hold)| Arc::clone(hold));
+        if let Some(hold) = hold {
+            hold.pass().await;
+        }
+        let mut state = self.lock();
+        state.enter(Operation::RemoveImage)?;
+        if !state.images.contains(&reference) {
+            return Err(RuntimeError::NotFound {
+                kind: ObjectKind::Image,
+                name: reference,
+            });
+        }
+        if state
+            .containers
+            .values()
+            .any(|c| c.spec.image.to_string() == reference)
+        {
+            return Err(RuntimeError::InUse {
+                kind: ObjectKind::Image,
+                name: reference,
+            });
+        }
+        state.images.remove(&reference);
         Ok(())
     }
 

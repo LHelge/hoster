@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO images (repository, digest, pulled_at) VALUES (?, ?, ?)\n             ON CONFLICT (repository, digest) DO UPDATE SET pulled_at = excluded.pulled_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "284d17dbc1d9644506ac73eb31b20ef345d14646d0ea2ded2841aa38c0c07769"
+}

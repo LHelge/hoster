@@ -15,6 +15,7 @@
     reason = "the Store API is consumed by the orchestrator and web UI"
 )]
 
+mod images;
 mod secrets;
 mod sessions;
 mod types;
@@ -40,9 +41,9 @@ use thiserror::Error;
 )]
 pub use types::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentOutcome, DeploymentSource,
-    DeploymentState, DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, Provenance,
-    RevisionId, SealedSecret, SecretEntry, ServicePointer, SessionRecord, Stack, StackRevision,
-    Timestamp, WebhookRejection,
+    DeploymentState, DigestSet, ImageUse, ImageUseKind, NewDeployment, PortAllocation, PortMap,
+    PortRequest, Provenance, RecordedImage, RevisionId, SealedSecret, SecretEntry, ServicePointer,
+    SessionRecord, Stack, StackRevision, Timestamp, WebhookRejection,
 };
 
 /// The embedded migrations from `migrations/`.

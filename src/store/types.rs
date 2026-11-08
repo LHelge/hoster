@@ -391,6 +391,36 @@ pub struct ServicePointer {
     pub ports: PortMap,
 }
 
+/// An image hoster pulled, as the `images` table records it (ADR-0041): image garbage collection
+/// only ever removes images recorded here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedImage {
+    /// `registry/repository`.
+    pub repository: String,
+    pub digest: String,
+    pub pulled_at: Timestamp,
+}
+
+/// Why a service's digest is wanted, for image retention (ADR-0041).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageUseKind {
+    /// The service's current pointer.
+    Current,
+    /// The target of a deployment that went live: a rollback candidate.
+    Live(DeploymentId),
+    /// The target of a deployment that has not finished yet.
+    InFlight,
+}
+
+/// One digest a service of a (not removed) stack uses or may roll back to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageUse {
+    pub stack: String,
+    pub service: String,
+    pub digest: String,
+    pub kind: ImageUseKind,
+}
+
 /// A loopback port reserved for one container (ADR-0026).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortAllocation {

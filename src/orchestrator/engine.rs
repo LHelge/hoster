@@ -456,6 +456,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     async fn pull(&self, run: &Run) -> Event {
         let mut images: Vec<_> = run.plan().changes.iter().map(|c| &c.image).collect();
         images.dedup();
+        // Image GC removes an image only while it holds this exclusively and no deployment is
+        // active, so an image this deployment finds present stays until it is done: GC sees the
+        // deployment active from now on.
+        let _pulling = self.images.read().await;
         for image in images {
             // Every stack shares the pull limit (ADR-0040); the wait for a permit is part of the
             // pull, so an interruption ends it too.
@@ -466,6 +470,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .expect("the pull semaphore is never closed");
             if let Err(err) = self.runtime.pull_image(image).await {
                 return Event::Failed(format!("cannot pull {image}: {err}"));
+            }
+            // Image GC prunes only what this table records (ADR-0041). Failing to record just
+            // means the image is never pruned, so the deployment carries on.
+            let repository = format!("{}/{}", image.registry(), image.repository());
+            let digest = image.digest().to_string();
+            if let Err(err) = self.store.record_image(&repository, &digest).await {
+                tracing::warn!(%image, %err, "cannot record the pulled image; it will not be pruned");
             }
         }
         Event::Pulled

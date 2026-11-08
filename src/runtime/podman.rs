@@ -20,7 +20,7 @@ use bollard::models::{
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     ListNetworksOptionsBuilder, LogsOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveVolumeOptions, StopContainerOptionsBuilder,
+    RemoveImageOptionsBuilder, RemoveVolumeOptions, StopContainerOptionsBuilder,
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use futures_util::StreamExt;
@@ -253,7 +253,9 @@ impl<'a> Call<'a> {
                 (Operation::RemoveNetwork, _) if Self::in_use(&message) => {
                     RuntimeError::InUse { kind, name }
                 }
-                (Operation::RemoveVolume, 409) => RuntimeError::InUse { kind, name },
+                (Operation::RemoveVolume | Operation::RemoveImage, 409) => {
+                    RuntimeError::InUse { kind, name }
+                }
                 _ => RuntimeError::Api {
                     operation: self.operation,
                     message: format!("{kind} {name}: {message} (HTTP {status_code})"),
@@ -659,6 +661,25 @@ impl ContainerRuntime for PodmanRuntime {
             }
         }
         tracing::info!(image = %reference, "image pulled");
+        Ok(())
+    }
+
+    async fn remove_image(&self, image: &PinnedImage) -> Result<(), RuntimeError> {
+        let reference = image.to_string();
+        let call = Call::new(Operation::RemoveImage, ObjectKind::Image, &reference);
+        // Not forced: an image a container still uses is reported as in use (409) and kept.
+        // An image other references name too (a tag, another digest) only loses this name.
+        let options = RemoveImageOptionsBuilder::new().force(false).build();
+        let removed = self
+            .docker
+            .remove_image(&reference, Some(options), None)
+            .await
+            .map_err(|err| call.error(err))?;
+        if removed.iter().any(|item| item.deleted.is_some()) {
+            tracing::info!(image = %reference, "image removed");
+        } else {
+            tracing::info!(image = %reference, "image untagged; other names keep it");
+        }
         Ok(())
     }
 
@@ -1236,14 +1257,10 @@ mod tests {
         let runtime = real_runtime().await;
         let reference = image.to_string();
         // Start from a clean slate so the pull path really runs; absence is fine.
-        let _ = runtime
-            .docker
-            .remove_image(
-                &reference,
-                None::<bollard::query_parameters::RemoveImageOptions>,
-                None,
-            )
-            .await;
+        match runtime.remove_image(&image).await {
+            Ok(()) | Err(RuntimeError::NotFound { .. }) => {}
+            Err(err) => panic!("cannot remove {reference}: {err}"),
+        }
         assert!(!runtime.has_image(&reference).await.unwrap());
         runtime.pull_image(&image).await.expect("pull by digest");
         assert!(runtime.has_image(&reference).await.unwrap());
@@ -1612,6 +1629,45 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response)?;
         Ok(response)
+    }
+
+    /// Image GC relies on podman refusing to remove an image a container uses (ADR-0041).
+    #[tokio::test]
+    async fn removing_an_image_a_container_uses_is_in_use_on_real_podman() {
+        let Some(runtime) = real_podman().await else {
+            return;
+        };
+        let stack = unique_stack();
+        let body = tokio::spawn({
+            let runtime = runtime.clone();
+            let stack = stack.clone();
+            async move {
+                let image = run_image();
+                runtime.pull_image(&image).await.expect("pull busybox");
+                runtime
+                    .ensure_network(&NetworkSpec::for_stack(&stack))
+                    .await
+                    .unwrap();
+                // Created, never started: a stopped container keeps its image in use too.
+                runtime
+                    .create_container(&spec_for(stack.as_ref(), "web"))
+                    .await
+                    .unwrap();
+                // An image with one name is refused as in use. One that other references name
+                // too (pulled by another digest or tag) only loses this name; either way the
+                // container keeps its image.
+                match runtime.remove_image(&image).await {
+                    Err(RuntimeError::InUse { .. }) | Ok(()) => {}
+                    Err(err) => panic!("{err:?}"),
+                }
+                assert!(runtime.has_image(&image.to_string()).await.unwrap());
+            }
+        });
+        let result = body.await;
+        clean_up(&runtime, &stack).await;
+        if let Err(err) = result {
+            std::panic::resume_unwind(err.into_panic());
+        }
     }
 
     #[tokio::test]

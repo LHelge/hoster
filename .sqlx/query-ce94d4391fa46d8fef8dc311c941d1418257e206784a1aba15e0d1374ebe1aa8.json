@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT repository, digest, pulled_at AS \"pulled_at: Timestamp\"\n               FROM images ORDER BY pulled_at, repository, digest",
+  "describe": {
+    "columns": [
+      {
+        "name": "repository",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "repository"
+          }
+        }
+      },
+      {
+        "name": "digest",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "digest"
+          }
+        }
+      },
+      {
+        "name": "pulled_at: Timestamp",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "images",
+            "name": "pulled_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ce94d4391fa46d8fef8dc311c941d1418257e206784a1aba15e0d1374ebe1aa8"
+}

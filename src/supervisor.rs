@@ -656,6 +656,11 @@ impl Startup for Supervisor {
                 tokio::spawn(
                     Arc::clone(&orchestrator).run_reconciler(self.teardown.token.child_token()),
                 );
+                // Images no service keeps for a rollback are pruned daily (ADR-0041).
+                tokio::spawn(
+                    Arc::clone(&orchestrator)
+                        .run_garbage_collector(self.teardown.token.child_token()),
+                );
                 // Live services are probed from now on (ADR-0038).
                 tokio::spawn(
                     Arc::clone(&orchestrator).run_health_monitor(self.teardown.token.child_token()),

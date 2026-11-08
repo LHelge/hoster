@@ -31,6 +31,10 @@
 //! ([`Orchestrator::run_health_monitor`]) and reports status changes on `ui_events`
 //! ([`Orchestrator::subscribe`]) and in [`Orchestrator::status`].
 //!
+//! Image garbage collection (`gc`, ADR-0041) keeps each service's current digest and its last
+//! three successful ones and prunes the other images hoster pulled once a day
+//! ([`Orchestrator::run_garbage_collector`]).
+//!
 //! Certificates (`certs`, ADR-0036): every apply tells the ACME task which hosts to ensure and
 //! which to forget ([`Orchestrator::connect_acme`]); the task's events are recorded and relayed
 //! on `ui_events` ([`Orchestrator::run_acme_events`], [`Orchestrator::certificates`]).
@@ -42,6 +46,7 @@
 
 mod certs;
 mod engine;
+mod gc;
 pub mod machine;
 mod monitor;
 mod plan;
@@ -58,7 +63,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::sync::{Notify, Semaphore, broadcast};
+use tokio::sync::{Notify, RwLock, Semaphore, broadcast};
 
 use crate::health::{HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
 use crate::ports::{PortAllocator, PortError};
@@ -77,6 +82,7 @@ use crate::store::{
 use certs::CertHosts;
 pub use certs::CertStatus;
 use engine::{Run, Target};
+pub use gc::GcSettings;
 use machine::Event;
 pub use plan::PlanError;
 use plan::{Plan, SecretVersions};
@@ -128,6 +134,8 @@ pub struct Settings {
     pub gap_retry_after: Duration,
     /// How many image pulls run at once, over every stack (ADR-0040).
     pub pull_limit: usize,
+    /// Image retention and how often images are pruned (ADR-0041).
+    pub gc: GcSettings,
 }
 
 impl Default for Settings {
@@ -141,6 +149,7 @@ impl Default for Settings {
             monitor: MonitorSettings::default(),
             gap_retry_after: Duration::from_secs(5),
             pull_limit: 2,
+            gc: GcSettings::default(),
         }
     }
 }
@@ -424,6 +433,9 @@ pub struct Orchestrator<R> {
     interrupt: Notify,
     /// Bounds the image pulls running at once, over every stack (ADR-0040).
     pulls: Semaphore,
+    /// Orders image pulls against image removal (ADR-0041): a deployment holds it shared while
+    /// it pulls, garbage collection exclusively while it removes one image.
+    images: RwLock<()>,
     /// Restart histories and warnings of the reconciler (ADR-0028).
     reconciler: Mutex<Reconciler>,
     /// Liveness of the live generations (ADR-0038).
@@ -614,6 +626,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             finished: Notify::new(),
             interrupt: Notify::new(),
             pulls,
+            images: RwLock::new(()),
             reconciler: Mutex::default(),
             watchlist: Mutex::default(),
             prober,
@@ -1574,6 +1587,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 }
 
+#[cfg(test)]
+mod gc_tests;
 #[cfg(test)]
 mod monitor_tests;
 #[cfg(test)]

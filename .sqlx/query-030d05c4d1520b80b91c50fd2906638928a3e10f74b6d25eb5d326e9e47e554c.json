@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM images WHERE repository = ? AND digest = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "030d05c4d1520b80b91c50fd2906638928a3e10f74b6d25eb5d326e9e47e554c"
+}
