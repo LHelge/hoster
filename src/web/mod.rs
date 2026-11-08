@@ -57,7 +57,7 @@ use crate::update::{GithubReleases, SystemdUserService, Updater};
 
 use self::assets::Assets;
 use self::auth::Auth;
-use self::certificates::{CertificateAccess, CertificateControl, Certificates};
+use self::certificates::{AcmeDirectory, CertificateAccess, CertificateControl, Certificates};
 use self::containers::{ContainerSource, Containers};
 use self::dashboard::Dashboard;
 pub(crate) use self::icons::Icon;
@@ -186,6 +186,7 @@ impl WebApp {
             dns,
             backoffs: Arc::new(store.clone()),
             admin_host: config.admin_host.to_string().to_ascii_lowercase(),
+            directory: AcmeDirectory::from(config.acme.directory_url.as_str()),
         };
         Ok(WebApp::new(
             auth,
@@ -247,6 +248,11 @@ impl WebApp {
             .route("/certificates", get(Certificates::page))
             .route("/certificates/dns", post(Certificates::check_dns))
             .route("/certificates/retry", post(Certificates::retry))
+            .route("/certificates/dns/all", post(Certificates::check_all_dns))
+            .route(
+                "/certificates/retry/failing",
+                post(Certificates::retry_failing),
+            )
             .layer(Extension(self.certificates.clone()))
             .route("/stacks/{name}/deploy", post(Stacks::deploy))
             .route("/stacks/{name}/remove", post(Stacks::remove))

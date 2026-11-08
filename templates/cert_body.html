@@ -1,0 +1,75 @@
+<section aria-label="Summary">
+<dl class="kpis cert-kpis">
+  {%- for tile in body.tiles %}
+  {{ tile }}
+  {%- endfor %}
+</dl>
+</section>
+{%- if let Some(alert) = body.alert %}
+<section class="alert alert-fail" aria-labelledby="cert-alert-title">
+  {{ crate::web::Icon::Failed }}
+  <div class="alert-text">
+    <p class="alert-title" id="cert-alert-title">{{ alert.title }}</p>
+    <p class="alert-detail">{% if let Some(error) = alert.error %}{{ error }}{% else %}No failed attempt recorded since hoster started; retry now to renew.{% endif %}</p>
+    <p class="alert-detail">Next automatic attempt: {{ alert.next_attempt }}.{% if alert.others > 0 %} {{ alert.others }} more {% if alert.others == 1 %}host needs{% else %}hosts need{% endif %} attention below.{% endif %}</p>
+    <div id="alert-dns" class="alert-dns" aria-live="polite"></div>
+  </div>
+  <div class="alert-actions">
+    <form class="inline-form" hx-post="/certificates/dns" hx-target="#alert-dns">
+      <input type="hidden" name="host" value="{{ alert.host }}">
+      <button type="submit" class="ghost">check dns<span class="visually-hidden"> of {{ alert.host }}</span></button>
+    </form>
+    <form class="inline-form" hx-post="/certificates/retry" hx-target="#cert-result">
+      <input type="hidden" name="host" value="{{ alert.host }}">
+      <button type="submit">retry now<span class="visually-hidden"> {{ alert.host }}</span></button>
+    </form>
+  </div>
+</section>
+{%- endif %}
+<section class="card" aria-labelledby="certs-title">
+  <header class="card-head">
+    <h2 id="certs-title">Hosts <span class="card-count">· {{ body.rows.len() }}</span></h2>
+    <span class="card-note">sorted by expiry · problems first</span>
+  </header>
+  {%- if body.rows.is_empty() %}
+  <p class="card-body muted">No hosts need a certificate yet.</p>
+  {%- else %}
+  <div class="table-scroll"><table class="list certificates">
+    <thead>
+      <tr><th scope="col">Domain</th><th scope="col">Stack</th><th scope="col">Issuer</th><th scope="col">Challenge</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col">DNS</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+    </thead>
+    <tbody>
+      {%- for row in body.rows %}
+      <tr>
+        <td><code class="cert-host">{{ row.host }}</code></td>
+        <td class="mono cert-nowrap">{% if let Some(stacks) = row.stacks %}{% if stacks.is_empty() %}<span class="muted">—</span>{% else %}{% for stack in stacks %}{% if !loop.first %}, {% endif %}<a href="{{ stack.href }}">{{ stack.name }}</a>{% endfor %}{% endif %}{% else %}<span class="muted">hoster admin</span>{% endif %}</td>
+        <td class="mono cert-nowrap">{% if let Some(issuer) = row.issuer %}{{ issuer }}{% else %}<span class="muted">none</span>{% endif %}</td>
+        <td class="mono">{{ row.challenge() }}</td>
+        <td class="cert-expiry">{% if let Some(expiry) = row.expiry %}
+          <span class="cert-expiry-head"><time datetime="{{ expiry.at }}">{{ expiry.date }}</time><span>{{ expiry.left }}</span></span>
+          {{ expiry.meter }}
+          <span class="cert-next">{{ expiry.time }}</span>
+        {%- else %}<span class="muted">no certificate yet</span>{% endif %}</td>
+        <td class="cert-status">{{ row.pill() }}
+          {%- if let Some(error) = row.error %}<span class="cert-error">{{ error }}</span>{% endif %}
+          <span class="cert-next">next: {{ row.next_attempt }}</span></td>
+        <td id="dns-{{ row.index }}" class="cert-dns">{% let dns = row.dns %}{% include "cert_dns.html" %}</td>
+        <td class="row-actions">
+          <form class="inline-form" hx-post="/certificates/dns" hx-target="#dns-{{ row.index }}">
+            <input type="hidden" name="host" value="{{ row.host }}">
+            <button type="submit" class="row-button">check dns<span class="visually-hidden"> of {{ row.host }}</span></button>
+          </form>
+          <form class="inline-form" hx-post="/certificates/retry" hx-target="#cert-result">
+            <input type="hidden" name="host" value="{{ row.host }}">
+            <button type="submit" class="row-button">retry<span class="visually-hidden"> {{ row.host }}</span></button>
+          </form>
+        </td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table></div>
+  {%- endif %}
+</section>
+{%- if let Some(flash) = body.flash %}
+<div id="cert-result" hx-swap-oob="innerHTML"><div class="flash flash-{{ flash.kind }}" role="status"><p>{{ flash.message }}</p></div></div>
+{%- endif %}

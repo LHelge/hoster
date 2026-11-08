@@ -32,7 +32,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt as _;
 
 use super::assets::Assets;
-use super::certificates::{CertOverview, CertRow};
+use super::certificates::{AcmeDirectory, CertOverview, CertOwner, CertRow};
 use super::system::System;
 use crate::acme::{Backoff, DnsMismatch, DnsVerdict, Validity};
 use crate::health::{HealthStats, HealthStatus};
@@ -568,7 +568,9 @@ impl Fixtures {
         ]
     }
 
-    /// Valid, expiring, failing behind a DNS mismatch while backing off, and not attempted yet.
+    /// Valid, due for renewal, expiring, failing to renew a certificate that expires soon,
+    /// failing behind a DNS mismatch while backing off without a certificate, and not attempted
+    /// yet.
     fn certificates() -> CertOverview {
         let now = SystemTime::now();
         let status = |set: &dyn Fn(&mut CertStatus)| {
@@ -576,7 +578,8 @@ impl Fixtures {
             set(&mut status);
             status
         };
-        let issued = |host: &str, left: Duration| CertRow {
+        let stack = |name: &str| CertOwner::Stacks(vec![name.to_owned()]);
+        let issued = |host: &str, owner: CertOwner, left: Duration| CertRow {
             host: host.into(),
             issuer: Some("Let's Encrypt R11".into()),
             validity: Some(Validity {
@@ -585,13 +588,29 @@ impl Fixtures {
             }),
             status: status(&|s| s.dns_checked = true),
             backoff: None,
+            owner,
         };
         CertOverview {
             source: "the A/AAAA records of admin.example.com".into(),
             public: ["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()].into(),
             hosts: vec![
-                issued("admin.example.com", 61 * DAY),
-                issued("blog.example.com", 5 * DAY),
+                issued("admin.example.com", CertOwner::Admin, 61 * DAY),
+                CertRow {
+                    status: status(&|s| {
+                        s.error = Some(
+                            "urn:ietf:params:acme:error:rateLimited: too many failed authorizations recently".into(),
+                        );
+                        s.retry_at = Some(now + 2 * HOUR);
+                        s.dns_checked = true;
+                    }),
+                    backoff: Some(Backoff {
+                        failures: 4,
+                        retry_at: now + 2 * HOUR,
+                    }),
+                    ..issued("blog.example.com", stack("blog"), 3 * DAY)
+                },
+                issued("docs.example.com", stack("docs"), 21 * DAY),
+                issued("acme.example.com", stack("docs"), 44 * DAY),
                 CertRow {
                     host: "shop.example.com".into(),
                     issuer: None,
@@ -615,6 +634,7 @@ impl Fixtures {
                         failures: 3,
                         retry_at: now + HOUR,
                     }),
+                    owner: stack("shop"),
                 },
                 CertRow {
                     host: "wiki.example.com".into(),
@@ -622,9 +642,11 @@ impl Fixtures {
                     validity: None,
                     status: CertStatus::default(),
                     backoff: None,
+                    owner: stack("wiki"),
                 },
-                issued("www.blog.example.com", 5 * DAY),
+                issued("www.blog.example.com", stack("blog"), 5 * DAY),
             ],
+            directory: AcmeDirectory::LetsEncryptStaging,
         }
     }
 
@@ -1053,6 +1075,49 @@ impl Session<'_> {
             .join("\n")
     }
 
+    /// `page` with the content of the `<div>` whose id is `id` replaced by `fragment`, as an
+    /// htmx `innerHTML` swap does.
+    fn replace_div(page: &str, id: &str, fragment: &str) -> String {
+        let at = page
+            .find(&format!("<div id=\"{id}\""))
+            .unwrap_or_else(|| panic!("no div#{id} in the page"));
+        let start = at + page[at..].find('>').unwrap() + 1;
+        let mut depth = 1;
+        let mut pos = start;
+        while depth > 0 {
+            let open = page[pos..].find("<div").map(|i| pos + i);
+            let close = pos + page[pos..].find("</div>").expect("an unclosed div");
+            match open {
+                Some(open) if open < close => {
+                    depth += 1;
+                    pos = open + 4;
+                }
+                _ => {
+                    depth -= 1;
+                    pos = close + 6;
+                }
+            }
+        }
+        let end = pos - "</div>".len();
+        format!("{}{fragment}{}", &page[..start], &page[end..])
+    }
+
+    /// [`replace_div`](Self::replace_div) for a response that ends in one
+    /// `hx-swap-oob="innerHTML"` element: its content goes into the element with its id, the
+    /// rest replaces the content of `div#id`.
+    fn swap_with_oob(page: &str, id: &str, response: &str) -> String {
+        let Some(at) = response
+            .find(" hx-swap-oob=\"innerHTML\">")
+            .and_then(|oob| response[..oob].rfind("<div id=\""))
+        else {
+            return Self::replace_div(page, id, response);
+        };
+        let (main, oob) = response.split_at(at);
+        let oob_id = oob["<div id=\"".len()..].split('"').next().unwrap();
+        let inner = &oob[oob.find('>').unwrap() + 1..oob.trim_end().len() - "</div>".len()];
+        Self::inject(&Self::replace_div(page, id, main), oob_id, inner)
+    }
+
     /// `page` with `fragment` as the content of the element whose id is `id`.
     fn inject(page: &str, id: &str, fragment: &str) -> String {
         let at = page
@@ -1081,11 +1146,26 @@ async fn ui_preview() {
         }
     }
     *app.certificates.overview.lock().unwrap() = Some(Fixtures::certificates());
-    app.certificates
-        .dns
-        .lock()
-        .unwrap()
-        .insert("admin.example.com".into(), DnsVerdict::Matches);
+    app.certificates.dns.lock().unwrap().extend(
+        [
+            "admin.example.com",
+            "blog.example.com",
+            "www.blog.example.com",
+            "docs.example.com",
+            "acme.example.com",
+            "wiki.example.com",
+        ]
+        .map(|host| (host.to_owned(), DnsVerdict::Matches))
+        .into_iter()
+        .chain([(
+            "shop.example.com".to_owned(),
+            DnsVerdict::Mismatch(DnsMismatch {
+                host: "shop.example.com".into(),
+                observed: vec!["203.0.113.9".parse().unwrap()],
+                expected: vec!["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()],
+            }),
+        )]),
+    );
     app.certificates
         .backing_off
         .lock()
@@ -1290,6 +1370,18 @@ async fn ui_preview() {
         "states/certificates-retry-refused.html",
         "Certificates: retry refused while backing off",
         &Session::inject(&certs, "cert-result", &retry),
+    );
+    let dns_all = session.post("/certificates/dns/all", &[]).await;
+    preview.write(
+        "states/certificates-dns-all.html",
+        "Certificates: after Check all DNS",
+        &Session::swap_with_oob(&certs, "cert-body", &dns_all),
+    );
+    let retry_failing = session.post("/certificates/retry/failing", &[]).await;
+    preview.write(
+        "states/certificates-retry-failing.html",
+        "Certificates: Retry failing, one host backing off",
+        &Session::inject(&certs, "cert-result", &retry_failing),
     );
     let registries = session.get("/settings/registries", StatusCode::OK).await;
     let test = session

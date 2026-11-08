@@ -2,14 +2,19 @@
 //! with its issuer, end of validity, last ACME error, next attempt and the advisory DNS check,
 //! under a header naming hoster's own public addresses, which that check compares against.
 //!
-//! Two actions, both HTMX posts:
+//! The page (epic 8bf) has summary tiles, an alert for the worst problem, and the table sorted
+//! by expiry with the problems first. Four actions, all HTMX posts:
 //!
-//! - **Check DNS now** (`POST /certificates/dns`) compares one host's A/AAAA records with the
+//! - **check dns** (`POST /certificates/dns`) compares one host's A/AAAA records with the
 //!   public addresses again and swaps the result into the host's DNS cell. The result is also
 //!   recorded in the orchestrator's certificate status until the next attempt reports its own.
-//! - **Retry now** (`POST /certificates/retry`) asks the ACME task to attempt the host now. It is
+//! - **retry** (`POST /certificates/retry`) asks the ACME task to attempt the host now. It is
 //!   refused, with the time left, while the host's persisted backoff runs (ADR-0035 #5), so the
 //!   button cannot spend the CA's rate limits.
+//! - **Check all DNS** (`POST /certificates/dns/all`) runs that check for every host at once and
+//!   answers with the page body (tiles, alert and table) re-rendered under a summary flash.
+//! - **Retry failing** (`POST /certificates/retry/failing`) asks for an attempt for every
+//!   failing host (the ones the navigation counts), each gated on its backoff like **retry**.
 //!
 //! The handlers reach the orchestrator, the served certificates, the DNS check and the backoffs
 //! through [`CertificateControl`], so the tests use a fake.
@@ -24,11 +29,12 @@ use axum::Extension;
 use axum::extract::Form;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use futures_util::future::join_all;
 use serde::Deserialize;
 
-use super::pages::{Layout, Page, Section, Shell};
+use super::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 use super::stacks::Outcome;
-use super::ui::{CertState, Pill, Tone};
+use super::ui::{CertState, Kpi, Meter, Pill, Tone};
 use crate::acme::{
     Backoff, BackoffStore, Backoffs, CertMap, DnsCheck, DnsMismatch, DnsVerdict, Validity,
 };
@@ -46,6 +52,18 @@ pub struct CertRow {
     pub status: CertStatus,
     /// The persisted backoff, while the host is failing.
     pub backoff: Option<Backoff>,
+    /// Who the certificate is for.
+    pub owner: CertOwner,
+}
+
+/// Who a host's certificate is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertOwner {
+    /// hoster's own admin host (ADR-0036).
+    Admin,
+    /// The stacks whose routes name the host; empty for a host the ACME task reported on that
+    /// no stack routes any more.
+    Stacks(Vec<String>),
 }
 
 impl CertRow {
@@ -68,6 +86,57 @@ pub struct CertOverview {
     pub public: BTreeSet<IpAddr>,
     /// Every managed host, sorted.
     pub hosts: Vec<CertRow>,
+    /// The ACME directory hoster orders from.
+    pub directory: AcmeDirectory,
+}
+
+/// The ACME directory in `acme.directory_url`, as the ACME tile names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcmeDirectory {
+    LetsEncrypt,
+    LetsEncryptStaging,
+    /// Any other CA (a test CA such as Pebble, or a commercial one), by its URL.
+    Custom(String),
+}
+
+impl AcmeDirectory {
+    const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
+    const LETS_ENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+    /// The directory URL.
+    pub fn url(&self) -> &str {
+        match self {
+            AcmeDirectory::LetsEncrypt => Self::LETS_ENCRYPT,
+            AcmeDirectory::LetsEncryptStaging => Self::LETS_ENCRYPT_STAGING,
+            AcmeDirectory::Custom(url) => url,
+        }
+    }
+}
+
+impl From<&str> for AcmeDirectory {
+    fn from(url: &str) -> Self {
+        match url.trim_end_matches('/') {
+            Self::LETS_ENCRYPT => AcmeDirectory::LetsEncrypt,
+            Self::LETS_ENCRYPT_STAGING => AcmeDirectory::LetsEncryptStaging,
+            _ => AcmeDirectory::Custom(url.to_owned()),
+        }
+    }
+}
+
+/// The tile's short name: `letsencrypt · prod`, `letsencrypt · staging`, or the custom
+/// directory's host.
+impl std::fmt::Display for AcmeDirectory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcmeDirectory::LetsEncrypt => f.write_str("letsencrypt · prod"),
+            AcmeDirectory::LetsEncryptStaging => f.write_str("letsencrypt · staging"),
+            AcmeDirectory::Custom(url) => {
+                let rest = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+                let host = rest.split(['/', '?']).next().unwrap_or(rest);
+                write!(f, "custom · {host}")
+            }
+        }
+    }
 }
 
 impl CertOverview {
@@ -110,6 +179,149 @@ pub trait CertificateControl: Send + Sync + 'static {
 
     /// Asks the ACME task to attempt `host` now, unless its backoff has not elapsed.
     async fn retry(&self, host: &str) -> Result<(), CertActionError>;
+
+    /// Runs [`check_dns`](Self::check_dns) for every managed host at once.
+    async fn check_all_dns(&self) -> DnsSweep {
+        let overview = self.overview().await;
+        let checks = overview
+            .hosts
+            .iter()
+            .map(|row| async move { (row.host.clone(), self.check_dns(&row.host).await) });
+        let mut sweep = DnsSweep::default();
+        for (host, verdict) in join_all(checks).await {
+            match verdict {
+                Ok(DnsVerdict::Matches) => sweep.matching += 1,
+                Ok(DnsVerdict::Mismatch(_)) => sweep.mismatched.push(host),
+                Ok(DnsVerdict::Unknown) => sweep.unknown += 1,
+                // A host that stopped being managed since the overview was read.
+                Err(_) => {}
+            }
+        }
+        sweep
+    }
+
+    /// Runs [`retry`](Self::retry) for every host failing at `now` (see
+    /// [`CertRow::is_failing`]), the ones still backing off being refused.
+    async fn retry_failing(&self, now: SystemTime) -> Result<RetrySweep, CertActionError> {
+        let overview = self.overview().await;
+        let mut sweep = RetrySweep::default();
+        for row in overview.hosts.iter().filter(|row| row.is_failing(now)) {
+            match self.retry(&row.host).await {
+                Ok(()) => sweep.queued.push(row.host.clone()),
+                Err(CertActionError::BackingOff { host, retry_at, .. }) => {
+                    sweep.backing_off.push((host, retry_at));
+                }
+                Err(CertActionError::UnknownHost(_)) => {}
+                Err(err @ (CertActionError::AcmeStopped | CertActionError::Store(_))) => {
+                    return Err(err);
+                }
+            }
+        }
+        Ok(sweep)
+    }
+}
+
+/// What **Check all DNS** found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DnsSweep {
+    /// How many hosts point at hoster.
+    pub matching: usize,
+    /// The hosts that resolve elsewhere.
+    pub mismatched: Vec<String>,
+    /// How many could not be compared, hoster's own addresses being unknown.
+    pub unknown: usize,
+}
+
+impl From<&DnsSweep> for Flash {
+    fn from(sweep: &DnsSweep) -> Self {
+        let total = sweep.matching + sweep.mismatched.len() + sweep.unknown;
+        let mut message = format!(
+            "Checked DNS for {total} {}: {} {} here",
+            if total == 1 { "host" } else { "hosts" },
+            sweep.matching,
+            if sweep.matching == 1 {
+                "points"
+            } else {
+                "point"
+            },
+        );
+        if !sweep.mismatched.is_empty() {
+            message.push_str(&format!(
+                ", {} {} elsewhere ({})",
+                sweep.mismatched.len(),
+                if sweep.mismatched.len() == 1 {
+                    "resolves"
+                } else {
+                    "resolve"
+                },
+                sweep.mismatched.join(", ")
+            ));
+        }
+        if sweep.unknown > 0 {
+            message.push_str(&format!(
+                ", {} could not be compared because hoster's public addresses are unknown",
+                sweep.unknown
+            ));
+        }
+        message.push('.');
+        Flash {
+            kind: if sweep.mismatched.is_empty() && sweep.unknown == 0 {
+                FlashKind::Success
+            } else {
+                FlashKind::Info
+            },
+            message,
+        }
+    }
+}
+
+/// What **Retry failing** asked for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetrySweep {
+    /// The hosts the ACME task was asked to attempt now.
+    pub queued: Vec<String>,
+    /// The hosts refused because their backoff runs, with its end.
+    pub backing_off: Vec<(String, SystemTime)>,
+}
+
+impl RetrySweep {
+    /// The outcome shown under the page header at `now`.
+    fn outcome(&self, now: SystemTime) -> Outcome {
+        let refused = self
+            .backing_off
+            .iter()
+            .map(|(host, at)| format!("{host} ({} left)", Left(*at, now)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match (self.queued.is_empty(), self.backing_off.is_empty()) {
+            (true, true) => Outcome::success("No host is failing, so there is nothing to retry."),
+            (true, false) => Outcome::error(
+                StatusCode::CONFLICT,
+                format!(
+                    "Not retrying: every failing host is backing off after a failed attempt: \
+                     {refused}. Retrying earlier would spend the CA's rate limits."
+                ),
+            ),
+            (false, _) => {
+                let mut message = format!(
+                    "Asked the ACME task to try {} now: {}.",
+                    if self.queued.len() == 1 {
+                        "1 host".to_owned()
+                    } else {
+                        format!("{} hosts", self.queued.len())
+                    },
+                    self.queued.join(", ")
+                );
+                if !refused.is_empty() {
+                    message.push_str(&format!(
+                        " Not retrying the ones backing off after a failed attempt: {refused}."
+                    ));
+                }
+                Outcome::success(message)
+                    .with_link("/certificates".to_owned(), "Reload the certificates")
+            }
+        }
+    }
 }
 
 /// The production wiring: the orchestrator's certificate status, the served certificates, the
@@ -121,18 +333,33 @@ pub struct CertificateAccess<R: ContainerRuntime> {
     pub backoffs: Arc<dyn BackoffStore>,
     /// The admin host, which always has a certificate (ADR-0036).
     pub admin_host: String,
+    /// The configured ACME directory.
+    pub directory: AcmeDirectory,
 }
 
 impl<R: ContainerRuntime> CertificateAccess<R> {
     /// Every managed host (the admin host always), with the backoff `backoffs` holds for it.
     fn rows(&self, mut backoffs: Backoffs) -> Vec<CertRow> {
         let mut status = self.orchestrator.certificates();
+        let mut owners = self.orchestrator.certificate_owners();
         status.entry(self.admin_host.clone()).or_default();
         status
             .into_iter()
             .map(|(host, status)| {
                 let entry = self.certs.entry(&host);
+                let owner = if host == self.admin_host {
+                    CertOwner::Admin
+                } else {
+                    CertOwner::Stacks(
+                        owners
+                            .remove(&host)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect(),
+                    )
+                };
                 CertRow {
+                    owner,
                     issuer: entry.as_ref().map(|e| e.issuer.clone()),
                     validity: entry.map(|e| e.validity),
                     backoff: backoffs.remove(&host),
@@ -171,6 +398,7 @@ impl<R: ContainerRuntime> CertificateControl for CertificateAccess<R> {
             source: self.dns.source().to_string(),
             public: self.dns.expected(),
             hosts: self.rows(backoffs),
+            directory: self.directory.clone(),
         }
     }
 
@@ -268,6 +496,26 @@ impl Certificates {
             .with_link("/certificates".to_owned(), "Reload the certificates")
             .into_response(),
             Err(err) => Self::refused(&err, SystemTime::now()).into_response(),
+        }
+    }
+
+    /// `POST /certificates/dns/all`: checks every host's DNS, then answers with the page body
+    /// re-rendered under a summary of what was found.
+    pub async fn check_all_dns(Extension(certificates): Extension<Certificates>) -> Response {
+        let sweep = certificates.0.check_all_dns().await;
+        let overview = certificates.0.overview().await;
+        let mut body = CertBody::new(&overview, SystemTime::now());
+        body.flash = Some(Flash::from(&sweep));
+        Page(CertBodyPartial { body }).into_response()
+    }
+
+    /// `POST /certificates/retry/failing`: asks for an attempt for every failing host outside
+    /// its backoff.
+    pub async fn retry_failing(Extension(certificates): Extension<Certificates>) -> Response {
+        let now = SystemTime::now();
+        match certificates.0.retry_failing(now).await {
+            Ok(sweep) => sweep.outcome(now).into_response(),
+            Err(err) => Self::refused(&err, now).into_response(),
         }
     }
 
@@ -409,21 +657,155 @@ impl DnsView {
     }
 }
 
+/// Where a row stands, for its status pill, the tiles and the sort order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Standing {
+    /// The last attempt failed (the certificate, if any, is still served).
+    Failed,
+    /// Served, but past its end of validity, with no failure recorded since startup.
+    Expired,
+    /// Served, with less than [`CertState::WARN_WITHIN`] left.
+    Expiring,
+    /// None served yet, and no attempt failed.
+    Pending,
+    /// Served and due for renewal (ADR-0015), not yet within the warning window.
+    Renewing,
+    /// Served and not due for renewal.
+    Valid,
+}
+
+impl Standing {
+    fn of(row: &CertRow, not_after: Option<SystemTime>, now: SystemTime) -> Self {
+        if row.status.error.is_some() {
+            return Standing::Failed;
+        }
+        let Some(not_after) = not_after else {
+            return Standing::Pending;
+        };
+        match CertState::from(not_after.duration_since(now).unwrap_or_default()) {
+            CertState::Expired => Standing::Expired,
+            CertState::Expiring => Standing::Expiring,
+            _ if row.validity.is_some_and(|v| now >= v.renew_at()) => Standing::Renewing,
+            _ => Standing::Valid,
+        }
+    }
+
+    /// Whether the row sorts with the problems at the top of the table.
+    fn is_problem(self) -> bool {
+        matches!(
+            self,
+            Standing::Failed | Standing::Expired | Standing::Expiring | Standing::Pending
+        )
+    }
+
+    fn tone(self) -> Tone {
+        match self {
+            Standing::Failed | Standing::Expired => Tone::Fail,
+            Standing::Expiring => Tone::Warn,
+            Standing::Pending | Standing::Renewing => Tone::Progress,
+            Standing::Valid => Tone::Ok,
+        }
+    }
+
+    fn pill(self) -> Pill {
+        self.tone().pill(match self {
+            Standing::Failed => "failed",
+            Standing::Expired => "expired",
+            Standing::Expiring => "expiring",
+            Standing::Pending => "pending",
+            Standing::Renewing => "renewing",
+            Standing::Valid => "valid",
+        })
+    }
+}
+
+/// One stack that routes a host, linked to its page.
+#[derive(Debug)]
+struct StackLink {
+    name: String,
+    href: String,
+}
+
+/// The "Expires" cell of a host with a certificate.
+#[derive(Debug)]
+struct Expiry {
+    /// RFC 3339, for the `datetime`.
+    at: String,
+    /// The date alone (`2026-12-15`).
+    date: String,
+    /// The time of day under it (`14:30Z`).
+    time: String,
+    /// `37d left`, `expires today`, `expired 3d ago`.
+    left: String,
+    meter: Meter,
+}
+
+impl Expiry {
+    const DAY: u64 = 24 * 60 * 60;
+    /// The meter's scale: Let's Encrypt's certificate lifetime.
+    const LIFETIME_DAYS: f64 = 90.0;
+
+    fn new(not_after: SystemTime, tone: Tone, now: SystemTime) -> Self {
+        let at = humantime::format_rfc3339_seconds(not_after).to_string();
+        let (days, left) = match not_after.duration_since(now) {
+            Ok(left) => {
+                let days = left.as_secs() / Self::DAY;
+                (
+                    days,
+                    if days == 0 {
+                        "expires today".to_owned()
+                    } else {
+                        format!("{days}d left")
+                    },
+                )
+            }
+            Err(past) => (
+                0,
+                match past.duration().as_secs() / Self::DAY {
+                    0 => "expired today".to_owned(),
+                    days => format!("expired {days}d ago"),
+                },
+            ),
+        };
+        Self {
+            date: at.get(..10).unwrap_or(&at).to_owned(),
+            time: at
+                .get(11..16)
+                .map_or_else(String::new, |hm| format!("{hm}Z")),
+            meter: Meter::new(
+                days as f64,
+                Self::LIFETIME_DAYS,
+                tone,
+                format!("{days} of 90 days left"),
+            ),
+            at,
+            left,
+        }
+    }
+}
+
 /// One row of the table.
 #[derive(Debug)]
 struct RowView {
     /// The row's position, for element ids (host names contain dots).
     index: usize,
     host: String,
+    /// `None` for the admin host, which no stack owns.
+    stacks: Option<Vec<StackLink>>,
     issuer: Option<String>,
-    not_after: Option<String>,
-    error: Option<String>,
+    expiry: Option<Expiry>,
+    not_after: Option<SystemTime>,
+    standing: Standing,
+    error: Option<AcmeError>,
+    /// Consecutive failed attempts, while backing off.
+    failures: Option<u32>,
     next_attempt: String,
     dns: DnsView,
+    failing: bool,
 }
 
 impl RowView {
-    fn new(index: usize, row: &CertRow, public_known: bool, now: SystemTime) -> Self {
+    fn new(row: &CertRow, public_known: bool, now: SystemTime) -> Self {
         let not_after = row.validity.map(|v| v.not_after).or(row.status.not_after);
         let retry_at = row.backoff.map(|b| b.retry_at).or(row.status.retry_at);
         let next_attempt = match (retry_at, row.validity) {
@@ -433,27 +815,252 @@ impl RowView {
                 humantime::format_rfc3339_seconds(at)
             ),
             (Some(_), _) => "now, after a failure".to_owned(),
+            (None, Some(validity))
+                if validity.renew_at() <= now && !validity.is_expired_at(now) =>
+            {
+                "renewal due now".to_owned()
+            }
             (None, Some(validity)) if !validity.is_expired_at(now) => format!(
                 "renewal from {}",
                 humantime::format_rfc3339_seconds(validity.renew_at())
             ),
             (None, _) => "pending".to_owned(),
         };
+        let standing = Standing::of(row, not_after, now);
+        let stacks = match &row.owner {
+            CertOwner::Admin => None,
+            CertOwner::Stacks(stacks) => Some(
+                stacks
+                    .iter()
+                    .map(|name| StackLink {
+                        name: name.clone(),
+                        href: format!("/stacks/{name}"),
+                    })
+                    .collect(),
+            ),
+        };
         Self {
-            index,
+            index: 0,
             host: row.host.clone(),
+            stacks,
             issuer: row.issuer.clone(),
-            not_after: not_after.map(|at| humantime::format_rfc3339_seconds(at).to_string()),
-            error: row.status.error.clone(),
+            expiry: not_after.map(|at| Expiry::new(at, standing.tone(), now)),
+            not_after,
+            standing,
+            error: row.status.error.clone().map(AcmeError),
+            failures: row.backoff.map(|b| b.failures),
             next_attempt,
             dns: DnsView::of_status(&row.status, public_known),
+            failing: row.is_failing(now),
         }
     }
 
-    /// The "Valid until" cell of a host without a certificate: pending, or failing once an
-    /// attempt reported an error.
-    fn pending_pill(&self) -> Pill {
-        Tone::from(CertState::unissued(self.error.as_deref())).pill("TLS pending")
+    /// The challenge type: hoster only uses HTTP-01 (ADR-0016).
+    fn challenge(&self) -> &'static str {
+        "http-01"
+    }
+
+    fn pill(&self) -> Pill {
+        self.standing.pill()
+    }
+
+    /// The table order: problems first, then by end of validity (hosts without a certificate
+    /// first), then by name.
+    fn sort_key(&self) -> (bool, Option<SystemTime>, &str) {
+        (!self.standing.is_problem(), self.not_after, &self.host)
+    }
+
+    /// `3 failed attempts`, or `a failed attempt` when the count is not known.
+    fn attempts(&self) -> String {
+        match self.failures {
+            Some(1) | None => "a failed attempt".to_owned(),
+            Some(n) => format!("{n} failed attempts"),
+        }
+    }
+}
+
+/// The alert above the table, for the worst problem: a host serving an expired certificate
+/// (failing or not; after a restart the recorded error is gone but the expiry is not), else a
+/// failing host whose certificate expires soon, else a host with no certificate after failed
+/// attempts.
+#[derive(Debug)]
+struct AlertView {
+    host: String,
+    title: String,
+    /// The last ACME error; `None` when no attempt failed since hoster started.
+    error: Option<AcmeError>,
+    next_attempt: String,
+    /// Other hosts needing attention, below in the table.
+    others: usize,
+}
+
+impl AlertView {
+    /// The alert for `rows` (in table order) at `now`, if one is due.
+    fn of(rows: &[RowView], now: SystemTime) -> Option<Self> {
+        let failed = || rows.iter().filter(|row| row.standing == Standing::Failed);
+        let expired = rows.iter().find_map(|row| {
+            if !matches!(row.standing, Standing::Failed | Standing::Expired) {
+                return None;
+            }
+            let past = now.duration_since(row.not_after?).ok()?;
+            let title = match row.standing {
+                Standing::Failed => format!(
+                    "{}'s certificate expired {} ago and renewal is failing",
+                    row.host,
+                    Days(past)
+                ),
+                _ => format!("{}'s certificate expired {} ago", row.host, Days(past)),
+            };
+            Some((row, title))
+        });
+        let expiring = || {
+            failed().find_map(|row| {
+                let left = row.not_after?.duration_since(now).ok()?;
+                (left < CertState::WARN_WITHIN).then(|| {
+                    let title = format!(
+                        "{} expires in {} and renewal is failing",
+                        row.host,
+                        Days(left)
+                    );
+                    (row, title)
+                })
+            })
+        };
+        let missing = || {
+            failed().find(|row| row.not_after.is_none()).map(|row| {
+                let title = format!("{} has no certificate after {}", row.host, row.attempts());
+                (row, title)
+            })
+        };
+        let (row, title) = expired.or_else(expiring).or_else(missing)?;
+        Some(Self {
+            host: row.host.clone(),
+            title,
+            error: row.error.clone(),
+            next_attempt: row.next_attempt.clone(),
+            others: rows.iter().filter(|r| r.failing).count().saturating_sub(1),
+        })
+    }
+}
+
+/// The last ACME error, as the page shows it: HTML-escaped, with a line-break opportunity
+/// (`<wbr>`) after each colon, so a long problem URN (`urn:ietf:params:acme:error:rateLimited`)
+/// wraps between its parts rather than mid-word.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AcmeError(String);
+
+impl std::fmt::Display for AcmeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, part) in self.0.split(':').enumerate() {
+            if i > 0 {
+                f.write_str(":<wbr>")?;
+            }
+            match askama::filters::escape(part, askama::filters::Html) {
+                Ok(safe) => write!(f, "{safe}")?,
+                Err(never) => match never {},
+            }
+        }
+        Ok(())
+    }
+}
+
+impl askama::filters::HtmlSafe for AcmeError {}
+
+/// A duration in whole days, for prose: `3 days`, `1 day`, `less than a day`.
+struct Days(Duration);
+
+impl std::fmt::Display for Days {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.as_secs() / Expiry::DAY {
+            0 => f.write_str("less than a day"),
+            1 => f.write_str("1 day"),
+            days => write!(f, "{days} days"),
+        }
+    }
+}
+
+/// The tiles, the alert and the table: what **Check all DNS** re-renders.
+#[derive(Debug)]
+struct CertBody {
+    tiles: Vec<Kpi>,
+    alert: Option<AlertView>,
+    rows: Vec<RowView>,
+    /// The outcome of the action that re-rendered the body.
+    flash: Option<Flash>,
+}
+
+impl CertBody {
+    fn new(overview: &CertOverview, now: SystemTime) -> Self {
+        let public_known = !overview.public.is_empty();
+        let mut rows: Vec<RowView> = overview
+            .hosts
+            .iter()
+            .map(|row| RowView::new(row, public_known, now))
+            .collect();
+        rows.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.index = index;
+        }
+        Self {
+            tiles: Self::tiles(&rows, &overview.directory),
+            alert: AlertView::of(&rows, now),
+            rows,
+            flash: None,
+        }
+    }
+
+    fn tiles(rows: &[RowView], directory: &AcmeDirectory) -> Vec<Kpi> {
+        let count = |standings: &[Standing]| {
+            rows.iter()
+                .filter(|row| standings.contains(&row.standing))
+                .count()
+        };
+        let held = rows.iter().filter(|row| row.expiry.is_some()).count();
+        let valid = count(&[Standing::Valid]);
+        let due = count(&[Standing::Renewing, Standing::Expiring]);
+        let pending = count(&[Standing::Pending]);
+        let failed: Vec<&RowView> = rows
+            .iter()
+            .filter(|row| matches!(row.standing, Standing::Failed | Standing::Expired))
+            .collect();
+        let tone = |n: usize, tone: Tone| if n > 0 { tone } else { Tone::Neutral };
+
+        let failed_sub = match failed.iter().max_by_key(|row| row.failures.unwrap_or(0)) {
+            None => "none failing".to_owned(),
+            Some(worst) => {
+                let attempts = match worst.failures {
+                    Some(n) if failed.len() == 1 => format!("{n} attempts · "),
+                    Some(n) => format!("most: {n} attempts · "),
+                    None => String::new(),
+                };
+                format!("{attempts}{}", worst.host)
+            }
+        };
+        vec![
+            Kpi::new(
+                "held",
+                held,
+                format!("of {} {}", rows.len(), if rows.len() == 1 { "host" } else { "hosts" }),
+            )
+            .title("Hosts with a certificate served"),
+            Kpi::new("valid", valid, "renewal not due yet")
+                .tone(tone(valid, Tone::Ok))
+                .title("More than a third of the certificate's lifetime left: 30 days of a 90-day certificate"),
+            Kpi::new(
+                "renewing / pending",
+                due + pending,
+                format!("{due} due for renewal · {pending} awaiting a first"),
+            )
+            .tone(tone(due + pending, Tone::Progress)),
+            Kpi::new("failed", failed.len(), failed_sub).tone(tone(failed.len(), Tone::Fail)),
+            Kpi::new("acme", directory, "http-01 · renews with ⅓ of lifetime left")
+                .title(format!("ACME directory {}", directory.url())),
+        ]
+    }
+
+    /// How many hosts **Retry failing** would ask for.
+    fn failing(&self) -> usize {
+        self.rows.iter().filter(|row| row.failing).count()
     }
 }
 
@@ -465,7 +1072,9 @@ pub struct CertificatesPage {
     source: String,
     /// hoster's public addresses, comma-separated; empty when unknown.
     public: String,
-    rows: Vec<RowView>,
+    /// The ACME directory's URL.
+    directory: String,
+    body: CertBody,
 }
 
 impl CertificatesPage {
@@ -475,14 +1084,18 @@ impl CertificatesPage {
             layout,
             source: overview.source.clone(),
             public: DnsView::list(&public),
-            rows: overview
-                .hosts
-                .iter()
-                .enumerate()
-                .map(|(index, row)| RowView::new(index, row, !public.is_empty(), now))
-                .collect(),
+            directory: overview.directory.url().to_owned(),
+            body: CertBody::new(overview, now),
         }
     }
+}
+
+/// The partial `POST /certificates/dns/all` answers with: the content of `#cert-body`, and the
+/// summary flash swapped out of band into `#cert-result`, the page's persistent live region.
+#[derive(Template)]
+#[template(path = "cert_body.html")]
+struct CertBodyPartial {
+    body: CertBody,
 }
 
 /// The partial `POST /certificates/dns` answers with.

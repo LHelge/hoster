@@ -1,10 +1,10 @@
 ---
 id: sak
 title: "Certificates page: summary tiles, failing-cert alert, table, bulk DNS check and retry"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:20:58.848799952Z"
-updated: "2026-11-08T18:20:58.848799952Z"
+updated: "2026-11-08T22:32:06.457145877Z"
 tags:
   - web
   - ui
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - xhh
 parent: "8bf"
+attempts: 1
 ---
 
 Redesign `/certificates` after `docs/design/Certificates.dc.html` (without the multi-resolver DNS panel, which is the DNS-diagnostics follow-up).
