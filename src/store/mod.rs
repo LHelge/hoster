@@ -42,11 +42,13 @@ use thiserror::Error;
 pub use types::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentOutcome, DeploymentSource,
     DeploymentState, DigestSet, ImageUse, ImageUseKind, NewDeployment, PortAllocation, PortMap,
-    PortRequest, Provenance, RecordedImage, RevisionId, SealedSecret, SecretEntry, ServicePointer,
-    SessionRecord, Stack, StackRevision, Timestamp, WebhookRejection,
+    PortRequest, Provenance, RecordedImage, RevisionId, SchemaVersion, SealedSecret, SecretEntry,
+    ServicePointer, SessionRecord, Stack, StackRevision, Timestamp, WebhookRejection,
 };
 
-/// The embedded migrations from `migrations/`.
+/// The embedded migrations from `migrations/`. Every one is a reversible `.up.sql` / `.down.sql`
+/// pair (ADR-0052), so a newer binary can undo its schema back to an older binary's; the store
+/// tests enforce this.
 static MIGRATOR: Migrator = sqlx::migrate!();
 
 /// Errors from the state store.
@@ -301,6 +303,36 @@ impl Store {
         name.push(dest.file_name().unwrap_or_else(|| "snapshot".as_ref()));
         name.push(format!(".tmp-{}", std::process::id()));
         Ok(dest.with_file_name(name))
+    }
+
+    /// The schema version this binary migrates databases to: its newest embedded migration.
+    pub fn expected_schema_version() -> SchemaVersion {
+        MIGRATOR
+            .iter()
+            .map(|m| m.version)
+            .max()
+            .unwrap_or_default()
+            .into()
+    }
+
+    /// The schema version the database is at: its newest successfully applied migration, `0`
+    /// if none has been applied. Reads without migrating, so it also works on a store from
+    /// [`Store::open_read_only`] whose database a newer or older binary migrated.
+    pub async fn schema_version(&self) -> Result<SchemaVersion> {
+        let has_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema \
+             WHERE type = 'table' AND name = '_sqlx_migrations')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        if !has_table {
+            return Ok(SchemaVersion::default());
+        }
+        let version: Option<i64> =
+            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(version.unwrap_or_default().into())
     }
 
     /// Path of the database file.
