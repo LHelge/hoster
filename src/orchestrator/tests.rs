@@ -1467,3 +1467,130 @@ port = 9090
     assert_eq!(removed.unwrap().containers, 2);
     assert!(volume_kept, "the volume survives stack removal");
 }
+
+#[tokio::test]
+async fn apply_ensures_certificates_before_deploying_and_remove_forgets_them() {
+    use crate::acme::{AcmeCommand, AcmeEvent};
+    use tokio::sync::mpsc;
+
+    let h = harness().await;
+    let (acme_tx, mut acme_rx) = mpsc::unbounded_channel();
+    h.orchestrator.connect_acme(acme_tx);
+    assert!(acme_rx.try_recv().is_err(), "no stack routes anything yet");
+
+    let applied = h.apply(NOTES).await;
+    // Sent at apply, whatever the deployment does next (ADR-0036).
+    assert_eq!(
+        acme_rx.try_recv().unwrap(),
+        AcmeCommand::Ensure {
+            hosts: vec!["notes.example.com".into(), "s3.notes.example.com".into()]
+        }
+    );
+    h.finish(applied.deployment.as_ref().unwrap()).await;
+
+    // The ACME task's events are recorded and relayed to the UI.
+    let mut ui = h.orchestrator.subscribe();
+    let (events_tx, events_rx) = mpsc::channel(4);
+    let relay = tokio::spawn(Arc::clone(&h.orchestrator).run_acme_events(events_rx));
+    let failed = AcmeEvent::Failed {
+        host: "notes.example.com".into(),
+        error: "the CA could not validate the HTTP-01 challenge".into(),
+        retry_at: std::time::SystemTime::UNIX_EPOCH,
+    };
+    events_tx.send(failed.clone()).await.unwrap();
+    drop(events_tx);
+    relay.await.unwrap();
+    assert_eq!(ui.try_recv().unwrap(), UiEvent::Certificate(failed));
+    assert_eq!(
+        h.orchestrator.certificates()["notes.example.com"]
+            .error
+            .as_deref(),
+        Some("the CA could not validate the HTTP-01 challenge")
+    );
+
+    h.orchestrator
+        .remove(RemoveStack::keeping_volumes("notes"))
+        .await
+        .unwrap();
+    let forgotten: Vec<_> = std::iter::from_fn(|| acme_rx.try_recv().ok()).collect();
+    assert_eq!(
+        forgotten,
+        ["notes.example.com", "s3.notes.example.com"]
+            .map(|host| AcmeCommand::Forget { host: host.into() })
+    );
+    assert!(h.orchestrator.certificates().is_empty());
+}
+
+#[tokio::test]
+async fn rollback_and_restart_follow_the_active_revisions_hosts() {
+    use crate::acme::AcmeCommand;
+    use tokio::sync::mpsc;
+
+    fn drain(rx: &mut mpsc::UnboundedReceiver<AcmeCommand>) -> Vec<AcmeCommand> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+    let ensure = |hosts: &[&str]| AcmeCommand::Ensure {
+        hosts: hosts.iter().map(|h| (*h).to_owned()).collect(),
+    };
+    let forget = |host: &str| AcmeCommand::Forget { host: host.into() };
+
+    let h = harness().await;
+    h.bootstrap().await;
+    let good = h.store.deployments("notes", 1).await.unwrap().remove(0);
+    let (acme_tx, mut acme_rx) = mpsc::unbounded_channel();
+    h.orchestrator.connect_acme(acme_tx);
+    let moved = NOTES.replace("s3.notes.example.com", "s3.example.org");
+    h.finish(h.apply(&moved).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(
+        drain(&mut acme_rx),
+        [
+            ensure(&["notes.example.com", "s3.notes.example.com"]),
+            ensure(&["notes.example.com", "s3.example.org"]),
+            forget("s3.notes.example.com"),
+        ]
+    );
+
+    // Rolling back makes the old revision, and its hosts, the active ones again.
+    let rolled = h.orchestrator.rollback("notes", good.id).await.unwrap();
+    assert_eq!(
+        drain(&mut acme_rx),
+        [
+            ensure(&["notes.example.com", "s3.notes.example.com"]),
+            forget("s3.example.org"),
+        ]
+    );
+    h.finish(&rolled).await;
+
+    // A revision whose deployment fails still has its hosts ensured, at apply and after a
+    // restart alike (ADR-0036).
+    h.runtime.fail_next(
+        Operation::PullImage,
+        RuntimeError::Api {
+            operation: Operation::PullImage,
+            message: "boom".into(),
+        },
+    );
+    let failed = h
+        .finish(h.apply(&moved).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(failed.state, S::Failed);
+    drain(&mut acme_rx);
+    let restarted = Orchestrator::new(
+        h.store.clone(),
+        Arc::clone(&h.runtime),
+        Arc::clone(&h.resolver) as Arc<dyn TagResolver>,
+        PortAllocator::new(h.store.clone(), PortRange::try_from(20000..=20015).unwrap()),
+        h.secrets.clone(),
+        Settings::default(),
+        Arc::default(),
+    );
+    let (acme_tx, mut acme_rx) = mpsc::unbounded_channel();
+    restarted.connect_acme(acme_tx);
+    restarted.recover().await.unwrap();
+    restarted.restore_routes().await.unwrap();
+    assert_eq!(
+        drain(&mut acme_rx),
+        [ensure(&["notes.example.com", "s3.example.org"])]
+    );
+}

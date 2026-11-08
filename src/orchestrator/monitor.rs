@@ -227,7 +227,10 @@ impl UiEvent {
             from,
             to,
             detail,
-        } = self;
+        } = self
+        else {
+            return;
+        };
         match to {
             HealthStatus::Unhealthy | HealthStatus::CrashLooping => tracing::warn!(
                 stack, service, generation, %from, %to, detail, "service health changed"

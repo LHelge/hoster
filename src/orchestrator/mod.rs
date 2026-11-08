@@ -28,12 +28,17 @@
 //! The health monitor (`monitor`, ADR-0038) keeps probing every live generation
 //! ([`Orchestrator::run_health_monitor`]) and reports status changes on `ui_events`
 //! ([`Orchestrator::subscribe`]) and in [`Orchestrator::status`].
+//!
+//! Certificates (`certs`, ADR-0036): every apply tells the ACME task which hosts to ensure and
+//! which to forget ([`Orchestrator::connect_acme`]); the task's events are recorded and relayed
+//! on `ui_events` ([`Orchestrator::run_acme_events`], [`Orchestrator::certificates`]).
 
 #![allow(
     dead_code,
     reason = "the orchestrator is wired into the supervisor and web UI by later tasks"
 )]
 
+mod certs;
 mod engine;
 pub mod machine;
 mod monitor;
@@ -64,6 +69,9 @@ use crate::store::{
     NewDeployment, StackRevision, Store, StoreError,
 };
 
+use certs::CertHosts;
+#[allow(unused_imports, reason = "read by the certificates page of the web UI")]
+pub use certs::CertStatus;
 use engine::{Run, Target};
 use machine::Event;
 pub use plan::PlanError;
@@ -246,6 +254,9 @@ pub enum UiEvent {
         /// The probe result (or reconciler verdict) behind the change.
         detail: String,
     },
+    /// The ACME task issued a certificate, failed to, or found a host's DNS not pointing here
+    /// (architecture §3.3 #2).
+    Certificate(crate::acme::AcmeEvent),
 }
 
 /// How many `ui_events` a slow receiver may fall behind before it lags.
@@ -383,6 +394,8 @@ struct State {
     slots: BTreeMap<String, Slot>,
     /// Desired state and the `RouteTable` published from it (architecture §6.4).
     routes: Routes,
+    /// The routed hosts the ACME task is told about, and their certificate status.
+    certs: CertHosts,
 }
 
 /// The deploy slot of one stack (ADR-0040): one active deployment, one pending.
@@ -515,6 +528,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             state: Mutex::new(State {
                 slots: BTreeMap::new(),
                 routes,
+                certs: CertHosts::default(),
             }),
             finished: Notify::new(),
             removal: Notify::new(),
@@ -644,6 +658,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let name = definition.name.to_string();
         let revision = self.store.add_pinned_revision(&name, toml, &images).await?;
         tracing::info!(stack = %name, revision = revision.revision, "applied stack revision");
+        // Certificates are requested now, before any image is deployed (ADR-0036).
+        self.lock().certs.apply(&definition);
         let deployment = if noop && !self.is_busy(&name) {
             None
         } else {
@@ -770,6 +786,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
         };
         let definition: Arc<Stack> = Arc::new(revision.toml.parse()?);
+        // The old revision is the active one again, so its hosts are ensured and the ones only
+        // the newer revision routed are forgotten, exactly as at apply (ADR-0036).
+        self.lock().certs.apply(&definition);
         let target = Target::new(definition, revision, pins, earlier.target);
         self.submit(target, DeploymentSource::Rollback).await
     }
@@ -858,6 +877,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             let mut state = self.lock();
             state.slots.remove(stack);
             state.routes.remove(&name);
+            state.certs.remove(stack);
         }
         tracing::info!(
             stack,

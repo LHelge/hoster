@@ -10,13 +10,15 @@
 //! The CA is reached through the private [`Ca`]/[`CaOrder`] traits, implemented for instant-acme's
 //! [`Account`] and [`Order`]; the unit tests drive the same flow against a scripted fake CA.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use instant_acme::{
-    Account, AuthorizationStatus, ChallengeType, Identifier, NewOrder, Order, OrderStatus, Problem,
-    RetryPolicy,
+    Account, AuthorizationStatus, CertificateIdentifier, ChallengeType, Identifier, NewOrder,
+    Order, OrderStatus, Problem, RetryPolicy,
 };
 
 use super::certs::{CertError, CertMap, Validity};
@@ -157,11 +159,28 @@ impl Drop for Published {
     }
 }
 
+/// The window in which the CA suggests renewing a certificate (ACME Renewal Information,
+/// RFC 9773).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenewalWindow {
+    pub start: SystemTime,
+    pub end: SystemTime,
+}
+
 /// The ACME CA, as far as issuance needs it.
 #[async_trait]
 trait Ca: Send + Sync {
     /// Opens an order for exactly one DNS identifier, `host`.
     async fn new_order(&self, host: &str) -> Result<Box<dyn CaOrder>, instant_acme::Error>;
+
+    /// The CA's suggested renewal window for the certificate `id` and how long until it may be
+    /// asked again (its `Retry-After`); `None` when the CA does not support ARI.
+    async fn renewal_window(
+        &self,
+        _id: &CertificateIdentifier<'_>,
+    ) -> Result<Option<(RenewalWindow, Duration)>, instant_acme::Error> {
+        Ok(None)
+    }
 }
 
 /// One open ACME order.
@@ -197,6 +216,23 @@ impl Ca for Account {
         let identifiers = [Identifier::Dns(host.to_owned())];
         let order = Account::new_order(self, &NewOrder::new(&identifiers)).await?;
         Ok(Box::new(order))
+    }
+
+    async fn renewal_window(
+        &self,
+        id: &CertificateIdentifier<'_>,
+    ) -> Result<Option<(RenewalWindow, Duration)>, instant_acme::Error> {
+        match self.renewal_info(id).await {
+            Ok((info, retry_after)) => Ok(Some((
+                RenewalWindow {
+                    start: info.suggested_window.start.into(),
+                    end: info.suggested_window.end.into(),
+                },
+                retry_after,
+            ))),
+            Err(instant_acme::Error::Unsupported(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -289,6 +325,19 @@ pub struct Issuer {
     certs: CertMap,
     /// How long to wait for validation and for the certificate.
     retry: RetryPolicy,
+    /// The CA's last renewal information per host, until its `Retry-After` has passed.
+    ari: std::sync::Arc<Mutex<HashMap<String, AriAnswer>>>,
+}
+
+/// A renewal information answer, kept until the CA may be asked again (RFC 9773 §4.3).
+#[derive(Debug, Clone)]
+struct AriAnswer {
+    /// The certificate it is about (its ARI identifier).
+    cert: String,
+    /// `None` when the CA does not support ARI.
+    window: Option<RenewalWindow>,
+    /// When the CA may be asked again.
+    until: tokio::time::Instant,
 }
 
 impl fmt::Debug for Issuer {
@@ -306,6 +355,11 @@ impl Issuer {
         .backoff(1.5)
         .timeout(Duration::from_secs(180));
 
+    /// The bounds on how long a renewal information answer is kept, whatever the CA's
+    /// `Retry-After` says. A CA without ARI is asked again after the maximum.
+    const ARI_RETRY_MIN: Duration = Duration::from_secs(60);
+    const ARI_RETRY_MAX: Duration = Duration::from_secs(24 * 60 * 60);
+
     /// An issuer ordering from `account`, answering challenges through `challenges` (the map the
     /// `:80` service reads) and installing certificates in `certs` (the one `:443` serves).
     pub fn new(account: Account, challenges: ChallengeMap, certs: CertMap) -> Self {
@@ -318,10 +372,12 @@ impl Issuer {
             challenges,
             certs,
             retry: Self::RETRY,
+            ari: std::sync::Arc::default(),
         }
     }
 
     /// Replaces the polling budget for validation and issuance.
+    #[allow(dead_code, reason = "for integration tests against a test CA")]
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
@@ -348,6 +404,56 @@ impl Issuer {
                 Err(IssueError { host, failure })
             }
         }
+    }
+
+    /// When `host`'s current certificate is valid, if it has one.
+    pub fn validity(&self, host: &str) -> Option<Validity> {
+        self.certs.validity(host)
+    }
+
+    /// The CA's suggested renewal window for `host`'s current certificate (ARI). `None` when
+    /// there is no certificate, the CA does not support ARI or cannot be asked right now.
+    ///
+    /// The CA is asked again only once its `Retry-After` has passed (RFC 9773 §4.3); until
+    /// then, or until the certificate changes, its last answer stands.
+    pub async fn renewal_window(&self, host: &str) -> Option<RenewalWindow> {
+        let key = self.certs.get(host)?;
+        let id = CertificateIdentifier::try_from(key.cert.first()?).ok()?;
+        let cert = id.to_string();
+        let now = tokio::time::Instant::now();
+        if let Some(answer) = self.ari_answers().get(host)
+            && answer.cert == cert
+            && answer.until > now
+        {
+            return answer.window;
+        }
+        let (window, ask_again) = match self.ca.renewal_window(&id).await {
+            Ok(Some((window, retry_after))) => (
+                Some(window),
+                retry_after.clamp(Self::ARI_RETRY_MIN, Self::ARI_RETRY_MAX),
+            ),
+            Ok(None) => (None, Self::ARI_RETRY_MAX),
+            Err(error) => {
+                tracing::debug!(host, %error, "cannot fetch ACME renewal information");
+                return None;
+            }
+        };
+        self.ari_answers().insert(
+            host.to_owned(),
+            AriAnswer {
+                cert,
+                window,
+                until: now + ask_again,
+            },
+        );
+        window
+    }
+
+    fn ari_answers(&self) -> std::sync::MutexGuard<'_, HashMap<String, AriAnswer>> {
+        // The map holds plain data and no invariants a panic could break.
+        self.ari
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     async fn run(&self, host: &str) -> Result<Validity, IssueFailure> {

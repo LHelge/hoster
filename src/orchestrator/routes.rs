@@ -27,7 +27,7 @@ use crate::routing::{
 };
 use crate::runtime::ContainerRuntime;
 use crate::stack::{Name, Stack};
-use crate::store::{PortMap, ServicePointer};
+use crate::store::{PortMap, ServicePointer, StackRevision};
 
 /// How many deployments back [`Orchestrator::restore_routes`] looks for the one that committed
 /// the current generations.
@@ -260,7 +260,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// any deployment is submitted: it replaces the in-memory state wholesale.
     pub async fn restore_routes(&self) -> Result<u64> {
         let mut desired = Vec::new();
+        let mut applied = Vec::new();
         for stack in self.store.stacks().await? {
+            // Certificates follow the applied revision, as they do at every apply (ADR-0036),
+            // whether or not it has been deployed yet.
+            if let Some(definition) = self.applied_definition(&stack.name).await? {
+                applied.push(definition);
+            }
             let pointers = self.store.services(&stack.name).await?;
             if pointers.is_empty() {
                 // Nothing runs, so nothing is routed.
@@ -271,7 +277,27 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             };
             desired.push(Self::desired_stack(definition, &pointers));
         }
-        Ok(self.lock().routes.restore(desired))
+        let mut state = self.lock();
+        let version = state.routes.restore(desired);
+        state.certs.restore(applied.iter().map(Arc::as_ref));
+        Ok(version)
+    }
+
+    /// The definition of `stack`'s latest (active) revision.
+    async fn applied_definition(&self, stack: &str) -> Result<Option<Arc<Stack>>> {
+        let revision = self.store.latest_revision(stack).await?;
+        Ok(revision.and_then(Self::parse_revision))
+    }
+
+    /// `revision`'s stack file, parsed; `None` (logged) when it no longer parses.
+    fn parse_revision(revision: StackRevision) -> Option<Arc<Stack>> {
+        match revision.toml.parse::<Stack>() {
+            Ok(definition) => Some(Arc::new(definition)),
+            Err(err) => {
+                tracing::warn!(stack = revision.stack, revision = revision.revision, %err, "stored revision no longer parses; its routes are not served");
+                None
+            }
+        }
     }
 
     /// The definition of `stack`'s most recent committed deployment, or its active revision
@@ -292,13 +318,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             Some(revision) => Some(revision),
             None => self.store.latest_revision(stack).await?,
         };
-        Ok(revision.and_then(|revision| match revision.toml.parse::<Stack>() {
-            Ok(definition) => Some(Arc::new(definition)),
-            Err(err) => {
-                tracing::warn!(stack, revision = revision.revision, %err, "stored revision no longer parses; its routes are not served");
-                None
-            }
-        }))
+        Ok(revision.and_then(Self::parse_revision))
     }
 
     /// `definition` with every service in `pointers` live on its current generation.

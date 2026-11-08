@@ -18,10 +18,10 @@ use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use pingora::server::ShutdownSignal;
 use tokio::signal::unix::{Signal, SignalKind, signal};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::acme::{CertMap, ChallengeMap};
+use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap};
 use crate::config::{Config, ProxyConfig};
 use crate::orchestrator::{Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
@@ -232,6 +232,9 @@ impl SignalSource for Signals {
 
 /// How long startup step 7 waits for the proxy's listeners to accept connections.
 const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many ACME events may wait for the orchestrator to record them.
+const ACME_EVENTS_CAPACITY: usize = 64;
 /// How long a fast shutdown waits for the Pingora thread. Pingora's grace period is an
 /// uninterruptible sleep, so a proxy that was already draining when the shutdown escalated may
 /// not stop sooner; the process then exits without it.
@@ -395,6 +398,9 @@ pub struct Supervisor {
     runtime: Option<PodmanRuntime>,
     /// The orchestrator, built and reconciled in startup step 5.
     orchestrator: Option<Arc<Orchestrator<PodmanRuntime>>>,
+    /// The ACME task's end of `acme_tx` (architecture §3.3 #1): the orchestrator sends on it from
+    /// step 5, the task starts reading in step 8.
+    acme_commands: Option<mpsc::UnboundedReceiver<AcmeCommand>>,
     /// The route table the proxy reads (architecture §3.2); empty until the orchestrator
     /// publishes one.
     routes: Arc<ArcSwap<RouteTable>>,
@@ -412,6 +418,7 @@ impl Supervisor {
             challenges: ChallengeMap::default(),
             runtime: None,
             orchestrator: None,
+            acme_commands: None,
             routes: Arc::default(),
             teardown: Teardown::default(),
         }
@@ -631,6 +638,10 @@ impl Startup for Supervisor {
                     },
                     Arc::clone(&self.routes),
                 );
+                // Hosts ensured from now on wait in the channel until the ACME task starts.
+                let (acme_tx, acme_rx) = mpsc::unbounded_channel();
+                orchestrator.connect_acme(acme_tx);
+                self.acme_commands = Some(acme_rx);
                 // Interrupted deployments resolved, containers adopted, started or removed
                 // (§4 step 5, §5.4); then the loop keeps them running (ADR-0028).
                 orchestrator
@@ -680,6 +691,22 @@ impl Startup for Supervisor {
                     .registry
                     .clone()
                     .context("the registry client is built before the admin app")?;
+                // The ACME task: the admin host, renewals and the hosts the orchestrator ensures
+                // (§4 step 8, ADR-0036). Its events come back to the orchestrator (§3.3 #2).
+                let certs = self
+                    .certs
+                    .clone()
+                    .context("certificates load before the ACME task starts")?;
+                let commands = self
+                    .acme_commands
+                    .take()
+                    .context("the orchestrator is connected to the ACME task in step 5")?;
+                let (events_tx, events_rx) = mpsc::channel(ACME_EVENTS_CAPACITY);
+                tokio::spawn(Arc::clone(&orchestrator).run_acme_events(events_rx));
+                let acme =
+                    AcmeService::new(&self.config, self.challenges.clone(), certs, store.clone());
+                tokio::spawn(acme.run(commands, events_tx, self.teardown.token.child_token()));
+
                 let web =
                     WebApp::from_config(&self.config, store, runtime, orchestrator, registry)?
                         .start(listen, self.teardown.token.child_token())

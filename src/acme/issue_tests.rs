@@ -48,6 +48,9 @@ struct FakeCa {
     /// The map `:80` reads, to observe what is served when.
     challenges: ChallengeMap,
     events: Arc<Mutex<Vec<Event>>>,
+    /// The renewal information it answers with (`None`: no ARI), and how often it was asked.
+    ari: Mutex<Option<(RenewalWindow, Duration)>>,
+    ari_asks: Mutex<u32>,
 }
 
 impl FakeCa {
@@ -65,6 +68,8 @@ impl FakeCa {
             root_pem: root.pem(),
             challenges,
             events: Arc::default(),
+            ari: Mutex::default(),
+            ari_asks: Mutex::default(),
         })
     }
 
@@ -89,6 +94,14 @@ impl Ca for Arc<FakeCa> {
             host: host.to_owned(),
             key: None,
         }))
+    }
+
+    async fn renewal_window(
+        &self,
+        _id: &CertificateIdentifier<'_>,
+    ) -> Result<Option<(RenewalWindow, Duration)>, instant_acme::Error> {
+        *self.ari_asks.lock().unwrap() += 1;
+        Ok(*self.ari.lock().unwrap())
     }
 }
 
@@ -162,10 +175,10 @@ impl CaOrder for FakeOrder {
             return Err(error());
         }
         let key = self.key.as_ref().expect("finalized before polling");
-        let leaf = CertificateParams::new(vec![self.host.clone()])
-            .unwrap()
-            .signed_by(key, &self.ca.issuer)
-            .unwrap();
+        let mut params = CertificateParams::new(vec![self.host.clone()]).unwrap();
+        // What ARI identifies a certificate by, together with its serial.
+        params.use_authority_key_identifier_extension = true;
+        let leaf = params.signed_by(key, &self.ca.issuer).unwrap();
         Ok(format!("{}{}", leaf.pem(), self.ca.root_pem))
     }
 }
@@ -245,6 +258,52 @@ async fn issues_installs_and_withdraws_the_challenge() {
     for file in ["fullchain.pem", "privkey.pem", "meta.json"] {
         assert!(host_dir.join(file).is_file(), "{file} written");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn renewal_information_is_asked_again_only_after_its_retry_after() {
+    let fx = Fixture::new(Script::Issue);
+    assert_eq!(fx.issuer.renewal_window("app.example.com").await, None);
+    assert_eq!(
+        *fx.ca.ari_asks.lock().unwrap(),
+        0,
+        "no certificate, nothing to ask"
+    );
+
+    fx.issuer.issue("app.example.com").await.unwrap();
+    let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let window = RenewalWindow {
+        start,
+        end: start + Duration::from_secs(3600),
+    };
+    let retry_after = Duration::from_secs(6 * 3600);
+    *fx.ca.ari.lock().unwrap() = Some((window, retry_after));
+    let asks = || *fx.ca.ari_asks.lock().unwrap();
+
+    assert_eq!(
+        fx.issuer.renewal_window("app.example.com").await,
+        Some(window)
+    );
+    tokio::time::advance(retry_after - Duration::from_secs(1)).await;
+    assert_eq!(
+        fx.issuer.renewal_window("app.example.com").await,
+        Some(window)
+    );
+    assert_eq!(asks(), 1, "the answer stands until Retry-After");
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    *fx.ca.ari.lock().unwrap() = None;
+    assert_eq!(fx.issuer.renewal_window("app.example.com").await, None);
+    assert_eq!(asks(), 2);
+
+    // A new certificate is asked about at once.
+    *fx.ca.ari.lock().unwrap() = Some((window, retry_after));
+    fx.issuer.issue("app.example.com").await.unwrap();
+    assert_eq!(
+        fx.issuer.renewal_window("app.example.com").await,
+        Some(window)
+    );
+    assert_eq!(asks(), 3);
 }
 
 #[tokio::test]

@@ -1,10 +1,10 @@
 ---
 id: a9y
 title: "ACME background task: ensure, renew, backoff, events"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.275247781Z"
-updated: "2026-11-08T01:42:35.724590044Z"
+updated: "2026-11-08T02:03:43.618862923Z"
 tags:
   - tls
   - acme

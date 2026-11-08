@@ -106,6 +106,7 @@ impl AccountStore {
     }
 
     /// The account file's path.
+    #[allow(dead_code, reason = "for `hoster doctor`")]
     pub fn path(&self) -> &Path {
         &self.path
     }

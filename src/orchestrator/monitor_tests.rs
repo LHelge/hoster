@@ -41,10 +41,11 @@ async fn monitored() -> (Harness, Arc<Orchestrator<FakeRuntime>>, Arc<FakeProber
 fn changes(events: &[UiEvent]) -> Vec<(&str, H, H)> {
     let mut changes: Vec<_> = events
         .iter()
-        .map(|e| match e {
+        .filter_map(|e| match e {
             UiEvent::Health {
                 service, from, to, ..
-            } => (service.as_str(), *from, *to),
+            } => Some((service.as_str(), *from, *to)),
+            _ => None,
         })
         .collect();
     changes.sort_by_key(|c| c.0);
@@ -132,7 +133,9 @@ async fn an_exited_container_is_unhealthy_without_a_probe() {
         .await
         .unwrap();
     assert_eq!(changes(&events), [("web", H::Healthy, H::Unhealthy)]);
-    let UiEvent::Health { detail, .. } = &events[0];
+    let UiEvent::Health { detail, .. } = &events[0] else {
+        panic!("not a health event: {:?}", events[0]);
+    };
     assert!(detail.starts_with("the container is exited"), "{detail}");
     assert_eq!(prober.take_probes().len(), 2);
     // The monitor never restarts anything (ADR-0038); that is the reconciler's job.

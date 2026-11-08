@@ -99,6 +99,16 @@ impl Validity {
     pub fn is_expired_at(&self, now: SystemTime) -> bool {
         now >= self.not_after
     }
+
+    /// When the certificate is due for renewal: once less than a third of its lifetime remains
+    /// (ADR-0015).
+    pub fn renew_at(&self) -> SystemTime {
+        let lifetime = self
+            .not_after
+            .duration_since(self.not_before)
+            .unwrap_or_default();
+        self.not_after - lifetime / 3
+    }
 }
 
 impl From<&X509Certificate<'_>> for Validity {
@@ -523,6 +533,7 @@ impl CertMap {
     }
 
     /// The hosts that currently have a certificate, sorted.
+    #[allow(dead_code, reason = "for the certificates page of the web UI")]
     pub fn hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = self.snapshot.load().keys().cloned().collect();
         hosts.sort();

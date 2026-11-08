@@ -272,8 +272,8 @@ where a boundary needs them:
 
 | # | Channel | Type | From → To | Purpose |
 |---|---|---|---|---|
-| 1 | `acme_tx` | `mpsc::Sender<AcmeCommand>` | Orchestrator → ACME task | `Ensure { hosts }` when the set of routed hosts changes, `Forget { host }`. |
-| 2 | `acme_events` | `mpsc::Sender<AcmeEvent>` | ACME task → Orchestrator | `Issued { host, not_after }`, `Failed { host, error, retry_at }`. The orchestrator records them and fans them out on `ui_events` (#5), so each channel has one producer. Used for status ("TLS pending") in the UI; deploys never wait on certificates (ADR-0036). |
+| 1 | `acme_tx` | `mpsc::UnboundedSender<AcmeCommand>` | Orchestrator → ACME task | `Ensure { hosts }` with the hosts of a stack's active revision at every apply and rollback, and for every stack's active revision at startup (deployed or not); `Forget { host }` when no active revision routes a host any more. Sent under the orchestrator lock, so the order is kept and an apply never waits for an issuance. |
+| 2 | `acme_events` | `mpsc::Sender<AcmeEvent>` | ACME task → Orchestrator | `Issued { host, not_after }`, `Failed { host, error, retry_at }`, `DnsMismatch { host, observed, expected }` (advisory, ADR-0051). The orchestrator records them and fans them out on `ui_events` (#5), so each channel has one producer. Used for status ("TLS pending") in the UI; deploys never wait on certificates (ADR-0036). |
 | 3 | `pingora_shutdown` | `watch::Sender<Option<ShutdownSignal>>` | Supervisor → Pingora "Server" runtime | Read by our `ShutdownSignalWatch` impl. SIGTERM becomes `GracefulTerminate`, a second SIGTERM or SIGINT becomes `FastShutdown`. |
 | 4 | `pingora_phase` | `broadcast::Receiver<ExecutionPhase>` | Pingora → Supervisor | `Running`, followed by a successful connect to the listener (§1.1), means the listeners are bound and the ACME task may start. An early `Terminated` means Pingora died, and the supervisor exits non-zero. |
 | 5 | `ui_events` | `broadcast::Sender<UiEvent>` | Orchestrator → Axum SSE handlers | Deploy progress, health changes and cert events (relayed from #2), pushed to open UI pages (HTMX SSE). Lagging receivers just re-render from current state. |
@@ -589,8 +589,11 @@ issue(host):
 - **One certificate per hostname.** Each cert has a single SAN. That keeps issuance failures
   isolated and avoids HTTP/2 connection coalescing across hosts.
 - **Failure handling.** Failures back off exponentially per host, starting at 5 minutes and capped
-  at 24 hours, which stays well inside Let's Encrypt's failed-validation limits. The directory URL
+  at 24 hours, which stays well inside Let's Encrypt's failed-validation limits. The backoff is
+  persisted in the state store (`kv` item `acme.backoff`), so a restart does not reset it. The directory URL
   is configurable, and staging is recommended for first runs.
+- **ARI.** A certificate's renewal information is fetched again only after the CA's
+  `Retry-After` (clamped to 1 min–24 h, RFC 9773 §4.3); a CA without ARI is asked once a day.
 
 ### 7.4 On-disk layout
 
