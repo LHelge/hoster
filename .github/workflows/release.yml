@@ -129,10 +129,12 @@ jobs:
           merge-multiple: true
 
       # Release files, flat: one binary per target, install.sh, whatever deploy/ holds (systemd
-      # unit, sysctl drop-in, example config) and one SHA256SUMS over all of them. install.sh and
-      # deploy/ are optional so the workflow works before they exist.
+      # unit, sysctl drop-in, example config) and one SHA256SUMS over all of them. install.sh is
+      # stamped with this release's tag (the Cargo.toml version), so the copy under
+      # releases/latest/download installs the binary it was released with (ADR-0052).
       - name: Package
         run: |
+          tag="v$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             test -f "dist/hoster-$target" || { echo "::error::missing hoster-$target"; exit 1; }
           done
@@ -146,7 +148,12 @@ jobs:
             fi
             cp "$1" "dist/$name"
           }
-          if [ -f install.sh ]; then add install.sh; fi
+          add install.sh
+          sed -i "s/^local RELEASE_VERSION=\"\"\$/local RELEASE_VERSION=\"$tag\"/" dist/install.sh
+          if ! grep -qx "local RELEASE_VERSION=\"$tag\"" dist/install.sh; then
+            echo "::error::could not stamp $tag into install.sh"
+            exit 1
+          fi
           if [ -d deploy ]; then
             while IFS= read -r -d '' f; do add "$f"; done < <(find deploy -type f -print0 | sort -z)
           fi

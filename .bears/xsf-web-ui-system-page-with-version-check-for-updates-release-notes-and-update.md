@@ -1,15 +1,16 @@
 ---
 id: xsf
 title: "Web UI: System page with version, check for updates, release notes and Update"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-08T08:25:50.008118293Z"
-updated: "2026-11-08T08:25:55.887046420Z"
+updated: "2026-11-08T09:51:12.925901259Z"
 tags:
   - web
 depends_on:
   - wpm
 parent: tbf
+attempts: 1
 ---
 
 ## Summary

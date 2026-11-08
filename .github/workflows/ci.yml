@@ -79,12 +79,24 @@ jobs:
 
       # ubuntu-latest ships shellcheck.
       - name: shellcheck
-        run: shellcheck scripts/*.sh
+        run: shellcheck install.sh scripts/*.sh
 
       # scripts/release.sh prepare/tag against a bare local remote, with gh and git-cliff stubbed
       # (ADR-0052).
       - name: release.sh
         run: scripts/test-release.sh
+
+  install-script:
+    name: install.sh on a fresh host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # install.sh for real, as root, against fake file:// releases with a stub binary: fresh
+      # install, idempotent re-run, updates and pruning, refused downgrade and checksum mismatch
+      # (ADR-0052). The runner is disposable, so the hoster user and /etc changes are fine.
+      - name: install.sh
+        run: sudo HOSTER_INSTALL_TEST_DISPOSABLE=1 scripts/test-install.sh
 
   sqlx:
     name: sqlx offline metadata is up to date
