@@ -61,6 +61,7 @@ use self::certificates::{CertificateAccess, CertificateControl, Certificates};
 use self::containers::{ContainerSource, Containers};
 use self::dashboard::Dashboard;
 pub(crate) use self::icons::Icon;
+use self::pages::ShellSource;
 use self::settings::{Registries, RegistryControl};
 use self::stacks::{StackControl, Stacks};
 use self::system::System;
@@ -140,6 +141,7 @@ pub struct WebApp {
     system: System,
     webhook: Webhook,
     stats: Stats,
+    shell: ShellSource,
 }
 
 impl WebApp {
@@ -214,6 +216,7 @@ impl WebApp {
         stats: Stats,
     ) -> Self {
         WebApp {
+            shell: ShellSource::new(Arc::clone(&stacks), Arc::clone(&certificates)),
             stats,
             system,
             auth: Arc::new(auth),
@@ -297,6 +300,7 @@ impl WebApp {
             .route("/healthz", get(WebApp::healthz))
             .route("/assets/{file}", get(Assets::serve))
             .merge(Auth::routes())
+            .layer(Extension(self.shell.clone()))
             .fallback(WebApp::not_found)
             .layer(axum::middleware::from_fn_with_state(
                 self.auth.clone(),

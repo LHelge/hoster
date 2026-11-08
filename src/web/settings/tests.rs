@@ -255,7 +255,10 @@ async fn registry_posts_need_the_csrf_token() {
 #[test]
 fn the_page_renders_without_tokens() {
     let page = RegistriesPage {
-        layout: Layout::new(Section::Settings, &Session::for_tests("octocat", "c0ffee")),
+        layout: Layout::new(
+            Section::Settings,
+            &crate::web::auth::Session::for_tests("octocat", "c0ffee"),
+        ),
         entries: vec![EntryView {
             host: "ghcr.io".into(),
             username: "bot".into(),

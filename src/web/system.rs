@@ -22,8 +22,7 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use super::auth::Session;
-use super::pages::{Layout, Page, Section};
+use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::Outcome;
 use crate::installation::Version;
 use crate::supervisor::ShutdownRequest;
@@ -129,10 +128,7 @@ impl System {
     }
 
     /// `GET /system`.
-    pub async fn page(
-        Extension(system): Extension<System>,
-        Extension(session): Extension<Session>,
-    ) -> Response {
+    pub async fn page(Extension(system): Extension<System>, shell: Shell) -> Response {
         let info = system.updater().running();
         let (installed, problem) = match system.updater().installed() {
             Ok(installed) => (installed, None),
@@ -145,7 +141,7 @@ impl System {
             ),
         };
         Page(SystemPage {
-            layout: Layout::new(Section::System, &session),
+            layout: shell.layout(Section::System),
             running: system.running().to_string(),
             target: info.target.clone(),
             schema: info.schema,

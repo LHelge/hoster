@@ -9,29 +9,51 @@
   <script src="{{ layout.htmx_sse() }}" defer></script>
 </head>
 <body{% if let Some(headers) = layout.hx_headers() %} hx-headers:inherited="{{ headers }}"{% endif %}>
-  <header>
-    <a class="brand" href="/">hoster</a>
-    <nav aria-label="Main">
-      <ul>
-        {%- for item in layout.nav() %}
-        <li><a href="{{ item.href }}"{% if item.current %} aria-current="page"{% endif %}>{{ item.icon }}{{ item.label }}</a></li>
-        {%- endfor %}
-      </ul>
-    </nav>
-    {%- if let Some(user) = layout.user %}
+{%- if let Some(user) = layout.user %}
+<div class="shell">
+  <nav class="sidebar" aria-label="Main">
+    <a class="brand" href="/">
+      <span class="brand-mark">{{ crate::web::Icon::Brand }}</span>
+      <span class="brand-text">
+        <span class="brand-name">hoster</span>
+        <span class="brand-meta">v{{ layout.version() }}{% if let Some(host) = layout.host %} · {{ host }}{% endif %}</span>
+      </span>
+    </a>
+    <ul class="nav">
+      {%- for item in layout.nav() %}
+      <li><a href="{{ item.href }}"{% if item.current %} aria-current="page"{% endif %}>{{ item.icon }}{{ item.label }}
+        {%- if let Some(count) = item.count %}
+        {%- if let Some(label) = count.label() %} <span class="nav-count nav-count-alert" role="img" aria-label="{{ label }}">{{ count.value }}</span>
+        {%- else %} <span class="nav-count">{{ count.value }}</span>{% endif %}
+        {%- endif %}</a></li>
+      {%- endfor %}
+    </ul>
     <div class="account">
-      <span class="login">{{ user.login }}</span>
-      <button type="button" hx-post="/auth/logout">{{ crate::web::Icon::LogOut }}Log out</button>
-      <button type="button" hx-post="/auth/logout-everywhere">Log out everywhere</button>
+      <span class="avatar" aria-hidden="true">{{ user.initial() }}</span>
+      <span class="account-who">
+        <span class="account-login">{{ user.login }}</span>
+        <span class="account-session">session · {{ user.left() }} left</span>
+      </span>
+      <button type="button" class="icon-button" hx-post="/auth/logout" aria-label="Log out" title="Log out">{{ crate::web::Icon::LogOut }}</button>
+      <button type="button" class="ghost account-everywhere" hx-post="/auth/logout-everywhere">Log out everywhere</button>
     </div>
-    {%- endif %}
-  </header>
-  <main>
-    <div id="flash" aria-live="polite">
-      {%- if let Some(flash) = layout.flash %}<p class="flash flash-{{ flash.kind }}" role="status">{{ flash.message }}</p>{% endif -%}
-    </div>
+  </nav>
+  <main class="content">
+    <header class="page-head">
+      <div class="page-title">
+        <nav class="crumb" aria-label="Breadcrumb">{% block crumb %}~/{{ layout.path() }}{% endblock %}</nav>
+        <h1>{% block heading %}{% endblock %}</h1>
+      </div>
+      <div class="page-actions">{% block actions %}{% endblock %}</div>
+    </header>
+    {% include "flash.html" %}
     {% block content %}{% endblock %}
   </main>
-  <footer>hoster {{ layout.version() }}</footer>
+</div>
+{%- else %}
+<main class="public">
+  {% block public %}{% endblock %}
+</main>
+{%- endif %}
 </body>
 </html>

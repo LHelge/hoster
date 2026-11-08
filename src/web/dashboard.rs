@@ -33,7 +33,7 @@ use futures_util::stream::{self, Stream, StreamExt};
 use tokio::sync::broadcast;
 
 use super::auth::{Auth, Session};
-use super::pages::{Layout, Page, Section};
+use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::{DeploymentView, ShortDigest, StackView, Stacks, When};
 use super::ui::{CertState, Pill, Tone};
 use crate::health::HealthStatus;
@@ -58,14 +58,14 @@ impl Dashboard {
 
     /// The `GET /` handler.
     pub async fn show(
-        Extension(session): Extension<Session>,
+        shell: Shell,
         Extension(stats): Extension<Stats>,
         Extension(stacks): Extension<Stacks>,
     ) -> Page<Dashboard> {
         let snapshot = stats.snapshot().await;
         let overview = Overview::gather(&stacks, &snapshot.certificates).await;
         Page(Dashboard {
-            layout: Layout::new(Section::Dashboard, &session),
+            layout: shell.layout(Section::Dashboard),
             overview,
             stats: StatsView::from(snapshot),
         })

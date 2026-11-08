@@ -19,8 +19,7 @@ use serde::Deserialize;
 use super::{DeploymentView, Outcome, StackView, Stacks, When};
 use crate::orchestrator::{SecretChange, StackSecret};
 use crate::secrets::SecretValue;
-use crate::web::auth::Session;
-use crate::web::pages::{Layout, Page, Section};
+use crate::web::pages::{Layout, Page, Section, Shell};
 
 /// The set form: a name within the stack, the value, and the name confirmed after review.
 #[derive(Deserialize)]
@@ -59,10 +58,10 @@ impl Stacks {
     /// `GET /stacks/{name}/secrets`: the stack's secrets and the form to set one.
     pub async fn secrets_page(
         Extension(stacks): Extension<Stacks>,
-        Extension(session): Extension<Session>,
+        shell: Shell,
         Path(name): Path<String>,
     ) -> Response {
-        let layout = Layout::new(Section::Stacks, &session);
+        let layout = shell.layout(Section::Stacks);
         match stacks.0.secrets(&name).await {
             Ok(secrets) => Page(SecretsPage {
                 layout,

@@ -1,21 +1,34 @@
 //! Server-rendered pages (ADR-0021). Templates live in `templates/` and are compiled into the
 //! binary by Askama; every page extends `base.html`, which reads the page's [`Layout`].
+//!
+//! Signed-in pages sit in the shell of ADR-0054: a sidebar with the version and hostname, the
+//! navigation with its counts and the session, and a page header with a `~/path` breadcrumb, the
+//! h1 and an actions slot (the `crumb`, `heading` and `actions` blocks). Handlers take a
+//! [`Shell`] extractor, which gathers the counts per request, and call [`Shell::layout`].
 
 use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
 
 use askama::Template;
+use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::{Html, IntoResponse, Response};
 
 use super::assets::Assets;
 use super::auth::Session;
+use super::certificates::CertificateControl;
 use super::icons::Icon;
+use super::stacks::StackControl;
+use crate::store::Timestamp;
 
-/// A section of the admin UI, as listed in the navigation bar.
+/// A section of the admin UI. All but [`Section::Containers`] are in the sidebar's navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Dashboard,
     Stacks,
+    /// The container list and logs: part of the stacks, so the navigation marks Stacks.
     Containers,
     Certificates,
     Settings,
@@ -23,10 +36,10 @@ pub enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    /// The sections the navigation lists, in order.
+    const NAV: [Section; 5] = [
         Section::Dashboard,
         Section::Stacks,
-        Section::Containers,
         Section::Certificates,
         Section::Settings,
         Section::System,
@@ -43,6 +56,18 @@ impl Section {
         }
     }
 
+    /// The page's default `~/path` breadcrumb, without the `~/`.
+    fn path(self) -> &'static str {
+        match self {
+            Section::Dashboard => "dashboard",
+            Section::Stacks => "stacks",
+            Section::Containers => "containers",
+            Section::Certificates => "certificates",
+            Section::Settings => "settings/registries",
+            Section::System => "system",
+        }
+    }
+
     fn icon(self) -> Icon {
         match self {
             Section::Dashboard => Icon::Dashboard,
@@ -51,6 +76,14 @@ impl Section {
             Section::Certificates => Icon::Certificates,
             Section::Settings => Icon::Settings,
             Section::System => Icon::System,
+        }
+    }
+
+    /// The navigation item marked current while this section is shown.
+    fn nav_item(self) -> Section {
+        match self {
+            Section::Containers => Section::Stacks,
+            section => section,
         }
     }
 }
@@ -68,12 +101,142 @@ impl fmt::Display for Section {
     }
 }
 
-/// One link in the navigation bar.
+/// One link in the navigation.
 pub struct NavItem {
     pub href: &'static str,
     pub icon: Icon,
     pub label: Section,
     pub current: bool,
+    pub count: Option<NavCount>,
+}
+
+/// The number next to a navigation item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NavCount {
+    pub value: usize,
+    /// It counts failures (a red badge, with an `aria-label` saying so), not just items.
+    pub alert: bool,
+}
+
+impl NavCount {
+    /// The badge's accessible name, for an alert.
+    pub fn label(&self) -> Option<String> {
+        self.alert.then(|| format!("{} failing", self.value))
+    }
+}
+
+/// The numbers the navigation shows; `None` where they could not be read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NavCounts {
+    pub stacks: Option<usize>,
+    pub failing_certificates: Option<usize>,
+}
+
+impl NavCounts {
+    /// The count shown next to `section`, if any: the number of stacks, and the failing
+    /// certificates when there are some.
+    fn of(&self, section: Section) -> Option<NavCount> {
+        match section {
+            Section::Stacks => self.stacks.map(|value| NavCount {
+                value,
+                alert: false,
+            }),
+            Section::Certificates => self
+                .failing_certificates
+                .filter(|&value| value > 0)
+                .map(|value| NavCount { value, alert: true }),
+            _ => None,
+        }
+    }
+}
+
+/// Where the shell's data comes from: shared by every route as a request extension, so the
+/// layout can gather the navigation's counts on every full page render.
+#[derive(Clone)]
+pub struct ShellSource {
+    stacks: Arc<dyn StackControl>,
+    certificates: Arc<dyn CertificateControl>,
+    /// The machine's hostname, read once.
+    host: Option<String>,
+}
+
+impl ShellSource {
+    pub fn new(stacks: Arc<dyn StackControl>, certificates: Arc<dyn CertificateControl>) -> Self {
+        let host = nix::unistd::gethostname()
+            .ok()
+            .and_then(|name| name.into_string().ok())
+            .filter(|name| !name.is_empty());
+        Self {
+            stacks,
+            certificates,
+            host,
+        }
+    }
+
+    /// The same source showing `host` as the machine's name.
+    #[cfg(test)]
+    pub fn with_host(mut self, host: &str) -> Self {
+        self.host = Some(host.to_owned());
+        self
+    }
+
+    /// The navigation's counts: one stack query and the in-memory certificate status. A count
+    /// that cannot be read is left out rather than failing the page.
+    async fn counts(&self) -> NavCounts {
+        let (stacks, failing) = tokio::join!(self.stacks.count(), self.certificates.failing());
+        NavCounts {
+            stacks: stacks
+                .inspect_err(|err| tracing::warn!(error = %err, "counting the stacks failed"))
+                .ok(),
+            failing_certificates: Some(failing),
+        }
+    }
+}
+
+/// The shell of a signed-in page, extracted per request: the session, the navigation's counts
+/// and the hostname. A handler turns it into the page's [`Layout`] with [`Shell::layout`].
+pub struct Shell {
+    session: Session,
+    counts: NavCounts,
+    host: Option<String>,
+}
+
+impl Shell {
+    /// The layout of an admin page in `section`.
+    pub fn layout(self, section: Section) -> Layout {
+        Layout {
+            counts: self.counts,
+            host: self.host,
+            ..Layout::new(section, &self.session)
+        }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Shell {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        // Both are set for every route behind the guard; their absence is a wiring bug.
+        let missing = || {
+            tracing::error!("a page asked for the shell outside the admin routes");
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        let session = parts
+            .extensions
+            .get::<Session>()
+            .cloned()
+            .ok_or_else(missing)?;
+        let source = parts
+            .extensions
+            .get::<ShellSource>()
+            .cloned()
+            .ok_or_else(missing)?;
+        Ok(Shell {
+            session,
+            counts: source.counts().await,
+            host: source.host,
+        })
+    }
 }
 
 /// How a flash message is styled; its `Display` is the CSS class suffix.
@@ -102,22 +265,58 @@ pub struct Flash {
     pub message: String,
 }
 
-/// The signed-in admin, as the header shows them.
+/// The signed-in admin, as the sidebar shows them.
 pub struct SignedIn {
     pub login: String,
     csrf_token: String,
+    expires_at: Timestamp,
+}
+
+impl SignedIn {
+    /// The avatar's letter.
+    pub fn initial(&self) -> String {
+        self.login
+            .chars()
+            .next()
+            .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().collect())
+    }
+
+    /// How long the session has left before its absolute expiry (`6h`, `25m`).
+    pub fn left(&self) -> Remaining {
+        let millis = self.expires_at.as_millis() - Timestamp::now().as_millis();
+        Remaining(Duration::from_millis(u64::try_from(millis).unwrap_or(0)))
+    }
+}
+
+/// A time left, coarsely: whole hours, then whole minutes, then `<1m`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Remaining(pub Duration);
+
+impl fmt::Display for Remaining {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let minutes = self.0.as_secs() / 60;
+        match minutes {
+            0 => f.write_str("<1m"),
+            1..60 => write!(f, "{minutes}m"),
+            _ => write!(f, "{}h", minutes / 60),
+        }
+    }
 }
 
 /// What `base.html` needs from every page.
 pub struct Layout {
-    /// The current section; `None` on public pages (the login page), which show no navigation.
+    /// The current section; `None` on public pages (the login page), which show no shell.
     pub section: Option<Section>,
     pub flash: Option<Flash>,
     pub user: Option<SignedIn>,
+    counts: NavCounts,
+    /// The machine's hostname, next to the version in the sidebar.
+    pub host: Option<String>,
 }
 
 impl Layout {
-    /// The layout of an admin page in `section`.
+    /// The layout of an admin page in `section`, without the navigation's counts; handlers get
+    /// theirs from [`Shell::layout`].
     pub fn new(section: Section, session: &Session) -> Self {
         Layout {
             section: Some(section),
@@ -125,7 +324,10 @@ impl Layout {
             user: Some(SignedIn {
                 login: session.login().to_owned(),
                 csrf_token: session.csrf_token().to_owned(),
+                expires_at: session.expires_at(),
             }),
+            counts: NavCounts::default(),
+            host: None,
         }
     }
 
@@ -135,6 +337,8 @@ impl Layout {
             section: None,
             flash: None,
             user: None,
+            counts: NavCounts::default(),
+            host: None,
         }
     }
 
@@ -143,19 +347,32 @@ impl Layout {
         self
     }
 
+    /// The same layout with the navigation showing `counts`.
+    #[cfg(test)]
+    pub fn with_counts(mut self, counts: NavCounts) -> Self {
+        self.counts = counts;
+        self
+    }
+
     pub fn nav(&self) -> Vec<NavItem> {
         let Some(current) = self.section else {
             return Vec::new();
         };
-        Section::ALL
+        Section::NAV
             .into_iter()
             .map(|section| NavItem {
                 href: section.href(),
                 icon: section.icon(),
                 label: section,
-                current: section == current,
+                current: section == current.nav_item(),
+                count: self.counts.of(section),
             })
             .collect()
+    }
+
+    /// The page's default breadcrumb, after `~/`.
+    pub fn path(&self) -> &'static str {
+        self.section.map_or("", Section::path)
     }
 
     /// The `hx-headers` JSON that makes every HTMX request carry the session's CSRF token
@@ -209,19 +426,47 @@ mod tests {
     }
 
     #[test]
-    fn base_layout_has_nav_flash_area_and_assets() {
+    fn base_layout_has_sidebar_header_flash_area_and_assets() {
         let html = Dashboard::empty(layout()).render().unwrap();
+        assert!(html.contains(r#"<nav class="sidebar" aria-label="Main">"#));
         assert!(html.contains(&format!(
             r#"<a href="/" aria-current="page">{}Dashboard</a>"#,
             crate::web::Icon::Dashboard
         )));
+        assert!(
+            !html.contains(r#"href="/containers""#),
+            "Containers is not in the navigation"
+        );
+        assert!(
+            html.contains(r#"<nav class="crumb" aria-label="Breadcrumb">~/dashboard</nav>"#),
+            "{html}"
+        );
+        assert!(html.contains("<h1>Dashboard</h1>"), "{html}");
+        assert!(
+            html.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+            "the version is in the sidebar"
+        );
+        assert!(!html.contains("<footer"), "{html}");
         assert!(
             html.contains(
                 r#"<body hx-headers:inherited="{&#34;X-CSRF-Token&#34;: &#34;c0ffee&#34;}">"#
             ),
             "{html}"
         );
-        assert!(html.contains(r#"hx-post="/auth/logout""#), "{html}");
+        assert!(
+            html.contains(r#"hx-post="/auth/logout" aria-label="Log out""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"hx-post="/auth/logout-everywhere">Log out everywhere</button>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<span class="account-login">octocat</span>"#));
+        assert!(html.contains(r#"<span class="avatar" aria-hidden="true">O</span>"#));
+        assert!(
+            html.contains("session · 11h left") || html.contains("session · 12h left"),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<div id="flash" aria-live="polite"></div>"#),
             "{html}"
@@ -232,6 +477,73 @@ mod tests {
             !html.contains("<script>"),
             "no inline scripts under the CSP"
         );
+        assert!(!html.contains("style="), "no inline styles under the CSP");
+    }
+
+    #[test]
+    fn the_navigation_counts_stacks_and_failing_certificates() {
+        let counts = |stacks, failing| NavCounts {
+            stacks,
+            failing_certificates: failing,
+        };
+        let html = Dashboard::empty(layout().with_counts(counts(Some(3), Some(2))))
+            .render()
+            .unwrap();
+        assert!(
+            html.contains(r#"Stacks <span class="nav-count">3</span></a>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"Certificates <span class="nav-count nav-count-alert" role="img" aria-label="2 failing">2</span></a>"#
+            ),
+            "{html}"
+        );
+
+        // No badge without failures, nor for a count that could not be read.
+        let html = Dashboard::empty(layout().with_counts(counts(None, Some(0))))
+            .render()
+            .unwrap();
+        assert!(!html.contains("nav-count"), "{html}");
+    }
+
+    #[test]
+    fn containers_pages_mark_stacks_in_the_navigation() {
+        let layout = Layout::new(
+            Section::Containers,
+            &Session::for_tests("octocat", "c0ffee"),
+        );
+        let current: Vec<_> = layout
+            .nav()
+            .into_iter()
+            .filter(|item| item.current)
+            .map(|item| item.label)
+            .collect();
+        assert_eq!(current, [Section::Stacks]);
+        assert_eq!(layout.path(), "containers");
+    }
+
+    #[test]
+    fn time_left_is_coarse() {
+        let left = |secs| Remaining(Duration::from_secs(secs)).to_string();
+        assert_eq!(left(0), "<1m");
+        assert_eq!(left(59), "<1m");
+        assert_eq!(left(60), "1m");
+        assert_eq!(left(59 * 60 + 59), "59m");
+        assert_eq!(left(3600), "1h");
+        assert_eq!(left(6 * 3600 + 3599), "6h");
+    }
+
+    #[test]
+    fn the_avatar_shows_the_logins_first_letter() {
+        let signed_in = |login: &str| SignedIn {
+            login: login.to_owned(),
+            csrf_token: String::new(),
+            expires_at: Timestamp::now(),
+        };
+        assert_eq!(signed_in("octocat").initial(), "O");
+        assert_eq!(signed_in("").initial(), "?");
+        assert_eq!(signed_in("octocat").left(), Remaining(Duration::ZERO));
     }
 
     #[test]

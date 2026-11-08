@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Apply a stack file{% endblock %}
+{% block crumb %}<a href="/stacks">~/stacks</a>/apply{% endblock %}
+{% block heading %}Apply a stack file{% endblock %}
 {% block content %}
-<h1>Apply a stack file</h1>
 <p class="muted">Paste the stack file or upload it. hoster checks it and shows what changes before anything is applied. <a href="/stacks">All stacks</a></p>
 <form class="stack-form" hx-post="/apply/preview" hx-target="#apply-result" enctype="multipart/form-data">
   <label for="stack-toml">Stack file</label>

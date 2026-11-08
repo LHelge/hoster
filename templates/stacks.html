@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Stacks{% endblock %}
+{% block heading %}Stacks{% endblock %}
+{% block actions %}<a class="button ghost" href="/containers">{{ crate::web::Icon::Containers }}Containers</a> <a class="button primary" href="/apply">Apply a stack file</a>{% endblock %}
 {% block content %}
-<h1>Stacks</h1>
-<p><a class="button" href="/apply">Apply a stack file</a></p>
 {%- if stacks.is_empty() %}
 <p>No stacks yet. Apply a stack file to create one.</p>
 {%- else %}

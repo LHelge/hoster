@@ -31,4 +31,4 @@ pub use dns::{DnsCheck, DnsMismatch, DnsVerdict, PublicAddresses};
     reason = "part of the ACME API for its future callers (doctor, web UI)"
 )]
 pub use issue::{IssueError, IssueFailure, Issuer};
-pub use task::{AcmeCommand, AcmeEvent, AcmeService, Backoff, BackoffStore};
+pub use task::{AcmeCommand, AcmeEvent, AcmeService, Backoff, BackoffStore, Backoffs};

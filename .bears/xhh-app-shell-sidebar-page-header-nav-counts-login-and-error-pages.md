@@ -1,16 +1,17 @@
 ---
 id: xhh
 title: "App shell: sidebar, page header, nav counts; login and error pages"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:19:24.356993792Z"
-updated: "2026-11-08T18:19:24.356993792Z"
+updated: "2026-11-08T19:32:51.472744440Z"
 tags:
   - web
   - ui
 depends_on:
   - dfs
 parent: "8bf"
+attempts: 1
 ---
 
 Replace the top bar in `templates/base.html` with the design's sidebar shell (see any `docs/design/*.dc.html`, the `<nav aria-label="Main">` block).

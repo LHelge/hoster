@@ -33,8 +33,7 @@ use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use tokio::sync::broadcast;
 
-use super::auth::Session;
-use super::pages::{FlashKind, Layout, Page, Section};
+use super::pages::{FlashKind, Layout, Page, Section, Shell};
 use super::ui::Pill;
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, PinChange,
@@ -56,6 +55,11 @@ use crate::store::{
 pub trait StackControl: Send + Sync + 'static {
     /// Every stack; see [`Orchestrator::status`].
     async fn status(&self) -> Result<Vec<StackStatus>, OrchestratorError>;
+
+    /// How many stacks there are, for the navigation; cheaper than [`StackControl::status`].
+    async fn count(&self) -> Result<usize, OrchestratorError> {
+        Ok(self.status().await?.len())
+    }
 
     /// What applying `toml` would do; see [`Orchestrator::preview`].
     async fn preview(&self, toml: &str) -> Result<ApplyPreview, OrchestratorError>;
@@ -139,6 +143,10 @@ pub trait StackControl: Send + Sync + 'static {
 impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
     async fn status(&self) -> Result<Vec<StackStatus>, OrchestratorError> {
         Orchestrator::status(self).await
+    }
+
+    async fn count(&self) -> Result<usize, OrchestratorError> {
+        Orchestrator::stack_count(self).await
     }
 
     async fn preview(&self, toml: &str) -> Result<ApplyPreview, OrchestratorError> {
@@ -274,11 +282,8 @@ impl Stacks {
     }
 
     /// `GET /stacks`: every stack.
-    pub async fn list(
-        Extension(stacks): Extension<Stacks>,
-        Extension(session): Extension<Session>,
-    ) -> Response {
-        let layout = Layout::new(Section::Stacks, &session);
+    pub async fn list(Extension(stacks): Extension<Stacks>, shell: Shell) -> Response {
+        let layout = shell.layout(Section::Stacks);
         match stacks.0.status().await {
             Ok(list) => Page(StackList {
                 layout,
@@ -300,10 +305,10 @@ impl Stacks {
     /// `GET /stacks/{name}`: one stack, with the deploy and remove forms.
     pub async fn show(
         Extension(stacks): Extension<Stacks>,
-        Extension(session): Extension<Session>,
+        shell: Shell,
         Path(name): Path<String>,
     ) -> Response {
-        let layout = Layout::new(Section::Stacks, &session);
+        let layout = shell.layout(Section::Stacks);
         match stacks.find(&name).await {
             Ok(status) => Page(StackPage {
                 layout,
@@ -315,9 +320,9 @@ impl Stacks {
     }
 
     /// `GET /apply`: the form to paste or upload a stack file.
-    pub async fn apply_form(Extension(session): Extension<Session>) -> Page<ApplyPage> {
+    pub async fn apply_form(shell: Shell) -> Page<ApplyPage> {
         Page(ApplyPage {
-            layout: Layout::new(Section::Stacks, &session),
+            layout: shell.layout(Section::Stacks),
         })
     }
 
@@ -482,10 +487,10 @@ impl Stacks {
     /// `GET /stacks/{name}/deployments/{id}`: one deployment, followed until it ends.
     pub async fn deployment_page(
         Extension(stacks): Extension<Stacks>,
-        Extension(session): Extension<Session>,
+        shell: Shell,
         Path((name, id)): Path<(String, String)>,
     ) -> Response {
-        let layout = Layout::new(Section::Stacks, &session);
+        let layout = shell.layout(Section::Stacks);
         match stacks.lookup(&name, &id).await {
             Ok(deployment) => Page(DeploymentPage { layout, deployment }).into_response(),
             Err(outcome) => outcome.page(layout),

@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Stack {{ stack.name }}{% endblock %}
+{% block crumb %}<a href="/stacks">~/stacks</a>/{{ stack.name }}{% endblock %}
+{% block heading %}Stack {{ stack.name }}{% endblock %}
 {% block content %}
-<h1>Stack {{ stack.name }}</h1>
 <p class="muted">Revision {{ stack.revision }} <code title="{{ stack.full_hash }}">{{ stack.hash }}</code>, applied {{ stack.applied_at }}. <a href="/stacks">All stacks</a></p>
 {%- if let Some(flag) = stack.flag %}
 <p class="flash flash-error">{{ flag }}</p>
