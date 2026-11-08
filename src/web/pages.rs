@@ -9,6 +9,7 @@ use axum::response::{Html, IntoResponse, Response};
 
 use super::assets::Assets;
 use super::auth::Session;
+use super::icons::Icon;
 
 /// A section of the admin UI, as listed in the navigation bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,17 @@ impl Section {
             Section::System => "/system",
         }
     }
+
+    fn icon(self) -> Icon {
+        match self {
+            Section::Dashboard => Icon::Dashboard,
+            Section::Stacks => Icon::Stacks,
+            Section::Containers => Icon::Containers,
+            Section::Certificates => Icon::Certificates,
+            Section::Settings => Icon::Settings,
+            Section::System => Icon::System,
+        }
+    }
 }
 
 impl fmt::Display for Section {
@@ -59,6 +71,7 @@ impl fmt::Display for Section {
 /// One link in the navigation bar.
 pub struct NavItem {
     pub href: &'static str,
+    pub icon: Icon,
     pub label: Section,
     pub current: bool,
 }
@@ -138,6 +151,7 @@ impl Layout {
             .into_iter()
             .map(|section| NavItem {
                 href: section.href(),
+                icon: section.icon(),
                 label: section,
                 current: section == current,
             })
@@ -197,7 +211,10 @@ mod tests {
     #[test]
     fn base_layout_has_nav_flash_area_and_assets() {
         let html = Dashboard::empty(layout()).render().unwrap();
-        assert!(html.contains(r#"<a href="/" aria-current="page">Dashboard</a>"#));
+        assert!(html.contains(&format!(
+            r#"<a href="/" aria-current="page">{}Dashboard</a>"#,
+            crate::web::Icon::Dashboard
+        )));
         assert!(
             html.contains(
                 r#"<body hx-headers:inherited="{&#34;X-CSRF-Token&#34;: &#34;c0ffee&#34;}">"#

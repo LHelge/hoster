@@ -52,7 +52,10 @@ async fn the_page_shows_version_target_schema_and_installed_versions() {
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
     assert!(
-        html.contains(r#"<a href="/system" aria-current="page">System</a>"#),
+        html.contains(&format!(
+            r#"<a href="/system" aria-current="page">{}System</a>"#,
+            crate::web::Icon::System
+        )),
         "{html}"
     );
     assert!(

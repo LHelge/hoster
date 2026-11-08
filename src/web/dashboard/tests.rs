@@ -191,27 +191,30 @@ fn every_warning_kind_is_raised_and_badged() {
     let html = compact(&overview.render().unwrap());
     assert!(
         html.contains(
-            r#"<span class="badge badge-error">failing health check</span> <a href="/stacks/blog">web (blog)</a>"#
+            &format!(r#"<span class="badge badge-error">{}failing health check</span> <a href="/stacks/blog">web (blog)</a>"#, crate::web::Icon::Warning)
         ),
         "{html}"
     );
     assert!(
-        html.contains(r#"<span class="badge badge-error">crash looping</span> <a href="/stacks/blog">worker (blog)</a>"#),
+        html.contains(&format!(r#"<span class="badge badge-error">{}crash looping</span> <a href="/stacks/blog">worker (blog)</a>"#, crate::web::Icon::Warning)),
         "{html}"
     );
     assert!(
         html.contains(
-            r#"<span class="badge badge-error">deploy failed</span> <a href="/stacks/blog/deployments/8">blog</a>: deployment 8 Failed: health check of &#60;web&#62; timed out"#
+            &format!(r#"<span class="badge badge-error">{}deploy failed</span> <a href="/stacks/blog/deployments/8">blog</a>: deployment 8 Failed: health check of &#60;web&#62; timed out"#, crate::web::Icon::Warning)
         ),
         "the detail is escaped: {html}"
     );
     assert!(
-        html.contains(r#"<span class="badge badge-error">certificate expiring</span> <a href="/certificates">blog.example.com</a>"#),
+        html.contains(&format!(r#"<span class="badge badge-error">{}certificate expiring</span> <a href="/certificates">blog.example.com</a>"#, crate::web::Icon::Warning)),
         "{html}"
     );
     // In the table: the failed deployment, the expiring certificate, the crash loop.
     assert!(
-        html.contains(r#"#8</a> <span class="badge badge-error">Failed</span>"#),
+        html.contains(&format!(
+            r#"#8</a> <span class="badge badge-error">{}Failed</span>"#,
+            crate::web::Icon::Failed
+        )),
         "{html}"
     );
     assert!(
@@ -220,9 +223,10 @@ fn every_warning_kind_is_raised_and_badged() {
     );
     assert!(html.contains(">13 d left</span>"), "{html}");
     assert!(
-        html.contains(
-            r#"<td><span class="badge badge-error">crash looping</span></td> <td>6</td>"#
-        ),
+        html.contains(&format!(
+            r#"<td><span class="badge badge-error">{}crash looping</span></td> <td>6</td>"#,
+            crate::web::Icon::Warning
+        )),
         "{html}"
     );
 }
@@ -290,7 +294,7 @@ fn a_stack_whose_revision_cannot_be_read_still_shows() {
     );
     let html = compact(&overview.render().unwrap());
     assert!(
-        html.contains(r#"<th scope="rowgroup" rowspan="1"><a href="/stacks/blog">blog</a><br><span class="badge badge-error">revision 1: deploy failed: boom</span></th>"#),
+        html.contains(&format!(r#"<th scope="rowgroup" rowspan="1"><a href="/stacks/blog">blog</a><br><span class="badge badge-error">{}revision 1: deploy failed: boom</span></th>"#, crate::web::Icon::Warning)),
         "{html}"
     );
     assert!(

@@ -30,10 +30,11 @@ async fn the_page_lists_names_times_and_users_but_no_values() {
     assert!(html.contains("<code>notes/old</code>"), "{html}");
     // Referenced but not set.
     assert!(
-        html.contains(
+        html.contains(&format!(
             r#"<code>notes/missing</code></td>
-      <td><span class="badge badge-error">not set</span>"#
-        ),
+      <td><span class="badge badge-error">{}not set</span>"#,
+            crate::web::Icon::Warning
+        )),
         "{html}"
     );
     // A referenced secret needs its name typed to delete; an unused one only a click.

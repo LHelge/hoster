@@ -14,7 +14,7 @@
     {%- for stack in stacks %}
     <tr>
       <td><a href="{{ stack.url }}">{{ stack.name }}</a>
-        {%- if let Some(flag) = stack.flag %}<br><span class="badge badge-error">{{ flag }}</span>{% endif %}</td>
+        {%- if let Some(flag) = stack.flag %}<br><span class="badge badge-error">{{ crate::web::Icon::Warning }}{{ flag }}</span>{% endif %}</td>
       <td>{{ stack.revision }} <code title="{{ stack.full_hash }}">{{ stack.hash }}</code></td>
       <td>
         <ul class="plain">

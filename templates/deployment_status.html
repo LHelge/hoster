@@ -10,7 +10,7 @@
   {%- endif %}
   {%- if deployment.redeployable %}
   <form class="inline-form" hx-post="{{ deployment.redeploy_url() }}" hx-target="#redeploy-result" hx-confirm="Redeploy deployment {{ deployment.id }}? Its digests and stack revision become the running ones again.">
-    <button type="submit">Redeploy this one</button>
+    <button type="submit">{{ crate::web::Icon::Redeploy }}Redeploy this one</button>
   </form>
   {%- endif %}
   {%- if let Some(error) = deployment.error %}

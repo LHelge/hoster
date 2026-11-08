@@ -20,7 +20,7 @@
     <tr>
       <td><code>{{ row.host }}</code></td>
       <td>{% if let Some(issuer) = row.issuer %}{{ issuer }}{% else %}<span class="muted">none</span>{% endif %}</td>
-      <td>{% if let Some(at) = row.not_after %}{{ at }}{% else %}<span class="badge badge-error">TLS pending</span>{% endif %}</td>
+      <td>{% if let Some(at) = row.not_after %}{{ at }}{% else %}<span class="badge badge-error">{{ crate::web::Icon::Pending }}TLS pending</span>{% endif %}</td>
       <td>{% if let Some(error) = row.error %}<span class="cert-error">{{ error }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
       <td>{{ row.next_attempt }}</td>
       <td id="dns-{{ row.index }}">{% let dns = row.dns %}{% include "cert_dns.html" %}</td>

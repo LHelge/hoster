@@ -24,7 +24,7 @@
         </form>
         <form class="inline-form" hx-post="/settings/registries/delete" hx-target="#registry-result" hx-confirm="Delete the credential for {{ entry.host }}?">
           <input type="hidden" name="host" value="{{ entry.host }}">
-          <button type="submit" class="danger">Delete</button>
+          <button type="submit" class="danger">{{ crate::web::Icon::Remove }}Delete</button>
         </form>
       </td>
     </tr>

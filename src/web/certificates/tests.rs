@@ -173,7 +173,10 @@ fn the_page_shows_the_public_addresses_and_one_row_per_host() {
         "{admin}"
     );
     assert!(
-        admin.contains(r#"<span class="badge badge-ok">ok</span>"#),
+        admin.contains(&format!(
+            r#"<span class="badge badge-ok">{}ok</span>"#,
+            crate::web::Icon::Ok
+        )),
         "{admin}"
     );
     assert!(
@@ -188,7 +191,10 @@ fn the_page_shows_the_public_addresses_and_one_row_per_host() {
     let notes = row(&html, "notes.example.com");
     assert!(notes.contains("TLS pending"), "{notes}");
     assert!(
-        notes.contains(r#"<span class="badge badge-error">mismatch</span>"#),
+        notes.contains(&format!(
+            r#"<span class="badge badge-error">{}mismatch</span>"#,
+            crate::web::Icon::Warning
+        )),
         "{notes}"
     );
     assert!(
@@ -238,7 +244,13 @@ fn an_attempt_without_known_public_addresses_is_not_shown_as_ok() {
     assert!(admin.contains("public addresses are unknown"), "{admin}");
     // A mismatch recorded earlier still names the addresses it was compared with.
     let notes = row(&html, "notes.example.com");
-    assert!(notes.contains("badge-error\">mismatch"), "{notes}");
+    assert!(
+        notes.contains(&format!(
+            "badge-error\">{}mismatch",
+            crate::web::Icon::Warning
+        )),
+        "{notes}"
+    );
 }
 
 #[test]
@@ -271,7 +283,10 @@ async fn the_page_is_in_the_navigation() {
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
     assert!(
-        html.contains(r#"<a href="/certificates" aria-current="page">Certificates</a>"#),
+        html.contains(&format!(
+            r#"<a href="/certificates" aria-current="page">{}Certificates</a>"#,
+            crate::web::Icon::Certificates
+        )),
         "{html}"
     );
     assert!(html.contains("<code>notes.example.com</code>"), "{html}");
@@ -305,7 +320,13 @@ async fn check_dns_now_answers_with_the_hosts_dns_cell() {
     assert!(!html.contains("<html"), "a partial, not a page: {html}");
 
     let html = body(app.send(check("admin.example.com")).await).await;
-    assert_eq!(html, r#"<span class="badge badge-ok">ok</span>"#);
+    assert_eq!(
+        html,
+        format!(
+            r#"<span class="badge badge-ok">{}ok</span>"#,
+            crate::web::Icon::Ok
+        )
+    );
 
     let response = app.send(check("other.example.com")).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
