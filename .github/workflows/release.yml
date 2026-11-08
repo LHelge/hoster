@@ -23,13 +23,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The documentation site (site/) and where it is deployed.
+  # aphid, for the documentation site (site/).
   APHID_VERSION: v0.3.0
-  DOCS_IMAGE: ghcr.io/lhelge/hoster-docs
-  DOCS_STACK: docs
-  DOCS_SERVICE: web
-  HOSTER_URL: https://hoster.lhelge.se/hooks/deploy
-  HOSTER_AUDIENCE: https://hoster.lhelge.se
   RUSTFLAGS: -D warnings
   # git-cliff for the release notes, pinned by version and by the SHA-512 of its x86_64 tarball.
   GIT_CLIFF_VERSION: 2.14.2
@@ -274,6 +269,14 @@ jobs:
       contents: read
       packages: write   # push to ghcr with GITHUB_TOKEN
       id-token: write   # request an OIDC token for hoster
+    # Job-level and not named HOSTER_*: hoster reads HOSTER_* as config overrides, so in the
+    # workflow env they would break the config tests of the build job.
+    env:
+      DOCS_IMAGE: ghcr.io/lhelge/hoster-docs
+      DOCS_STACK: docs
+      DOCS_SERVICE: web
+      DEPLOY_URL: https://hoster.lhelge.se/hooks/deploy
+      DEPLOY_AUDIENCE: https://hoster.lhelge.se
     steps:
       - uses: actions/checkout@v7
 
@@ -316,14 +319,14 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
-          audience=$(jq -rn --arg a "$HOSTER_AUDIENCE" '$a|@uri')
+          audience=$(jq -rn --arg a "$DEPLOY_AUDIENCE" '$a|@uri')
           token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -r .value)
           echo "::add-mask::$token"
 
           body=$(jq -nc --arg s "$DOCS_STACK" --arg svc "$DOCS_SERVICE" --arg d "$DIGEST" \
             --arg t "$GITHUB_REF_NAME" '{stack:$s, images:{($svc):$d}, tag:$t}')
-          status=$(curl -sS -o response.json -w '%{http_code}' -X POST "$HOSTER_URL" \
+          status=$(curl -sS -o response.json -w '%{http_code}' -X POST "$DEPLOY_URL" \
             -H 'Content-Type: application/json' \
             -H "Authorization: Bearer $token" \
             --data "$body")
