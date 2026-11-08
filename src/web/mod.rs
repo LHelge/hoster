@@ -236,6 +236,7 @@ impl WebApp {
             .route("/stacks", get(Stacks::list))
             .route("/stacks/{name}", get(Stacks::show))
             .layer(Extension(self.stats.clone()))
+            .route("/stacks/{name}/logs", get(Stacks::logs))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))
             .route(
@@ -249,7 +250,6 @@ impl WebApp {
             .layer(Extension(self.certificates.clone()))
             .route("/stacks/{name}/deploy", post(Stacks::deploy))
             .route("/stacks/{name}/remove", post(Stacks::remove))
-            .route("/stacks/{name}/logs", get(Stacks::logs))
             .route(
                 "/stacks/{name}/secrets",
                 get(Stacks::secrets_page).post(Stacks::save_secret),

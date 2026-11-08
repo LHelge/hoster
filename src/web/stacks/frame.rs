@@ -9,8 +9,10 @@
 //! inline under the header. Deploying explicit digests is a form on the overview, not a header
 //! action.
 //!
-//! The logs tab leads to the container list until it gets a page of its own (task gn6); it must
-//! move to the stack's log view before `/containers` becomes a redirect to `/stacks`.
+//! The logs tab leads to the log page of one of the stack's containers until it gets a page of
+//! its own (task gn6): `?service=` picks the service (the first by default) and `?container=`
+//! one of its containers (the one running it by default), as the overview's services table
+//! links them.
 //!
 //! A page builds a [`StackHeader`] with the [`Tab`] it is, and its template includes
 //! `stack_header.html`, which reads the page's `header` field.
@@ -19,14 +21,16 @@ use std::fmt;
 use std::time::SystemTime;
 
 use axum::Extension;
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::response::{IntoResponse, Redirect, Response};
+use serde::Deserialize;
 
 use super::list::{Ago, Condition, LastDeploy, ServiceChip};
-use super::overview::StackView;
+use super::overview::{StackContainers, StackView};
 use super::{DeploymentView, Stacks, When};
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::store::{Deployment, DeploymentState};
+use crate::web::containers::Containers;
 use crate::web::pages::{Section, Shell};
 use crate::web::ui::{Pill, Tone};
 
@@ -46,18 +50,46 @@ impl Stacks {
         StackHeader::new(status, tab, live.as_ref(), SystemTime::now())
     }
 
-    /// `GET /stacks/{name}/logs`: the logs tab. Until it has a page of its own (task gn6), it
-    /// leads to the container list, where each container's log is; an unknown stack is a 404.
+    /// `GET /stacks/{name}/logs[?service=…&container=…]`: the logs tab. Until it has a page of
+    /// its own (task gn6), it leads to the log page of the container
+    /// [`StackContainers::log_of`] picks, or back to the services table when the stack has no
+    /// such container; an unknown stack is a 404.
     pub async fn logs(
         Extension(stacks): Extension<Stacks>,
+        Extension(containers): Extension<Containers>,
         shell: Shell,
         Path(name): Path<String>,
+        Query(query): Query<LogsQuery>,
     ) -> Response {
-        match stacks.find(&name).await {
-            Ok(_) => Redirect::to("/containers").into_response(),
-            Err(outcome) => outcome.page(shell.layout(Section::Stacks)),
+        let status = match stacks.find(&name).await {
+            Ok(status) => status,
+            Err(outcome) => return outcome.page(shell.layout(Section::Stacks)),
+        };
+        let containers = match containers.of_stack(&name).await {
+            Ok(list) => StackContainers::from(list),
+            Err(err) => {
+                tracing::error!(stack = %name, error = %err, "listing the stack's containers failed");
+                StackContainers::default()
+            }
+        };
+        let target = containers.log_of(
+            &status,
+            query.service.as_deref(),
+            query.container.as_deref(),
+        );
+        match target {
+            Some(container) => Redirect::to(&format!("/containers/{container}/logs")),
+            None => Redirect::to(&format!("{}#services", StackView::url(&name))),
         }
+        .into_response()
     }
+}
+
+/// The query of the logs tab.
+#[derive(Debug, Deserialize)]
+pub struct LogsQuery {
+    service: Option<String>,
+    container: Option<String>,
 }
 
 /// One tab of the stack pages.

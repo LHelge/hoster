@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
@@ -80,6 +80,8 @@ impl PullHold {
 struct FakeContainer {
     spec: ContainerSpec,
     state: ContainerState,
+    /// When it last started running.
+    started_at: Option<SystemTime>,
     logs: Vec<LogLine>,
     /// The streams following the log; each gets every line pushed from now on. They end when
     /// the container stops running, as podman's followed logs do.
@@ -89,6 +91,9 @@ struct FakeContainer {
 impl FakeContainer {
     /// Sets the state; a container that stops running ends the streams following its log.
     fn set_state(&mut self, state: ContainerState) {
+        if state.is_running() && !self.state.is_running() {
+            self.started_at = Some(SystemTime::now());
+        }
         self.state = state;
         if !state.is_running() {
             self.followers.clear();
@@ -102,6 +107,7 @@ impl FakeContainer {
             labels: self.spec.labels.clone(),
             state: self.state,
             ports: self.spec.ports.iter().copied().map(Into::into).collect(),
+            started_at: self.started_at,
         }
     }
 }
@@ -238,6 +244,13 @@ impl FakeRuntime {
     pub fn set_state(&self, id: &ContainerId, state: ContainerState) {
         if let Some(container) = self.lock().containers.get_mut(id) {
             container.set_state(state);
+        }
+    }
+
+    /// Sets when a container last started, as if it had been up since `time`.
+    pub fn set_started_at(&self, id: &ContainerId, time: SystemTime) {
+        if let Some(container) = self.lock().containers.get_mut(id) {
+            container.started_at = Some(time);
         }
     }
 
@@ -404,6 +417,7 @@ impl ContainerRuntime for FakeRuntime {
             FakeContainer {
                 spec: spec.clone(),
                 state: ContainerState::Created,
+                started_at: None,
                 logs: Vec::new(),
                 followers: Vec::new(),
             },
@@ -727,12 +741,14 @@ mod tests {
     async fn crash_is_visible_to_inspect() {
         let runtime = ready().await;
         let id = runtime.create_container(&spec("a")).await.unwrap();
+        assert_eq!(runtime.inspect(&id).await.unwrap().started_at, None);
         runtime.start(&id).await.unwrap();
+        let started = runtime.inspect(&id).await.unwrap().started_at;
+        assert!(started.is_some(), "starting sets the start time");
         runtime.set_state(&id, ContainerState::Exited(Some(137)));
-        assert_eq!(
-            runtime.inspect(&id).await.unwrap().state,
-            ContainerState::Exited(Some(137))
-        );
+        let crashed = runtime.inspect(&id).await.unwrap();
+        assert_eq!(crashed.state, ContainerState::Exited(Some(137)));
+        assert_eq!(crashed.started_at, started, "the last start is kept");
         assert_eq!(runtime.spec(&id), Some(spec("a")));
     }
 

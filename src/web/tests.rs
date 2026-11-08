@@ -437,23 +437,104 @@ mod containers {
     }
 
     #[tokio::test]
-    async fn containers_page_lists_managed_containers_with_log_links() {
+    async fn containers_are_listed_on_their_stack_and_their_log_links_back() {
         let (app, browser, _) = with_container().await;
+        // The container list moved to the stacks' pages (ADR-0054).
         let response = app.get("/containers", Some(&browser.cookie)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let html = body(response).await;
-        // Containers is not in the navigation; its pages belong to Stacks (ADR-0054).
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/stacks");
+        // `web` is not a service of the fake's `notes`, so it is listed after the services.
+        let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+        assert!(
+            html.contains(r#"<code class="service-container">hoster-notes-web-g3</code>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<td>service not in the active revision</td>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"href="/stacks/notes/logs?service=web&#38;container=hoster-notes-web-g3""#
+            ),
+            "{html}"
+        );
+
+        let html = body(
+            app.get(
+                "/containers/hoster-notes-web-g3/logs",
+                Some(&browser.cookie),
+            )
+            .await,
+        )
+        .await;
+        // The log page belongs to Stacks, and leads back to its stack.
         assert!(
             html.contains(r#"<li><a href="/stacks" aria-current="page">"#),
             "{html}"
         );
-        assert!(!html.contains(r#"<li><a href="/containers""#), "{html}");
-        assert!(html.contains("<code>hoster-notes-web-g3</code>"), "{html}");
         assert!(
-            html.contains(r#"<a href="/containers/hoster-notes-web-g3/logs">Logs</a>"#),
+            html.contains(r#"<nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/<a href="/stacks/notes">notes</a>/logs/hoster-notes-web-g3</nav>"#),
             "{html}"
         );
-        assert!(html.contains("<td>running</td>"), "{html}");
+        assert!(
+            html.contains(r#"<a href="/stacks/notes#services">All containers of notes</a>"#),
+            "{html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn containers_of_removed_stacks_are_listed_on_the_stacks_page() {
+        let (app, browser, _) = with_container().await;
+        let html = body(app.get("/stacks", Some(&browser.cookie)).await).await;
+        assert!(!html.contains("Containers of removed stacks"), "{html}");
+
+        // A container left behind by a stack hoster no longer has.
+        let generation = ServiceGeneration {
+            stack: "gone".parse().unwrap(),
+            service: "web".parse().unwrap(),
+            generation: 1,
+        };
+        let spec = ContainerSpec::new(&generation, DeploymentId::from(1), IMAGE.parse().unwrap());
+        let runtime = &app.runtime;
+        runtime
+            .ensure_network(&NetworkSpec::for_stack(&generation.stack))
+            .await
+            .unwrap();
+        let id = runtime.create_container(&spec).await.unwrap();
+        runtime.start(&id).await.unwrap();
+
+        let html = body(app.get("/stacks", Some(&browser.cookie)).await).await;
+        assert!(html.contains("Containers of removed stacks"), "{html}");
+        assert!(
+            html.contains(r#"<td><code>hoster-gone-web-g1</code></td>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"href="/containers/hoster-gone-web-g1/logs""#),
+            "{html}"
+        );
+        assert!(
+            !html.contains("<td><code>hoster-notes-web-g3</code></td>"),
+            "notes is a stack hoster has: {html}"
+        );
+        assert!(html.contains(r#"<section id="leftovers""#), "{html}");
+
+        // Its log leads back to that list, not to the stack that is gone.
+        let html = body(
+            app.get("/containers/hoster-gone-web-g1/logs", Some(&browser.cookie))
+                .await,
+        )
+        .await;
+        assert!(!html.contains(r#"href="/stacks/gone"#), "{html}");
+        assert!(
+            html.contains(r#"<nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/<a href="/stacks#leftovers">removed</a>/logs/hoster-gone-web-g1</nav>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/stacks#leftovers">Containers of removed stacks</a>"#),
+            "{html}"
+        );
     }
 
     #[tokio::test]

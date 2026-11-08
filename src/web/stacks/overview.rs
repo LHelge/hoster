@@ -2,8 +2,8 @@
 //! [`StackHeader`].
 //!
 //! The overview opens with the stack's KPI tiles and its slowest routes, from hoster's
-//! in-process statistics (ADR-0045), then shows the services with their images and digests, the
-//! routes and named volumes of the active revision, the form that deploys
+//! in-process statistics (ADR-0045), then shows the services with their containers, the routes
+//! and named volumes of the active revision, the form that deploys
 //! explicit digests to the CI-built services, a link to apply a new revision, the refused
 //! webhook deploys (ADR-0047) and, last, the danger zone: removing the stack once its name is
 //! typed (ADR-0030). The danger zone says what goes (containers, network, routes) and what stays
@@ -11,11 +11,13 @@
 //! volumes ticking deletes: those of every revision, as [`Orchestrator::volumes`] finds them,
 //! with where the active revision mounts each.
 //!
-//! The tiles, the slowest routes and the routes card are built in `figures.rs`.
+//! The tiles, the slowest routes and the routes card are built in `figures.rs`; the services
+//! table, which lists the stack's containers too, in `services.rs`.
 //!
 //! [`Orchestrator::volumes`]: crate::orchestrator::Orchestrator::volumes
 
 mod figures;
+mod services;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,22 +27,26 @@ use axum::extract::Path;
 use axum::response::{IntoResponse, Response};
 
 use self::figures::{Figures, Readings, RouteRow, SlowRoute};
+pub(super) use self::services::StackContainers;
+use self::services::{ServiceRow, ServiceTable};
 use super::frame::{StackHeader, Tab};
 use super::list::StackCard;
-use super::{Outcome, ShortDigest, Stacks, When};
-use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
+use super::{Outcome, Stacks, When};
+use crate::orchestrator::StackStatus;
 use crate::runtime::VolumeMount;
 use crate::stack::Stack;
 use crate::stats::{Elapsed, Stats};
 use crate::store::WebhookRejection;
+use crate::web::containers::Containers;
 use crate::web::pages::{Layout, Page, Section, Shell};
 use crate::web::ui::Kpi;
 
 impl Stacks {
-    /// `GET /stacks/{name}`: one stack, with the deploy and remove forms.
+    /// `GET /stacks/{name}`: one stack, with its containers and the deploy and remove forms.
     pub async fn show(
         Extension(stacks): Extension<Stacks>,
         Extension(stats): Extension<Stats>,
+        Extension(containers): Extension<Containers>,
         shell: Shell,
         Path(name): Path<String>,
     ) -> Response {
@@ -53,10 +59,18 @@ impl Stacks {
             Ok(volumes) => volumes,
             Err(err) => return Outcome::from(err).page(layout),
         };
+        let containers = containers
+            .of_stack(&name)
+            .await
+            .map(StackContainers::from)
+            .map_err(|err| {
+                tracing::error!(stack = %name, error = %err, "listing the stack's containers failed");
+                err.to_string()
+            });
         Page(StackPage {
             layout,
             header: stacks.header(&status, Tab::Overview).await,
-            stack: StackView::new(&status, volumes, &Readings::of(&stats).await),
+            stack: StackView::new(&status, volumes, containers, &Readings::of(&stats).await),
         })
         .into_response()
     }
@@ -76,7 +90,8 @@ pub struct StackPage {
 pub struct StackView {
     name: String,
     url: String,
-    services: Vec<ServiceView>,
+    /// The services, with the stack's containers.
+    services: ServiceTable,
     /// Whether any service takes its digest from deploys, so the deploy form has fields.
     deployable: bool,
     /// Refused webhook attempts, newest first (ADR-0047).
@@ -91,6 +106,7 @@ pub struct StackView {
     slowest: Vec<SlowRoute>,
     /// The routes of the active revision, for the routes card.
     route_rows: Vec<RouteRow>,
+    now: std::time::SystemTime,
 }
 
 impl StackView {
@@ -107,8 +123,13 @@ impl StackView {
     }
 
     /// The services that take their digest from deploys.
-    fn ci_built(&self) -> impl Iterator<Item = &ServiceView> {
-        self.services.iter().filter(|s| s.ci_built)
+    fn ci_built(&self) -> impl Iterator<Item = &ServiceRow> {
+        self.services.rows.iter().filter(|s| s.ci_built)
+    }
+
+    /// When the page was rendered, for the uptimes' tooltips.
+    fn now(&self) -> std::time::SystemTime {
+        self.now
     }
 
     /// How far back the latency percentiles look.
@@ -129,6 +150,7 @@ impl StackView {
     /// The services' names, for the danger zone's "one container per service".
     fn service_names(&self) -> String {
         self.services
+            .rows
             .iter()
             .map(|s| s.name.as_str())
             .collect::<Vec<_>>()
@@ -137,19 +159,25 @@ impl StackView {
 }
 
 impl StackView {
-    /// The overview of `status`, whose revisions declare `volumes` (podman names), with the
-    /// figures of `readings`.
-    fn new(status: &StackStatus, volumes: BTreeSet<String>, readings: &Readings) -> Self {
-        let services: Vec<ServiceView> = status.services.iter().map(ServiceView::from).collect();
+    /// The overview of `status`, whose revisions declare `volumes` (podman names), with its
+    /// `containers` (or why they cannot be listed) and the figures of `readings`.
+    fn new(
+        status: &StackStatus,
+        volumes: BTreeSet<String>,
+        containers: Result<StackContainers, String>,
+        readings: &Readings,
+    ) -> Self {
         let stack = status.revision.toml.parse::<Stack>().ok();
+        let services = ServiceTable::new(status, stack.as_ref(), containers, readings.now);
         let figures = Figures::new(status, stack.as_ref(), readings);
         Self {
+            now: readings.now,
             kpis: figures.kpis,
             slowest: figures.slowest,
             route_rows: figures.routes,
             url: Self::url(&status.name),
             name: status.name.clone(),
-            deployable: services.iter().any(|s| s.ci_built),
+            deployable: services.rows.iter().any(|s| s.ci_built),
             services,
             rejections: status.rejections.iter().map(RejectionView::from).collect(),
             routes: StackCard::routes(status),
@@ -228,38 +256,6 @@ impl From<&WebhookRejection> for RejectionView {
     }
 }
 
-/// A service as the overview shows it.
-#[derive(Debug)]
-struct ServiceView {
-    name: String,
-    image: String,
-    ci_built: bool,
-    /// What it runs, in words.
-    state: String,
-    digest: Option<String>,
-    short_digest: Option<String>,
-}
-
-impl From<&ServiceStatus> for ServiceView {
-    fn from(service: &ServiceStatus) -> Self {
-        let (state, digest) = match &service.state {
-            ServiceState::Running { generation, digest } => {
-                (format!("generation {generation}"), Some(digest.clone()))
-            }
-            ServiceState::AwaitingFirstDigest => ("awaiting its first digest".to_owned(), None),
-            ServiceState::NotDeployed => ("not deployed".to_owned(), None),
-        };
-        Self {
-            name: service.name.clone(),
-            image: service.image.clone(),
-            ci_built: service.ci_built,
-            state,
-            short_digest: digest.as_deref().map(|d| ShortDigest(d).to_string()),
-            digest,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,7 +291,12 @@ mod tests {
 
     #[test]
     fn the_danger_zone_names_the_services_and_routes() {
-        let view = StackView::new(&notes_status(), BTreeSet::new(), &Readings::default());
+        let view = StackView::new(
+            &notes_status(),
+            BTreeSet::new(),
+            Ok(StackContainers::default()),
+            &Readings::default(),
+        );
         assert_eq!(view.service_names(), "api, storage");
         assert_eq!(view.ci_built().count(), 1);
         assert_eq!(view.routes, ["notes.example.com"]);

@@ -40,8 +40,8 @@ use crate::orchestrator::{CertStatus, RestartStats, ServiceState, ServiceStatus,
 use crate::registry::{RegistryCheck, RegistryCredential};
 use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
 use crate::runtime::{
-    ContainerRuntime, ContainerSpec, ContainerState, LogLine, LogStream, NetworkSpec,
-    ServiceGeneration,
+    ContainerRuntime, ContainerSpec, ContainerState, LogLine, LogStream, NetworkSpec, Operation,
+    PortBinding, RuntimeError, ServiceGeneration,
 };
 use crate::stack::RouteTimeouts;
 use crate::stats::{CertExpiry, RequestOutcome, ServiceRestarts};
@@ -705,14 +705,86 @@ impl Fixtures {
             .push(("ghcr.io".into(), Ok(RegistryCheck::Authenticated)));
     }
 
-    /// A running api container with stdout and stderr lines, and an exited worker.
+    /// The stacks' containers: notes' api (with stdout and stderr lines) next to its draining
+    /// previous generation and an internal storage, blog's web with an exited worker, and
+    /// shop's storefront with the next generation starting, and one left behind by a removed
+    /// `legacy` stack. Routed services publish a loopback port; each has been up for a while.
     async fn containers(app: &TestApp) -> String {
         let runtime = &app.runtime;
         let mut first = None;
-        for (stack, service, generation, n, state) in [
-            ("notes", "api", 2, 1, ContainerState::Running),
-            ("blog", "worker", 4, 3, ContainerState::Exited(Some(1))),
-            ("blog", "web", 4, 2, ContainerState::Running),
+        for (stack, service, generation, n, state, port, up) in [
+            (
+                "notes",
+                "api",
+                2,
+                1,
+                ContainerState::Running,
+                Some(20_014),
+                2 * HOUR + 240 * Duration::from_secs(1),
+            ),
+            (
+                "notes",
+                "api",
+                1,
+                9,
+                ContainerState::Running,
+                Some(20_003),
+                3 * DAY,
+            ),
+            (
+                "notes",
+                "storage",
+                2,
+                0xaa,
+                ContainerState::Running,
+                None,
+                12 * DAY + 6 * HOUR,
+            ),
+            (
+                "blog",
+                "worker",
+                4,
+                3,
+                ContainerState::Exited(Some(1)),
+                None,
+                HOUR,
+            ),
+            (
+                "blog",
+                "web",
+                4,
+                2,
+                ContainerState::Running,
+                Some(20_007),
+                5 * HOUR,
+            ),
+            (
+                "shop",
+                "storefront",
+                7,
+                4,
+                ContainerState::Running,
+                Some(20_011),
+                DAY,
+            ),
+            (
+                "shop",
+                "storefront",
+                8,
+                5,
+                ContainerState::Running,
+                Some(20_015),
+                Duration::from_secs(12),
+            ),
+            (
+                "legacy",
+                "web",
+                3,
+                6,
+                ContainerState::Exited(Some(0)),
+                None,
+                40 * DAY,
+            ),
         ] {
             let generation = ServiceGeneration {
                 stack: stack.parse().unwrap(),
@@ -720,8 +792,15 @@ impl Fixtures {
                 generation,
             };
             let image = format!("ghcr.io/acme/{service}@{}", digest(n));
-            let spec =
+            let mut spec =
                 ContainerSpec::new(&generation, DeploymentId::from(1), image.parse().unwrap());
+            spec.ports = port
+                .map(|host_port| PortBinding {
+                    container_port: 8080,
+                    host_port,
+                })
+                .into_iter()
+                .collect();
             runtime
                 .ensure_network(&NetworkSpec::for_stack(&generation.stack))
                 .await
@@ -729,6 +808,7 @@ impl Fixtures {
             runtime.pull_image(&spec.image).await.unwrap();
             let id = runtime.create_container(&spec).await.unwrap();
             runtime.start(&id).await.unwrap();
+            runtime.set_started_at(&id, SystemTime::now() - up);
             runtime.set_state(&id, state);
             if first.is_none() {
                 first = Some(spec.name.clone());
@@ -990,7 +1070,10 @@ async fn ui_preview() {
         ("/certificates", "Certificates"),
         ("/settings/registries", "Settings: registries"),
         ("/system", "System"),
-        ("/containers", "Containers"),
+        (
+            "/containers/hoster-legacy-web-g3/logs",
+            "Container logs: leftover of a removed stack",
+        ),
     ] {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("", url), label, &html);
@@ -1060,6 +1143,20 @@ async fn ui_preview() {
         "Stack: removal without the name typed",
         &Session::inject(&stack, "remove-result", &remove),
     );
+    app.runtime.fail_always(
+        Operation::ListManaged,
+        RuntimeError::Unreachable {
+            socket: "/run/user/1000/podman/podman.sock".into(),
+            message: "connection refused".into(),
+        },
+    );
+    let html = session.get("/stacks/notes", StatusCode::OK).await;
+    preview.write(
+        "states/stack-podman-unreachable.html",
+        "Stack: containers cannot be listed",
+        &html,
+    );
+    app.runtime.clear_failures();
     let system = session.get("/system", StatusCode::OK).await;
     let check = session.post("/system/check", &[]).await;
     preview.write(
@@ -1111,7 +1208,6 @@ async fn ui_preview() {
         ("/stacks", "Empty: stacks"),
         ("/certificates", "Empty: certificates"),
         ("/settings/registries", "Empty: registries"),
-        ("/containers", "Empty: containers"),
         ("/system", "Empty: system (not an installed layout)"),
     ] {
         let html = session.get(url, StatusCode::OK).await;

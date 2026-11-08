@@ -23,13 +23,12 @@ use super::icons::Icon;
 use super::stacks::StackControl;
 use crate::store::Timestamp;
 
-/// A section of the admin UI. All but [`Section::Containers`] are in the sidebar's navigation.
+/// A section of the admin UI, each in the sidebar's navigation. The containers and their logs
+/// belong to the stacks (ADR-0054).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Dashboard,
     Stacks,
-    /// The container list and logs: part of the stacks, so the navigation marks Stacks.
-    Containers,
     Certificates,
     Settings,
     System,
@@ -49,7 +48,6 @@ impl Section {
         match self {
             Section::Dashboard => "/",
             Section::Stacks => "/stacks",
-            Section::Containers => "/containers",
             Section::Certificates => "/certificates",
             Section::Settings => "/settings/registries",
             Section::System => "/system",
@@ -61,7 +59,6 @@ impl Section {
         match self {
             Section::Dashboard => "dashboard",
             Section::Stacks => "stacks",
-            Section::Containers => "containers",
             Section::Certificates => "certificates",
             Section::Settings => "settings/registries",
             Section::System => "system",
@@ -72,18 +69,9 @@ impl Section {
         match self {
             Section::Dashboard => Icon::Dashboard,
             Section::Stacks => Icon::Stacks,
-            Section::Containers => Icon::Containers,
             Section::Certificates => Icon::Certificates,
             Section::Settings => Icon::Settings,
             Section::System => Icon::System,
-        }
-    }
-
-    /// The navigation item marked current while this section is shown.
-    fn nav_item(self) -> Section {
-        match self {
-            Section::Containers => Section::Stacks,
-            section => section,
         }
     }
 }
@@ -93,7 +81,6 @@ impl fmt::Display for Section {
         f.write_str(match self {
             Section::Dashboard => "Dashboard",
             Section::Stacks => "Stacks",
-            Section::Containers => "Containers",
             Section::Certificates => "Certificates",
             Section::Settings => "Settings",
             Section::System => "System",
@@ -364,7 +351,7 @@ impl Layout {
                 href: section.href(),
                 icon: section.icon(),
                 label: section,
-                current: section == current.nav_item(),
+                current: section == current,
                 count: self.counts.of(section),
             })
             .collect()
@@ -505,22 +492,6 @@ mod tests {
             .render()
             .unwrap();
         assert!(!html.contains("nav-count"), "{html}");
-    }
-
-    #[test]
-    fn containers_pages_mark_stacks_in_the_navigation() {
-        let layout = Layout::new(
-            Section::Containers,
-            &Session::for_tests("octocat", "c0ffee"),
-        );
-        let current: Vec<_> = layout
-            .nav()
-            .into_iter()
-            .filter(|item| item.current)
-            .map(|item| item.label)
-            .collect();
-        assert_eq!(current, [Section::Stacks]);
-        assert_eq!(layout.path(), "containers");
     }
 
     #[test]

@@ -1,5 +1,8 @@
-//! The container pages (ADR-0044): the managed containers, and each one's log with *tail N*,
-//! *since* and *follow*, streamed into the page over SSE with HTMX's SSE extension.
+//! The container pages (ADR-0044): each managed container's log with *tail N*, *since* and
+//! *follow*, streamed into the page over SSE with HTMX's SSE extension. The containers
+//! themselves are listed on their stack's overview (ADR-0054), which reads them through
+//! [`Containers::of_stack`]; `GET /containers`, the list they had before, redirects to
+//! `/stacks`, which lists the containers of stacks no longer in the store.
 //!
 //! `GET /containers/{name}/logs` renders the page; its log element connects to
 //! `GET /containers/{name}/logs/stream` with the same query. The stream sends the log in batches
@@ -24,12 +27,13 @@ use axum::Extension;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use futures_util::stream::{self, BoxStream, Stream, StreamExt};
 use serde::Deserialize;
 
 use super::auth::{Auth, Session};
 use super::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
+use super::stacks::Stacks;
 use crate::runtime::{
     ContainerId, ContainerInfo, ContainerRuntime, LogLine, LogOptions, LogStream, RuntimeError,
     label,
@@ -43,6 +47,11 @@ pub trait ContainerSource: Send + Sync + 'static {
     /// Every hoster-managed container.
     async fn managed(&self) -> Result<Vec<ContainerInfo>, RuntimeError>;
 
+    /// The managed containers of `stack`, each as inspect reports it (with its start time). A
+    /// container removed between listing and inspecting is left out; one that cannot be
+    /// inspected otherwise is kept as the list reported it.
+    async fn of_stack(&self, stack: &str) -> Result<Vec<ContainerInfo>, RuntimeError>;
+
     /// A container's log; see [`ContainerRuntime::logs`].
     fn log(
         &self,
@@ -55,6 +64,26 @@ pub trait ContainerSource: Send + Sync + 'static {
 impl<R: ContainerRuntime> ContainerSource for R {
     async fn managed(&self) -> Result<Vec<ContainerInfo>, RuntimeError> {
         self.list_managed().await
+    }
+
+    async fn of_stack(&self, stack: &str) -> Result<Vec<ContainerInfo>, RuntimeError> {
+        let listed = self.list_managed().await?.into_iter().filter(|c| {
+            c.labels
+                .get(label::STACK)
+                .is_some_and(|label| label == stack)
+        });
+        let inspected = futures_util::future::join_all(listed.map(|listed| async move {
+            match self.inspect(&listed.id).await {
+                Ok(info) => Some(info),
+                Err(RuntimeError::NotFound { .. }) => None,
+                Err(err) => {
+                    tracing::warn!(container = %listed.name, error = %err, "inspecting a container failed");
+                    Some(listed)
+                }
+            }
+        }))
+        .await;
+        Ok(inspected.into_iter().flatten().collect())
     }
 
     fn log(
@@ -110,34 +139,29 @@ impl Containers {
             .ok_or(LookupError::NotFound)
     }
 
-    /// `GET /containers`: every managed container, with a link to its log.
-    pub async fn list(
-        Extension(containers): Extension<Containers>,
-        shell: Shell,
-    ) -> Page<ContainerList> {
-        let layout = shell.layout(Section::Containers);
-        match containers.0.managed().await {
-            Ok(list) => Page(ContainerList {
-                layout,
-                rows: list.iter().map(ContainerRow::from).collect(),
-            }),
-            Err(err) => {
-                tracing::error!(error = %err, "listing containers failed");
-                Page(ContainerList {
-                    layout: layout.with_flash(Flash {
-                        kind: FlashKind::Error,
-                        message: format!("Cannot list the containers: {err}"),
-                    }),
-                    rows: Vec::new(),
-                })
-            }
-        }
+    /// The managed containers of `stack`, for its overview.
+    pub(in crate::web) async fn of_stack(
+        &self,
+        stack: &str,
+    ) -> Result<Vec<ContainerInfo>, RuntimeError> {
+        self.0.of_stack(stack).await
+    }
+
+    /// Every managed container, for the leftovers of removed stacks that `/stacks` lists.
+    pub(in crate::web) async fn managed(&self) -> Result<Vec<ContainerInfo>, RuntimeError> {
+        self.0.managed().await
+    }
+
+    /// `GET /containers`: the containers are listed on their stacks' pages now (ADR-0054).
+    pub async fn list() -> Redirect {
+        Redirect::to("/stacks")
     }
 
     /// `GET /containers/{name}/logs`: the log page, whose log element streams from
     /// `…/logs/stream` with the same query.
     pub async fn log_page(
         Extension(containers): Extension<Containers>,
+        Extension(stacks): Extension<Stacks>,
         shell: Shell,
         Path(name): Path<String>,
         Query(query): Query<LogQuery>,
@@ -147,7 +171,7 @@ impl Containers {
             Ok(container) => container,
             Err(err) => return err.into_response(),
         };
-        let mut layout = shell.layout(Section::Containers);
+        let mut layout = shell.layout(Section::Stacks);
         let stream_url = match LogOptions::try_from(&query) {
             Ok(_) => Some(format!(
                 "/containers/{}/logs/stream?{}",
@@ -162,9 +186,12 @@ impl Containers {
                 None
             }
         };
+        let container = ContainerRow::from(&container);
+        let stack_url = container.stack_url(&stacks).await;
         Page(LogPage {
             layout,
-            container: ContainerRow::from(&container),
+            container,
+            stack_url,
             form: LogForm::from(&query),
             stream_url,
         })
@@ -503,7 +530,7 @@ impl From<LogLine> for LogEntry {
     }
 }
 
-/// A container as the pages list it.
+/// The container a log page shows.
 #[derive(Debug)]
 pub struct ContainerRow {
     name: String,
@@ -526,12 +553,23 @@ impl From<&ContainerInfo> for ContainerRow {
     }
 }
 
-/// `GET /containers`.
-#[derive(Template)]
-#[template(path = "containers.html")]
-pub struct ContainerList {
-    layout: Layout,
-    rows: Vec<ContainerRow>,
+impl ContainerRow {
+    /// The page of the container's stack, or `None` when the container has no stack label or
+    /// its stack is gone (it is then listed among the leftovers on `/stacks`). When the stacks
+    /// cannot be read, the stack is assumed to be there.
+    async fn stack_url(&self, stacks: &Stacks) -> Option<String> {
+        if self.stack.is_empty() {
+            return None;
+        }
+        let exists = match stacks.status().await {
+            Ok(list) => list.iter().any(|s| s.name == self.stack),
+            Err(err) => {
+                tracing::warn!(error = %err, "listing the stacks failed");
+                true
+            }
+        };
+        exists.then(|| format!("/stacks/{}", self.stack))
+    }
 }
 
 /// The log form, filled in with the query it was submitted with.
@@ -561,6 +599,8 @@ impl From<&LogQuery> for LogForm {
 struct LogPage {
     layout: Layout,
     container: ContainerRow,
+    /// The page of the container's stack; `None` for a leftover of a removed stack.
+    stack_url: Option<String>,
     form: LogForm,
     /// The stream to connect to; `None` when the query is invalid.
     stream_url: Option<String>,

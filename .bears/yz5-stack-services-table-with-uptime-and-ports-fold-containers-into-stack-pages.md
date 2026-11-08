@@ -1,10 +1,10 @@
 ---
 id: yz5
 title: Stack services table with uptime and ports; fold /containers into stack pages
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:20:19.770389557Z"
-updated: "2026-11-08T18:20:19.770389557Z"
+updated: "2026-11-08T21:05:54.021447664Z"
 tags:
   - web
   - ui
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - "7wg"
 parent: "8bf"
+attempts: 1
 ---
 
 The services table of the stack overview, after `docs/design/StackDetail.dc.html` (Services section), plus the move away from the Containers page.
