@@ -255,16 +255,7 @@ impl Config {
     /// Loads and validates the configuration from the file at `path` (or the default location),
     /// defaults and the process environment.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
-        let dirs = XdgDirs::from_env();
-        let path = match path {
-            Some(path) => path.to_owned(),
-            None => dirs.config_file().ok_or(ConfigError::NoConfigDir)?,
-        };
-        if !path.is_file() {
-            return Err(ConfigError::NotFound(path));
-        }
-
-        let file = Toml::file_exact(&path);
+        let (path, figment) = Self::layers(path)?;
         let mut problems = Vec::new();
         if Figment::from(Toml::file_exact(&path)).contains(ADMIN_GITHUB_KEY) {
             problems.push(Problem::new(
@@ -272,15 +263,6 @@ impl Config {
                 format!("not allowed in the file; set {ADMIN_GITHUB_ENV} in the environment"),
             ));
         }
-
-        let mut figment = Figment::new();
-        if let Some(state_dir) = dirs.state_dir() {
-            figment = figment.merge(Serialized::default("state_dir", state_dir));
-        }
-        if let Some(key_file) = dirs.secret_key_file() {
-            figment = figment.merge(Serialized::default("secret_key_file", key_file));
-        }
-        let figment = figment.merge(file).merge(EnvOverrides::new());
 
         // A file that cannot be read or parsed hides every key; report only that, rather than
         // claiming below that keys set in the environment are missing.
@@ -339,6 +321,64 @@ impl Config {
             }
             _ => Err(ConfigError::Invalid(Problems(problems))),
         }
+    }
+
+    /// Only `state_dir`, resolved exactly as [`load`](Self::load) resolves it (its default, the
+    /// file at `path` or the default location, and `HOSTER_STATE_DIR`), without requiring or
+    /// validating anything else. `hoster update` and `hoster rollback` run in an SSH session as
+    /// the hoster user, which lacks the service's environment: `HOSTER_ADMIN_GITHUB` lives in the
+    /// unit's drop-in (ADR-0052).
+    pub fn load_state_dir(path: Option<&Path>) -> Result<PathBuf, ConfigError> {
+        let (path, figment) = Self::layers(path)?;
+        let problems = |errors: figment::Error| {
+            ConfigError::Invalid(Problems(
+                errors
+                    .into_iter()
+                    .map(|error| match &error.metadata {
+                        Some(_) => Problem::from(error),
+                        None => Problem::new(path.display().to_string(), error.kind.to_string()),
+                    })
+                    .collect(),
+            ))
+        };
+        if !figment.contains("state_dir") {
+            return Err(ConfigError::Invalid(Problems(vec![Problem::new(
+                "state_dir",
+                "not set, and neither $XDG_DATA_HOME nor $HOME is set to derive it from",
+            )])));
+        }
+        let state_dir: PathBuf = figment.extract_inner("state_dir").map_err(problems)?;
+        if !state_dir.is_absolute() {
+            return Err(ConfigError::Invalid(Problems(vec![Problem::new(
+                "state_dir",
+                "must be an absolute path",
+            )])));
+        }
+        Ok(state_dir)
+    }
+
+    /// The configuration file (at `path` or the default location) and the layers every value is
+    /// read from: the XDG defaults, the file and the `HOSTER_*` environment.
+    fn layers(path: Option<&Path>) -> Result<(PathBuf, Figment), ConfigError> {
+        let dirs = XdgDirs::from_env();
+        let path = match path {
+            Some(path) => path.to_owned(),
+            None => dirs.config_file().ok_or(ConfigError::NoConfigDir)?,
+        };
+        if !path.is_file() {
+            return Err(ConfigError::NotFound(path));
+        }
+        let mut figment = Figment::new();
+        if let Some(state_dir) = dirs.state_dir() {
+            figment = figment.merge(Serialized::default("state_dir", state_dir));
+        }
+        if let Some(key_file) = dirs.secret_key_file() {
+            figment = figment.merge(Serialized::default("secret_key_file", key_file));
+        }
+        let figment = figment
+            .merge(Toml::file_exact(&path))
+            .merge(EnvOverrides::new());
+        Ok((path, figment))
     }
 
     /// The `aud` claim deploy webhook tokens must carry (ADR-0047).
@@ -1120,6 +1160,44 @@ mod tests {
                 config.state_dir,
                 jail.directory().join(".local/share/hoster")
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn state_dir_alone_loads_without_the_admin_handle() {
+        Jail::expect_with(|jail| {
+            // An SSH session as hoster: no HOSTER_ADMIN_GITHUB, which only the unit sets.
+            jail.set_env("HOME", jail.directory().to_owned().display());
+            jail.set_env("XDG_DATA_HOME", jail.directory().join("data").display());
+            let path = jail.directory().join("hoster.toml");
+            jail.create_file("hoster.toml", MINIMAL)?;
+            assert!(Config::load(Some(&path)).is_err());
+            assert_eq!(
+                Config::load_state_dir(Some(&path)).map_err(|e| e.to_string())?,
+                jail.directory().join("data/hoster")
+            );
+
+            // The file and the environment override the default, as for the service.
+            jail.create_file("hoster.toml", &format!("{MINIMAL}state_dir = \"/srv/h\"\n"))?;
+            assert_eq!(
+                Config::load_state_dir(Some(&path)).map_err(|e| e.to_string())?,
+                Path::new("/srv/h")
+            );
+            jail.set_env("HOSTER_STATE_DIR", "/srv/env");
+            assert_eq!(
+                Config::load_state_dir(Some(&path)).map_err(|e| e.to_string())?,
+                Path::new("/srv/env")
+            );
+
+            jail.set_env("HOSTER_STATE_DIR", "relative");
+            let err = Config::load_state_dir(Some(&path)).unwrap_err().to_string();
+            assert!(err.contains("absolute"), "{err}");
+            let missing = jail.directory().join("missing.toml");
+            assert!(matches!(
+                Config::load_state_dir(Some(&missing)),
+                Err(ConfigError::NotFound(_))
+            ));
             Ok(())
         });
     }

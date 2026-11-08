@@ -233,6 +233,14 @@ directory (the `hoster backup db` code), switches `current` and shuts hoster dow
 `Restart=always` starts the new version, which migrates the database on startup. The restart
 has the short ingress gap of ADR-0034. There is no preflight run and no automatic revert.
 
+Run the CLI as hoster, not root (`sudo machinectl shell hoster@` or `sudo -iu hoster`; it finds
+the user manager under `/run/user/<uid>` when the session sets no `XDG_RUNTIME_DIR`). Of the
+configuration they read only `state_dir`, so unlike `hoster doctor` they need no
+`HOSTER_ADMIN_GITHUB`. `hoster update --check` only shows the versions and the release notes; otherwise it asks before
+updating (`--yes` skips that). `hoster update` and `hoster rollback` exit 0 when they succeeded
+or hoster already is up to date, 1 on an error or a declined confirmation, and 2 on a usage
+error (such as no terminal to confirm on without `--yes`).
+
 **Rollback.** If a release misbehaves, go back to the previous version over SSH, as `hoster`:
 
 ```sh
@@ -342,6 +350,9 @@ The fake releases are wired in with `HOSTER_INSTALL_RELEASES_URL`, which replace
 | JSON log lines | `[log] format = "json"` in `hoster.toml` (or `HOSTER_LOG__FORMAT=json`), then `journalctl --user -u hoster -o cat \| jq` |
 | Only the access log | `journalctl --user -u hoster -o cat \| grep hoster::access` |
 | No access log | `Environment=RUST_LOG=info,hoster::access=off` in the drop-in |
+| Check for an update | `hoster update --check`: the running and the latest version, and the release notes |
+| Update | `hoster update` (`--version vX.Y.Z` for a specific release or a pre-release, `--yes` to skip the confirmation): installs the release, snapshots the database and restarts the service |
+| Roll back | `hoster rollback` (`--yes` to skip the confirmation): returns to the previous installed version, undoing the database migrations it does not know; their data is lost |
 
 **Log lines.** The proxy writes one line per request under the `hoster::access` target: host,
 method, path (without the query), matched route, stack, service, generation, upstream, status,

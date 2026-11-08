@@ -315,6 +315,16 @@ impl Store {
             .into()
     }
 
+    /// How many of this binary's migrations undoing the schema from `from` down to `to` reverts:
+    /// those newer than `to` and no newer than `from` (what `hoster rollback` warns about).
+    pub fn migrations_between(to: SchemaVersion, from: SchemaVersion) -> usize {
+        let (to, from) = (i64::from(to), i64::from(from));
+        MIGRATOR
+            .iter()
+            .filter(|m| m.migration_type.is_up_migration() && m.version > to && m.version <= from)
+            .count()
+    }
+
     /// The schema version the database is at: its newest successfully applied migration, `0`
     /// if none has been applied. Reads without migrating, so it also works on a store from
     /// [`Store::open_read_only`] whose database a newer or older binary migrated.

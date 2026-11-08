@@ -1162,6 +1162,23 @@ mod migrations {
         store.close().await;
     }
 
+    #[test]
+    fn migrations_between_counts_the_migrations_an_undo_reverts() {
+        let all = versions();
+        let latest = Store::expected_schema_version();
+        assert_eq!(
+            Store::migrations_between(SchemaVersion::default(), latest),
+            all.len()
+        );
+        assert_eq!(Store::migrations_between(latest, latest), 0);
+        let second = SchemaVersion::from(all[1]);
+        assert_eq!(Store::migrations_between(second, latest), all.len() - 2);
+        assert_eq!(
+            Store::migrations_between(SchemaVersion::from(all[0]), second),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn an_unmigrated_database_is_at_version_zero() {
         let dir = TempDir::new().unwrap();

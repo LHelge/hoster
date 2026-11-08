@@ -1,10 +1,10 @@
 ---
 id: "7uz"
 title: "`hoster update` and `hoster rollback` CLI subcommands"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-08T08:25:49.995852108Z"
-updated: "2026-11-08T09:51:13.396474334Z"
+updated: "2026-11-08T10:04:09.244497597Z"
 tags:
   - core
   - ops
