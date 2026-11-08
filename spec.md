@@ -137,7 +137,8 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
 
    hoster verifies the token (GitHub's signature, issuer, audience, expiry, single-use `jti`) and
    checks its claims against the stack's `[deploy]` rule. Several services may be listed in
-   `images` to deploy them together (ADR-0042, ADR-0047).
+   `images` to deploy them together (ADR-0042, ADR-0047). The full guide, with a complete
+   workflow to copy, is [docs/deploying-from-ci.md](docs/deploying-from-ci.md).
 
 ### 5.3 Every release
 

@@ -95,40 +95,53 @@ impl Signer {
     }
 }
 
-/// Claims shaped like GitHub's documented example token, for a tag push of `acme/notes`
-/// (repository id 74) running its release workflow in the `production` environment.
+/// docs/deploying-from-ci.md, whose example token claims these tests sign.
+const GUIDE: &str = include_str!("../../../docs/deploying-from-ci.md");
+
+/// The claims example in [`GUIDE`]: the code block after its `oidc-claims-example` marker. It
+/// is shaped like GitHub's documented example token, for a tag push of `acme/notes`
+/// (repository id 123456789) running its release workflow in the `production` environment.
+fn documented_claims() -> Value {
+    let (_, rest) = GUIDE
+        .split_once("<!-- oidc-claims-example")
+        .expect("the guide marks its claims example");
+    let (_, rest) = rest.split_once("```json\n").expect("a json block follows");
+    let (block, _) = rest.split_once("```").expect("the json block ends");
+    serde_json::from_str(block).expect("the guide's claims example is JSON")
+}
+
+/// [`documented_claims`] as a token minted just now with id `jti`, for [`ORIGIN`].
 fn claims(jti: &str) -> Value {
     let now = now();
-    json!({
-        "jti": jti,
-        "sub": "repo:acme/notes:environment:production",
-        "environment": "production",
-        "aud": ORIGIN,
-        "ref": "refs/tags/v1.4.2",
-        "sha": "0f3c5e1a",
-        "repository": "acme/notes",
-        "repository_owner": "acme",
-        "actor_id": "12",
-        "repository_visibility": "private",
-        "repository_id": "74",
-        "repository_owner_id": "65",
-        "run_id": "123456",
-        "run_number": "10",
-        "run_attempt": "1",
-        "runner_environment": "github-hosted",
-        "actor": "octocat",
-        "workflow": "release",
-        "head_ref": "",
-        "base_ref": "",
-        "event_name": "push",
-        "ref_type": "tag",
-        "workflow_ref": "acme/notes/.github/workflows/release.yml@refs/tags/v1.4.2",
-        "job_workflow_ref": "acme/notes/.github/workflows/release.yml@refs/tags/v1.4.2",
-        "iss": "https://token.actions.githubusercontent.com",
-        "nbf": now - 5,
-        "iat": now - 5,
-        "exp": now + 300,
-    })
+    let mut claims = documented_claims();
+    claims["jti"] = json!(jti);
+    claims["aud"] = json!(ORIGIN);
+    claims["nbf"] = json!(now - 5);
+    claims["iat"] = json!(now - 5);
+    claims["exp"] = json!(now + 300);
+    claims
+}
+
+#[test]
+fn the_guide_documents_a_github_token_for_the_default_audience() {
+    let claims = documented_claims();
+    assert_eq!(claims["iss"], "https://token.actions.githubusercontent.com");
+    assert_eq!(claims["aud"], ORIGIN);
+    for field in [
+        "jti",
+        "repository",
+        "repository_id",
+        "ref",
+        "sha",
+        "run_id",
+        "actor",
+        "environment",
+        "workflow_ref",
+        "job_workflow_ref",
+    ] {
+        assert!(claims[field].is_string(), "{field} is missing");
+    }
+    assert!(claims["exp"].as_u64() > claims["iat"].as_u64());
 }
 
 /// `claims` with `field` replaced.
@@ -170,7 +183,7 @@ async fn a_github_token_verifies_and_yields_its_claims() {
         .unwrap();
     assert_eq!(claims.jti, "id-1");
     assert_eq!(claims.repository, "acme/notes");
-    assert_eq!(claims.repository_id, 74);
+    assert_eq!(claims.repository_id, 123456789);
     assert_eq!(claims.git_ref, "refs/tags/v1.4.2");
     assert_eq!(claims.run_id, "123456");
     assert_eq!(claims.environment.as_deref(), Some("production"));
@@ -186,7 +199,7 @@ async fn numeric_ids_and_audience_lists_are_accepted() {
     let signer = Signer::a();
     serve_jwks(&server, &[&signer]).await;
     let token = with(
-        with(claims("id"), "repository_id", json!(74)),
+        with(claims("id"), "repository_id", json!(123456789)),
         "aud",
         json!(["other", ORIGIN]),
     );
@@ -194,7 +207,7 @@ async fn numeric_ids_and_audience_lists_are_accepted() {
         .verify(&signer.sign(&token))
         .await
         .unwrap();
-    assert_eq!(claims.repository_id, 74);
+    assert_eq!(claims.repository_id, 123456789);
 }
 
 #[tokio::test]
@@ -375,9 +388,9 @@ async fn an_unreachable_key_set_rejects_never_accepts() {
 // The endpoint, through the app
 // ---------------------------------------------------------------------------------------------
 
-/// [`NOTES`] with a `[deploy]` rule for `acme/notes` (repository id 74), tags only.
+/// [`NOTES`] with a `[deploy]` rule for `acme/notes` (repository id 123456789), tags only.
 fn hooked() -> String {
-    format!("{NOTES}\n[deploy]\nrepository_id = 74\nrefs = [\"refs/tags/v*\"]\n")
+    format!("{NOTES}\n[deploy]\nrepository_id = 123456789\nrefs = [\"refs/tags/v*\"]\n")
 }
 
 /// The app with `notes` deployable by the webhook and GitHub's key set served.
@@ -426,13 +439,13 @@ async fn the_spec_ci_snippet_deploys_with_provenance_from_the_token() {
     };
     assert_eq!(request.stack, "notes");
     assert_eq!(request.images["api"], digest(1));
-    assert_eq!(request.caller.repository_id, 74);
+    assert_eq!(request.caller.repository_id, 123456789);
     assert_eq!(request.caller.environment.as_deref(), Some("production"));
     assert_eq!(
         request.provenance,
         Provenance {
             repository: "acme/notes".into(),
-            sha: "0f3c5e1a".into(),
+            sha: "0f3c5e1a9d2b7c4e8f6a1b3d5c7e9f0a2b4c6d8e".into(),
             git_ref: "refs/tags/v1.4.2".into(),
             run_id: "123456".into(),
             actor: "octocat".into(),

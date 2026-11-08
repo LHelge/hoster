@@ -63,6 +63,10 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds the
 `x86_64-unknown-linux-musl` binary and publishes it with `SHA256SUMS` and the `deploy/` files as a
 GitHub release. See [docs/install.md](docs/install.md).
 
+App repositories deploy to hoster from their own release workflows with a GitHub Actions OIDC
+token; see [docs/deploying-from-ci.md](docs/deploying-from-ci.md) and the example in
+[examples/github-actions/release.yml](examples/github-actions/release.yml).
+
 ## License
 
 Licensed under either of
