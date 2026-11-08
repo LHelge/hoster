@@ -27,7 +27,9 @@ use axum::extract::Path;
 use axum::response::{IntoResponse, Response};
 
 use self::figures::{Figures, Readings, RouteRow, SlowRoute};
-pub(super) use self::services::StackContainers;
+#[cfg(test)]
+pub(super) use self::services::Role;
+pub(super) use self::services::{LogCandidate, LogPick, StackContainers};
 use self::services::{ServiceRow, ServiceTable};
 use super::frame::{StackHeader, Tab};
 use super::list::StackCard;

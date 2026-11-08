@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Logs of {{ header.name }}{% endblock %}
+{% block head %}{% include "stack_header.html" %}{% endblock %}
+{% block content %}
+{%- let log = tab.log %}
+<section class="log-view" aria-label="Logs">
+  <div class="log-toolbar">
+    {%- if !tab.services.is_empty() %}
+    <nav class="log-choices" aria-label="Services">
+      {%- for service in tab.services %}
+      <a class="log-chip" href="{{ service.href }}"{% if service.current %} aria-current="page"{% endif %}><span class="dot {{ service.dot }}" aria-hidden="true"></span>{{ service.label }}</a>
+      {%- endfor %}
+    </nav>
+    {%- endif %}
+    {%- if !tab.containers.is_empty() %}
+    <nav class="log-choices log-containers" aria-label="Containers of {{ tab.service.as_deref().unwrap_or_default() }}">
+      <span class="log-label">container</span>
+      {%- for container in tab.containers %}
+      <a class="log-chip" href="{{ container.href }}"{% if container.current %} aria-current="true"{% endif %}>{{ container.label }}{% if let Some(detail) = container.detail %} <span class="log-chip-detail">{{ detail }}</span>{% endif %}</a>
+      {%- endfor %}
+    </nav>
+    {%- endif %}
+    {%- if log.container.is_some() %}
+    {% include "log_options.html" %}
+    {%- endif %}
+  </div>
+  {%- if log.container.is_some() %}
+  {% include "log_panel.html" %}
+  {%- else if tab.listing_failed %}
+  <p class="log-empty">The stack's containers could not be listed, so there is no log to show.</p>
+  {%- else if let Some(service) = tab.service %}
+  <p class="log-empty">{{ service }} has no container yet, so there is no log to show. It gets one when a deployment starts it.</p>
+  {%- else %}
+  <p class="log-empty">The stack has no services, so there is no log to show.</p>
+  {%- endif %}
+</section>
+{% endblock %}
