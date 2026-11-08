@@ -364,6 +364,11 @@ impl Config {
         }
     }
 
+    /// The file name, in the state directory, of the 0600 Unix socket the admin app listens on
+    /// and the proxy routes the admin host to (ADR-0031). Unused when `web.dev_listen` puts the
+    /// app on loopback TCP instead.
+    pub const ADMIN_SOCKET_NAME: &str = "admin.sock";
+
     /// Checks the rules serde cannot express; the types already enforce the rest.
     fn validate(&self) -> Vec<Problem> {
         let mut problems = Vec::new();

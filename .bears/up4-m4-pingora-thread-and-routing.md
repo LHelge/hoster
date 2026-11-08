@@ -2,10 +2,10 @@
 id: up4
 title: "M4: Pingora thread and routing"
 type: epic
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.138767920Z"
-updated: "2026-11-07T14:45:17.138767920Z"
+updated: "2026-11-08T01:43:19.559996654Z"
 ---
 
 ## Scope

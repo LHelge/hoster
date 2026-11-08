@@ -53,16 +53,11 @@ pub enum Listen {
     Tcp(SocketAddr),
 }
 
-impl Listen {
-    /// The socket's file name in the state directory.
-    const SOCKET_NAME: &str = "admin.sock";
-}
-
 impl From<&Config> for Listen {
     fn from(config: &Config) -> Self {
         match config.web.dev_listen {
             Some(addr) => Listen::Tcp(addr),
-            None => Listen::Unix(config.state_dir.join(Listen::SOCKET_NAME)),
+            None => Listen::Unix(config.state_dir.join(Config::ADMIN_SOCKET_NAME)),
         }
     }
 }
@@ -324,3 +319,8 @@ impl WebServer {
 
 #[cfg(test)]
 mod tests;
+
+/// The admin app with a mock GitHub and fake containers and stacks, for tests elsewhere in the
+/// crate (the proxy's admin-host tests).
+#[cfg(test)]
+pub(crate) use self::auth::tests::TestApp;

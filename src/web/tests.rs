@@ -121,7 +121,7 @@ fn get_over_socket(path: &Path, target: &str) -> String {
 #[tokio::test]
 async fn serves_on_a_0600_unix_socket_until_cancelled() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(Listen::SOCKET_NAME);
+    let path = dir.path().join(Config::ADMIN_SOCKET_NAME);
     let token = CancellationToken::new();
     let mut server = app()
         .await
@@ -150,7 +150,7 @@ async fn serves_on_a_0600_unix_socket_until_cancelled() {
 #[tokio::test]
 async fn replaces_a_stale_socket_but_not_a_live_one() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(Listen::SOCKET_NAME);
+    let path = dir.path().join(Config::ADMIN_SOCKET_NAME);
     // A socket file nobody accepts on, as left behind by a crash.
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
     let mut server = app()
@@ -173,7 +173,7 @@ async fn replaces_a_stale_socket_but_not_a_live_one() {
 #[tokio::test]
 async fn keeps_a_socket_it_cannot_probe() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(Listen::SOCKET_NAME);
+    let path = dir.path().join(Config::ADMIN_SOCKET_NAME);
     // A live socket we may not connect to: the probe fails with "permission denied", not
     // "connection refused", so it must not be mistaken for a stale one.
     let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
@@ -196,7 +196,7 @@ async fn keeps_a_socket_it_cannot_probe() {
 #[tokio::test]
 async fn refuses_to_replace_a_regular_file() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(Listen::SOCKET_NAME);
+    let path = dir.path().join(Config::ADMIN_SOCKET_NAME);
     std::fs::write(&path, "not a socket").unwrap();
     let err = app()
         .await

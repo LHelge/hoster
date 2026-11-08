@@ -243,6 +243,10 @@ fn the_admin_route_is_injected_by_build_only_for_a_served_reserved_host() {
     let entry = table.lookup("hoster.example.com", "/anything").unwrap();
     assert_eq!(entry.owner, Owner::Reserved("admin UI"));
     assert_eq!(entry.prefix_str, "/");
+    assert!(matches!(&entry.target, Target::Unix(socket) if *socket == admin_socket()));
+    // Long enough for SSE streams, not the proxy's default 60 s read timeout.
+    assert_eq!(entry.timeouts, RouteEntry::RESERVED_TIMEOUTS);
+    assert!(entry.timeouts.read.unwrap() >= Duration::from_secs(60 * 60));
 
     let unrouted = Reserved::default().with_host(host("hoster.example.com"), "admin UI");
     let table = RouteTable::build(&DesiredState::default(), &unrouted).unwrap();

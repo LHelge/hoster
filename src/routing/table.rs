@@ -34,6 +34,20 @@ pub struct RouteEntry {
     pub timeouts: RouteTimeouts,
 }
 
+impl RouteEntry {
+    /// Upstream timeouts of the routes to hoster's own app. Its SSE streams (deploy progress,
+    /// logs) can stay quiet for longer than the proxy's default read timeout, so a read may
+    /// wait an hour; the app's keep-alive comments keep a healthy stream well inside that. Idle
+    /// pooled connections to the local socket may be kept as long. Connect and write keep the
+    /// proxy's defaults.
+    pub const RESERVED_TIMEOUTS: RouteTimeouts = RouteTimeouts {
+        connect: None,
+        read: Some(Duration::from_secs(60 * 60)),
+        write: None,
+        idle: Some(Duration::from_secs(60 * 60)),
+    };
+}
+
 /// Where a route's requests go.
 #[derive(Debug, Clone)]
 pub enum Target {
@@ -60,7 +74,7 @@ impl RouteTable {
                 prefix_str: "/".to_owned(),
                 strip_prefix: false,
                 target: Target::Unix(Arc::clone(upstream)),
-                timeouts: RouteTimeouts::default(),
+                timeouts: RouteEntry::RESERVED_TIMEOUTS,
             });
         }
         for desired_stack in desired.stacks() {

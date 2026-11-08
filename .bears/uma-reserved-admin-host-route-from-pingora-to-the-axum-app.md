@@ -1,10 +1,10 @@
 ---
 id: uma
 title: Reserved admin-host route from Pingora to the Axum app
-status: open
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.249544996Z"
-updated: "2026-11-07T21:12:34.740654563Z"
+updated: "2026-11-08T01:43:19.559773791Z"
 tags:
   - proxy
   - web
@@ -12,6 +12,7 @@ depends_on:
   - pav
   - "9st"
 parent: up4
+attempts: 1
 ---
 
 ## Summary

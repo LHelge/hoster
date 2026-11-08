@@ -57,6 +57,9 @@ struct ReservedHost {
 }
 
 impl Reserved {
+    /// The purpose of the admin host.
+    const ADMIN_UI: &'static str = "admin UI";
+
     /// Reserves `host` for `purpose`, e.g. "admin UI", without routing it. Keeps a socket an
     /// earlier [`with_unix_host`](Self::with_unix_host) gave the same host.
     pub fn with_host(mut self, host: Host, purpose: &'static str) -> Self {
@@ -89,10 +92,22 @@ impl Reserved {
     }
 }
 
-/// The reserved hosts of a running hoster: its admin host.
+/// The reserved hosts of a running hoster: its admin host, routed to the admin app's Unix
+/// socket in the state directory (ADR-0031). With `web.dev_listen` the app listens on loopback
+/// TCP instead, so the host is only kept away from the stacks.
 impl From<&Config> for Reserved {
     fn from(config: &Config) -> Self {
-        Reserved::default().with_host(Host::from(&config.admin_host), "admin UI")
+        let host = Host::from(&config.admin_host);
+        match config.web.dev_listen {
+            Some(_) => Reserved::default().with_host(host, Self::ADMIN_UI),
+            None => Reserved::default().with_unix_host(
+                host,
+                Self::ADMIN_UI,
+                Arc::new(UnixUpstream::from(
+                    config.state_dir.join(Config::ADMIN_SOCKET_NAME),
+                )),
+            ),
+        }
     }
 }
 

@@ -33,7 +33,7 @@ use tokio_rustls::client::TlsStream;
 
 use super::{Proxy, ProxyError, ProxyState, ProxyThread};
 use crate::acme::{CertMap, ChallengeMap};
-use crate::config::ProxyConfig;
+use crate::config::{ProxyConfig, Timeouts};
 use crate::routing::{
     DesiredStack, DesiredState, DrainOutcome, Reserved, RouteTable, Target, UnixUpstream, Upstream,
 };
@@ -41,6 +41,7 @@ use crate::stack::{
     DEFAULT_DRAIN_TIMEOUT, DEFAULT_STOP_TIMEOUT, Name, Route, RouteTimeouts, Service, Stack,
     UpdateStrategy,
 };
+use crate::web::{Listen, TestApp, WebServer};
 
 const CHUNK: usize = 64 * 1024;
 static ZEROS: [u8; CHUNK] = [0; CHUNK];
@@ -182,6 +183,7 @@ fn service(routes: Vec<Route>) -> Service {
 ///   each connection and closes on the second, counting requests
 /// - `gap.example.com` `/` → a service in its stop-first gap
 /// - `admin.example.com` → the app on a Unix socket (reserved host)
+/// - `hoster.example.com` → hoster's real admin app on its own 0600 Unix socket (reserved host)
 ///
 /// Every routed host has a certificate from one test CA, and so does `noroute.example.com`,
 /// which has no routes.
@@ -205,6 +207,9 @@ struct Harness {
     flaky_requests: Arc<AtomicUsize>,
     shutdown: watch::Sender<Option<ShutdownSignal>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// hoster's admin app behind `hoster.example.com`, and the server running it.
+    admin: TestApp,
+    _admin_server: WebServer,
     _socket_dir: tempfile::TempDir,
 }
 
@@ -271,6 +276,11 @@ fn sni_for(host: &str) -> String {
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with(Timeouts::default()).await
+    }
+
+    /// The harness with `defaults` as the proxy's timeouts for routes that set none.
+    async fn start_with(defaults: Timeouts) -> Self {
         let state = AppState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let web_port = listener.local_addr().unwrap().port();
@@ -280,6 +290,20 @@ impl Harness {
         let socket = socket_dir.path().join("admin.sock");
         let unix = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(axum::serve(unix, upstream_app(state.clone())).into_future());
+
+        let admin_dir = socket_dir.path().join("state");
+        std::fs::create_dir(&admin_dir).unwrap();
+        let admin_socket = admin_dir.join(crate::config::Config::ADMIN_SOCKET_NAME);
+        let admin = TestApp::new().await;
+        let admin_server = admin
+            .app
+            .clone()
+            .start(
+                Listen::Unix(admin_socket.clone()),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
 
         let resets = Arc::new(AtomicUsize::new(0));
         let reset_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -381,11 +405,17 @@ impl Harness {
             .with_gap(name("gapped"), Duration::from_secs(7))]
         .into_iter()
         .collect();
-        let reserved = Reserved::default().with_unix_host(
-            "admin.example.com".parse().unwrap(),
-            "admin UI",
-            Arc::new(UnixUpstream::from(socket)),
-        );
+        let reserved = Reserved::default()
+            .with_unix_host(
+                "admin.example.com".parse().unwrap(),
+                "admin UI",
+                Arc::new(UnixUpstream::from(socket)),
+            )
+            .with_unix_host(
+                "hoster.example.com".parse().unwrap(),
+                "admin UI",
+                Arc::new(UnixUpstream::from(admin_socket)),
+            );
         let table = RouteTable::build(&desired, &reserved).unwrap();
 
         let ca = TestCa::new();
@@ -399,6 +429,7 @@ impl Harness {
             "flaky.example.com",
             "gap.example.com",
             "admin.example.com",
+            "hoster.example.com",
             "noroute.example.com",
         ] {
             let (chain, key) = ca.issue(host);
@@ -429,7 +460,7 @@ impl Harness {
                 threads: NonZeroUsize::new(2).unwrap(),
                 grace_period: Duration::from_secs(1),
                 graceful_shutdown_timeout: Duration::from_secs(1),
-                ..ProxyConfig::default()
+                timeouts: defaults,
             };
             attempts += 1;
             match Proxy::new(&config, proxy_state.clone()).spawn(rx.clone()) {
@@ -456,6 +487,8 @@ impl Harness {
             flaky_requests,
             shutdown,
             thread: Some(thread),
+            admin,
+            _admin_server: admin_server,
             _socket_dir: socket_dir,
         }
     }
@@ -745,6 +778,169 @@ async fn reaches_a_unix_socket_target() {
     assert_eq!(reply.status, 200, "{}", reply.text());
     assert_eq!(reply.json()["path"], "/healthz");
     assert_eq!(echoed(&reply, "host"), ["admin.example.com"]);
+}
+
+#[tokio::test]
+async fn the_admin_host_reaches_the_admin_app() {
+    let h = Harness::start().await;
+    let reply = h.get("hoster.example.com", "/healthz").await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(reply.text(), "ok\n");
+    assert_eq!(reply.header("cache-control"), Some("no-store"));
+    assert!(
+        reply
+            .header("content-security-policy")
+            .is_some_and(|csp| csp.starts_with("default-src 'self'")),
+        "{:?}",
+        reply.headers
+    );
+
+    // The UI, served through the proxy: a signed-out visitor is sent to log in.
+    let reply = h.get("hoster.example.com", "/").await;
+    assert_eq!(reply.status, 303, "{}", reply.text());
+    assert_eq!(reply.header("location"), Some("/auth/login"));
+
+    // `/hooks/*` goes to the same app (its own 404, not the proxy's), whatever the method.
+    let head = "POST /hooks/deploy HTTP/1.1\r\nHost: hoster.example.com\r\n\
+                Content-Length: 2\r\nConnection: close\r\n\r\n{}";
+    let reply = h.request(head).await;
+    assert_eq!(reply.status, 404, "{}", reply.text());
+    assert_ne!(reply.text(), "404 Not Found\n", "answered by the proxy");
+    assert!(
+        reply.header("content-security-policy").is_some(),
+        "{reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_admin_app_builds_urls_and_checks_origins_through_the_proxy() {
+    let h = Harness::start().await;
+
+    // The OAuth callback is an absolute URL on the admin host.
+    let reply = h.get("hoster.example.com", "/auth/github/login").await;
+    assert_eq!(reply.status, 303, "{}", reply.text());
+    let location = reply.header("location").expect("redirect to GitHub");
+    assert!(
+        location
+            .contains("redirect_uri=https%3A%2F%2Fhoster.example.com%2Fauth%2Fgithub%2Fcallback"),
+        "{location}"
+    );
+
+    // A signed-in browser gets the UI.
+    let browser = h.admin.sign_in().await;
+    let (cookie, csrf) = (&browser.cookie, &browser.csrf);
+    let home = format!(
+        "GET / HTTP/1.1\r\nHost: hoster.example.com\r\nCookie: {cookie}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    let reply = h.request(&home).await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+
+    // A POST from another origin is refused by the app's CSRF check, even with the token.
+    let logout = |origin: &str, fetch_site: &str| {
+        format!(
+            "POST /auth/logout HTTP/1.1\r\nHost: hoster.example.com\r\nCookie: {cookie}\r\n\
+             Origin: {origin}\r\nSec-Fetch-Site: {fetch_site}\r\nX-CSRF-Token: {csrf}\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    };
+    let reply = h
+        .request(&logout("https://evil.example.com", "cross-site"))
+        .await;
+    assert_eq!(reply.status, 403, "{}", reply.text());
+    assert_eq!(reply.text(), "cross-origin request refused\n");
+
+    // The same POST from the admin origin passes it and ends the session.
+    let reply = h
+        .request(&logout("https://hoster.example.com", "same-origin"))
+        .await;
+    assert_eq!(reply.status, 303, "{}", reply.text());
+    assert_eq!(reply.header("location"), Some("/auth/login"));
+    let reply = h.request(&home).await;
+    assert_eq!(reply.status, 303, "signed out: {}", reply.text());
+}
+
+#[tokio::test]
+async fn a_unix_socket_target_sees_the_forwarded_headers() {
+    let h = Harness::start().await;
+    let reply = h.get("admin.example.com", "/whoami").await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(echoed(&reply, "host"), ["admin.example.com"]);
+    assert_eq!(echoed(&reply, "x-forwarded-host"), ["admin.example.com"]);
+    assert_eq!(echoed(&reply, "x-forwarded-proto"), ["https"]);
+    assert_eq!(echoed(&reply, "x-forwarded-for"), ["127.0.0.1"]);
+
+    // A browser's `Origin` reaches the app untouched, for its CSRF check.
+    let reply = h
+        .request(
+            "POST /whoami HTTP/1.1\r\nHost: admin.example.com\r\n\
+             Origin: https://admin.example.com\r\nSec-Fetch-Site: same-origin\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+    assert_eq!(echoed(&reply, "origin"), ["https://admin.example.com"]);
+    assert_eq!(echoed(&reply, "sec-fetch-site"), ["same-origin"]);
+}
+
+/// Reads `client` until `needle` has arrived, failing after `within`.
+async fn read_until<S: AsyncRead + AsyncWrite + Unpin>(
+    client: &mut Client<S>,
+    needle: &str,
+    within: Duration,
+) -> std::io::Result<String> {
+    let mut seen = String::new();
+    let mut buf = [0; 256];
+    tokio::time::timeout(within, async {
+        while !seen.contains(needle) {
+            let n = client.0.read(&mut buf).await?;
+            if n == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        Ok(seen)
+    })
+    .await
+    .map_err(|_| std::io::ErrorKind::TimedOut)?
+}
+
+#[tokio::test]
+async fn admin_sse_streams_outlive_the_default_read_timeout() {
+    let short = Timeouts {
+        read: Duration::from_millis(300),
+        ..Timeouts::default()
+    };
+    let h = &Harness::start_with(short).await;
+
+    let open = |host: &'static str| async move {
+        let mut client = h.connect(host).await;
+        client
+            .write(
+                format!("GET /sse HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await;
+        let (status, _) = client.head().await;
+        assert_eq!(status, 200, "{host}");
+        read_until(&mut client, "data: first", Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|e| panic!("{host}: first event: {e}"));
+        client
+    };
+
+    // A stack route under the short default: the quiet stream is cut.
+    let mut app = open("app.example.com").await;
+    let cut = read_until(&mut app, "data: second", Duration::from_secs(5)).await;
+    assert!(cut.is_err(), "{cut:?}");
+
+    // The admin route keeps a stream open across a silence longer than that default.
+    let mut admin = open("admin.example.com").await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Both handlers wait on the same release; the cut one may not have noticed yet.
+    h.state.sse_release.notify_waiters();
+    read_until(&mut admin, "data: second", Duration::from_secs(5))
+        .await
+        .expect("the stream is still open");
 }
 
 #[tokio::test]

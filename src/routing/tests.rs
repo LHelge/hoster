@@ -209,6 +209,25 @@ fn reserved_comes_from_the_configured_admin_host() {
         // Only the configured host is reserved, not some default.
         let a = stack("a", &[("web", "hoster.example.com", "/")]);
         assert_eq!(RouteClaims::check(&a, [], &reserved), Ok(()));
+
+        // Every path on it goes to the admin app's socket in the state directory.
+        let table = RouteTable::build(&DesiredState::default(), &reserved).unwrap();
+        let entry = table.lookup("admin.example.org", "/hooks/deploy").unwrap();
+        let socket = config.state_dir.join("admin.sock");
+        assert!(
+            matches!(&entry.target, Target::Unix(u) if u.as_ref().as_ref() == socket),
+            "{entry:?}"
+        );
+
+        // In development the app listens on loopback TCP: the host stays reserved, unrouted.
+        jail.set_env("HOSTER_WEB__DEV_LISTEN", "127.0.0.1:8080");
+        let config = crate::config::Config::load(Some(&jail.directory().join("hoster.toml")))
+            .expect("valid config");
+        let reserved = Reserved::from(&config);
+        let a = stack("a", &[("web", "admin.example.org", "/")]);
+        assert!(RouteClaims::check(&a, [], &reserved).is_err());
+        let table = RouteTable::build(&DesiredState::default(), &reserved).unwrap();
+        assert!(table.lookup("admin.example.org", "/").is_none());
         Ok(())
     });
 }
