@@ -658,6 +658,8 @@ src/
   registry/          generic OCI registry client (token discovery, HEAD manifest), poller
   web/               Axum app: admin UI routes, GitHub OAuth, sessions, webhook handler
   installation/      versioned binary layout under ~/.local/lib/hoster, `hoster version` (ADR-0052)
+  update/            Updater: GitHub release lookup, checksum-verified download, DB snapshot,
+                     switch and prune; rollback with schema undo; systemctl --user (ADR-0052)
 templates/           Askama templates (compiled in)
 assets/              vendored htmx 4.0.x + CSS (embedded via include_bytes!/rust-embed)
 ```

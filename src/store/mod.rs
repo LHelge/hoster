@@ -335,6 +335,94 @@ impl Store {
         Ok(version.unwrap_or_default().into())
     }
 
+    /// Undoes the migrations of the existing database under `state_dir` newer than `target`,
+    /// with this binary's down scripts, and returns the schema version the database is at
+    /// afterwards (`hoster rollback`, ADR-0052). Nothing else may have the database open: the
+    /// caller stops the service first. The database is never created.
+    ///
+    /// Each down script runs in its own transaction, so a failure leaves the database at the
+    /// last migration that was undone; the caller restores its snapshot.
+    pub async fn undo_migrations(state_dir: &Path, target: SchemaVersion) -> Result<SchemaVersion> {
+        let path = state_dir.join(Self::FILE_NAME);
+        if !path.is_file() {
+            return Err(StoreError::Missing(path));
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .journal_mode(SqliteJournalMode::Wal)
+            .foreign_keys(true)
+            .busy_timeout(Self::BUSY_TIMEOUT);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|source| StoreError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        let store = Self { pool, path };
+        let result = async {
+            store.check_integrity().await?;
+            MIGRATOR
+                .undo(&store.pool, target.into())
+                .await
+                .map_err(|source| StoreError::Migrate {
+                    path: store.path.clone(),
+                    source,
+                })?;
+            store.schema_version().await
+        }
+        .await;
+        store.close().await;
+        result
+    }
+
+    /// Replaces the database under `state_dir` with the snapshot at `snapshot` (written by
+    /// [`Store::snapshot`]). Nothing may have the database open. The snapshot is copied to a
+    /// temporary file next to the database, fsynced and renamed over it; the old `-wal`/`-shm`
+    /// files are removed first so SQLite never applies a stale log to the restored file. The
+    /// snapshot itself is kept.
+    pub fn restore(state_dir: &Path, snapshot: &Path) -> Result<()> {
+        let path = state_dir.join(Self::FILE_NAME);
+        let io_err = |path: &Path| {
+            let path = path.to_owned();
+            move |source| StoreError::Io { path, source }
+        };
+        let tmp = Self::snapshot_tmp_path(&path).map_err(io_err(&path))?;
+        let copied = (|| {
+            let mut from = fs::File::open(snapshot).map_err(io_err(snapshot))?;
+            let mut to = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+                .map_err(io_err(&tmp))?;
+            io::copy(&mut from, &mut to).map_err(io_err(&tmp))?;
+            to.sync_all().map_err(io_err(&tmp))
+        })();
+        if let Err(err) = copied {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        for suffix in ["-wal", "-shm"] {
+            let mut side = path.as_os_str().to_owned();
+            side.push(suffix);
+            let side = PathBuf::from(side);
+            match fs::remove_file(&side) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                other => other.map_err(io_err(&side))?,
+            }
+        }
+        if let Err(source) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(StoreError::Io { path, source });
+        }
+        fs::File::open(state_dir)
+            .and_then(|d| d.sync_all())
+            .map_err(io_err(state_dir))
+    }
+
     /// Path of the database file.
     pub fn path(&self) -> &Path {
         &self.path

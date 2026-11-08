@@ -1177,4 +1177,61 @@ mod migrations {
             SchemaVersion::default()
         );
     }
+
+    #[tokio::test]
+    async fn undo_migrations_reverts_a_closed_database_to_the_target() {
+        let (dir, store) = open().await;
+        store.add_revision("notes", "x").await.unwrap();
+        store.close().await;
+        let state = dir.path().join("state");
+        let reached = Store::undo_migrations(&state, SchemaVersion::from(5))
+            .await
+            .unwrap();
+        assert_eq!(reached, SchemaVersion::from(5));
+        let store = Store::open_read_only(&state).await.unwrap();
+        assert_eq!(
+            store.schema_version().await.unwrap(),
+            SchemaVersion::from(5)
+        );
+        store.close().await;
+        // Opening normally migrates it forward again, and the stack survived.
+        let store = Store::open(&state).await.unwrap();
+        assert!(store.stack("notes").await.unwrap().is_some());
+        store.close().await;
+
+        let missing = TempDir::new().unwrap();
+        let err = Store::undo_migrations(missing.path(), SchemaVersion::from(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Missing(_)), "{err}");
+        assert!(!missing.path().join(Store::FILE_NAME).exists());
+    }
+}
+
+#[tokio::test]
+async fn restore_replaces_the_database_with_a_snapshot() {
+    let (dir, store) = open().await;
+    let state = dir.path().join("state");
+    store.kv_set("k", "before").await.unwrap();
+    let snapshot = dir.path().join("snap.db");
+    store.snapshot(&snapshot).await.unwrap();
+    store.kv_set("k", "after").await.unwrap();
+    store.close().await;
+
+    Store::restore(&state, &snapshot).unwrap();
+    assert!(snapshot.is_file(), "the snapshot is kept");
+    assert_eq!(mode(&state.join(Store::FILE_NAME)), 0o600);
+    assert!(!state.join("hoster.db-wal").exists());
+    let store = Store::open(&state).await.unwrap();
+    assert_eq!(store.kv_get("k").await.unwrap().as_deref(), Some("before"));
+    store.close().await;
+
+    let err = Store::restore(&state, &dir.path().join("nope.db")).unwrap_err();
+    assert!(matches!(err, StoreError::Io { .. }), "{err}");
+    let leftovers: Vec<_> = fs::read_dir(&state)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().contains(".tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }
