@@ -18,7 +18,7 @@ jobs:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rustup reads rust-toolchain.toml and installs the pinned toolchain with rustfmt and clippy.
       - name: Install toolchain
@@ -39,7 +39,7 @@ jobs:
     name: zero-downtime deploy on rootless podman
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
         run: rustup toolchain install
@@ -64,7 +64,7 @@ jobs:
     name: systemd unit and sysctl drop-in
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # systemd-analyze verify on deploy/systemd/hoster.service (ADR-0023); prints the security
       # exposure report as well.
@@ -86,7 +86,7 @@ jobs:
     name: release scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ubuntu-latest ships shellcheck.
       - name: shellcheck
@@ -101,7 +101,7 @@ jobs:
     name: install.sh on a fresh host
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # install.sh for real, as root, against fake file:// releases with a stub binary: fresh
       # install, idempotent re-run, updates and pruning, refused downgrade and checksum mismatch
@@ -115,7 +115,7 @@ jobs:
     env:
       DATABASE_URL: sqlite:${{ github.workspace }}/target/sqlx-check.db
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
         run: rustup toolchain install
@@ -142,7 +142,7 @@ jobs:
     name: MSRV (rust-version in Cargo.toml)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The development toolchain in rust-toolchain.toml is newer than the declared minimum, so check
       # that the crate still builds on the `rust-version` it promises.
@@ -162,7 +162,7 @@ jobs:
     name: static musl release build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml lists the musl target. musl-tools provides musl-gcc for the C parts of
       # dependencies (ring, bundled libsqlite3).

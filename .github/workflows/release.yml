@@ -29,7 +29,7 @@ jobs:
     name: verify tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history and every branch, so the tagged commit can be checked against main.
           fetch-depth: 0
@@ -68,7 +68,7 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rustup reads rust-toolchain.toml (which lists both musl targets). musl-tools provides
       # musl-gcc for the C parts of dependencies (ring, bundled libsqlite3); cc-rs only picks it
@@ -109,7 +109,7 @@ jobs:
           mkdir -p bin
           cp "target/$TARGET/release/hoster" "bin/hoster-$TARGET"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hoster-${{ matrix.target }}
           path: bin/
@@ -120,9 +120,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: hoster-*-unknown-linux-musl
           path: dist
@@ -159,7 +159,7 @@ jobs:
           fi
           (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           # Fixed name: ref names can contain '/', which artifact names can't (workflow_dispatch on a
           # branch such as task/4ah).
@@ -176,12 +176,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # git-cliff needs the history and the tags to find the previous release.
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: hoster-release
           path: dist
