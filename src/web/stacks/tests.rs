@@ -9,7 +9,8 @@ use http_body_util::BodyExt as _;
 
 use super::*;
 use crate::health::HealthStats;
-use crate::orchestrator::{RestartStats, ServiceStatus};
+use crate::orchestrator::{RestartStats, ServiceState, ServiceStatus};
+use crate::runtime::VolumeMount;
 use crate::stack::Stack;
 use crate::store::{ContentHash, RevisionId, StackRevision};
 use crate::web::auth::tests::{Browser, ORIGIN, TestApp};
@@ -158,6 +159,8 @@ pub struct FakeStacks {
     pub rejections: Mutex<Vec<WebhookRejection>>,
     /// The `ui_events` the deployment streams follow.
     pub events: broadcast::Sender<UiEvent>,
+    /// Volumes only earlier revisions declared, by podman name (`hoster-<stack>-<volume>`).
+    pub earlier_volumes: Mutex<Vec<String>>,
 }
 
 impl Default for FakeStacks {
@@ -173,6 +176,7 @@ impl Default for FakeStacks {
             foreign: Mutex::new(Vec::new()),
             rejections: Mutex::new(Vec::new()),
             events: broadcast::channel(16).0,
+            earlier_volumes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -368,6 +372,34 @@ impl StackControl for FakeStacks {
         deployments.sort_by_key(|d| std::cmp::Reverse(d.id));
         deployments.truncate(limit as usize);
         Ok(deployments)
+    }
+
+    async fn latest_live(&self, stack: &str) -> Result<Option<Deployment>, OrchestratorError> {
+        Ok(self
+            .history(stack, u32::MAX)
+            .await?
+            .into_iter()
+            .find(|d| d.state.is_redeployable()))
+    }
+
+    async fn volumes(&self, stack: &str) -> Result<BTreeSet<String>, OrchestratorError> {
+        let status = self
+            .current(stack)
+            .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
+        let prefix = format!("hoster-{stack}-");
+        let mut volumes: BTreeSet<String> = self
+            .earlier_volumes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|volume| volume.starts_with(&prefix))
+            .cloned()
+            .collect();
+        if let Ok(definition) = status.revision.toml.parse::<Stack>() {
+            volumes
+                .extend(VolumeMount::of(&definition).map(|(_, mount)| mount.volume().to_owned()));
+        }
+        Ok(volumes)
     }
 
     async fn rollback(
@@ -627,6 +659,206 @@ async fn stacks_list_shows_cards_with_services_revision_and_last_deploy() {
 }
 
 #[tokio::test]
+async fn the_stack_header_has_the_status_deployments_actions_and_tabs() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"<nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/notes</nav>"#),
+        "{html}"
+    );
+    // The flag of the failed deploy makes the stack failed; one of two services is up.
+    assert!(
+        html.contains(&format!(
+            r#"<span class="pill pill-fail">{}failed · 1/2 up</span>"#,
+            crate::web::Icon::Failed
+        )),
+        "{html}"
+    );
+    let hash = ContentHash::of(NOTES).to_string();
+    assert!(
+        html.contains(&format!(
+            r#"rev 1 <code title="{hash}">{}</code> · applied <time"#,
+            &hash[..12]
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r##"<a href="/stacks/notes/deployments/3">#3</a> <span class="pill pill-ok">{}Live</span> · apply"##,
+            crate::web::Icon::Ok
+        )),
+        "{html}"
+    );
+    // Redeploy redeploys the last live deployment, through the history's endpoint and confirm.
+    assert!(
+        html.contains(r##"hx-post="/stacks/notes/deployments/3/redeploy" hx-target="#stack-action-result" hx-confirm="Redeploy deployment #3? Its digests"##),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r##"hx-post="/stacks/notes/reresolve/preview" hx-target="#reresolve-result""##
+        ),
+        "{html}"
+    );
+    for (href, label, current) in [
+        ("/stacks/notes", "overview", true),
+        ("/stacks/notes/logs", "logs", false),
+        ("/stacks/notes/secrets", "environment", false),
+        ("/stacks/notes/deployments", "deployments", false),
+    ] {
+        let current = if current {
+            r#"aria-selected="true" aria-current="page""#
+        } else {
+            r#"aria-selected="false""#
+        };
+        assert!(
+            html.contains(&format!(
+                r#"<a role="tab" href="{href}" {current}>{label}</a>"#
+            )),
+            "{label}: {html}"
+        );
+    }
+    assert!(html.contains(r#"<div role="tablist">"#), "{html}");
+
+    assert!(
+        html.contains(&format!("{}Redeploy</button>", crate::web::Icon::Redeploy)),
+        "{html}"
+    );
+    // Third-party tags are pinned; the services card says what re-resolving does.
+    assert!(
+        html.contains("Re-resolve tags previews newer ones"),
+        "{html}"
+    );
+
+    // The logs tab leads to the containers until it has its own page; an unknown stack is a 404.
+    let logs = app.get("/stacks/notes/logs", Some(&browser.cookie)).await;
+    assert_eq!(logs.status(), StatusCode::SEE_OTHER);
+    assert_eq!(logs.headers()[header::LOCATION], "/containers");
+    let missing = app.get("/stacks/nope/logs", Some(&browser.cookie)).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn redeploy_falls_back_to_the_latest_live_deployment_in_the_history() {
+    let app = TestApp::new().await;
+    {
+        let mut stacks = app.stacks.stacks.lock().unwrap();
+        stacks[0].last = Some(deployment(5, DeploymentState::Failed));
+        stacks[0].flag = None;
+    }
+    *app.stacks.deployments.lock().unwrap() = [
+        (2, DeploymentState::Live),
+        (4, DeploymentState::Superseded),
+        (5, DeploymentState::Failed),
+    ]
+    .map(|(id, state)| (deployment(id, state), Vec::new()))
+    .into();
+    let browser = app.sign_in().await;
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"hx-post="/stacks/notes/deployments/2/redeploy""#),
+        "{html}"
+    );
+    // Redeploying #2 rolls back past the latest deployment, #5: the button and confirm say so.
+    assert!(
+        html.contains(&format!(
+            "{}Redeploy #2</button>",
+            crate::web::Icon::Redeploy
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"hx-confirm="Roll back to deployment #2? The latest deployment, #5, is not live; #2&#39;s digests and stack revision become the running ones.""#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span><a href="/stacks/notes/deployments/5">#5</a>"#),
+        "{html}"
+    );
+
+    // While #6 runs and #7, the latest, waits, the redeploy queues behind #6 and replaces #7.
+    {
+        let mut stacks = app.stacks.stacks.lock().unwrap();
+        stacks[0].last = Some(deployment(7, DeploymentState::Queued));
+        stacks[0].active = Some((DeploymentId::from(6), DeploymentState::Pulling));
+        stacks[0].queued = Some(DeploymentId::from(7));
+    }
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"hx-confirm="Redeploy deployment #2? It queues behind the running deployment #6 and replaces the queued deployment #7; then #2&#39;s digests and stack revision become the running ones.""#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<a href="/stacks/notes/deployments/6">#6</a> running: Pulling"#),
+        "{html}"
+    );
+    assert!(html.contains("<span>#7 queued</span>"), "{html}");
+    // The latest deployment is the queued one, so it is not listed a second time.
+    assert!(!html.contains("/stacks/notes/deployments/7"), "{html}");
+
+    // Nothing ever went live: no Redeploy button.
+    app.stacks.deployments.lock().unwrap().clear();
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(!html.contains("/redeploy"), "{html}");
+}
+
+#[tokio::test]
+async fn the_danger_zone_names_what_goes_and_lists_the_volumes() {
+    let app = TestApp::new().await;
+    let toml = format!("{NOTES}\n[services.api.volumes]\ndata = \"/data\"\n");
+    app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 1, &toml);
+    let browser = app.sign_in().await;
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    let danger = &html[html
+        .find(r#"class="card danger-zone""#)
+        .expect("a danger zone")..];
+    assert!(
+        danger.contains("(one per service: api, storage), its network and its routes for <span class=\"mono\">notes.example.com</span>."),
+        "{danger}"
+    );
+    assert!(
+        danger.contains("revisions and deployment history are kept"),
+        "{danger}"
+    );
+    assert!(
+        danger.contains(
+            r#"<li><code>hoster-notes-data</code> <span class="muted">→ api:/data</span></li>"#
+        ),
+        "{danger}"
+    );
+    assert!(danger.contains(r#"name="delete_volumes""#), "{danger}");
+    assert!(danger.contains("unless you tick the box"), "{danger}");
+    assert!(danger.contains(r#"name="confirm" required"#), "{danger}");
+    assert!(
+        danger.contains(r#"hx-post="/stacks/notes/remove""#),
+        "{danger}"
+    );
+    // It is the last section of the overview.
+    assert!(!danger.contains("<section"), "{danger}");
+
+    // The box deletes the volumes of every revision, so those only earlier ones declared are
+    // listed too.
+    *app.stacks.earlier_volumes.lock().unwrap() = vec!["hoster-notes-pgdata".into()];
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"<li><code>hoster-notes-pgdata</code> <span class="muted">from an earlier revision</span></li>"#),
+        "{html}"
+    );
+
+    // Without volumes there is nothing to tick.
+    app.stacks.earlier_volumes.lock().unwrap().clear();
+    app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 1, NOTES);
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains("No revision of the stack declares a volume."),
+        "{html}"
+    );
+    assert!(!html.contains(r#"name="delete_volumes""#), "{html}");
+    assert!(!html.contains("unless you tick the box"), "{html}");
+}
+
+#[tokio::test]
 async fn read_only_pages_need_a_session_but_no_javascript() {
     let app = TestApp::new().await;
     let response = app.get("/stacks", None).await;
@@ -634,7 +866,7 @@ async fn read_only_pages_need_a_session_but_no_javascript() {
 
     let browser = app.sign_in().await;
     let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
-    assert!(html.contains("<h1>Stack notes</h1>"), "{html}");
+    assert!(html.contains("<h1>notes</h1>"), "{html}");
     // Only the CI-built service gets a digest field.
     assert!(html.contains(r#"name="digest.api""#), "{html}");
     assert!(!html.contains(r#"name="digest.storage""#), "{html}");

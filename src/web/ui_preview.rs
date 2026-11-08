@@ -87,6 +87,10 @@ port = 3000
 
 [services.db]
 image = "docker.io/library/postgres:17"
+
+[services.db.volumes]
+pgdata = "/var/lib/postgresql/data"
+backups = "/backups"
 "#;
 
 const WIKI: &str = r#"version = 1
@@ -310,7 +314,12 @@ impl Fixtures {
                 ],
                 active: Some((DeploymentId::from(15), DeploymentState::Pulling)),
                 queued: Some(DeploymentId::from(16)),
-                last: Some(Self::deployment("shop", 14, DeploymentState::Live, DAY)),
+                last: Some(Self::deployment(
+                    "shop",
+                    16,
+                    DeploymentState::Queued,
+                    Duration::from_secs(5),
+                )),
                 flag: None,
                 rejections: Vec::new(),
             },
@@ -490,6 +499,11 @@ impl Fixtures {
             (failed, failed_events),
             (superseded, Vec::new()),
             (running, running_events),
+            // shop's last good deployment, which its Redeploy queues behind the running one.
+            (
+                Self::deployment("shop", 14, DeploymentState::Live, DAY),
+                Vec::new(),
+            ),
         ]
     }
 
@@ -899,6 +913,8 @@ async fn ui_preview() {
     let mut app = TestApp::new().await;
     *app.stacks.stacks.lock().unwrap() = Fixtures::stacks();
     *app.stacks.deployments.lock().unwrap() = Fixtures::deployments();
+    // A volume of shop's that an earlier revision declared and the active one dropped.
+    *app.stacks.earlier_volumes.lock().unwrap() = vec!["hoster-shop-redis".into()];
     *app.certificates.overview.lock().unwrap() = Some(Fixtures::certificates());
     app.certificates
         .dns
@@ -999,6 +1015,22 @@ async fn ui_preview() {
         "states/stack-reresolve.html",
         "Stack: re-resolve preview",
         &Session::inject(&stack, "reresolve-result", &reresolve),
+    );
+    let deploy = session
+        .post("/stacks/notes/deploy", &[("digest.api", &digest(0x42))])
+        .await;
+    preview.write(
+        "states/stack-deployed.html",
+        "Stack: manual deploy result",
+        &Session::inject(&stack, "deploy-result", &deploy),
+    );
+    let remove = session
+        .post("/stacks/notes/remove", &[("confirm", "note")])
+        .await;
+    preview.write(
+        "states/stack-remove-refused.html",
+        "Stack: removal without the name typed",
+        &Session::inject(&stack, "remove-result", &remove),
     );
     let system = session.get("/system", StatusCode::OK).await;
     let check = session.post("/system/check", &[]).await;

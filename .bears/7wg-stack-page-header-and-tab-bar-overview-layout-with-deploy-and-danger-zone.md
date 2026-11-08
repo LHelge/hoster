@@ -1,16 +1,17 @@
 ---
 id: "7wg"
 title: Stack page header and tab bar; overview layout with deploy and danger zone
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:19:54.956592362Z"
-updated: "2026-11-08T18:19:54.956592362Z"
+updated: "2026-11-08T20:21:34.496866951Z"
 tags:
   - web
   - ui
 depends_on:
   - xhh
 parent: "8bf"
+attempts: 1
 ---
 
 Shared frame for all stack pages, after the header of `docs/design/StackDetail.dc.html`. This task moves the existing content of `/stacks/{name}` into the new layout. Later tasks add new sections.

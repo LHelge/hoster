@@ -1009,6 +1009,24 @@ impl Store {
         Self::load_deployments(&mut conn, ids).await
     }
 
+    /// The newest deployment of a stack that went live (`live` or `live_with_warnings`): the one
+    /// a redeploy of the stack's last good state rolls back to (ADR-0041).
+    pub async fn latest_live_deployment(&self, stack: &str) -> Result<Option<Deployment>> {
+        let mut conn = self.pool.acquire().await?;
+        let id = sqlx::query_scalar!(
+            r#"SELECT id AS "id: DeploymentId" FROM deployments
+               WHERE stack = ? AND state IN ('live', 'live_with_warnings')
+               ORDER BY id DESC LIMIT 1"#,
+            stack,
+        )
+        .fetch_optional(&mut *conn)
+        .await?;
+        match id {
+            Some(id) => Self::load_deployment(&mut conn, id).await,
+            None => Ok(None),
+        }
+    }
+
     /// How the deployments of every stack (not removed) that finished at or after `since` went:
     /// one entry per stack and terminal state, sorted by stack.
     pub async fn deployment_outcomes(&self, since: Timestamp) -> Result<Vec<DeploymentOutcome>> {

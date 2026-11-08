@@ -54,7 +54,7 @@ mod reconcile;
 mod routes;
 mod stack_secrets;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::pin::pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -1180,26 +1180,28 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         })
     }
 
-    /// Deletes every named volume any revision of the stack declared (`hoster-<stack>-<volume>`,
-    /// ADR-0030). A volume that was never created is skipped. Returns the deleted names.
-    async fn remove_volumes(&self, stack: &Name) -> Result<Vec<String>> {
-        let mut names = std::collections::BTreeSet::new();
-        for revision in self.store.revisions(stack.as_ref()).await? {
+    /// The podman names of every named volume any revision of `stack` declared
+    /// (`hoster-<stack>-<volume>`, ADR-0030): the volumes removing it with `delete_volumes`
+    /// deletes. A stored revision that no longer parses is skipped with a warning.
+    pub async fn volumes(&self, stack: &str) -> Result<BTreeSet<String>> {
+        let mut names = BTreeSet::new();
+        for revision in self.store.revisions(stack).await? {
             let definition = match revision.toml.parse::<Stack>() {
                 Ok(definition) => definition,
                 Err(err) => {
-                    tracing::warn!(%stack, revision = revision.revision, %err, "stored revision no longer parses; its volumes are not deleted");
+                    tracing::warn!(%stack, revision = revision.revision, %err, "stored revision no longer parses; its volumes are not known");
                     continue;
                 }
             };
-            for service in definition.services.values() {
-                for (volume, target) in &service.volumes {
-                    if let Ok(mount) = VolumeMount::named(stack, volume, target) {
-                        names.insert(mount.volume().to_owned());
-                    }
-                }
-            }
+            names.extend(VolumeMount::of(&definition).map(|(_, mount)| mount.volume().to_owned()));
         }
+        Ok(names)
+    }
+
+    /// Deletes every named volume any revision of the stack declared ([`Self::volumes`]). A
+    /// volume that was never created is skipped. Returns the deleted names.
+    async fn remove_volumes(&self, stack: &Name) -> Result<Vec<String>> {
+        let names = self.volumes(stack.as_ref()).await?;
         let mut removed = Vec::new();
         for volume in names {
             match self.runtime.remove_volume(&volume).await {
@@ -1352,6 +1354,15 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             return Err(OrchestratorError::UnknownStack(stack.to_owned()));
         }
         Ok(self.store.deployments(stack, limit).await?)
+    }
+
+    /// The newest deployment of `stack` that went live, the one redeploying its last good
+    /// state rolls back to (ADR-0041); `None` when none ever did.
+    pub async fn latest_live(&self, stack: &str) -> Result<Option<Deployment>> {
+        if self.store.stack(stack).await?.is_none() {
+            return Err(OrchestratorError::UnknownStack(stack.to_owned()));
+        }
+        Ok(self.store.latest_live_deployment(stack).await?)
     }
 
     /// Deployment `id` of `stack`, with its state transitions in order.

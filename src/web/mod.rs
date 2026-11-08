@@ -249,6 +249,7 @@ impl WebApp {
             .route("/stacks/{name}", get(Stacks::show))
             .route("/stacks/{name}/deploy", post(Stacks::deploy))
             .route("/stacks/{name}/remove", post(Stacks::remove))
+            .route("/stacks/{name}/logs", get(Stacks::logs))
             .route(
                 "/stacks/{name}/secrets",
                 get(Stacks::secrets_page).post(Stacks::save_secret),

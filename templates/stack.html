@@ -1,92 +1,108 @@
 {% extends "base.html" %}
 {% block title %}Stack {{ stack.name }}{% endblock %}
-{% block crumb %}<a href="/stacks">~/stacks</a>/{{ stack.name }}{% endblock %}
-{% block heading %}Stack {{ stack.name }}{% endblock %}
+{% block head %}{% include "stack_header.html" %}{% endblock %}
 {% block content %}
-<p class="muted">Revision {{ stack.revision }} <code title="{{ stack.full_hash }}">{{ stack.hash }}</code>, applied {{ stack.applied_at }}. <a href="/stacks">All stacks</a></p>
-{%- if let Some(flag) = stack.flag %}
-<p class="flash flash-error">{{ flag }}</p>
-{%- endif %}
-<p>
-  {%- if let Some((id, state, url)) = stack.active %}Deployment <a href="{{ url }}">#{{ id }}</a> is running: {{ state }}.
-  {%- else if let Some(last) = stack.last %}Last deployment: <a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} ({{ last.source }}, {{ last.at }}).
-  {%- else %}No deployments yet.{% endif %}
-  {%- if let Some(queued) = stack.queued %} Deployment #{{ queued }} is queued.{% endif %}
-  <a href="{{ stack.history_url() }}">Deployment history</a>
-</p>
-
-<h2>Services</h2>
-<div class="table-scroll"><table class="list services">
-  <thead>
-    <tr><th scope="col">Service</th><th scope="col">Image</th><th scope="col">Digest</th><th scope="col">State</th></tr>
-  </thead>
-  <tbody>
-    {%- for service in stack.services %}
-    <tr>
-      <td>{{ service.name }}</td>
-      <td><code class="wrap">{{ service.image }}</code>{% if service.ci_built %} <span class="muted">(CI-built)</span>{% endif %}</td>
-      <td>{% if let Some(digest) = service.digest %}<code title="{{ digest }}">{% if let Some(short) = service.short_digest %}{{ short }}{% endif %}</code>{% endif %}</td>
-      <td>{{ service.state }}</td>
-    </tr>
-    {%- endfor %}
-  </tbody>
-</table></div>
-
-<h2>Apply a new revision</h2>
-<p class="actions"><a class="button" href="/apply">Apply a stack file</a> <span class="muted">Applying redeploys the services whose configuration changes.</span></p>
-{%- if stack.third_party %}
-<form class="stack-form" hx-post="{{ stack.reresolve_url() }}" hx-target="#reresolve-result">
-  <p class="muted">Third-party tags were resolved to digests when the revision was applied. Re-resolving looks them up again and shows what would change before anything is applied.</p>
-  <button type="submit">Re-resolve tags</button>
-</form>
-{%- endif %}
-<div id="reresolve-result" aria-live="polite"></div>
-
-<h2>Secrets</h2>
-<p class="actions"><a class="button" href="{{ stack.secrets_url() }}">Manage secrets</a> <span class="muted">Values are encrypted and write-only.</span></p>
+<section class="card" aria-labelledby="services-title">
+  <header class="card-head">
+    <h2 id="services-title">Services <span class="card-count">· {{ stack.services.len() }}</span></h2>
+    {%- if header.third_party %}
+    <span class="card-note">third-party tags are pinned to digests; Re-resolve tags previews newer ones</span>
+    {%- endif %}
+  </header>
+  <div class="table-scroll"><table class="list services">
+    <thead>
+      <tr><th scope="col">Service</th><th scope="col">Image</th><th scope="col">Digest</th><th scope="col">State</th></tr>
+    </thead>
+    <tbody>
+      {%- for service in stack.services %}
+      <tr>
+        <td class="mono">{{ service.name }}</td>
+        <td><code class="wrap">{{ service.image }}</code>{% if service.ci_built %} <span class="tag">CI-built</span>{% endif %}</td>
+        <td>{% if let Some(digest) = service.digest %}<code title="{{ digest }}">{% if let Some(short) = service.short_digest %}{{ short }}{% endif %}</code>{% else %}<span class="muted">none</span>{% endif %}</td>
+        <td>{{ service.state }}</td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table></div>
+</section>
 
 {%- if stack.deployable %}
-<h2>Deploy</h2>
-<form class="stack-form" hx-post="{{ stack.deploy_url() }}" hx-target="#deploy-result">
-  {%- for service in stack.services %}{% if service.ci_built %}
-  <label>{{ service.name }} <input type="text" name="digest.{{ service.name }}" placeholder="sha256:…" size="40" autocomplete="off" spellcheck="false"></label>
-  {%- endif %}{% endfor %}
-  <p class="muted">Services left empty keep the digest they run.</p>
-  <button type="submit">{{ crate::web::Icon::Deploy }}Deploy</button>
-</form>
-<div id="deploy-result" aria-live="polite"></div>
+<section class="card" aria-labelledby="deploy-title">
+  <header class="card-head">
+    <h2 id="deploy-title">Deploy</h2>
+    <span class="card-note">explicit digests for the CI-built services</span>
+  </header>
+  <form class="card-body deploy-form" hx-post="{{ stack.deploy_url() }}" hx-target="#deploy-result">
+    <div class="deploy-fields">
+      {%- for service in stack.ci_built() %}
+      <label>{{ service.name }} <input type="text" name="digest.{{ service.name }}" placeholder="sha256:…" autocomplete="off" spellcheck="false"></label>
+      {%- endfor %}
+    </div>
+    <p class="muted">Services left empty keep the digest they run.</p>
+    <button type="submit" class="primary">{{ crate::web::Icon::Deploy }}Deploy</button>
+  </form>
+  <div id="deploy-result" class="card-result" aria-live="polite"></div>
+</section>
 {%- endif %}
+
+<p class="apply-link"><a class="button" href="/apply">{{ crate::web::Icon::Deploy }}Apply a new revision</a> <span class="muted">Applying a stack file redeploys the services whose configuration changes.</span></p>
 
 {%- if !stack.rejections.is_empty() %}
-<h2>Refused webhook deploys</h2>
-<p class="muted">Attempts with a valid GitHub Actions token that were refused, newest first. To allow a repository, put its <code>repository_id</code> in the stack file's <code>[deploy]</code> section.</p>
-<div class="table-scroll"><table class="list rejections">
-  <thead>
-    <tr><th scope="col">Time</th><th scope="col">Repository</th><th scope="col">repository_id</th><th scope="col">Ref</th><th scope="col">Environment</th><th scope="col">Workflow</th><th scope="col">Run</th><th scope="col">Reason</th></tr>
-  </thead>
-  <tbody>
-    {%- for rejection in stack.rejections %}
-    <tr>
-      <td>{{ rejection.at }}</td>
-      <td>{{ rejection.repository }} <span class="muted">({{ rejection.actor }})</span></td>
-      <td><code>{{ rejection.repository_id }}</code></td>
-      <td><code class="wrap">{{ rejection.git_ref }}</code></td>
-      <td>{{ rejection.environment }}</td>
-      <td><code class="wrap">{{ rejection.workflow_ref }}</code>{% if let Some(job) = rejection.job_workflow_ref %}<br><span class="muted">job_workflow_ref</span> <code class="wrap">{{ job }}</code>{% endif %}</td>
-      <td>{{ rejection.run_id }}</td>
-      <td>{{ rejection.reason }}</td>
-    </tr>
-    {%- endfor %}
-  </tbody>
-</table></div>
+<section class="card" aria-labelledby="rejections-title">
+  <header class="card-head">
+    <h2 id="rejections-title">Refused webhook deploys</h2>
+  </header>
+  <p class="card-body muted">Attempts with a valid GitHub Actions token that were refused, newest first. To allow a repository, put its <code>repository_id</code> in the stack file's <code>[deploy]</code> section.</p>
+  <div class="table-scroll"><table class="list rejections">
+    <thead>
+      <tr><th scope="col">Time</th><th scope="col">Repository</th><th scope="col">repository_id</th><th scope="col">Ref</th><th scope="col">Environment</th><th scope="col">Workflow</th><th scope="col">Run</th><th scope="col">Reason</th></tr>
+    </thead>
+    <tbody>
+      {%- for rejection in stack.rejections %}
+      <tr>
+        <td><code>{{ rejection.at }}</code></td>
+        <td>{{ rejection.repository }} <span class="muted">({{ rejection.actor }})</span></td>
+        <td><code>{{ rejection.repository_id }}</code></td>
+        <td><code>{{ rejection.git_ref }}</code></td>
+        <td>{{ rejection.environment }}</td>
+        <td><code class="wrap">{{ rejection.workflow_ref }}</code>{% if let Some(job) = rejection.job_workflow_ref %}<br><span class="muted">job_workflow_ref</span> <code class="wrap">{{ job }}</code>{% endif %}</td>
+        <td>{{ rejection.run_id }}</td>
+        <td>{{ rejection.reason }}</td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table></div>
+</section>
 {%- endif %}
 
-<h2>Remove</h2>
-<form class="stack-form" hx-post="{{ stack.remove_url() }}" hx-target="#remove-result">
-  <p>Removes the stack's containers, network and routes. Its revisions and deployment history are kept, and so are its named volumes unless you delete them.</p>
-  <label>Type <strong>{{ stack.name }}</strong> to confirm <input type="text" name="confirm" required autocomplete="off" spellcheck="false"></label>
-  <label><input type="checkbox" name="delete_volumes"> Also delete the stack's volumes and their data</label>
-  <button type="submit" class="danger">{{ crate::web::Icon::Remove }}Remove stack</button>
-</form>
-<div id="remove-result" aria-live="polite"></div>
+<section class="card danger-zone" id="danger" aria-labelledby="danger-title">
+  <header class="card-head">
+    <h2 id="danger-title">Danger zone</h2>
+  </header>
+  <form class="card-body danger-body" hx-post="{{ stack.remove_url() }}" hx-target="#remove-result">
+    <div class="danger-what">
+      <h3>Remove stack</h3>
+      <p>Stops and removes the stack's containers (one per service: {{ stack.service_names() }}), its network and its routes{% if !stack.routes.is_empty() %} for <span class="mono">{{ stack.routes.join(", ") }}</span>{% endif %}.</p>
+      <p>Its revisions and deployment history are kept, and so are its named volumes{% if !stack.volumes.is_empty() %} unless you tick the box{% endif %}.</p>
+      {%- if stack.volumes.is_empty() %}
+      <p class="muted">No revision of the stack declares a volume.</p>
+      {%- else %}
+      <ul class="volumes" aria-label="Volumes">
+        {%- for volume in stack.volumes %}
+        <li><code>{{ volume.name }}</code> <span class="muted">{% if volume.mounts.is_empty() %}from an earlier revision{% else %}→ {{ volume.mounts.join(", ") }}{% endif %}</span></li>
+        {%- endfor %}
+      </ul>
+      <label class="danger-check"><input type="checkbox" name="delete_volumes"> Also delete these volumes and their data</label>
+      {%- endif %}
+    </div>
+    <div class="danger-confirm">
+      <label for="remove-confirm">Type <strong class="mono">{{ stack.name }}</strong> to confirm</label>
+      <div class="danger-row">
+        <input id="remove-confirm" type="text" name="confirm" required autocomplete="off" spellcheck="false">
+        <button type="submit" class="danger">{{ crate::web::Icon::Remove }}Remove stack</button>
+      </div>
+    </div>
+  </form>
+  <div id="remove-result" class="card-result" aria-live="polite"></div>
+</section>
 {% endblock %}

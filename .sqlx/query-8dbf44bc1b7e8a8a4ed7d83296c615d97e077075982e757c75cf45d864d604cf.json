@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id: DeploymentId\" FROM deployments\n               WHERE stack = ? AND state IN ('live', 'live_with_warnings')\n               ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: DeploymentId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8dbf44bc1b7e8a8a4ed7d83296c615d97e077075982e757c75cf45d864d604cf"
+}
