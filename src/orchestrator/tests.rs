@@ -566,6 +566,44 @@ async fn deployment_lookup_returns_the_transitions_of_that_stack_only() {
 }
 
 #[tokio::test]
+async fn every_persisted_transition_reaches_ui_events() {
+    let h = harness().await;
+    let mut ui = h.orchestrator.subscribe();
+    let applied = h.apply(NOTES).await;
+    let outcome = applied.deployment.unwrap();
+    h.finish(&outcome).await;
+    let mut states = Vec::new();
+    while let Ok(event) = ui.try_recv() {
+        if let UiEvent::Deployment { stack, id, state } = event {
+            assert_eq!((stack.as_str(), id), ("notes", outcome.deployment));
+            if states.last() != Some(&state) {
+                states.push(state);
+            }
+        }
+    }
+    let persisted = h.states(outcome.deployment).await;
+    // The first event, `Received`, is written when the deployment is created; no page can be
+    // following it yet.
+    assert_eq!(states, persisted[1..], "{states:?} vs {persisted:?}");
+    assert_eq!(states.last(), Some(&S::Live));
+}
+
+#[tokio::test]
+async fn history_lists_a_stacks_deployments_newest_first() {
+    let h = harness().await;
+    h.bootstrap().await;
+    let history = h.orchestrator.history("notes", 10).await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history[0].id > history[1].id);
+    assert_eq!(history[0].source, DeploymentSource::Webhook);
+    assert_eq!(h.orchestrator.history("notes", 1).await.unwrap().len(), 1);
+    assert!(matches!(
+        h.orchestrator.history("other", 10).await,
+        Err(OrchestratorError::UnknownStack(_))
+    ));
+}
+
+#[tokio::test]
 async fn pull_failure_aborts_and_leaves_the_old_generation() {
     let h = harness().await;
     h.bootstrap().await;

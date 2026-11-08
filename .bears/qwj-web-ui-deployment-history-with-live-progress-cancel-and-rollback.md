@@ -1,10 +1,10 @@
 ---
 id: qwj
 title: "Web UI: deployment history with live progress, cancel and rollback"
-status: open
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.319533924Z"
-updated: "2026-11-07T14:45:17.319533924Z"
+updated: "2026-11-08T02:58:20.532696946Z"
 tags:
   - web
 depends_on:
@@ -13,6 +13,7 @@ depends_on:
   - "25t"
   - "3g2"
 parent: mdd
+attempts: 1
 ---
 
 ## Summary

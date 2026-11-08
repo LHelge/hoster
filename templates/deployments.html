@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Deployments of {{ stack }}{% endblock %}
+{% block content %}
+<h1>Deployments of <a href="{{ stack_url }}">{{ stack }}</a></h1>
+<p class="muted">The newest deployments first. Redeploying one that went live rolls the stack back to its digests and stack revision.</p>
+<div id="redeploy-result" aria-live="polite"></div>
+{%- if deployments.is_empty() %}
+<p>No deployments yet.</p>
+{%- else %}
+<table class="list deployments">
+  <thead>
+    <tr><th scope="col">#</th><th scope="col">State</th><th scope="col">Source</th><th scope="col">Digests</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col">Reason</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+  </thead>
+  <tbody>
+    {%- for deployment in deployments %}
+    <tr>
+      <td><a href="{{ deployment.url }}">{{ deployment.id }}</a></td>
+      <td>{% if deployment.failed %}<strong class="state-failed">{{ deployment.state }}</strong>{% else %}{{ deployment.state }}{% endif %}</td>
+      <td>{{ deployment.source }}</td>
+      <td>
+        {%- for (service, short, digest) in deployment.digests %}
+        <span class="digest">{{ service }} <code title="{{ digest }}">{{ short }}</code></span>{% if !loop.last %}<br>{% endif %}
+        {%- endfor %}
+      </td>
+      <td>{{ deployment.started }}</td>
+      <td>{{ deployment.duration }}{% if !deployment.finished %} <span class="muted">(running)</span>{% endif %}</td>
+      <td>{% if let Some(error) = deployment.error %}{{ error }}{% endif %}</td>
+      <td>
+        {%- if let Some(url) = deployment.redeploy_url %}
+        <form class="inline-form" hx-post="{{ url }}" hx-target="#redeploy-result" hx-confirm="Redeploy deployment {{ deployment.id }}? Its digests and stack revision become the running ones again.">
+          <button type="submit">Redeploy</button>
+        </form>
+        {%- endif %}
+      </td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+{% endblock %}

@@ -1,11 +1,16 @@
-<section id="deployment-status"{% if !deployment.finished %} hx-get="{{ deployment.status_url() }}" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+<section id="deployment-status">
   <p class="deployment-state">
     <strong>{{ deployment.state }}</strong>
-    {%- if deployment.finished %}{% if let Some(at) = deployment.finished_at %} at {{ at }}{% endif %}{% else %} <span class="muted">(in progress; this updates by itself, or <a href="{{ deployment.url }}">reload</a>)</span>{% endif %}
+    {%- if deployment.finished %}{% if let Some(at) = deployment.finished_at %} at {{ at }}{% endif %}, after {{ deployment.duration }}{% else %} for {{ deployment.duration }} <span class="muted">(in progress; this updates by itself, or <a href="{{ deployment.url }}">reload</a>)</span>{% endif %}
   </p>
   {%- if deployment.cancellable %}
   <form class="inline-form" hx-post="{{ deployment.cancel_url() }}" hx-target="#cancel-result" hx-confirm="Cancel deployment {{ deployment.id }}? It aborts and the stack stays as it was.">
     <button type="submit">Cancel deployment</button>
+  </form>
+  {%- endif %}
+  {%- if deployment.redeployable %}
+  <form class="inline-form" hx-post="{{ deployment.redeploy_url() }}" hx-target="#redeploy-result" hx-confirm="Redeploy deployment {{ deployment.id }}? Its digests and stack revision become the running ones again.">
+    <button type="submit">Redeploy this one</button>
   </form>
   {%- endif %}
   {%- if let Some(error) = deployment.error %}

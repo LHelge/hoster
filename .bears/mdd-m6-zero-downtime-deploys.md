@@ -2,10 +2,10 @@
 id: mdd
 title: "M6: Zero-downtime deploys"
 type: epic
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.143338114Z"
-updated: "2026-11-07T14:45:17.143338114Z"
+updated: "2026-11-08T02:58:20.532967129Z"
 ---
 
 ## Scope

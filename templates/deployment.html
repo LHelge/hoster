@@ -2,6 +2,10 @@
 {% block title %}Deployment {{ deployment.id }}{% endblock %}
 {% block content %}
 <h1>Deployment {{ deployment.id }} of <a href="{{ deployment.stack_url }}">{{ deployment.stack }}</a></h1>
+<p class="muted"><a href="{{ deployment.history_url() }}">Deployment history</a></p>
+<div id="deployment-live"{% if !deployment.finished %} hx-sse:connect="{{ deployment.events_url() }}" hx-swap="innerHTML" hx-sse:close="end"{% endif %}>
 {% include "deployment_status.html" %}
-<div id="cancel-result"></div>
+</div>
+<div id="cancel-result" aria-live="polite"></div>
+<div id="redeploy-result" aria-live="polite"></div>
 {% endblock %}

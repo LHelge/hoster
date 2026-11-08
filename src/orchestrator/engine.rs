@@ -296,7 +296,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     async fn execute(self: &Arc<Self>, run: &mut Run, effect: Effect) -> Option<Event> {
         match effect {
             Effect::Persist { to, message } => {
-                if let Err(err) = self.store.transition(run.id, to, message.as_deref()).await {
+                if let Err(err) = self
+                    .persist(&run.stack_name(), run.id, to, message.as_deref())
+                    .await
+                {
                     tracing::error!(deployment = %run.id, %err, "cannot persist transition");
                 }
                 None
@@ -776,7 +779,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     upstream.addr,
                     humantime::format_duration(timeout),
                 );
-                if let Err(err) = self.store.note(run.id, run.state, &message).await {
+                if let Err(err) = self
+                    .note(&run.stack_name(), run.id, run.state, &message)
+                    .await
+                {
                     tracing::warn!(deployment = %run.id, %err, "cannot record the drain timeout");
                 }
             }

@@ -28,7 +28,7 @@ port = 8080
 image = "docker.io/rustfs/rustfs:1.0.0"
 "#;
 
-fn digest(n: u8) -> String {
+pub(super) fn digest(n: u8) -> String {
     format!("sha256:{}", format!("{n:02x}").repeat(32))
 }
 
@@ -43,7 +43,7 @@ fn revision(stack: &str, number: u32, toml: &str) -> StackRevision {
     }
 }
 
-fn deployment(id: i64, state: DeploymentState) -> Deployment {
+pub(super) fn deployment(id: i64, state: DeploymentState) -> Deployment {
     Deployment {
         id: DeploymentId::from(id),
         stack: "notes".into(),
@@ -110,6 +110,7 @@ pub enum Call {
     SetSecret(String, String, String),
     DeleteSecret(String, String),
     Cancel(String, DeploymentId),
+    Rollback(String, DeploymentId),
 }
 
 /// The value the secret fakes hold; it must never appear in a page.
@@ -155,6 +156,8 @@ pub struct FakeStacks {
     pub foreign: Mutex<Vec<String>>,
     /// Every refused webhook attempt recorded, oldest first.
     pub rejections: Mutex<Vec<WebhookRejection>>,
+    /// The `ui_events` the deployment streams follow.
+    pub events: broadcast::Sender<UiEvent>,
 }
 
 impl Default for FakeStacks {
@@ -169,6 +172,7 @@ impl Default for FakeStacks {
             calls: Mutex::new(Vec::new()),
             foreign: Mutex::new(Vec::new()),
             rejections: Mutex::new(Vec::new()),
+            events: broadcast::channel(16).0,
         }
     }
 }
@@ -348,6 +352,45 @@ impl StackControl for FakeStacks {
                 state: deployment.state,
             })
         }
+    }
+
+    async fn history(&self, stack: &str, limit: u32) -> Result<Vec<Deployment>, OrchestratorError> {
+        self.current(stack)
+            .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
+        let mut deployments: Vec<Deployment> = self
+            .deployments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(d, _)| d.stack == stack)
+            .map(|(d, _)| d.clone())
+            .collect();
+        deployments.sort_by_key(|d| std::cmp::Reverse(d.id));
+        deployments.truncate(limit as usize);
+        Ok(deployments)
+    }
+
+    async fn rollback(
+        &self,
+        stack: &str,
+        id: DeploymentId,
+    ) -> Result<DeployOutcome, OrchestratorError> {
+        self.record(Call::Rollback(stack.into(), id));
+        let (deployment, _) = self.deployment(stack, id).await?;
+        if !deployment.state.is_redeployable() {
+            return Err(OrchestratorError::NotRedeployable {
+                id,
+                reason: "it never went live".into(),
+            });
+        }
+        Ok(DeployOutcome {
+            deployment: DeploymentId::from(20),
+            state: *self.deploy_state.lock().unwrap(),
+        })
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<UiEvent> {
+        self.events.subscribe()
     }
 
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {
@@ -850,7 +893,9 @@ async fn the_deployment_page_follows_a_running_deployment_until_it_ends() {
     .await;
     assert!(html.contains("<h1>Deployment 7 of"), "{html}");
     assert!(
-        html.contains(r#"hx-get="/stacks/notes/deployments/7/status" hx-trigger="every 1s""#),
+        html.contains(
+            r#"hx-sse:connect="/stacks/notes/deployments/7/events" hx-swap="innerHTML" hx-sse:close="end""#
+        ),
         "{html}"
     );
     assert!(html.contains("pulling &#60;api&#62;"), "{html}");
@@ -866,8 +911,8 @@ async fn the_deployment_page_follows_a_running_deployment_until_it_ends() {
         "{partial}"
     );
     assert!(
-        !partial.contains("hx-trigger"),
-        "a finished deployment stops polling"
+        !partial.contains("hx-sse"),
+        "the partial never opens a stream itself"
     );
     assert!(partial.contains("<strong>Live</strong>"), "{partial}");
 
@@ -902,7 +947,10 @@ async fn a_deployment_before_switching_can_be_cancelled_from_its_page() {
         ),
         "{html}"
     );
-    assert!(html.contains(r#"<div id="cancel-result"></div>"#), "{html}");
+    assert!(
+        html.contains(r#"<div id="cancel-result" aria-live="polite"></div>"#),
+        "{html}"
+    );
 
     let response = app
         .send(post(

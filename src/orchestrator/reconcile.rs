@@ -337,8 +337,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             to = %to,
             "resolving interrupted deployment"
         );
-        self.store
-            .transition(deployment.id, to, Some(message))
+        self.persist(&deployment.stack, deployment.id, to, Some(message))
             .await?;
         Ok(to)
     }

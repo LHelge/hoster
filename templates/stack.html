@@ -11,6 +11,7 @@
   {%- else if let Some(last) = stack.last %}Last deployment: <a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} ({{ last.source }}, {{ last.at }}).
   {%- else %}No deployments yet.{% endif %}
   {%- if let Some(queued) = stack.queued %} Deployment #{{ queued }} is queued.{% endif %}
+  <a href="{{ stack.history_url() }}">Deployment history</a>
 </p>
 
 <h2>Services</h2>

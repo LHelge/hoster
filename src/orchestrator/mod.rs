@@ -304,6 +304,13 @@ pub enum UiEvent {
     /// The ACME task issued a certificate, failed to, or found a host's DNS not pointing here
     /// (architecture §3.3 #2).
     Certificate(crate::acme::AcmeEvent),
+    /// A deployment moved to `state`, or logged a note in it (deploy progress for the
+    /// deployment pages). Pages re-read the deployment from [`Orchestrator::deployment`].
+    Deployment {
+        stack: String,
+        id: DeploymentId,
+        state: DeploymentState,
+    },
 }
 
 /// How many `ui_events` a slow receiver may fall behind before it lags.
@@ -676,6 +683,42 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let _ = self.ui_events.send(event);
     }
 
+    /// Persists a deployment's move to `to` (see [`Store::transition`]) and tells the open UI
+    /// pages about it. Every transition the orchestrator makes goes through here.
+    async fn persist(
+        &self,
+        stack: &str,
+        id: DeploymentId,
+        to: DeploymentState,
+        message: Option<&str>,
+    ) -> std::result::Result<(), StoreError> {
+        self.store.transition(id, to, message).await?;
+        self.emit(UiEvent::Deployment {
+            stack: stack.to_owned(),
+            id,
+            state: to,
+        });
+        Ok(())
+    }
+
+    /// Logs a note on a deployment in `state` (see [`Store::note`]) and tells the open UI
+    /// pages about it.
+    async fn note(
+        &self,
+        stack: &str,
+        id: DeploymentId,
+        state: DeploymentState,
+        message: &str,
+    ) -> std::result::Result<(), StoreError> {
+        self.store.note(id, state, message).await?;
+        self.emit(UiEvent::Deployment {
+            stack: stack.to_owned(),
+            id,
+            state,
+        });
+        Ok(())
+    }
+
     /// Applies a stack file (ADR-0027, ADR-0049): validates it, checks its routes against the
     /// other stacks, resolves third-party tags to digests (ADR-0025), stores it as the active
     /// revision and redeploys every service whose (digest, config hash) changes.
@@ -982,10 +1025,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             id: deployment,
             reason: reason.to_owned(),
         };
-        if !matches!(
-            earlier.state,
-            DeploymentState::Live | DeploymentState::LiveWithWarnings
-        ) {
+        if !earlier.state.is_redeployable() {
             return Err(refuse("it never went live"));
         }
         let old = match earlier.revision {
@@ -1050,13 +1090,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         // Wake a deploy task waiting in a health check or a pull, so it aborts now.
         self.interrupt.notify_waiters();
         if let Some(pending) = pending {
-            self.store
-                .transition(
-                    pending.id(),
-                    DeploymentState::Superseded,
-                    Some(STACK_REMOVED),
-                )
-                .await?;
+            self.persist(
+                stack,
+                pending.id(),
+                DeploymentState::Superseded,
+                Some(STACK_REMOVED),
+            )
+            .await?;
             self.finished.notify_waiters();
         }
         if let Some(active) = active {
@@ -1301,6 +1341,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         Ok(out)
     }
 
+    /// The newest `limit` deployments of `stack`, newest first: its deployment history.
+    pub async fn history(&self, stack: &str, limit: u32) -> Result<Vec<Deployment>> {
+        if self.store.stack(stack).await?.is_none() {
+            return Err(OrchestratorError::UnknownStack(stack.to_owned()));
+        }
+        Ok(self.store.deployments(stack, limit).await?)
+    }
+
     /// Deployment `id` of `stack`, with its state transitions in order.
     pub async fn deployment(
         &self,
@@ -1475,8 +1523,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             Claim::Free => self.check_running(&mut run).await,
             Claim::Removing => {
                 // The removal started after the check above.
-                self.store
-                    .transition(id, DeploymentState::Rejected, Some(STACK_REMOVED))
+                self.persist(&stack, id, DeploymentState::Rejected, Some(STACK_REMOVED))
                     .await?;
                 return Err(OrchestratorError::Removing(stack));
             }
@@ -1490,8 +1537,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         Event::Dequeued
                     }
                     Enqueued::Removing(_) => {
-                        self.store
-                            .transition(id, DeploymentState::Superseded, Some(STACK_REMOVED))
+                        self.persist(&stack, id, DeploymentState::Superseded, Some(STACK_REMOVED))
                             .await?;
                         self.finished.notify_waiters();
                         return Err(OrchestratorError::Removing(stack));

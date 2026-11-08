@@ -225,9 +225,18 @@ impl WebApp {
                 post(Stacks::reresolve_preview),
             )
             .route("/stacks/{name}/reresolve", post(Stacks::reresolve))
+            .route("/stacks/{name}/deployments", get(Stacks::history))
             .route(
                 "/stacks/{name}/deployments/{id}",
                 get(Stacks::deployment_page),
+            )
+            .route(
+                "/stacks/{name}/deployments/{id}/events",
+                get(Stacks::deployment_events),
+            )
+            .route(
+                "/stacks/{name}/deployments/{id}/redeploy",
+                post(Stacks::redeploy),
             )
             .route(
                 "/stacks/{name}/deployments/{id}/status",

@@ -46,6 +46,23 @@ async fn deployment(store: &Store, stack: &str) -> Deployment {
 }
 
 #[tokio::test]
+async fn a_deployments_duration_runs_from_creation_to_its_end() {
+    use std::time::Duration;
+    let (_dir, store) = open().await;
+    store.add_revision("notes", "x").await.unwrap();
+    let mut d = deployment(&store, "notes").await;
+    d.finished_at = Some(d.created_at + Duration::from_millis(12_345));
+    assert_eq!(d.duration(), Duration::from_millis(12_345));
+    // A clock that went backwards gives zero, not a panic or a huge duration.
+    d.finished_at = Some(d.created_at - Duration::from_secs(5));
+    assert_eq!(d.duration(), Duration::ZERO);
+    // Unfinished: up to now.
+    d.finished_at = None;
+    d.created_at = Timestamp::now() - Duration::from_secs(60);
+    assert!(d.duration() >= Duration::from_secs(60));
+}
+
+#[tokio::test]
 async fn open_creates_private_state_dir_and_wal_database() {
     let (dir, store) = open().await;
     let state = dir.path().join("state");

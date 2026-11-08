@@ -17,7 +17,8 @@
 //! "Re-resolve tags" (ADR-0025) works the same way for the active revision: the preview shows
 //! the digests every third-party tag resolves to now and the services that would move, and the
 //! confirmation applies them as a new revision and redeploys (ADR-0049). The stack's secrets
-//! (ADR-0029) have their own page; see `secrets.rs`.
+//! (ADR-0029) have their own page; see `secrets.rs`. The deployment history, live progress and
+//! "redeploy this one" are in `deployments.rs`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -30,17 +31,19 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
+use tokio::sync::broadcast;
 
 use super::auth::Session;
 use super::pages::{FlashKind, Layout, Page, Section};
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, PinChange,
-    RemoveOutcome, RemoveStack, SecretChange, ServiceState, StackSecret, StackStatus,
+    RemoveOutcome, RemoveStack, SecretChange, ServiceState, StackSecret, StackStatus, UiEvent,
     WebhookDeploy,
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
 use crate::stack::{Diagnostic, StackError};
+use crate::stats::Elapsed;
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
     Timestamp, WebhookRejection,
@@ -88,6 +91,19 @@ pub trait StackControl: Send + Sync + 'static {
 
     /// See [`Orchestrator::cancel`].
     async fn cancel(&self, stack: &str, id: DeploymentId) -> Result<(), OrchestratorError>;
+
+    /// See [`Orchestrator::history`].
+    async fn history(&self, stack: &str, limit: u32) -> Result<Vec<Deployment>, OrchestratorError>;
+
+    /// See [`Orchestrator::rollback`].
+    async fn rollback(
+        &self,
+        stack: &str,
+        id: DeploymentId,
+    ) -> Result<DeployOutcome, OrchestratorError>;
+
+    /// See [`Orchestrator::subscribe`].
+    fn subscribe(&self) -> broadcast::Receiver<UiEvent>;
 
     /// See [`Orchestrator::reresolve_preview`].
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError>;
@@ -168,6 +184,22 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
 
     async fn cancel(&self, stack: &str, id: DeploymentId) -> Result<(), OrchestratorError> {
         Orchestrator::cancel(self, stack, id).await
+    }
+
+    async fn history(&self, stack: &str, limit: u32) -> Result<Vec<Deployment>, OrchestratorError> {
+        Orchestrator::history(self, stack, limit).await
+    }
+
+    async fn rollback(
+        &self,
+        stack: &str,
+        id: DeploymentId,
+    ) -> Result<DeployOutcome, OrchestratorError> {
+        Orchestrator::rollback(self, stack, id).await
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<UiEvent> {
+        Orchestrator::subscribe(self)
     }
 
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {
@@ -449,8 +481,8 @@ impl Stacks {
         }
     }
 
-    /// `GET /stacks/{name}/deployments/{id}/status`: the deployment's status partial, which
-    /// polls itself while the deployment runs.
+    /// `GET /stacks/{name}/deployments/{id}/status`: the deployment's status partial, the
+    /// one the page's live stream sends (see `deployments.rs`).
     pub async fn deployment_status(
         Extension(stacks): Extension<Stacks>,
         Path((name, id)): Path<(String, String)>,
@@ -879,6 +911,10 @@ impl StackView {
     pub fn remove_url(&self) -> String {
         format!("{}/remove", self.url)
     }
+
+    pub fn history_url(&self) -> String {
+        format!("{}/deployments", self.url)
+    }
 }
 
 impl From<&StackStatus> for StackView {
@@ -1023,6 +1059,10 @@ pub struct DeploymentView {
     finished: bool,
     /// Whether it may still be cancelled: active and before `Switching` (ADR-0040).
     cancellable: bool,
+    /// Whether it went live, so it can be redeployed as a rollback (ADR-0041).
+    redeployable: bool,
+    /// How long it took, or has been running.
+    duration: String,
 }
 
 impl DeploymentView {
@@ -1072,11 +1112,22 @@ impl DeploymentView {
             finished_at: deployment.finished_at.map(|t| When(t).to_string()),
             finished: deployment.state.is_terminal(),
             cancellable: deployment.state.is_cancellable(),
+            redeployable: deployment.state.is_redeployable(),
+            duration: Elapsed(deployment.duration()).to_string(),
         }
     }
 
-    pub fn status_url(&self) -> String {
-        format!("{}/status", self.url)
+    /// The live progress stream (SSE) the page follows while the deployment runs.
+    pub fn events_url(&self) -> String {
+        format!("{}/events", self.url)
+    }
+
+    pub fn redeploy_url(&self) -> String {
+        format!("{}/redeploy", self.url)
+    }
+
+    pub fn history_url(&self) -> String {
+        format!("{}/deployments", self.stack_url)
     }
 
     pub fn cancel_url(&self) -> String {
@@ -1301,6 +1352,7 @@ pub struct ErrorPage {
     layout: Layout,
 }
 
+mod deployments;
 mod secrets;
 
 #[cfg(test)]

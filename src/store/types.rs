@@ -196,6 +196,12 @@ impl DeploymentState {
         )
     }
 
+    /// Whether a deployment that ended in this state can be redeployed, as a rollback
+    /// (ADR-0041): it went live.
+    pub fn is_redeployable(self) -> bool {
+        matches!(self, Self::Live | Self::LiveWithWarnings)
+    }
+
     /// Whether reaching this state is worth a warning in the log: the deployment did not go
     /// (entirely) as planned.
     fn is_trouble(self) -> bool {
@@ -292,6 +298,16 @@ pub struct Deployment {
     pub committed_at: Option<Timestamp>,
     /// When the deployment reached a terminal state.
     pub finished_at: Option<Timestamp>,
+}
+
+impl Deployment {
+    /// How long the deployment took: from its creation to its end, or to now while it runs.
+    /// Zero if the clock went backwards in between.
+    pub fn duration(&self) -> Duration {
+        let end = self.finished_at.unwrap_or_else(Timestamp::now);
+        let millis = end.as_millis().saturating_sub(self.created_at.as_millis());
+        Duration::from_millis(u64::try_from(millis).unwrap_or(0))
+    }
 }
 
 /// Where a webhook deployment came from: the verified OIDC token's claims (ADR-0047), plus
