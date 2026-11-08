@@ -18,7 +18,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc;
 
 use super::{Orchestrator, UiEvent};
-use crate::acme::{AcmeCommand, AcmeEvent, DnsMismatch};
+use crate::acme::{AcmeCommand, AcmeEvent, DnsMismatch, DnsVerdict};
 use crate::runtime::ContainerRuntime;
 use crate::stack::Stack;
 
@@ -34,6 +34,9 @@ pub struct CertStatus {
     /// The host's DNS did not point at hoster at the last attempt (ADR-0051), until an attempt
     /// finds it pointing here.
     pub dns_mismatch: Option<DnsMismatch>,
+    /// Whether DNS was compared since startup, by an attempt or from the certificates page; when
+    /// it was and `dns_mismatch` is `None`, DNS pointed here.
+    pub dns_checked: bool,
     /// `dns_mismatch` was reported for the attempt in flight. The ACME task reports a mismatch
     /// before each attempt it finds one for and nothing when DNS matches, so an outcome without
     /// one means DNS pointed here that time.
@@ -45,8 +48,17 @@ impl CertStatus {
     fn record(&mut self, event: &AcmeEvent) {
         match event {
             AcmeEvent::Issued { not_after, .. } => {
+                // A host behind a CDN is issued despite a mismatch (ADR-0051 #2); the mismatch
+                // reported for this attempt still describes its DNS.
+                let dns_mismatch = if self.mismatch_this_attempt {
+                    self.dns_mismatch.take()
+                } else {
+                    None
+                };
                 *self = CertStatus {
                     not_after: Some(*not_after),
+                    dns_mismatch,
+                    dns_checked: true,
                     ..CertStatus::default()
                 };
             }
@@ -55,15 +67,28 @@ impl CertStatus {
             } => {
                 self.error = Some(error.clone());
                 self.retry_at = Some(*retry_at);
+                self.dns_checked = true;
                 if !std::mem::take(&mut self.mismatch_this_attempt) {
                     self.dns_mismatch = None;
                 }
             }
             AcmeEvent::DnsMismatch(mismatch) => {
                 self.dns_mismatch = Some(mismatch.clone());
+                self.dns_checked = true;
                 self.mismatch_this_attempt = true;
             }
         }
+    }
+
+    /// Takes a comparison made outside an attempt into account (the certificates page's
+    /// "Check DNS now"). An attempt in flight still reports its own.
+    fn dns_checked(&mut self, verdict: &DnsVerdict) {
+        match verdict {
+            DnsVerdict::Matches => self.dns_mismatch = None,
+            DnsVerdict::Mismatch(mismatch) => self.dns_mismatch = Some(mismatch.clone()),
+            DnsVerdict::Unknown => return,
+        }
+        self.dns_checked = true;
     }
 }
 
@@ -141,6 +166,33 @@ impl CertHosts {
             .record(event);
     }
 
+    /// Records a DNS comparison for `host` made outside an attempt. Ignored for hosts that are
+    /// neither routed nor the admin host.
+    pub(super) fn dns_checked(
+        &mut self,
+        host: &str,
+        admin_host: Option<&str>,
+        verdict: &DnsVerdict,
+    ) {
+        let host = host.to_ascii_lowercase();
+        let known = self.status.contains_key(&host)
+            || admin_host.is_some_and(|admin| admin.eq_ignore_ascii_case(&host))
+            || self.by_stack.values().any(|hosts| hosts.contains(&host));
+        if known && !self.forgotten.contains(&host) {
+            self.status.entry(host).or_default().dns_checked(verdict);
+        }
+    }
+
+    /// Asks the ACME task to try `host` again now; whether a running task was told.
+    pub(super) fn retry(&self, host: &str) -> bool {
+        self.acme.as_ref().is_some_and(|acme| {
+            acme.send(AcmeCommand::Retry {
+                host: host.to_ascii_lowercase(),
+            })
+            .is_ok()
+        })
+    }
+
     /// The status of every routed host, and of any other host the ACME task reported on (the
     /// admin host).
     pub(super) fn status(&self) -> BTreeMap<String, CertStatus> {
@@ -202,6 +254,22 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// reported on it), by host.
     pub fn certificates(&self) -> BTreeMap<String, CertStatus> {
         self.lock().certs.status()
+    }
+
+    /// Records the outcome of a DNS comparison for `host` made from the certificates page, so
+    /// the status shows it until the next attempt reports its own. `admin_host` is recorded
+    /// too, even before the ACME task reported on it.
+    pub fn record_dns_check(&self, host: &str, admin_host: &str, verdict: &DnsVerdict) {
+        self.lock()
+            .certs
+            .dns_checked(host, Some(admin_host), verdict);
+    }
+
+    /// Asks the ACME task to attempt `host` now (`AcmeCommand::Retry`). The task skips hosts it
+    /// does not manage, hosts still backing off and certificates that are not due. `false` when
+    /// no ACME task is connected or it has stopped.
+    pub fn retry_certificate(&self, host: &str) -> bool {
+        self.lock().certs.retry(host)
     }
 }
 
@@ -309,6 +377,7 @@ mod tests {
         });
         let issued = CertStatus {
             not_after: Some(at),
+            dns_checked: true,
             ..CertStatus::default()
         };
         assert_eq!(certs.status()["notes.example.com"], issued);
@@ -341,6 +410,79 @@ mod tests {
         let status = &certs.status()["notes.example.com"];
         assert_eq!(status.dns_mismatch, None);
         assert_eq!(status.error.as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn a_host_issued_despite_a_mismatch_keeps_showing_it() {
+        let mut certs = CertHosts::default();
+        certs.apply(&stack("cdn", &["cdn.example.com"]));
+        let at = SystemTime::UNIX_EPOCH;
+        let mismatch = DnsMismatch {
+            host: "cdn.example.com".into(),
+            observed: vec!["203.0.113.9".parse().unwrap()],
+            expected: vec!["192.0.2.1".parse().unwrap()],
+        };
+        let issued = AcmeEvent::Issued {
+            host: "cdn.example.com".into(),
+            not_after: at,
+        };
+        certs.record(&AcmeEvent::DnsMismatch(mismatch.clone()));
+        certs.record(&issued);
+        let status = &certs.status()["cdn.example.com"];
+        assert_eq!(status.not_after, Some(at));
+        assert_eq!(status.dns_mismatch.as_ref(), Some(&mismatch));
+
+        // The renewal finds DNS pointing here.
+        certs.record(&issued);
+        assert_eq!(certs.status()["cdn.example.com"].dns_mismatch, None);
+    }
+
+    #[test]
+    fn manual_dns_checks_update_routed_hosts_and_the_admin_host_only() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut certs = CertHosts::default();
+        certs.apply(&stack("notes", &["notes.example.com"]));
+        assert!(!certs.status()["notes.example.com"].dns_checked);
+
+        let mismatch = DnsMismatch {
+            host: "notes.example.com".into(),
+            observed: vec!["203.0.113.9".parse().unwrap()],
+            expected: vec!["192.0.2.1".parse().unwrap()],
+        };
+        certs.dns_checked(
+            "Notes.example.com",
+            None,
+            &DnsVerdict::Mismatch(mismatch.clone()),
+        );
+        let status = &certs.status()["notes.example.com"];
+        assert!(status.dns_checked);
+        assert_eq!(status.dns_mismatch.as_ref(), Some(&mismatch));
+        certs.dns_checked("notes.example.com", None, &DnsVerdict::Unknown);
+        assert!(certs.status()["notes.example.com"].dns_mismatch.is_some());
+        certs.dns_checked("notes.example.com", None, &DnsVerdict::Matches);
+        assert_eq!(certs.status()["notes.example.com"].dns_mismatch, None);
+
+        certs.dns_checked("other.example.com", None, &DnsVerdict::Matches);
+        certs.dns_checked(
+            "admin.example.com",
+            Some("admin.example.com"),
+            &DnsVerdict::Matches,
+        );
+        assert_eq!(
+            certs.status().keys().collect::<Vec<_>>(),
+            ["admin.example.com", "notes.example.com"]
+        );
+
+        assert!(!certs.retry("notes.example.com"), "no ACME task connected");
+        certs.connect(tx);
+        drain(&mut rx);
+        assert!(certs.retry("NOTES.example.com"));
+        assert_eq!(
+            drain(&mut rx),
+            [AcmeCommand::Retry {
+                host: "notes.example.com".into()
+            }]
+        );
     }
 
     #[test]

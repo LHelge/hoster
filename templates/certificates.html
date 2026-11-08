@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Certificates{% endblock %}
+{% block content %}
+<h1>Certificates</h1>
+<p class="public-addresses">hoster's public addresses:
+  {%- if public.is_empty() %} <strong>unknown</strong>
+  {%- else %} <code>{{ public }}</code>
+  {%- endif %} <span class="muted">(from {{ source }})</span></p>
+<p class="muted">Before each attempt, hoster compares a host's A/AAAA records with these addresses. The check is advisory: a host that resolves elsewhere (for example behind a CDN) is still issued a certificate, but a mismatch is the likely cause of a failing one. Failed attempts back off from 5 minutes to 24 hours.</p>
+
+{%- if rows.is_empty() %}
+<p>No hosts need a certificate yet.</p>
+{%- else %}
+<table class="list certificates">
+  <thead>
+    <tr><th scope="col">Host</th><th scope="col">Issuer</th><th scope="col">Valid until</th><th scope="col">Last error</th><th scope="col">Next attempt</th><th scope="col">DNS</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+  </thead>
+  <tbody>
+    {%- for row in rows %}
+    <tr>
+      <td><code>{{ row.host }}</code></td>
+      <td>{% if let Some(issuer) = row.issuer %}{{ issuer }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{% if let Some(at) = row.not_after %}{{ at }}{% else %}<span class="badge badge-error">TLS pending</span>{% endif %}</td>
+      <td>{% if let Some(error) = row.error %}<span class="cert-error">{{ error }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{{ row.next_attempt }}</td>
+      <td id="dns-{{ row.index }}">{% let dns = row.dns %}{% include "cert_dns.html" %}</td>
+      <td>
+        <form class="inline-form" hx-post="/certificates/dns" hx-target="#dns-{{ row.index }}">
+          <input type="hidden" name="host" value="{{ row.host }}">
+          <button type="submit">Check DNS now</button>
+        </form>
+        <form class="inline-form" hx-post="/certificates/retry" hx-target="#cert-result">
+          <input type="hidden" name="host" value="{{ row.host }}">
+          <button type="submit">Retry now</button>
+        </form>
+      </td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+<div id="cert-result" aria-live="polite"></div>
+{% endblock %}

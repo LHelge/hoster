@@ -8,6 +8,7 @@ mod account;
 mod atomic;
 mod certs;
 mod challenge;
+mod dns;
 mod issue;
 mod task;
 
@@ -22,9 +23,12 @@ pub use account::{AccountError, AccountStore};
 )]
 pub use certs::{CertEntry, CertError, CertMap, LoadReport, Validity};
 pub use challenge::ChallengeMap;
+#[cfg(test)]
+pub use dns::Resolve;
+pub use dns::{DnsCheck, DnsMismatch, DnsVerdict, PublicAddresses};
 #[allow(
     unused_imports,
     reason = "part of the ACME API for its future callers (doctor, web UI)"
 )]
 pub use issue::{IssueError, IssueFailure, Issuer};
-pub use task::{AcmeCommand, AcmeEvent, AcmeService, DnsMismatch};
+pub use task::{AcmeCommand, AcmeEvent, AcmeService, Backoff, BackoffStore};

@@ -2,10 +2,10 @@
 id: "52q"
 title: "M5: TLS and ACME"
 type: epic
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.140929949Z"
-updated: "2026-11-07T14:45:17.140929949Z"
+updated: "2026-11-08T02:35:56.809567846Z"
 ---
 
 ## Scope

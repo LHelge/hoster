@@ -1,10 +1,10 @@
 ---
 id: cuh
 title: "Web UI: certificates page with DNS check"
-status: in_progress
+status: done
 priority: P3
 created: "2026-11-07T14:45:17.279477441Z"
-updated: "2026-11-08T02:18:25.247035784Z"
+updated: "2026-11-08T02:35:56.809356726Z"
 tags:
   - web
   - tls

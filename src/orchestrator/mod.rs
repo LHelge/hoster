@@ -75,7 +75,6 @@ use crate::store::{
 };
 
 use certs::CertHosts;
-#[allow(unused_imports, reason = "read by the certificates page of the web UI")]
 pub use certs::CertStatus;
 use engine::{Run, Target};
 use machine::Event;

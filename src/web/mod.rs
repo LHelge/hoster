@@ -1,6 +1,7 @@
 //! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), the dashboard
 //! with hoster's in-process statistics (ADR-0045, read through [`Stats`]), container logs
-//! (ADR-0044, see `containers.rs`), the stack pages with their secrets (ADR-0027, ADR-0029,
+//! (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
+//! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029,
 //! ADR-0049, see `stacks.rs`), Settings → Registries (ADR-0025, see `settings.rs`), and the
 //! deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`).
 //!
@@ -15,6 +16,7 @@
 
 mod assets;
 mod auth;
+mod certificates;
 mod containers;
 mod pages;
 mod settings;
@@ -37,6 +39,7 @@ use tokio::net::{TcpListener, UnixListener};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::acme::{CertMap, DnsCheck};
 use crate::config::Config;
 use crate::orchestrator::Orchestrator;
 use crate::runtime::ContainerRuntime;
@@ -45,6 +48,7 @@ use crate::store::Store;
 
 use self::assets::Assets;
 use self::auth::Auth;
+use self::certificates::{CertificateAccess, CertificateControl, Certificates};
 use self::containers::{ContainerSource, Containers};
 use self::pages::Dashboard;
 use self::settings::{Registries, RegistryControl};
@@ -115,6 +119,7 @@ impl SecurityHeaders {
 pub struct WebApp {
     auth: Arc<Auth>,
     containers: Containers,
+    certificates: Certificates,
     stacks: Stacks,
     registries: Registries,
     webhook: Webhook,
@@ -123,15 +128,22 @@ pub struct WebApp {
 
 impl WebApp {
     /// The app for `config`, with sessions in `store`, containers from `runtime`, stacks managed
-    /// through `orchestrator`, registry credentials in `registry`, and the GitHub OAuth App's
+    /// through `orchestrator`, the served certificates in `certs` with the DNS check `dns`
+    /// (shared with the ACME task), registry credentials in `registry`, the GitHub OAuth App's
     /// credentials read from their files or systemd credentials, and the dashboard's `stats`.
     /// Fails when the credentials are missing. Deploy webhook tokens are verified against
     /// GitHub's key set for the configured audience (ADR-0047).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the app's collaborators, each wired by the supervisor"
+    )]
     pub fn from_config<R: ContainerRuntime>(
         config: &Config,
         store: Store,
         runtime: Arc<R>,
         orchestrator: Arc<Orchestrator<R>>,
+        certs: CertMap,
+        dns: DnsCheck,
         registry: RegistryAccess,
         stats: Stats,
     ) -> anyhow::Result<Self> {
@@ -139,9 +151,17 @@ impl WebApp {
             .context("setting up the deploy webhook")?;
         let auth =
             Auth::from_config(config, store.clone()).context("setting up the GitHub login")?;
+        let certificates = CertificateAccess {
+            orchestrator: Arc::clone(&orchestrator),
+            certs,
+            dns,
+            backoffs: Arc::new(store.clone()),
+            admin_host: config.admin_host.to_string().to_ascii_lowercase(),
+        };
         Ok(WebApp::new(
             auth,
             runtime,
+            Arc::new(certificates),
             Arc::new(orchestrator),
             Arc::new(registry),
             verifier,
@@ -150,9 +170,14 @@ impl WebApp {
         ))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the app's collaborators, each injected for tests"
+    )]
     fn new(
         auth: Auth,
         containers: Arc<dyn ContainerSource>,
+        certificates: Arc<dyn CertificateControl>,
         stacks: Arc<dyn StackControl>,
         registries: Arc<dyn RegistryControl>,
         verifier: OidcVerifier,
@@ -163,6 +188,7 @@ impl WebApp {
             stats,
             auth: Arc::new(auth),
             containers: Containers::from(containers),
+            certificates: Certificates::from(certificates),
             webhook: Webhook::new(verifier, store, Arc::clone(&stacks)),
             stacks: Stacks::from(stacks),
             registries: Registries::from(registries),
@@ -181,6 +207,10 @@ impl WebApp {
                 get(Containers::log_stream),
             )
             .layer(Extension(self.containers.clone()))
+            .route("/certificates", get(Certificates::page))
+            .route("/certificates/dns", post(Certificates::check_dns))
+            .route("/certificates/retry", post(Certificates::retry))
+            .layer(Extension(self.certificates.clone()))
             .route("/stacks", get(Stacks::list))
             .route("/stacks/{name}", get(Stacks::show))
             .route("/stacks/{name}/deploy", post(Stacks::deploy))

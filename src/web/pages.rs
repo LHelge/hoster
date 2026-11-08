@@ -21,14 +21,16 @@ pub enum Section {
     Dashboard,
     Stacks,
     Containers,
+    Certificates,
     Settings,
 }
 
 impl Section {
-    const ALL: [Section; 4] = [
+    const ALL: [Section; 5] = [
         Section::Dashboard,
         Section::Stacks,
         Section::Containers,
+        Section::Certificates,
         Section::Settings,
     ];
 
@@ -37,6 +39,7 @@ impl Section {
             Section::Dashboard => "/",
             Section::Stacks => "/stacks",
             Section::Containers => "/containers",
+            Section::Certificates => "/certificates",
             Section::Settings => "/settings/registries",
         }
     }
@@ -48,6 +51,7 @@ impl fmt::Display for Section {
             Section::Dashboard => "Dashboard",
             Section::Stacks => "Stacks",
             Section::Containers => "Containers",
+            Section::Certificates => "Certificates",
             Section::Settings => "Settings",
         })
     }

@@ -128,6 +128,9 @@ table.pins tr.changes td { background: var(--info-bg); }
 ul.plain { margin: 0; padding: 0; list-style: none; }
 .badge { display: inline-block; padding: 0 0.4rem; border-radius: 6px; font-size: 0.85em; }
 .badge-error { background: var(--error-bg); }
+.badge-ok { background: var(--success-bg); }
+.dns-detail { display: block; font-size: 0.85em; }
+.cert-error { font-size: 0.9em; overflow-wrap: anywhere; }
 .stack-form { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; margin: 0 0 1rem; }
 .stack-form textarea {
   width: 100%;

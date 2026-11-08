@@ -1,0 +1,10 @@
+{%- if dns.state == "ok" -%}
+<span class="badge badge-ok">ok</span>
+{%- else if dns.state == "mismatch" -%}
+<span class="badge badge-error">mismatch</span>
+<span class="dns-detail">resolves to {% if dns.observed.is_empty() %}nothing{% else %}<code>{{ dns.observed }}</code>{% endif %}; hoster is <code>{{ dns.expected }}</code></span>
+{%- else if dns.state == "unknown" -%}
+<span class="muted">cannot compare: hoster's public addresses are unknown</span>
+{%- else -%}
+<span class="muted">not checked yet</span>
+{%- endif -%}

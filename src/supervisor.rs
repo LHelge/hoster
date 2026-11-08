@@ -21,7 +21,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap};
+use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap, DnsCheck, PublicAddresses};
 use crate::config::{Config, ProxyConfig};
 use crate::orchestrator::{Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
@@ -716,8 +716,16 @@ impl Startup for Supervisor {
                         certs: certs.clone(),
                     }),
                 );
-                let acme =
-                    AcmeService::new(&self.config, self.challenges.clone(), certs, store.clone());
+                // One DNS check, so the certificates page shows the addresses the task compares
+                // against (ADR-0051 #2).
+                let dns = DnsCheck::from(PublicAddresses::from(&self.config));
+                let acme = AcmeService::new(
+                    &self.config,
+                    self.challenges.clone(),
+                    certs.clone(),
+                    store.clone(),
+                    dns.clone(),
+                );
                 tokio::spawn(acme.run(commands, events_tx, self.teardown.token.child_token()));
 
                 let web = WebApp::from_config(
@@ -725,6 +733,8 @@ impl Startup for Supervisor {
                     store,
                     runtime,
                     orchestrator,
+                    certs,
+                    dns,
                     registry,
                     stats,
                 )?

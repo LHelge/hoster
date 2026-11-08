@@ -98,6 +98,21 @@ fn insert_writes_the_layout_atomically_with_private_key_permissions() {
 }
 
 #[test]
+fn entries_name_the_issuer_of_the_leaf() {
+    let dir = tempfile::tempdir().unwrap();
+    let (map, _) = open(dir.path());
+    assert!(map.entry("app.example.com").is_none());
+    let cert = Issued::new(&["app.example.com"]);
+    let validity = map
+        .insert("app.example.com", cert.fullchain(), cert.key.clone())
+        .unwrap();
+    let entry = map.entry("APP.example.com").unwrap();
+    assert_eq!(entry.issuer, "Test CA");
+    assert_eq!(entry.validity, validity);
+    assert_eq!(map.hosts(), ["app.example.com"]);
+}
+
+#[test]
 fn certified_key_holds_the_leaf_first_chain() {
     let dir = tempfile::tempdir().unwrap();
     let (map, _) = open(dir.path());

@@ -3,12 +3,14 @@
 //! lifetimes and backoffs advance with it.
 
 use std::collections::HashMap;
+use std::io;
+use std::net::IpAddr;
 use std::sync::Mutex;
 
 use tokio::task::JoinHandle;
 
 use super::*;
-use crate::acme::IssueFailure;
+use crate::acme::{IssueFailure, PublicAddresses};
 
 const ADMIN: &str = "admin.example.com";
 const HOSTER_IP: &str = "192.0.2.1";
@@ -75,6 +77,11 @@ impl FakeAcme {
         } else {
             state.failing.remove(host);
         }
+    }
+
+    /// Loses `host`'s certificate, as if it had been deleted from disk.
+    fn lose(&self, host: &str) {
+        self.state.lock().unwrap().certs.remove(host);
     }
 
     fn window(&self, host: &str, window: RenewalWindow) {
@@ -261,6 +268,11 @@ impl Harness {
         self.commands.send(AcmeCommand::Forget { host }).unwrap();
     }
 
+    fn retry(&self, host: &str) {
+        let host = host.to_owned();
+        self.commands.send(AcmeCommand::Retry { host }).unwrap();
+    }
+
     async fn next(&mut self) -> AcmeEvent {
         self.events.recv().await.expect("the task is running")
     }
@@ -407,6 +419,48 @@ async fn the_backoff_survives_a_restart() {
     let attempts = h.acme.attempts("notes.example.com");
     assert_eq!(attempts, [Duration::ZERO, 5 * MINUTE, 15 * MINUTE]);
     assert_eq!(h.clock.since_start(retry_at), 35 * MINUTE);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_now_attempts_at_once_but_never_inside_the_backoff() {
+    let mut h = Harness::start(90 * DAY);
+    h.next().await;
+    h.ensure(&["notes.example.com"]);
+    h.next().await;
+
+    // A certificate that went missing is issued again at once rather than on the next tick.
+    h.acme.lose("notes.example.com");
+    h.retry("NOTES.example.com");
+    let event = h.next().await;
+    assert_eq!(issued(&event), Some("notes.example.com"), "{event:?}");
+
+    // A valid certificate that is not due, and a host nobody ensured, are left alone.
+    h.retry("notes.example.com");
+    h.retry("other.example.com");
+    h.pass(MINUTE).await;
+    assert_eq!(h.acme.attempts("notes.example.com").len(), 2);
+    assert!(h.acme.attempts("other.example.com").is_empty());
+
+    // A failing host is not tried again before its backoff has run out.
+    h.acme.fail("notes.example.com", true);
+    h.acme.lose("notes.example.com");
+    h.retry("notes.example.com");
+    assert!(matches!(h.next().await, AcmeEvent::Failed { .. }));
+    h.pass(MINUTE).await;
+    h.retry("notes.example.com");
+    h.pass(MINUTE).await;
+    assert_eq!(h.acme.attempts("notes.example.com").len(), 3);
+    assert_eq!(h.sent(), []);
+}
+
+#[test]
+fn the_time_left_of_a_backoff() {
+    let now = SystemTime::UNIX_EPOCH + DAY;
+    let backoff = Backoff::after(None, now);
+    assert_eq!(backoff.remaining(now), Some(5 * MINUTE));
+    assert_eq!(backoff.remaining(now + 4 * MINUTE), Some(MINUTE));
+    assert_eq!(backoff.remaining(now + 5 * MINUTE), None);
+    assert_eq!(backoff.remaining(now + HOUR), None);
 }
 
 #[tokio::test(start_paused = true)]

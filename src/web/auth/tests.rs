@@ -14,6 +14,7 @@ use crate::runtime::FakeRuntime;
 use crate::stats::tests::FakeStats;
 use crate::stats::{Stats, Traffic};
 use crate::web::WebApp;
+use crate::web::certificates::tests::FakeCertificates;
 use crate::web::settings::tests::FakeRegistries;
 use crate::web::stacks::tests::FakeStacks;
 use crate::web::webhook::OidcVerifier;
@@ -30,6 +31,8 @@ pub struct TestApp {
     pub store: Store,
     /// The containers the app shows.
     pub runtime: Arc<FakeRuntime>,
+    /// The certificates the certificates page shows.
+    pub certificates: Arc<FakeCertificates>,
     /// The orchestrator the stack pages talk to.
     pub stacks: Arc<FakeStacks>,
     /// The registry credentials Settings → Registries manages.
@@ -78,6 +81,7 @@ impl TestApp {
             idle_timeout,
         };
         let runtime = Arc::new(FakeRuntime::new());
+        let certificates = Arc::new(FakeCertificates::default());
         let stacks = Arc::new(FakeStacks::default());
         let registries = Arc::new(FakeRegistries::default());
         let verifier = OidcVerifier::new(ORIGIN, base.join(JWKS_PATH).unwrap()).unwrap();
@@ -86,6 +90,7 @@ impl TestApp {
         let app = WebApp::new(
             Auth::new(settings, store.clone(), client),
             runtime.clone(),
+            certificates.clone(),
             stacks.clone(),
             registries.clone(),
             verifier,
@@ -96,6 +101,7 @@ impl TestApp {
             github,
             store,
             runtime,
+            certificates,
             stacks,
             registries,
             traffic,

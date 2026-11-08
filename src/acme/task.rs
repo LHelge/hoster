@@ -25,8 +25,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future;
-use std::io;
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -40,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 use super::account::AccountStore;
 use super::certs::{CertMap, Validity};
 use super::challenge::ChallengeMap;
+use super::dns::{DnsCheck, DnsMismatch, DnsVerdict, Resolve};
 use super::issue::{IssueError, Issuer, RenewalWindow};
 use crate::config::{AcmeConfig, Config};
 use crate::store::Store;
@@ -52,6 +51,9 @@ pub enum AcmeCommand {
     Ensure { hosts: Vec<String> },
     /// The host is no longer routed: keep its certificate until it expires, but stop renewing it.
     Forget { host: String },
+    /// The operator asked to try `host` again now (the certificates page). Like any attempt it
+    /// is skipped while the host's backoff runs and when its certificate is not due.
+    Retry { host: String },
 }
 
 /// What the ACME task reports to the orchestrator (architecture §3.3 #2).
@@ -79,16 +81,6 @@ impl AcmeEvent {
     }
 }
 
-/// A host whose A/AAAA records are not (all) hoster's public addresses.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DnsMismatch {
-    pub host: String,
-    /// The host's addresses, sorted; empty when it does not resolve.
-    pub observed: Vec<IpAddr>,
-    /// hoster's public addresses, sorted.
-    pub expected: Vec<IpAddr>,
-}
-
 /// The CA and the certificates it issued, as far as the task needs them. [`Issuer`] in
 /// production; the tests use a fake.
 #[async_trait]
@@ -113,24 +105,6 @@ impl Acme for Issuer {
 
     async fn issue(&self, host: &str) -> Result<Validity, IssueError> {
         Issuer::issue(self, host).await
-    }
-}
-
-/// A/AAAA lookups for the advisory DNS check.
-#[async_trait]
-pub trait Resolve: Send + Sync {
-    async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>>;
-}
-
-/// The system resolver (`getaddrinfo`, through tokio).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SystemResolver;
-
-#[async_trait]
-impl Resolve for SystemResolver {
-    async fn lookup(&self, host: &str) -> io::Result<Vec<IpAddr>> {
-        let addrs = tokio::net::lookup_host((host, 0)).await?;
-        Ok(addrs.map(|addr| addr.ip()).collect())
     }
 }
 
@@ -172,6 +146,14 @@ impl Backoff {
             failures,
             retry_at: now + Self::delay(failures),
         }
+    }
+
+    /// How long is left of the backoff at `now`; `None` once an attempt is allowed again.
+    pub fn remaining(&self, now: SystemTime) -> Option<Duration> {
+        self.retry_at
+            .duration_since(now)
+            .ok()
+            .filter(|left| !left.is_zero())
     }
 
     /// How long to wait after `failures` consecutive failures: 5 min, doubling, at most 24 h.
@@ -216,33 +198,13 @@ impl BackoffStore for Store {
     }
 }
 
-/// Where hoster's public addresses for the DNS check come from (ADR-0051 #2).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PublicAddresses {
-    /// `acme.public_addresses`.
-    Configured(BTreeSet<IpAddr>),
-    /// The A/AAAA records of this host (the admin host), re-resolved on every tick.
-    OfHost(String),
-}
-
-impl From<&Config> for PublicAddresses {
-    fn from(config: &Config) -> Self {
-        if config.acme.public_addresses.is_empty() {
-            PublicAddresses::OfHost(config.admin_host.to_string())
-        } else {
-            PublicAddresses::Configured(config.acme.public_addresses.iter().copied().collect())
-        }
-    }
-}
-
 /// The ACME background task. Build it with [`AcmeTask::new`] and [`run`](AcmeTask::run) it.
 pub struct AcmeTask {
     acme: Arc<dyn Acme>,
     store: Arc<dyn BackoffStore>,
-    resolver: Arc<dyn Resolve>,
     clock: Arc<dyn Clock>,
     admin_host: String,
-    public: PublicAddresses,
+    dns: DnsCheck,
     events: mpsc::Sender<AcmeEvent>,
     tick: Duration,
 }
@@ -253,21 +215,20 @@ impl AcmeTask {
     pub const TICK: Duration = Duration::from_secs(60 * 60);
 
     /// A task issuing through `acme` for `admin_host` and the ensured hosts, persisting backoffs
-    /// in `store` and reporting on `events`.
+    /// in `store`, checking DNS with `dns` and reporting on `events`.
     pub fn new(
         acme: Arc<dyn Acme>,
         store: Arc<dyn BackoffStore>,
         admin_host: impl Into<String>,
-        public: PublicAddresses,
+        dns: impl Into<DnsCheck>,
         events: mpsc::Sender<AcmeEvent>,
     ) -> Self {
         Self {
             acme,
             store,
-            resolver: Arc::new(SystemResolver),
             clock: Arc::new(SystemClock),
             admin_host: admin_host.into().to_ascii_lowercase(),
-            public,
+            dns: dns.into(),
             events,
             tick: Self::TICK,
         }
@@ -279,7 +240,7 @@ impl AcmeTask {
         allow(dead_code, reason = "production uses the system resolver")
     )]
     pub fn with_resolver(mut self, resolver: Arc<dyn Resolve>) -> Self {
-        self.resolver = resolver;
+        self.dns = self.dns.with_resolver(resolver);
         self
     }
 
@@ -341,8 +302,6 @@ struct Worker {
     /// The hosts that need a certificate; always includes the admin host.
     wanted: BTreeSet<String>,
     backoffs: Backoffs,
-    /// hoster's public addresses as last resolved; empty skips the DNS check.
-    expected: BTreeSet<IpAddr>,
 }
 
 impl Worker {
@@ -358,11 +317,10 @@ impl Worker {
             }
         };
         let wanted = BTreeSet::from([task.admin_host.clone()]);
-        let mut worker = Self {
+        let worker = Self {
             task,
             wanted,
             backoffs,
-            expected: BTreeSet::new(),
         };
         worker.refresh_public().await;
         worker
@@ -396,27 +354,18 @@ impl Worker {
                     self.persist().await;
                 }
             }
+            AcmeCommand::Retry { host } => {
+                let host = host.to_ascii_lowercase();
+                if self.wanted.contains(&host) {
+                    self.check(&host, shutdown).await;
+                }
+            }
         }
     }
 
     /// Re-resolves hoster's public addresses, keeping the previous ones on a failure.
-    async fn refresh_public(&mut self) {
-        match &self.task.public {
-            PublicAddresses::Configured(addresses) => self.expected = addresses.clone(),
-            PublicAddresses::OfHost(host) => match self.task.resolver.lookup(host).await {
-                Ok(addresses) if !addresses.is_empty() => {
-                    let addresses: BTreeSet<IpAddr> = addresses.into_iter().collect();
-                    if addresses != self.expected {
-                        tracing::info!(host, ?addresses, "resolved hoster's public addresses");
-                    }
-                    self.expected = addresses;
-                }
-                Ok(_) => tracing::warn!(host, "the admin host has no A/AAAA records"),
-                Err(error) => {
-                    tracing::warn!(host, %error, "cannot resolve the admin host's addresses");
-                }
-            },
-        }
+    async fn refresh_public(&self) {
+        self.task.dns.refresh().await;
     }
 
     /// Checks every wanted host.
@@ -469,7 +418,7 @@ impl Worker {
             }
             return;
         }
-        if let Some(mismatch) = self.dns_check(host).await {
+        if let DnsVerdict::Mismatch(mismatch) = self.task.dns.check(host).await {
             tracing::warn!(
                 host,
                 observed = ?mismatch.observed,
@@ -529,28 +478,6 @@ impl Worker {
             .is_some_and(|window| window.start <= now)
     }
 
-    /// The advisory DNS check: `Some` when `host` does not resolve to hoster's addresses only.
-    async fn dns_check(&self, host: &str) -> Option<DnsMismatch> {
-        if self.expected.is_empty() {
-            return None;
-        }
-        let observed: BTreeSet<IpAddr> = match self.task.resolver.lookup(host).await {
-            Ok(addresses) => addresses.into_iter().collect(),
-            Err(error) => {
-                tracing::debug!(host, %error, "cannot resolve host");
-                BTreeSet::new()
-            }
-        };
-        if !observed.is_empty() && observed.is_subset(&self.expected) {
-            return None;
-        }
-        Some(DnsMismatch {
-            host: host.to_owned(),
-            observed: observed.into_iter().collect(),
-            expected: self.expected.iter().copied().collect(),
-        })
-    }
-
     async fn persist(&self) {
         if let Err(error) = self.task.store.save(&self.backoffs).await {
             tracing::warn!(
@@ -572,7 +499,7 @@ pub struct AcmeService {
     pub config: AcmeConfig,
     pub state_dir: PathBuf,
     pub admin_host: String,
-    pub public: PublicAddresses,
+    pub dns: DnsCheck,
     pub challenges: ChallengeMap,
     pub certs: CertMap,
     pub store: Store,
@@ -582,13 +509,20 @@ impl AcmeService {
     /// How long to wait before asking the CA for the account again.
     const ACCOUNT_RETRY: Duration = Duration::from_secs(5 * 60);
 
-    /// The service for hoster's configuration.
-    pub fn new(config: &Config, challenges: ChallengeMap, certs: CertMap, store: Store) -> Self {
+    /// The service for hoster's configuration, sharing `dns` (and the public addresses it
+    /// resolves) with the web UI.
+    pub fn new(
+        config: &Config,
+        challenges: ChallengeMap,
+        certs: CertMap,
+        store: Store,
+        dns: DnsCheck,
+    ) -> Self {
         Self {
             config: config.acme.clone(),
             state_dir: config.state_dir.clone(),
             admin_host: config.admin_host.to_string(),
-            public: PublicAddresses::from(config),
+            dns,
             challenges,
             certs,
             store,
@@ -629,7 +563,7 @@ impl AcmeService {
             Arc::new(issuer),
             Arc::new(self.store),
             self.admin_host,
-            self.public,
+            self.dns,
             events,
         )
         .run(commands, shutdown)

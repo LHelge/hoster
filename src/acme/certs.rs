@@ -130,6 +130,9 @@ pub struct CertEntry {
     /// The rustls key and leaf-first chain, built with the ring provider (ADR-0037).
     pub key: Arc<CertifiedKey>,
     pub validity: Validity,
+    /// Who issued the leaf: its issuer's organization and common name (`Let's Encrypt R11`),
+    /// or the whole distinguished name when it has neither.
+    pub issuer: String,
 }
 
 /// The contents of `meta.json`.
@@ -194,7 +197,7 @@ impl Certificate {
             .public_key()
             .ok_or_else(|| CertError::KeyMismatch { host: host.clone() })?;
 
-        let (chain, validity) = {
+        let (chain, validity, issuer) = {
             let parsed = chain
                 .iter()
                 .map(|der| {
@@ -214,6 +217,7 @@ impl Certificate {
                 return Err(CertError::NameMismatch { host });
             }
             let validity = Validity::from(&parsed[leaf]);
+            let issuer = Self::issuer(&parsed[leaf]);
             let order = Self::leaf_first_order(&parsed, leaf);
             drop(parsed);
             let mut slots: Vec<Option<CertificateDer<'static>>> =
@@ -222,7 +226,7 @@ impl Certificate {
                 .into_iter()
                 .map(|i| slots[i].take().expect("each index appears once"))
                 .collect::<Vec<_>>();
-            (chain, validity)
+            (chain, validity, issuer)
         };
 
         let ari_cert_id = CertificateIdentifier::try_from(&chain[0])
@@ -238,6 +242,7 @@ impl Certificate {
             entry: CertEntry {
                 key: Arc::new(key),
                 validity,
+                issuer,
             },
             ari_cert_id,
         })
@@ -261,6 +266,21 @@ impl Certificate {
             Err(CertError::InvalidHost {
                 host: host.to_owned(),
             })
+        }
+    }
+
+    /// `cert`'s issuer as people name it: organization and common name.
+    fn issuer(cert: &X509Certificate<'_>) -> String {
+        let name = cert.issuer();
+        let parts: Vec<&str> = name
+            .iter_organization()
+            .chain(name.iter_common_name())
+            .filter_map(|attr| attr.as_str().ok())
+            .collect();
+        if parts.is_empty() {
+            name.to_string()
+        } else {
+            parts.join(" ")
         }
     }
 
@@ -530,6 +550,14 @@ impl CertMap {
             .load()
             .get(&host.to_ascii_lowercase())
             .map(|entry| entry.validity)
+    }
+
+    /// `host`'s current certificate, if it has one.
+    pub fn entry(&self, host: &str) -> Option<CertEntry> {
+        self.snapshot
+            .load()
+            .get(&host.to_ascii_lowercase())
+            .cloned()
     }
 
     /// The hosts that currently have a certificate, sorted.
