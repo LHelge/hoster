@@ -1,16 +1,17 @@
 ---
 id: "7uz"
 title: "`hoster update` and `hoster rollback` CLI subcommands"
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-08T08:25:49.995852108Z"
-updated: "2026-11-08T08:25:55.875484042Z"
+updated: "2026-11-08T09:51:13.396474334Z"
 tags:
   - core
   - ops
 depends_on:
   - wpm
 parent: tbf
+attempts: 1
 ---
 
 ## Summary

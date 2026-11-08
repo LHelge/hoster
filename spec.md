@@ -82,11 +82,15 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
 
 ### 5.1 One-time setup on the VPS
 
-1. Create a `hoster` user and enable linger for it. Enable its user-level `podman.socket`, set
-   `net.ipv4.ip_unprivileged_port_start=80`, and install the binary plus the user unit
-   `hoster.service` (ADR-0023).
-2. Write `~/.config/hoster/hoster.toml`: ACME contact email and directory, admin hostname (e.g.
-   `hoster.example.com`) and upstream port range. Secrets go in separate files (ADR-0024).
+1. Run the install script as root:
+   `curl -fsSL https://github.com/LHelge/hoster/releases/latest/download/install.sh | sudo bash`.
+   It creates a `hoster` user and enables linger for it, enables its user-level `podman.socket`,
+   sets `net.ipv4.ip_unprivileged_port_start=80`, and installs the binary under
+   `~hoster/.local/lib/hoster` plus the user unit `hoster.service` (ADR-0023, ADR-0052). It
+   never starts the service; see [docs/install.md](docs/install.md).
+2. Edit `~/.config/hoster/hoster.toml`, which the script created from the example: ACME contact
+   email and directory, admin hostname (e.g. `hoster.example.com`) and upstream port range.
+   Secrets go in separate files (ADR-0024).
 3. Create a GitHub OAuth App with callback `https://hoster.example.com/auth/github/callback`.
    Give hoster its client id/secret, and set `HOSTER_ADMIN_GITHUB=<your handle>` in the unit's
    environment (ADR-0021, ADR-0031).

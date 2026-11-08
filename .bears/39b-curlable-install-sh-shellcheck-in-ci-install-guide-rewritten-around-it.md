@@ -1,10 +1,10 @@
 ---
 id: "39b"
 title: Curlable install.sh, shellcheck in CI, install guide rewritten around it
-status: open
+status: done
 priority: P1
 created: "2026-11-08T08:25:50.020301649Z"
-updated: "2026-11-08T08:25:50.020301649Z"
+updated: "2026-11-08T09:56:55.260802847Z"
 tags:
   - ops
   - docs
@@ -12,6 +12,7 @@ depends_on:
   - a5g
   - vug
 parent: tbf
+attempts: 1
 ---
 
 ## Summary

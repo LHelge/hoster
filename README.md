@@ -6,6 +6,21 @@ proxy with ACME certificates, zero-downtime deploys by image digest, and a small
 See [spec.md](spec.md) for what it does and [docs/](docs/) for the architecture and the decision
 records.
 
+## Quick start
+
+On a Linux VPS (x86_64 or aarch64) with systemd:
+
+```sh
+curl -fsSL https://github.com/LHelge/hoster/releases/latest/download/install.sh | sudo bash
+```
+
+The script installs podman if needed, creates the `hoster` user, installs the binary and the
+systemd user unit, and prints the few steps left to you (your GitHub handle, an OAuth App,
+`admin_host` and the ACME contact) before you start the service. It never starts hoster itself,
+and re-running it is safe. Add `--dry-run` to see what it would do. Updates come from the admin
+UI or `hoster update`. See [docs/install.md](docs/install.md) for what the script does, updates,
+rollback and recovery.
+
 ## Development
 
 The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on first use.
