@@ -1,20 +1,20 @@
 //! Registry credentials keyed by registry host (ADR-0025).
 //!
-//! The long-term home is the encrypted secret store (ADR-0029), edited under Settings →
-//! Registries. Until it exists, [`FileCredentials`] reads one 0600 file per host from
-//! `<state_dir>/registries/`. Callers only see the [`RegistryCredentials`] trait, so the switch
-//! does not touch them.
+//! They live in the encrypted secret store (ADR-0029), entered under Settings → Registries:
+//! [`StoredCredentials`] keeps one secret per host, named `_registry/<host>` (a `:` before a
+//! port becomes `_`). Stack names start with a lowercase letter, so that namespace can never
+//! collide with an app secret (`<stack>/<name>`). Callers only see the [`RegistryCredentials`]
+//! trait.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
-use tokio::io::AsyncReadExt;
+
+use crate::secrets::{SecretError, SecretName, SecretStore, SecretValue};
+use crate::store::Timestamp;
 
 /// A username and secret (for ghcr: any username and a classic PAT with `read:packages`).
 ///
@@ -40,6 +40,11 @@ impl RegistryCredential {
     /// The password or token. Never log it.
     pub fn secret(&self) -> &str {
         &self.secret
+    }
+
+    /// The stored form, `username:secret`, as a secret value.
+    fn sealable(&self) -> SecretValue {
+        SecretValue::from(format!("{}:{}", self.username, self.secret))
     }
 }
 
@@ -70,32 +75,88 @@ impl FromStr for RegistryCredential {
     }
 }
 
-/// Why a credential could not be looked up. Messages name the registry and file, never the
+/// A registry host as images name it: `ghcr.io`, `docker.io`, `localhost:5000`. Lowercase
+/// letters, digits, `.` and `-`, with an optional `:<port>`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RegistryHost(String);
+
+impl RegistryHost {
+    /// The secret-store namespace of registry credentials.
+    const NAMESPACE: &str = "_registry/";
+
+    /// The name of this host's credential in the secret store.
+    fn secret_name(&self) -> SecretName {
+        format!("{}{}", Self::NAMESPACE, self.0.replace(':', "_"))
+            .parse()
+            .expect("a valid host is a valid secret name")
+    }
+
+    /// The host a secret-store name belongs to, if it is a registry credential.
+    fn from_secret_name(name: &str) -> Option<Self> {
+        name.strip_prefix(Self::NAMESPACE)?
+            .replace('_', ":")
+            .parse()
+            .ok()
+    }
+}
+
+impl FromStr for RegistryHost {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim().to_ascii_lowercase();
+        let (name, port) = match s.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (s.as_str(), None),
+        };
+        let name_ok = !name.is_empty()
+            && name.len() <= 253
+            && name.split('.').all(|label| {
+                !label.is_empty()
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            });
+        let port_ok = port.is_none_or(|p| p.parse::<u16>().is_ok_and(|p| p > 0));
+        if name_ok && port_ok {
+            Ok(Self(s))
+        } else {
+            Err(format!(
+                "`{s}` is not a registry host such as ghcr.io, docker.io or localhost:5000"
+            ))
+        }
+    }
+}
+
+impl AsRef<str> for RegistryHost {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RegistryHost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Why a credential could not be looked up or stored. Messages name the registry, never the
 /// secret.
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {
-    #[error("invalid registry host `{registry}` for a credential lookup")]
-    InvalidHost { registry: String },
-    #[error("cannot read the credential for {registry} from {}: {source}", path.display())]
-    Read {
+    #[error("invalid registry host `{registry}`: {reason}")]
+    InvalidHost { registry: String, reason: String },
+    #[error("invalid credential for {registry}: {reason}")]
+    Invalid { registry: String, reason: String },
+    #[error("the stored credential for {registry} is malformed: {reason}")]
+    Malformed { registry: String, reason: String },
+    #[error("cannot access the credential for {registry} in the secret store: {source}")]
+    Store {
         registry: String,
-        path: PathBuf,
-        source: io::Error,
-    },
-    #[error(
-        "the credential file for {registry}, {}, is readable by others (mode {mode:o}); \
-         run `chmod 600` on it", path.display()
-    )]
-    Permissions {
-        registry: String,
-        path: PathBuf,
-        mode: u32,
-    },
-    #[error("malformed credential file for {registry}, {}: {reason}", path.display())]
-    Malformed {
-        registry: String,
-        path: PathBuf,
-        reason: String,
+        #[source]
+        source: SecretError,
     },
 }
 
@@ -103,10 +164,10 @@ impl CredentialError {
     /// The registry host the lookup was for.
     pub fn registry(&self) -> &str {
         match self {
-            Self::InvalidHost { registry }
-            | Self::Read { registry, .. }
-            | Self::Permissions { registry, .. }
-            | Self::Malformed { registry, .. } => registry,
+            Self::InvalidHost { registry, .. }
+            | Self::Invalid { registry, .. }
+            | Self::Malformed { registry, .. }
+            | Self::Store { registry, .. } => registry,
         }
     }
 }
@@ -145,112 +206,163 @@ impl RegistryCredentials for BTreeMap<String, RegistryCredential> {
     }
 }
 
-/// One file per registry host, `<dir>/<host>`, holding `username:token` and readable by its
-/// owner only (mode 0600 or stricter). A missing file means anonymous pulls.
+/// A stored registry credential as Settings → Registries lists it: the token is never listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileCredentials {
-    dir: PathBuf,
+pub struct RegistryEntry {
+    pub host: RegistryHost,
+    pub username: String,
+    pub updated_at: Timestamp,
 }
 
-impl FileCredentials {
-    /// The directory under hoster's state directory that holds the files.
-    pub const DIR_NAME: &str = "registries";
+/// The registry credentials in the secret store (ADR-0025, ADR-0029). Cheap to clone.
+#[derive(Debug, Clone)]
+pub struct StoredCredentials {
+    secrets: SecretStore,
+}
 
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+impl From<SecretStore> for StoredCredentials {
+    fn from(secrets: SecretStore) -> Self {
+        Self { secrets }
     }
+}
 
-    /// `<state_dir>/registries`.
-    pub fn in_state_dir(state_dir: &Path) -> Self {
-        Self::new(state_dir.join(Self::DIR_NAME))
-    }
-
-    #[allow(
-        dead_code,
-        reason = "for messages that point the admin at the directory"
-    )]
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// The file for `registry`, refusing hosts that would escape the directory.
-    fn path(&self, registry: &str) -> Result<PathBuf, CredentialError> {
-        let valid = !registry.is_empty()
-            && !registry.starts_with('.')
-            && registry
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || ".-:".contains(c));
-        if !valid {
-            return Err(CredentialError::InvalidHost {
-                registry: registry.to_owned(),
-            });
+impl StoredCredentials {
+    /// Stores (or replaces) the credential for `host`. The username must not contain `:`, and
+    /// neither part may be empty or span lines.
+    pub async fn set(
+        &self,
+        host: &RegistryHost,
+        credential: &RegistryCredential,
+    ) -> Result<(), CredentialError> {
+        let invalid = |reason: &str| CredentialError::Invalid {
+            registry: host.to_string(),
+            reason: reason.to_owned(),
+        };
+        if credential.username().contains(':') {
+            return Err(invalid("the username must not contain `:`"));
         }
-        Ok(self.dir.join(registry))
+        let sealable = credential.sealable();
+        let parsed: RegistryCredential = sealable
+            .expose()
+            .parse()
+            .map_err(|_| invalid("enter a username and a token, each on one line"))?;
+        if parsed != *credential {
+            return Err(invalid("enter a username and a token, each on one line"));
+        }
+        self.secrets
+            .set(&host.secret_name(), &sealable)
+            .await
+            .map_err(|source| CredentialError::Store {
+                registry: host.to_string(),
+                source,
+            })?;
+        tracing::info!(registry = %host, "registry credential stored");
+        Ok(())
     }
 
-    async fn read(&self, registry: &str) -> Result<Option<RegistryCredential>, CredentialError> {
-        let path = self.path(registry)?;
-        let read_error = |path: &Path, source| CredentialError::Read {
-            registry: registry.to_owned(),
-            path: path.to_path_buf(),
+    /// Removes the credential for `host`. Returns whether there was one.
+    pub async fn remove(&self, host: &RegistryHost) -> Result<bool, CredentialError> {
+        self.secrets
+            .remove(&host.secret_name())
+            .await
+            .map_err(|source| CredentialError::Store {
+                registry: host.to_string(),
+                source,
+            })
+    }
+
+    /// Every stored credential's host, username and last change, by host.
+    pub async fn list(&self) -> Result<Vec<RegistryEntry>, CredentialError> {
+        let store_error = |source| CredentialError::Store {
+            registry: "any registry".to_owned(),
             source,
         };
-        // Open once and check the mode of the opened file, so the file that is checked is the
-        // file that is read even if the path is swapped in between.
-        let mut file = match tokio::fs::File::open(&path).await {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(read_error(&path, e)),
-        };
-        let metadata = file.metadata().await.map_err(|e| read_error(&path, e))?;
-        if !metadata.is_file() {
-            return Err(read_error(
-                &path,
-                io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"),
-            ));
-        }
-        let mode = metadata.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(CredentialError::Permissions {
-                registry: registry.to_owned(),
-                path,
-                mode,
+        let mut out = Vec::new();
+        for entry in self.secrets.list().await.map_err(store_error)? {
+            let Some(host) = RegistryHost::from_secret_name(&entry.name) else {
+                continue;
+            };
+            let username = match self.read(&host).await {
+                Ok(Some(credential)) => credential.username,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::warn!(registry = %host, error = %err, "unreadable registry credential");
+                    String::new()
+                }
+            };
+            out.push(RegistryEntry {
+                host,
+                username,
+                updated_at: entry.updated_at,
             });
         }
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)
+        out.sort_by(|a, b| a.host.cmp(&b.host));
+        Ok(out)
+    }
+
+    async fn read(
+        &self,
+        host: &RegistryHost,
+    ) -> Result<Option<RegistryCredential>, CredentialError> {
+        let Some((value, _)) = self
+            .secrets
+            .reveal(host.secret_name().as_ref())
             .await
-            .map_err(|e| read_error(&path, e))?;
-        contents
+            .map_err(|source| CredentialError::Store {
+                registry: host.to_string(),
+                source,
+            })?
+        else {
+            return Ok(None);
+        };
+        value
+            .expose()
             .parse()
             .map(Some)
             .map_err(|reason| CredentialError::Malformed {
-                registry: registry.to_owned(),
-                path,
+                registry: host.to_string(),
                 reason,
             })
     }
 }
 
-impl RegistryCredentials for FileCredentials {
+impl RegistryCredentials for StoredCredentials {
     fn lookup<'a>(
         &'a self,
         registry: &'a str,
     ) -> BoxFuture<'a, Result<Option<RegistryCredential>, CredentialError>> {
-        self.read(registry).boxed()
+        async move {
+            let host: RegistryHost =
+                registry
+                    .parse()
+                    .map_err(|reason| CredentialError::InvalidHost {
+                        registry: registry.to_owned(),
+                        reason,
+                    })?;
+            self.read(&host).await
+        }
+        .boxed()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::secrets::SecretKey;
+    use crate::store::Store;
 
     const TOKEN: &str = "ghp_supersecrettoken";
 
-    fn write(dir: &Path, name: &str, contents: &str, mode: u32) {
-        let path = dir.join(name);
-        std::fs::write(&path, contents).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    async fn stored(dir: &TempDir) -> (StoredCredentials, SecretStore) {
+        let store = Store::open(&dir.path().join("state")).await.unwrap();
+        let secrets = SecretStore::new(store, &SecretKey::generate());
+        (StoredCredentials::from(secrets.clone()), secrets)
+    }
+
+    fn host(s: &str) -> RegistryHost {
+        s.parse().unwrap()
     }
 
     #[test]
@@ -268,73 +380,116 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn file_credentials_are_keyed_by_host() {
-        let state = tempfile::tempdir().unwrap();
-        let provider = FileCredentials::in_state_dir(state.path());
-        assert_eq!(provider.dir(), state.path().join("registries"));
-        // No directory yet: anonymous.
-        assert!(provider.lookup("ghcr.io").await.unwrap().is_none());
-
-        std::fs::create_dir(provider.dir()).unwrap();
-        write(provider.dir(), "ghcr.io", &format!("bot:{TOKEN}\n"), 0o600);
-        write(provider.dir(), "localhost:5000", "dev:pw", 0o400);
-        let ghcr = provider.lookup("ghcr.io").await.unwrap().unwrap();
-        assert_eq!((ghcr.username(), ghcr.secret()), ("bot", TOKEN));
-        let local = provider.lookup("localhost:5000").await.unwrap().unwrap();
-        assert_eq!(local.username(), "dev");
-        assert!(provider.lookup("docker.io").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn file_credentials_must_be_private() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "ghcr.io", &format!("bot:{TOKEN}"), 0o644);
-        let err = FileCredentials::new(dir.path())
-            .lookup("ghcr.io")
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, CredentialError::Permissions { mode: 0o644, .. }),
-            "{err:?}"
-        );
-        assert_eq!(err.registry(), "ghcr.io");
-        assert!(err.to_string().contains("chmod 600"));
-        assert!(!err.to_string().contains(TOKEN));
-
-        std::fs::create_dir(dir.path().join("docker.io")).unwrap();
-        let err = FileCredentials::new(dir.path())
-            .lookup("docker.io")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, CredentialError::Read { .. }), "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn malformed_files_do_not_leak_their_contents() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "ghcr.io", TOKEN, 0o600);
-        let err = FileCredentials::new(dir.path())
-            .lookup("ghcr.io")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, CredentialError::Malformed { .. }), "{err:?}");
-        assert!(!err.to_string().contains(TOKEN), "{err}");
-        assert!(!format!("{err:?}").contains(TOKEN));
-    }
-
-    #[tokio::test]
-    async fn hosts_cannot_escape_the_directory() {
-        let provider = FileCredentials::new("/nonexistent");
-        for host in ["", "../etc/passwd", ".hidden", "a/b"] {
-            assert!(
-                matches!(
-                    provider.lookup(host).await,
-                    Err(CredentialError::InvalidHost { .. })
-                ),
-                "{host}"
+    #[test]
+    fn registry_hosts() {
+        for good in [
+            "ghcr.io",
+            "docker.io",
+            "localhost:5000",
+            "registry-1.example.com",
+        ] {
+            assert_eq!(host(good).to_string(), good);
+            assert_eq!(
+                RegistryHost::from_secret_name(host(good).secret_name().as_ref()),
+                Some(host(good))
             );
         }
+        assert_eq!(host(" GHCR.io ").as_ref(), "ghcr.io");
+        assert_eq!(
+            host("localhost:5000").secret_name().as_ref(),
+            "_registry/localhost_5000"
+        );
+        for bad in [
+            "",
+            "../etc",
+            ".hidden",
+            "a/b",
+            "-a.io",
+            "a..io",
+            "host:0",
+            "host:http",
+            "a_b",
+        ] {
+            assert!(bad.parse::<RegistryHost>().is_err(), "{bad}");
+        }
+        // App secrets are not registry credentials.
+        assert_eq!(RegistryHost::from_secret_name("notes/db"), None);
+    }
+
+    #[tokio::test]
+    async fn stored_credentials_round_trip_by_host() {
+        let dir = TempDir::new().unwrap();
+        let (credentials, secrets) = stored(&dir).await;
+        assert!(credentials.lookup("ghcr.io").await.unwrap().is_none());
+
+        credentials
+            .set(&host("ghcr.io"), &RegistryCredential::new("bot", TOKEN))
+            .await
+            .unwrap();
+        credentials
+            .set(
+                &host("localhost:5000"),
+                &RegistryCredential::new("dev", "pw"),
+            )
+            .await
+            .unwrap();
+        // An app secret is not listed.
+        secrets
+            .set(&"notes/db".parse().unwrap(), &SecretValue::from("x"))
+            .await
+            .unwrap();
+
+        let ghcr = credentials.lookup("ghcr.io").await.unwrap().unwrap();
+        assert_eq!((ghcr.username(), ghcr.secret()), ("bot", TOKEN));
+        let local = credentials.lookup("localhost:5000").await.unwrap().unwrap();
+        assert_eq!(local.username(), "dev");
+        assert!(credentials.lookup("docker.io").await.unwrap().is_none());
+
+        let listed = credentials.list().await.unwrap();
+        let hosts: Vec<_> = listed.iter().map(|e| e.host.to_string()).collect();
+        assert_eq!(hosts, ["ghcr.io", "localhost:5000"]);
+        assert_eq!(listed[0].username, "bot");
+        assert!(!format!("{listed:?}").contains(TOKEN));
+
+        // Replacing keeps one entry; removing drops it.
+        credentials
+            .set(&host("ghcr.io"), &RegistryCredential::new("bot2", "new"))
+            .await
+            .unwrap();
+        assert_eq!(
+            credentials
+                .lookup("ghcr.io")
+                .await
+                .unwrap()
+                .unwrap()
+                .secret(),
+            "new"
+        );
+        assert!(credentials.remove(&host("ghcr.io")).await.unwrap());
+        assert!(!credentials.remove(&host("ghcr.io")).await.unwrap());
+        assert!(credentials.lookup("ghcr.io").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_credentials_and_hosts_are_refused_without_echoing_secrets() {
+        let dir = TempDir::new().unwrap();
+        let (credentials, _) = stored(&dir).await;
+        for bad in [
+            RegistryCredential::new("a:b", TOKEN),
+            RegistryCredential::new("", TOKEN),
+            RegistryCredential::new("bot", ""),
+            RegistryCredential::new("bot", format!("{TOKEN}\nmore")),
+        ] {
+            let err = credentials.set(&host("ghcr.io"), &bad).await.unwrap_err();
+            assert!(matches!(err, CredentialError::Invalid { .. }), "{err:?}");
+            assert!(!err.to_string().contains(TOKEN), "{err}");
+        }
+        let err = credentials.lookup("../etc").await.unwrap_err();
+        assert!(
+            matches!(err, CredentialError::InvalidHost { .. }),
+            "{err:?}"
+        );
+        assert_eq!(err.registry(), "../etc");
     }
 
     #[tokio::test]

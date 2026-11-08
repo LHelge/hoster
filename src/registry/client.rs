@@ -75,6 +75,14 @@ pub enum RegistryError {
         image: String,
         status: StatusCode,
     },
+    #[error(
+        "{registry} refused the token request ({status}); check the username and token of the \
+         {registry} credential"
+    )]
+    Rejected {
+        registry: String,
+        status: StatusCode,
+    },
     #[error("`{image}` was not found on its registry")]
     NotFound { image: String },
     #[error("{registry} is rate-limiting requests{}", retry_after_text(*.retry_after))]
@@ -113,6 +121,46 @@ impl RegistryError {
             Self::RateLimited { retry_after, .. } => *retry_after,
             _ => None,
         }
+    }
+
+    /// The kind of failure in a few words, for the UI's "test" result (`401 Unauthorized`,
+    /// `429 Too Many Requests`, `network error`, …). Never contains a credential.
+    pub fn class(&self) -> String {
+        match self {
+            Self::Unauthorized { status, .. }
+            | Self::Rejected { status, .. }
+            | Self::Status { status, .. } => status.to_string(),
+            Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS.to_string(),
+            Self::NotFound { .. } => StatusCode::NOT_FOUND.to_string(),
+            Self::Http { .. } => "network error".to_owned(),
+            Self::Credentials(_) => "credential store error".to_owned(),
+            Self::Client(_) => "client error".to_owned(),
+            Self::NoTag { .. } => "nothing to resolve".to_owned(),
+            Self::Challenge { .. } | Self::Token { .. } | Self::Digest { .. } => {
+                "unusable registry response".to_owned()
+            }
+        }
+    }
+}
+
+/// What [`RegistryClient::check`] found out about a registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryCheck {
+    /// The registry API answers without authentication.
+    Open,
+    /// The token request succeeded without a credential (none is stored for the registry).
+    Anonymous,
+    /// The token request succeeded with the registry's stored credential.
+    Authenticated,
+}
+
+impl fmt::Display for RegistryCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Open => "the registry API answers without authentication",
+            Self::Anonymous => "an anonymous token request succeeded (no credential is stored)",
+            Self::Authenticated => "a token request with the stored credential succeeded",
+        })
     }
 }
 
@@ -330,6 +378,88 @@ impl RegistryClient {
         Ok(image.clone().pin(digest))
     }
 
+    /// Tests access to `registry` (the UI's "test" action, ADR-0025): `GET /v2/`, and when that
+    /// asks for authentication, the token request the challenge names, with the registry's
+    /// credential if one is stored and anonymously otherwise. No scope is requested, so this
+    /// checks the credential itself, not access to any one repository. Nothing is cached.
+    pub async fn check(&self, registry: &str) -> Result<RegistryCheck, RegistryError> {
+        let base = self.endpoint(registry)?;
+        let url = base.join("v2/").map_err(|e| RegistryError::Challenge {
+            registry: registry.to_owned(),
+            reason: format!("invalid API URL: {e}"),
+        })?;
+        let response = self
+            .http
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|e| Self::http_error(registry, e))?;
+        match response.status() {
+            status if status.is_success() => return Ok(RegistryCheck::Open),
+            StatusCode::UNAUTHORIZED => {}
+            StatusCode::TOO_MANY_REQUESTS => return Err(Self::rate_limited(registry, &response)),
+            status => {
+                return Err(RegistryError::Status {
+                    registry: registry.to_owned(),
+                    what: "the API version check",
+                    status,
+                });
+            }
+        }
+        let challenge = Challenge::from_headers(registry, response.headers())?;
+        let credential = self.credentials.lookup(registry).await?;
+        let outcome = if credential.is_some() {
+            RegistryCheck::Authenticated
+        } else {
+            RegistryCheck::Anonymous
+        };
+        match challenge {
+            Challenge::Basic => {
+                let Some(credential) = credential else {
+                    return Err(RegistryError::Rejected {
+                        registry: registry.to_owned(),
+                        status: StatusCode::UNAUTHORIZED,
+                    });
+                };
+                let response = self
+                    .http
+                    .get(url)
+                    .header(header::AUTHORIZATION, Self::basic_header(&credential))
+                    .send()
+                    .await
+                    .map_err(|e| Self::http_error(registry, e))?;
+                match response.status() {
+                    status if status.is_success() => Ok(outcome),
+                    status @ (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => {
+                        Err(RegistryError::Rejected {
+                            registry: registry.to_owned(),
+                            status,
+                        })
+                    }
+                    StatusCode::TOO_MANY_REQUESTS => Err(Self::rate_limited(registry, &response)),
+                    status => Err(RegistryError::Status {
+                        registry: registry.to_owned(),
+                        what: "the API version check",
+                        status,
+                    }),
+                }
+            }
+            Challenge::Bearer { realm, service, .. } => {
+                let realm = self.realm_url(registry, &base, &realm)?;
+                self.fetch_token(registry, realm, service, None, credential, Instant::now())
+                    .await?;
+                Ok(outcome)
+            }
+        }
+    }
+
+    /// Drops every cached token of `registry`, so the next request authenticates with its
+    /// current credential (after the credential was replaced or deleted).
+    pub fn forget_registry(&self, registry: &str) {
+        self.auth_cache()
+            .retain(|(cached, _), _| cached != registry);
+    }
+
     fn endpoint(&self, registry: &str) -> Result<Url, RegistryError> {
         match self.endpoints.get(registry) {
             Some(url) => Ok(url.clone()),
@@ -451,7 +581,7 @@ impl RegistryClient {
             }
             Challenge::Bearer { realm, service, .. } => {
                 // Ask for exactly the scope this client needs, whatever the challenge named.
-                let scope = format!("repository:{repository}:pull");
+                let scope = Some(format!("repository:{repository}:pull"));
                 let realm = self.realm_url(registry, base, &realm)?;
                 self.fetch_token(registry, realm, service, scope, credential, issued_at)
                     .await?
@@ -484,7 +614,7 @@ impl RegistryClient {
         registry: &str,
         realm: Url,
         service: Option<String>,
-        scope: String,
+        scope: Option<String>,
         credential: Option<RegistryCredential>,
         issued_at: Instant,
     ) -> Result<CachedAuth, RegistryError> {
@@ -494,7 +624,9 @@ impl RegistryClient {
             if let Some(service) = &service {
                 query.append_pair("service", service);
             }
-            query.append_pair("scope", &scope);
+            if let Some(scope) = &scope {
+                query.append_pair("scope", scope);
+            }
         }
         let mut request = self.http.get(url);
         if let Some(credential) = &credential {
@@ -507,10 +639,16 @@ impl RegistryClient {
         match response.status() {
             status if status.is_success() => {}
             status @ (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => {
-                return Err(RegistryError::Unauthorized {
-                    registry: registry.to_owned(),
-                    image: scope,
-                    status,
+                return Err(match scope {
+                    Some(scope) => RegistryError::Unauthorized {
+                        registry: registry.to_owned(),
+                        image: scope,
+                        status,
+                    },
+                    None => RegistryError::Rejected {
+                        registry: registry.to_owned(),
+                        status,
+                    },
                 });
             }
             StatusCode::TOO_MANY_REQUESTS => return Err(Self::rate_limited(registry, &response)),

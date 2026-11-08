@@ -597,12 +597,12 @@ issue(host):
 Under hoster's state directory, `~hoster/.local/share/hoster` (ADR-0023):
 
 ```
-hoster.db         # SQLite state store (ADR-0022), plus -wal/-shm files
+hoster.db         # SQLite state store (ADR-0022), plus -wal/-shm files; holds the sealed secrets:
+                  # app secrets `<stack>/<name>` and registry credentials `_registry/<host>` (ADR-0025, ADR-0029)
 acme/account.json # instant-acme AccountCredentials (0600)
 certs/<host>/fullchain.pem
 certs/<host>/privkey.pem   (0600)
 certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
-registries/<registry-host> # `username:token` pull credential (0600), until the secret store (ADR-0029)
 ```
 
 ## 8. Podman conventions

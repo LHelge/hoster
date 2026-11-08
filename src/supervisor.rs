@@ -26,12 +26,12 @@ use crate::config::{Config, ProxyConfig};
 use crate::orchestrator::{Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
 use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
-use crate::registry::{FileCredentials, RegistryClient};
+use crate::registry::{RegistryClient, StoredCredentials};
 use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
 use crate::store::Store;
-use crate::web::{Listen, WebApp, WebServer};
+use crate::web::{Listen, RegistryAccess, WebApp, WebServer};
 
 /// One step of the startup sequence, in order (architecture §4 steps 1–9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +384,9 @@ pub struct Supervisor {
     /// The secret store (ADR-0029), opened with the state store; its key is generated on the
     /// first start.
     secrets: Option<SecretStore>,
+    /// The registry credentials in the secret store (ADR-0025) and the registry client that
+    /// uses them, shared by podman pulls, the orchestrator and Settings → Registries.
+    registry: Option<RegistryAccess>,
     /// The certificates served by SNI, loaded from disk in startup step 3.
     certs: Option<CertMap>,
     /// The HTTP-01 challenges the `:80` listener answers; the ACME task fills it.
@@ -404,6 +407,7 @@ impl Supervisor {
             config,
             store: None,
             secrets: None,
+            registry: None,
             certs: None,
             challenges: ChallengeMap::default(),
             runtime: None,
@@ -537,6 +541,13 @@ impl Startup for Supervisor {
                 )
                 .await
                 .context("cannot open the secret store")?;
+                let credentials = StoredCredentials::from(secrets.clone());
+                let client = RegistryClient::new(Arc::new(credentials.clone()))
+                    .context("cannot build the registry client")?;
+                self.registry = Some(RegistryAccess {
+                    credentials,
+                    client: Arc::new(client),
+                });
                 self.secrets = Some(secrets);
                 self.store = Some(store);
                 Ok(())
@@ -547,10 +558,14 @@ impl Startup for Supervisor {
                 let runtime = PodmanRuntime::connect(&socket)
                     .await
                     .context("cannot connect to podman")?
-                    // Until the secret store exists (ADR-0029): one 0600 file per registry host.
-                    .with_credentials(Arc::new(FileCredentials::in_state_dir(
-                        &self.config.state_dir,
-                    )));
+                    // The credentials of Settings → Registries (ADR-0025).
+                    .with_credentials(Arc::new(
+                        self.registry
+                            .as_ref()
+                            .context("the secret store opens before podman")?
+                            .credentials
+                            .clone(),
+                    ));
                 self.runtime = Some(runtime);
                 Ok(())
             }
@@ -598,13 +613,16 @@ impl Startup for Supervisor {
                     .secrets
                     .clone()
                     .context("the secret store opens before reconciliation")?;
-                let resolver = RegistryClient::new(Arc::new(FileCredentials::in_state_dir(
-                    &self.config.state_dir,
-                )))?;
+                let resolver = self
+                    .registry
+                    .as_ref()
+                    .context("the registry client is built before reconciliation")?
+                    .client
+                    .clone();
                 let orchestrator = Orchestrator::new(
                     store.clone(),
                     Arc::new(runtime),
-                    Arc::new(resolver) as Arc<dyn TagResolver>,
+                    resolver as Arc<dyn TagResolver>,
                     PortAllocator::new(store, self.config.upstream_ports),
                     secrets,
                     Settings {
@@ -658,9 +676,14 @@ impl Startup for Supervisor {
                     .orchestrator
                     .clone()
                     .context("the orchestrator is built before the admin app")?;
-                let web = WebApp::from_config(&self.config, store, runtime, orchestrator)?
-                    .start(listen, self.teardown.token.child_token())
-                    .await?;
+                let registry = self
+                    .registry
+                    .clone()
+                    .context("the registry client is built before the admin app")?;
+                let web =
+                    WebApp::from_config(&self.config, store, runtime, orchestrator, registry)?
+                        .start(listen, self.teardown.token.child_token())
+                        .await?;
                 self.teardown.web = Some(web);
                 Ok(())
             }

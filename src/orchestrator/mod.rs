@@ -40,6 +40,7 @@ mod monitor;
 mod plan;
 mod reconcile;
 mod routes;
+mod stack_secrets;
 
 use std::collections::BTreeMap;
 use std::pin::pin;
@@ -70,6 +71,7 @@ use plan::{Plan, SecretVersions};
 use reconcile::Reconciler;
 pub use reconcile::{RestartPolicy, RestartStats};
 use routes::Routes;
+pub use stack_secrets::{SecretChange, StackSecret};
 
 /// Resolves a third-party image's tag to the digest the registry serves for it (ADR-0025).
 /// [`RegistryClient`] in production; tests use a fake.
@@ -145,6 +147,14 @@ pub enum OrchestratorError {
     StackBusy(String),
     #[error("stack {0} is being removed")]
     Removing(String),
+    #[error(
+        "stack {stack} is at revision {active} now, not revision {expected}; review the change again"
+    )]
+    RevisionChanged {
+        stack: String,
+        expected: u32,
+        active: u32,
+    },
     #[error("deleting the volumes of stack {stack} needs the stack's name typed as confirmation")]
     VolumeConfirmation { stack: String },
     #[error(transparent)]
@@ -562,13 +572,75 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// revision and redeploys every service whose (digest, config hash) changes.
     #[tracing::instrument(skip_all)]
     pub async fn apply(self: &Arc<Self>, toml: &str) -> Result<ApplyOutcome> {
+        let prepared = self.prepare(toml).await?;
+        self.store_and_redeploy(toml, prepared).await
+    }
+
+    /// What "re-resolve tags" (ADR-0025) would do for `stack`: its active revision previewed
+    /// again, so every third-party tag is resolved afresh. The diff is in the pins.
+    #[tracing::instrument(skip(self))]
+    pub async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview> {
+        let revision = self.active_revision(stack).await?;
+        self.preview(&revision.toml).await
+    }
+
+    /// "Re-resolve tags" (ADR-0025, ADR-0049): resolves the third-party tags of `stack`'s
+    /// active revision again and, if any digest changed, applies the result as a new revision
+    /// and redeploys what changes, like any apply. `expected` is the revision the admin
+    /// reviewed; a stack that moved on since is refused. `None` when every digest is unchanged:
+    /// no revision is created and nothing redeploys.
+    #[tracing::instrument(skip(self))]
+    pub async fn reresolve(
+        self: &Arc<Self>,
+        stack: &str,
+        expected: u32,
+    ) -> Result<Option<ApplyOutcome>> {
+        let revision = self.active_revision(stack).await?;
+        let changed = |active: u32| OrchestratorError::RevisionChanged {
+            stack: stack.to_owned(),
+            expected,
+            active,
+        };
+        if revision.revision != expected {
+            return Err(changed(revision.revision));
+        }
+        // Resolving asks the registries and can take a while: look again afterwards, so an
+        // apply that landed meanwhile is not reverted by re-storing the older file.
+        let prepared = self.prepare(&revision.toml).await?;
+        let latest = self.active_revision(stack).await?;
+        if latest.revision != expected {
+            return Err(changed(latest.revision));
+        }
+        if prepared.images == self.store.revision_images(revision.id).await? {
+            return Ok(None);
+        }
+        self.store_and_redeploy(&revision.toml, prepared)
+            .await
+            .map(Some)
+    }
+
+    /// The active revision of `stack`, which must not be removed.
+    async fn active_revision(&self, stack: &str) -> Result<StackRevision> {
+        let unknown = || OrchestratorError::UnknownStack(stack.to_owned());
+        if self.store.stack(stack).await?.is_none() {
+            return Err(unknown());
+        }
+        self.store.latest_revision(stack).await?.ok_or_else(unknown)
+    }
+
+    /// Stores a prepared stack file as the active revision and redeploys what changes.
+    async fn store_and_redeploy(
+        self: &Arc<Self>,
+        toml: &str,
+        prepared: Prepared,
+    ) -> Result<ApplyOutcome> {
         let Prepared {
             definition,
             images,
             warnings,
             changed,
             noop,
-        } = self.prepare(toml).await?;
+        } = prepared;
         let name = definition.name.to_string();
         let revision = self.store.add_pinned_revision(&name, toml, &images).await?;
         tracing::info!(stack = %name, revision = revision.revision, "applied stack revision");
@@ -1275,6 +1347,8 @@ mod monitor_tests;
 mod reconcile_tests;
 #[cfg(test)]
 mod routes_tests;
+#[cfg(test)]
+mod stack_secrets_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

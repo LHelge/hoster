@@ -12,6 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 use crate::runtime::FakeRuntime;
 use crate::web::WebApp;
+use crate::web::settings::tests::FakeRegistries;
 use crate::web::stacks::tests::FakeStacks;
 
 pub const ORIGIN: &str = "https://hoster.example.com";
@@ -26,6 +27,8 @@ pub struct TestApp {
     pub runtime: Arc<FakeRuntime>,
     /// The orchestrator the stack pages talk to.
     pub stacks: Arc<FakeStacks>,
+    /// The registry credentials Settings → Registries manages.
+    pub registries: Arc<FakeRegistries>,
     pub app: WebApp,
     _dir: TempDir,
 }
@@ -67,16 +70,19 @@ impl TestApp {
         };
         let runtime = Arc::new(FakeRuntime::new());
         let stacks = Arc::new(FakeStacks::default());
+        let registries = Arc::new(FakeRegistries::default());
         let app = WebApp::new(
             Auth::new(settings, store.clone(), client),
             runtime.clone(),
             stacks.clone(),
+            registries.clone(),
         );
         TestApp {
             github,
             store,
             runtime,
             stacks,
+            registries,
             app,
             _dir: dir,
         }

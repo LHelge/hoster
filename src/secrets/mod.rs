@@ -1,5 +1,6 @@
 //! The encrypted secret store (ADR-0029): app secrets (`<stack>/<name>`, injected into containers
-//! as environment variables) and, later, hoster's own registry credentials (ADR-0025).
+//! as environment variables) and hoster's own registry credentials (`_registry/<host>`,
+//! ADR-0025).
 //!
 //! Values are sealed with XChaCha20-Poly1305 under a [`SecretKey`] that lives outside the state
 //! directory: the user-scoped systemd credential `secret_key` if there is one, else a 0600 key
@@ -9,13 +10,9 @@
 //! [`SecretVersion`], which joins the per-service config hash.
 //!
 //! [`SecretStore`] is write-only towards the UI: set, replace, remove and list names. Only the
-//! deploy engine calls [`SecretStore::reveal`], at container create. [`SecretValue`] never prints
-//! its contents, so values cannot slip into logs through `Debug`.
-
-#![allow(
-    dead_code,
-    reason = "the secret store API is consumed by the web UI and registry credentials later"
-)]
+//! deploy engine (at container create) and the registry credentials (for pulls and token
+//! requests) call [`SecretStore::reveal`]. [`SecretValue`] never prints its contents, so values
+//! cannot slip into logs through `Debug`.
 
 use std::fmt;
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -153,6 +150,32 @@ impl From<String> for SecretValue {
 impl From<&str> for SecretValue {
     fn from(value: &str) -> Self {
         Self(value.to_owned())
+    }
+}
+
+/// Form fields deserialize straight into a value, so the plaintext never sits in a `String`
+/// that something could print.
+impl<'de> serde::Deserialize<'de> for SecretValue {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self)
+    }
+}
+
+impl SecretValue {
+    /// Whether the value is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The value with browser line endings (`\r\n`) made `\n`.
+    pub fn normalized(self) -> Self {
+        if self.0.contains('\r') {
+            Self(self.0.replace("\r\n", "\n"))
+        } else {
+            self
+        }
     }
 }
 

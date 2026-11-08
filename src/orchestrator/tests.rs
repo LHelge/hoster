@@ -51,17 +51,29 @@ pub(super) fn digest(n: u8) -> String {
     format!("sha256:{}", format!("{n:02x}").repeat(32))
 }
 
-/// Resolves every tag to `digest(0xaa)` and counts the lookups.
-#[derive(Default)]
+/// Resolves every tag to `digest(<digest>)`, `digest(0xaa)` unless changed, and counts the
+/// lookups.
 pub(super) struct FakeResolver {
     calls: AtomicUsize,
+    /// What tags resolve to; change it to move a tag upstream.
+    pub(super) digest: std::sync::atomic::AtomicU8,
+}
+
+impl Default for FakeResolver {
+    fn default() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            digest: std::sync::atomic::AtomicU8::new(0xaa),
+        }
+    }
 }
 
 #[async_trait]
 impl TagResolver for FakeResolver {
     async fn resolve(&self, image: &ImageRef) -> Result<PinnedImage, RegistryError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(image.clone().pin(digest(0xaa).parse().unwrap()))
+        let to = digest(self.digest.load(Ordering::SeqCst));
+        Ok(image.clone().pin(to.parse().unwrap()))
     }
 }
 
@@ -992,7 +1004,7 @@ async fn removing_a_stack_mid_deploy_aborts_the_deploy_first() {
 }
 
 /// A stack whose api reads a secret, plus a two-port service and an unrouted worker.
-const WITH_SECRETS: &str = r#"
+pub(super) const WITH_SECRETS: &str = r#"
 version = 1
 name = "notes"
 
@@ -1022,14 +1034,14 @@ image = "ghcr.io/acme/notes-worker"
 "#;
 
 impl Harness {
-    async fn set_secret(&self, name: &str, value: &str) {
+    pub(super) async fn set_secret(&self, name: &str, value: &str) {
         self.secrets
             .set(&name.parse::<SecretName>().unwrap(), &value.into())
             .await
             .unwrap();
     }
 
-    fn spec_of(&self, name: &str) -> crate::runtime::ContainerSpec {
+    pub(super) fn spec_of(&self, name: &str) -> crate::runtime::ContainerSpec {
         self.runtime.spec(&self.container(name).id).unwrap()
     }
 }

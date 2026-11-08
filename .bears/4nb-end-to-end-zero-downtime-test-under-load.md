@@ -1,15 +1,16 @@
 ---
 id: "4nb"
 title: End-to-end zero-downtime test under load
-status: open
+status: in_progress
 priority: P1
 created: "2026-11-07T14:45:17.315113504Z"
-updated: "2026-11-07T14:45:17.315113504Z"
+updated: "2026-11-08T01:54:17.703501182Z"
 tags:
   - test
 depends_on:
   - shg
 parent: mdd
+attempts: 1
 ---
 
 ## Summary

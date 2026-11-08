@@ -13,6 +13,11 @@
 //! services that will be redeployed. Its confirm form posts the same file to `POST /apply`,
 //! which applies and redeploys in one step (there is no "apply without redeploy", ADR-0049) and
 //! sends the browser to the resulting deployment's page, which follows it until it ends.
+//!
+//! "Re-resolve tags" (ADR-0025) works the same way for the active revision: the preview shows
+//! the digests every third-party tag resolves to now and the services that would move, and the
+//! confirmation applies them as a new revision and redeploys (ADR-0049). The stack's secrets
+//! (ADR-0029) have their own page; see `secrets.rs`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -30,9 +35,10 @@ use super::auth::Session;
 use super::pages::{FlashKind, Layout, Page, Section};
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, PinChange,
-    RemoveOutcome, RemoveStack, ServiceState, StackStatus,
+    RemoveOutcome, RemoveStack, SecretChange, ServiceState, StackSecret, StackStatus,
 };
 use crate::runtime::ContainerRuntime;
+use crate::secrets::{SecretError, SecretValue};
 use crate::stack::{Diagnostic, StackError};
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
@@ -68,6 +74,34 @@ pub trait StackControl: Send + Sync + 'static {
         stack: &str,
         id: DeploymentId,
     ) -> Result<(Deployment, Vec<DeploymentEvent>), OrchestratorError>;
+
+    /// See [`Orchestrator::reresolve_preview`].
+    async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError>;
+
+    /// See [`Orchestrator::reresolve`].
+    async fn reresolve(
+        &self,
+        stack: &str,
+        expected: u32,
+    ) -> Result<Option<ApplyOutcome>, OrchestratorError>;
+
+    /// See [`Orchestrator::secrets`].
+    async fn secrets(&self, stack: &str) -> Result<Vec<StackSecret>, OrchestratorError>;
+
+    /// See [`Orchestrator::set_secret`].
+    async fn set_secret(
+        &self,
+        stack: &str,
+        name: &str,
+        value: &SecretValue,
+    ) -> Result<SecretChange, OrchestratorError>;
+
+    /// See [`Orchestrator::delete_secret`].
+    async fn delete_secret(
+        &self,
+        stack: &str,
+        name: &str,
+    ) -> Result<SecretChange, OrchestratorError>;
 }
 
 #[async_trait::async_trait]
@@ -102,6 +136,39 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         id: DeploymentId,
     ) -> Result<(Deployment, Vec<DeploymentEvent>), OrchestratorError> {
         Orchestrator::deployment(self, stack, id).await
+    }
+
+    async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {
+        Orchestrator::reresolve_preview(self, stack).await
+    }
+
+    async fn reresolve(
+        &self,
+        stack: &str,
+        expected: u32,
+    ) -> Result<Option<ApplyOutcome>, OrchestratorError> {
+        Orchestrator::reresolve(self, stack, expected).await
+    }
+
+    async fn secrets(&self, stack: &str) -> Result<Vec<StackSecret>, OrchestratorError> {
+        Orchestrator::secrets(self, stack).await
+    }
+
+    async fn set_secret(
+        &self,
+        stack: &str,
+        name: &str,
+        value: &SecretValue,
+    ) -> Result<SecretChange, OrchestratorError> {
+        Orchestrator::set_secret(self, stack, name, value).await
+    }
+
+    async fn delete_secret(
+        &self,
+        stack: &str,
+        name: &str,
+    ) -> Result<SecretChange, OrchestratorError> {
+        Orchestrator::delete_secret(self, stack, name).await
     }
 }
 
@@ -196,10 +263,49 @@ impl Stacks {
         Extension(stacks): Extension<Stacks>,
         StackFile(toml): StackFile,
     ) -> Response {
-        let outcome = match stacks.0.apply(&toml).await {
-            Ok(outcome) => outcome,
-            Err(err) => return Outcome::from(err).quoting(&toml).into_response(),
+        match stacks.0.apply(&toml).await {
+            Ok(outcome) => Self::applied(outcome),
+            Err(err) => Outcome::from(err).quoting(&toml).into_response(),
+        }
+    }
+
+    /// `POST /stacks/{name}/reresolve/preview`: the digests the third-party tags of the active
+    /// revision resolve to now, and what applying them would redeploy.
+    pub async fn reresolve_preview(
+        Extension(stacks): Extension<Stacks>,
+        Path(name): Path<String>,
+    ) -> Response {
+        let revision = match stacks.find(&name).await {
+            Ok(status) => status.revision.revision,
+            Err(outcome) => return outcome.into_response(),
         };
+        match stacks.0.reresolve_preview(&name).await {
+            Ok(preview) => Page(ReresolveView::new(preview, revision)).into_response(),
+            Err(err) => Outcome::from(err).into_response(),
+        }
+    }
+
+    /// `POST /stacks/{name}/reresolve`: applies freshly resolved digests as a new revision and
+    /// redeploys the services they move (ADR-0025, ADR-0049).
+    pub async fn reresolve(
+        Extension(stacks): Extension<Stacks>,
+        Path(name): Path<String>,
+        Form(form): Form<ReresolveForm>,
+    ) -> Response {
+        match stacks.0.reresolve(&name, form.revision).await {
+            Ok(Some(outcome)) => Self::applied(outcome),
+            Ok(None) => Outcome::success(format!(
+                "Every tag of {name} still resolves to the digest it runs; nothing changed."
+            ))
+            .informing()
+            .into_response(),
+            Err(err) => Outcome::from(err).into_response(),
+        }
+    }
+
+    /// The answer to an apply: sends the browser to the deployment, or says that nothing
+    /// needed redeploying.
+    fn applied(outcome: ApplyOutcome) -> Response {
         let stack = outcome.revision.stack.clone();
         let revision = outcome.revision.revision;
         match outcome.deployment {
@@ -323,7 +429,7 @@ impl Stacks {
         }
     }
 
-    async fn lookup(&self, stack: &str, id: &str) -> Result<DeploymentView, Outcome> {
+    pub(super) async fn lookup(&self, stack: &str, id: &str) -> Result<DeploymentView, Outcome> {
         let id: DeploymentId = id
             .parse()
             .map_err(|_| Outcome::error(StatusCode::NOT_FOUND, format!("No deployment {id}.")))?;
@@ -440,6 +546,12 @@ impl DeployForm {
     }
 }
 
+/// The confirm form of "re-resolve tags": the revision that was reviewed.
+#[derive(Deserialize)]
+pub struct ReresolveForm {
+    revision: u32,
+}
+
 /// The remove form.
 #[derive(Deserialize)]
 pub struct RemoveForm {
@@ -470,7 +582,7 @@ struct Link {
 }
 
 impl Outcome {
-    fn success(message: impl Into<String>) -> Self {
+    pub(super) fn success(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::OK,
             kind: FlashKind::Success,
@@ -480,7 +592,7 @@ impl Outcome {
         }
     }
 
-    fn error(status: StatusCode, message: impl Into<String>) -> Self {
+    pub(super) fn error(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
             kind: FlashKind::Error,
@@ -488,7 +600,7 @@ impl Outcome {
         }
     }
 
-    fn with_link(mut self, href: String, label: impl Into<String>) -> Self {
+    pub(super) fn with_link(mut self, href: String, label: impl Into<String>) -> Self {
         self.link = Some(Link {
             href,
             label: label.into(),
@@ -505,8 +617,14 @@ impl Outcome {
         self
     }
 
+    /// Shown as information rather than as a success.
+    pub(super) fn informing(mut self) -> Self {
+        self.kind = FlashKind::Info;
+        self
+    }
+
     /// The outcome as a full page, for the read-only routes.
-    fn page(self, layout: Layout) -> Response {
+    pub(super) fn page(self, layout: Layout) -> Response {
         let status = self.status;
         (
             status,
@@ -534,6 +652,7 @@ impl From<OrchestratorError> for Outcome {
             E::UnknownStack(_) | E::UnknownService(_) | E::UnknownDeployment(_) => {
                 StatusCode::NOT_FOUND
             }
+            E::Secret(SecretError::InvalidName { .. }) => StatusCode::UNPROCESSABLE_ENTITY,
             E::Invalid(_)
             | E::Collision(_)
             | E::Resolve { .. }
@@ -541,7 +660,7 @@ impl From<OrchestratorError> for Outcome {
             | E::Digest { .. }
             | E::NotRedeployable { .. }
             | E::VolumeConfirmation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            E::StackBusy(_) | E::Removing(_) => StatusCode::CONFLICT,
+            E::StackBusy(_) | E::Removing(_) | E::RevisionChanged { .. } => StatusCode::CONFLICT,
             E::Runtime(_) => StatusCode::BAD_GATEWAY,
             E::Secret(_) | E::Store(_) | E::Ports(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -561,7 +680,7 @@ impl From<OrchestratorError> for Outcome {
                     .map(|c| Problem::from(c.to_string()))
                     .collect(),
             ),
-            other => (Self::sentence(other), Vec::new()),
+            other => (Self::sentence(&other.to_string()), Vec::new()),
         };
         Self {
             status,
@@ -573,12 +692,11 @@ impl From<OrchestratorError> for Outcome {
 
 impl Outcome {
     /// An error's message as a sentence.
-    fn sentence(err: &OrchestratorError) -> String {
-        let text = err.to_string();
+    pub(super) fn sentence(text: &str) -> String {
         let mut chars = text.chars();
         match chars.next() {
             Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
-            None => text,
+            None => text.to_owned(),
         }
     }
 }
@@ -639,7 +757,7 @@ impl From<String> for Problem {
 }
 
 /// A digest shortened for tables: `sha256:` and the first 12 hex digits.
-struct ShortDigest<'a>(&'a str);
+pub(super) struct ShortDigest<'a>(pub(super) &'a str);
 
 impl fmt::Display for ShortDigest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -654,7 +772,7 @@ impl fmt::Display for ShortDigest<'_> {
 }
 
 /// A store timestamp as an RFC 3339 UTC time, to the second.
-struct When(Timestamp);
+pub(super) struct When(pub(super) Timestamp);
 
 impl fmt::Display for When {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -676,6 +794,8 @@ pub struct StackView {
     services: Vec<ServiceView>,
     /// Whether any service takes its digest from deploys, so the deploy form has fields.
     deployable: bool,
+    /// Whether any service uses a third-party image, so "re-resolve tags" has work to do.
+    third_party: bool,
     last: Option<DeploymentSummary>,
     /// The deployment running now, as (id, state, url).
     active: Option<(String, String, String)>,
@@ -684,8 +804,16 @@ pub struct StackView {
 }
 
 impl StackView {
-    fn url(stack: &str) -> String {
+    pub(super) fn url(stack: &str) -> String {
         format!("/stacks/{stack}")
+    }
+
+    pub fn secrets_url(&self) -> String {
+        format!("{}/secrets", self.url)
+    }
+
+    pub fn reresolve_url(&self) -> String {
+        format!("{}/reresolve/preview", self.url)
     }
 
     pub fn deploy_url(&self) -> String {
@@ -709,6 +837,7 @@ impl From<&StackStatus> for StackView {
             full_hash: hash.clone(),
             applied_at: When(status.revision.created_at).to_string(),
             deployable: services.iter().any(|s| s.ci_built),
+            third_party: services.iter().any(|s| !s.ci_built),
             services,
             last: status.last.as_ref().map(DeploymentSummary::from),
             active: status.active.map(|(id, state)| {
@@ -798,7 +927,7 @@ pub struct DeploymentView {
 }
 
 impl DeploymentView {
-    fn url(stack: &str, id: DeploymentId) -> String {
+    pub(super) fn url(stack: &str, id: DeploymentId) -> String {
         format!("/stacks/{stack}/deployments/{id}")
     }
 
@@ -918,6 +1047,34 @@ impl From<&PinChange> for PinView {
     }
 }
 
+/// What "re-resolve tags" would do: the pins before and after, and what moves.
+#[derive(Template)]
+#[template(path = "reresolve_preview.html")]
+pub struct ReresolveView {
+    stack: String,
+    confirm_url: String,
+    /// The revision being re-resolved, which the confirmation names.
+    revision: u32,
+    pins: Vec<PinView>,
+    changed: Vec<String>,
+    /// Whether any digest differs from the active revision's.
+    moves: bool,
+}
+
+impl ReresolveView {
+    fn new(preview: ApplyPreview, revision: u32) -> Self {
+        let pins: Vec<PinView> = preview.pins.iter().map(PinView::from).collect();
+        Self {
+            confirm_url: format!("{}/reresolve", StackView::url(&preview.stack)),
+            moves: pins.iter().any(|p| p.changes),
+            pins,
+            changed: preview.changed,
+            stack: preview.stack,
+            revision,
+        }
+    }
+}
+
 /// A line diff between the active revision and the new file, in hunks with context.
 #[derive(Debug, Default)]
 struct FileDiff {
@@ -1017,6 +1174,8 @@ pub struct DeploymentStatus {
 pub struct ErrorPage {
     layout: Layout,
 }
+
+mod secrets;
 
 #[cfg(test)]
 pub(super) mod tests;

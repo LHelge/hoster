@@ -1,0 +1,27 @@
+<section class="preview">
+  <h3>Re-resolving the tags of {{ stack }}</h3>
+  {%- if pins.is_empty() %}
+  <p>The stack has no third-party images.</p>
+  {%- else %}
+  {%- include "pins.html" %}
+  {%- endif %}
+  {%- if moves %}
+  <h3>Will be redeployed</h3>
+  {%- if changed.is_empty() %}
+  <p class="redeploy-none">No service: every service already runs this configuration.</p>
+  {%- else %}
+  <ul class="redeploy">
+    {%- for service in changed %}
+    <li>{{ service }}</li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
+  <form class="stack-form" hx-post="{{ confirm_url }}" hx-target="#reresolve-result">
+    <input type="hidden" name="revision" value="{{ revision }}">
+    <p class="muted">Applies the stack file of revision {{ revision }} again, pinned to the new digests, as a new revision. Tags are resolved again when you confirm.</p>
+    <button type="submit">{% if changed.is_empty() %}Apply{% else %}Apply and redeploy {{ changed.len() }} service{% if changed.len() != 1 %}s{% endif %}{% endif %}</button>
+  </form>
+  {%- else %}
+  <p>Every tag still resolves to the digest of revision {{ revision }}: nothing to apply.</p>
+  {%- endif %}
+</section>

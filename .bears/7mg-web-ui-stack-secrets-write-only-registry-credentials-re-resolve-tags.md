@@ -1,10 +1,10 @@
 ---
 id: "7mg"
 title: "Web UI: stack secrets (write-only), registry credentials, re-resolve tags"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T21:12:34.638757908Z"
-updated: "2026-11-08T01:32:39.687427862Z"
+updated: "2026-11-08T01:55:26.564439759Z"
 tags:
   - web
   - security

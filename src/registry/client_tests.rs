@@ -494,6 +494,169 @@ async fn a_token_server_claiming_an_endless_lifetime_does_not_panic() {
     assert_eq!(pinned.digest().as_ref(), DIGEST);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The "test" action of Settings → Registries
+// ---------------------------------------------------------------------------------------------
+
+/// `GET /v2/` answers with a challenge without a scope.
+async fn mount_api_challenge(server: &MockServer, realm: &str) {
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "www-authenticate",
+            format!(r#"Bearer realm="{realm}",service="{REGISTRY}""#).as_str(),
+        ))
+        .mount(server)
+        .await;
+}
+
+fn bot() -> Arc<dyn RegistryCredentials> {
+    Arc::new(BTreeMap::from([(
+        REGISTRY.to_owned(),
+        RegistryCredential::new("bot", "s3cret-token"),
+    )]))
+}
+
+#[tokio::test]
+async fn check_requests_an_unscoped_token_with_the_stored_credential() {
+    let server = MockServer::start().await;
+    let realm = format!("{}/token", server.uri());
+    mount_api_challenge(&server, &realm).await;
+    // base64("bot:s3cret-token")
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(query_param("service", REGISTRY))
+        .and(header("authorization", "Basic Ym90OnMzY3JldC10b2tlbg=="))
+        .respond_with(token("t"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let check = client(&server, bot()).check(REGISTRY).await.unwrap();
+    assert_eq!(check, RegistryCheck::Authenticated);
+    // No scope was asked for: the credential itself is tested.
+    let requests = server.received_requests().await.unwrap();
+    let token_request = requests.iter().find(|r| r.url.path() == "/token").unwrap();
+    assert!(
+        !token_request.url.query().unwrap().contains("scope"),
+        "{}",
+        token_request.url
+    );
+}
+
+#[tokio::test]
+async fn check_without_a_credential_is_anonymous_and_open_registries_say_so() {
+    let server = MockServer::start().await;
+    let realm = format!("{}/token", server.uri());
+    mount_api_challenge(&server, &realm).await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(token("anon"))
+        .mount(&server)
+        .await;
+    let check = client(&server, Arc::new(Anonymous))
+        .check(REGISTRY)
+        .await
+        .unwrap();
+    assert_eq!(check, RegistryCheck::Anonymous);
+
+    let open = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&open)
+        .await;
+    assert_eq!(
+        client(&open, bot()).check(REGISTRY).await.unwrap(),
+        RegistryCheck::Open
+    );
+}
+
+#[tokio::test]
+async fn check_failures_carry_their_class_and_never_the_token() {
+    let server = MockServer::start().await;
+    let realm = format!("{}/token", server.uri());
+    mount_api_challenge(&server, &realm).await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let err = client(&server, bot()).check(REGISTRY).await.unwrap_err();
+    assert!(matches!(err, RegistryError::Rejected { .. }), "{err:?}");
+    assert_eq!(err.class(), "401 Unauthorized");
+    assert!(!err.to_string().contains("s3cret"), "{err}");
+    assert!(!format!("{err:?}").contains("s3cret"), "{err:?}");
+
+    let limited = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
+        .mount(&limited)
+        .await;
+    let err = client(&limited, bot()).check(REGISTRY).await.unwrap_err();
+    assert_eq!(err.class(), "429 Too Many Requests");
+
+    // Nothing listens: a network error.
+    let gone =
+        client(&limited, bot()).with_endpoint(REGISTRY, "http://127.0.0.1:9/".parse().unwrap());
+    let err = gone.check(REGISTRY).await.unwrap_err();
+    assert_eq!(err.class(), "network error", "{err}");
+}
+
+#[tokio::test]
+async fn basic_auth_registries_are_checked_with_the_credential() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .and(header("authorization", "Basic Ym90OnMzY3JldC10b2tlbg=="))
+        .respond_with(ResponseTemplate::new(200))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/"))
+        .respond_with(
+            ResponseTemplate::new(401).insert_header("www-authenticate", r#"Basic realm="r""#),
+        )
+        .mount(&server)
+        .await;
+    assert_eq!(
+        client(&server, bot()).check(REGISTRY).await.unwrap(),
+        RegistryCheck::Authenticated
+    );
+    let err = client(&server, Arc::new(Anonymous))
+        .check(REGISTRY)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RegistryError::Rejected { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn forgetting_a_registry_drops_its_cached_tokens() {
+    let server = MockServer::start().await;
+    let realm = format!("{}/token", server.uri());
+    mount_challenge(&server, &realm).await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(token("t"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(MANIFEST))
+        .and(header("authorization", "Bearer t"))
+        .respond_with(found())
+        .mount(&server)
+        .await;
+    let client = client(&server, Arc::new(Anonymous));
+    let image = image("registry.test/owner/app:v1");
+    client.resolve(&image).await.unwrap();
+    client.forget_registry("other.test");
+    client.resolve(&image).await.unwrap(); // still cached
+    client.forget_registry(REGISTRY);
+    client.resolve(&image).await.unwrap(); // a fresh token
+}
+
 /// Live checks against public images; run with `HOSTER_REGISTRY_LIVE_TESTS=1 cargo test`.
 ///
 /// `HOSTER_REGISTRY_LIVE_IMAGE=ghcr.io/owner/private:tag` and

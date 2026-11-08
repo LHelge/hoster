@@ -32,6 +32,16 @@
 
 <h2>Apply a new revision</h2>
 <p><a class="button" href="/apply">Apply a stack file</a> <span class="muted">Applying redeploys the services whose configuration changes.</span></p>
+{%- if stack.third_party %}
+<form class="stack-form" hx-post="{{ stack.reresolve_url() }}" hx-target="#reresolve-result">
+  <p class="muted">Third-party tags were resolved to digests when the revision was applied. Re-resolving looks them up again and shows what would change before anything is applied.</p>
+  <button type="submit">Re-resolve tags</button>
+</form>
+{%- endif %}
+<div id="reresolve-result" aria-live="polite"></div>
+
+<h2>Secrets</h2>
+<p><a class="button" href="{{ stack.secrets_url() }}">Manage secrets</a> <span class="muted">Values are encrypted and write-only.</span></p>
 
 {%- if stack.deployable %}
 <h2>Deploy</h2>

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Registries{% endblock %}
+{% block content %}
+<h1>Registries</h1>
+<p class="muted">Pull credentials, one per registry host, used for podman pulls and for resolving tags to digests. Tokens are encrypted at rest and write-only. For ghcr.io use a classic personal access token with only <code>read:packages</code>, ideally of a dedicated machine account. Changing a credential redeploys nothing.</p>
+
+{%- if entries.is_empty() %}
+<p>No credentials are stored: every registry is accessed anonymously.</p>
+{%- else %}
+<table class="list registries">
+  <thead>
+    <tr><th scope="col">Registry</th><th scope="col">Username</th><th scope="col">Last changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+  </thead>
+  <tbody>
+    {%- for entry in entries %}
+    <tr>
+      <td><code>{{ entry.host }}</code></td>
+      <td>{{ entry.username }}</td>
+      <td>{{ entry.changed_at }}</td>
+      <td>
+        <form class="inline-form" hx-post="/settings/registries/test" hx-target="#registry-result">
+          <input type="hidden" name="host" value="{{ entry.host }}">
+          <button type="submit">Test</button>
+        </form>
+        <form class="inline-form" hx-post="/settings/registries/delete" hx-target="#registry-result" hx-confirm="Delete the credential for {{ entry.host }}?">
+          <input type="hidden" name="host" value="{{ entry.host }}">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+<div id="registry-result" aria-live="polite"></div>
+
+<h2>Add or replace a credential</h2>
+<form class="stack-form" hx-post="/settings/registries" hx-target="#save-result">
+  <label>Registry host <input type="text" name="host" required autocomplete="off" spellcheck="false" placeholder="ghcr.io"></label>
+  <label>Username <input type="text" name="username" required autocomplete="off" spellcheck="false"></label>
+  <label>Token <input type="password" name="token" required autocomplete="new-password"></label>
+  <button type="submit">Save</button>
+</form>
+<div id="save-result" aria-live="polite"></div>
+
+<h2>Test a registry</h2>
+<form class="stack-form" hx-post="/settings/registries/test" hx-target="#test-result">
+  <label>Registry host <input type="text" name="host" required autocomplete="off" spellcheck="false" placeholder="docker.io"></label>
+  <p class="muted">Makes the token request the registry asks for: with its stored credential, or anonymously when none is stored.</p>
+  <button type="submit">Test</button>
+</form>
+<div id="test-result" aria-live="polite"></div>
+{% endblock %}

@@ -18,16 +18,23 @@ pub enum Section {
     Dashboard,
     Stacks,
     Containers,
+    Settings,
 }
 
 impl Section {
-    const ALL: [Section; 3] = [Section::Dashboard, Section::Stacks, Section::Containers];
+    const ALL: [Section; 4] = [
+        Section::Dashboard,
+        Section::Stacks,
+        Section::Containers,
+        Section::Settings,
+    ];
 
     fn href(self) -> &'static str {
         match self {
             Section::Dashboard => "/",
             Section::Stacks => "/stacks",
             Section::Containers => "/containers",
+            Section::Settings => "/settings/registries",
         }
     }
 }
@@ -38,6 +45,7 @@ impl fmt::Display for Section {
             Section::Dashboard => "Dashboard",
             Section::Stacks => "Stacks",
             Section::Containers => "Containers",
+            Section::Settings => "Settings",
         })
     }
 }

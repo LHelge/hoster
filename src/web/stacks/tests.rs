@@ -100,6 +100,37 @@ pub enum Call {
     Apply(String),
     Deploy(String, DigestSet),
     Remove(RemoveStack),
+    ReresolvePreview(String),
+    Reresolve(String, u32),
+    /// A stored secret, with the value it was given (only the fake keeps it, to prove the
+    /// pages never show it).
+    SetSecret(String, String, String),
+    DeleteSecret(String, String),
+}
+
+/// The value the secret fakes hold; it must never appear in a page.
+pub const SECRET_VALUE: &str = "s3cr3t-Value-42";
+
+/// The secrets of `notes`: `db` set and used by api, `old` set and unused, `missing` used by
+/// api but not set.
+fn notes_secrets() -> Vec<StackSecret> {
+    vec![
+        StackSecret {
+            name: "db".into(),
+            updated_at: Some(Timestamp::now()),
+            services: vec!["api".into()],
+        },
+        StackSecret {
+            name: "missing".into(),
+            updated_at: None,
+            services: vec!["api".into()],
+        },
+        StackSecret {
+            name: "old".into(),
+            updated_at: Some(Timestamp::now()),
+            services: Vec::new(),
+        },
+    ]
 }
 
 /// An orchestrator that knows the stacks it is given, validates stack files for real and
@@ -111,6 +142,10 @@ pub struct FakeStacks {
     pub changed: Mutex<Vec<String>>,
     /// The state a deploy answers with.
     pub deploy_state: Mutex<DeploymentState>,
+    /// The secrets of `notes`.
+    pub secrets: Mutex<Vec<StackSecret>>,
+    /// Whether a re-resolve finds a moved digest.
+    pub tags_moved: Mutex<bool>,
     pub calls: Mutex<Vec<Call>>,
 }
 
@@ -121,6 +156,8 @@ impl Default for FakeStacks {
             deployments: Mutex::new(Vec::new()),
             changed: Mutex::new(vec!["api".into()]),
             deploy_state: Mutex::new(DeploymentState::Received),
+            secrets: Mutex::new(notes_secrets()),
+            tags_moved: Mutex::new(true),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -236,19 +273,130 @@ impl StackControl for FakeStacks {
             .cloned()
             .ok_or(OrchestratorError::UnknownDeployment(id))
     }
+
+    async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {
+        self.record(Call::ReresolvePreview(stack.into()));
+        let status = self
+            .current(stack)
+            .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
+        let moved = *self.tags_moved.lock().unwrap();
+        Ok(ApplyPreview {
+            stack: stack.into(),
+            current: Some(status.revision),
+            warnings: Vec::new(),
+            pins: vec![PinChange {
+                service: "storage".into(),
+                before: Some(digest(0xaa)),
+                after: digest(if moved { 0xbb } else { 0xaa }),
+            }],
+            changed: if moved {
+                vec!["storage".into()]
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    async fn reresolve(
+        &self,
+        stack: &str,
+        expected: u32,
+    ) -> Result<Option<ApplyOutcome>, OrchestratorError> {
+        self.record(Call::Reresolve(stack.into(), expected));
+        let status = self
+            .current(stack)
+            .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
+        if status.revision.revision != expected {
+            return Err(OrchestratorError::RevisionChanged {
+                stack: stack.into(),
+                expected,
+                active: status.revision.revision,
+            });
+        }
+        if !*self.tags_moved.lock().unwrap() {
+            return Ok(None);
+        }
+        Ok(Some(ApplyOutcome {
+            revision: revision(stack, expected + 1, &status.revision.toml),
+            warnings: Vec::new(),
+            changed: vec!["storage".into()],
+            deployment: Some(DeployOutcome {
+                deployment: DeploymentId::from(9),
+                state: DeploymentState::Validating,
+            }),
+        }))
+    }
+
+    async fn secrets(&self, stack: &str) -> Result<Vec<StackSecret>, OrchestratorError> {
+        self.current(stack)
+            .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
+        Ok(self.secrets.lock().unwrap().clone())
+    }
+
+    async fn set_secret(
+        &self,
+        stack: &str,
+        name: &str,
+        value: &SecretValue,
+    ) -> Result<SecretChange, OrchestratorError> {
+        self.record(Call::SetSecret(
+            stack.into(),
+            name.into(),
+            value.expose().into(),
+        ));
+        let current = self.secrets(stack).await?;
+        let found = current.iter().find(|s| s.name == name);
+        let services = found.map(|s| s.services.clone()).unwrap_or_default();
+        Ok(SecretChange {
+            secret: format!("{stack}/{name}"),
+            existed: found.is_some_and(|s| s.updated_at.is_some()),
+            deployment: (!services.is_empty()).then(|| DeployOutcome {
+                deployment: DeploymentId::from(11),
+                state: DeploymentState::Validating,
+            }),
+            services,
+        })
+    }
+
+    async fn delete_secret(
+        &self,
+        stack: &str,
+        name: &str,
+    ) -> Result<SecretChange, OrchestratorError> {
+        self.record(Call::DeleteSecret(stack.into(), name.into()));
+        let current = self.secrets(stack).await?;
+        let found = current
+            .iter()
+            .find(|s| s.name == name && s.updated_at.is_some());
+        let services = found.map(|s| s.services.clone()).unwrap_or_default();
+        Ok(SecretChange {
+            secret: format!("{stack}/{name}"),
+            existed: found.is_some(),
+            deployment: (!services.is_empty()).then(|| DeployOutcome {
+                deployment: DeploymentId::from(12),
+                state: DeploymentState::Validating,
+            }),
+            services,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
 // Through the app
 // ---------------------------------------------------------------------------------------------
 
-async fn body(response: Response) -> String {
+pub async fn body(response: Response) -> String {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
 /// An HTMX form post from a signed-in browser.
-fn post(uri: &str, browser: &Browser, content_type: &str, body: impl Into<Body>) -> Request<Body> {
+pub fn post(
+    uri: &str,
+    browser: &Browser,
+    content_type: &str,
+    body: impl Into<Body>,
+) -> Request<Body> {
     Request::post(uri)
         .header(header::COOKIE, &browser.cookie)
         .header(header::ORIGIN, ORIGIN)
@@ -259,9 +407,9 @@ fn post(uri: &str, browser: &Browser, content_type: &str, body: impl Into<Body>)
         .unwrap()
 }
 
-const FORM: &str = "application/x-www-form-urlencoded";
+pub const FORM: &str = "application/x-www-form-urlencoded";
 
-fn encoded(fields: &[(&str, &str)]) -> String {
+pub fn encoded(fields: &[(&str, &str)]) -> String {
     fields
         .iter()
         .map(|(k, v)| {
@@ -741,4 +889,116 @@ fn preview_of_a_new_stack_says_so_and_lists_no_redeploy() {
         "{html}"
     );
     assert!(html.contains(">Apply</button>"), "{html}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Re-resolve tags (ADR-0025, ADR-0049)
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stack_page_offers_reresolve_and_secrets() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"hx-post="/stacks/notes/reresolve/preview""#),
+        "{html}"
+    );
+    assert!(html.contains(r#"href="/stacks/notes/secrets""#), "{html}");
+}
+
+#[tokio::test]
+async fn reresolve_previews_the_moved_digests_then_applies_the_reviewed_revision() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let response = app
+        .send(post("/stacks/notes/reresolve/preview", &browser, FORM, ""))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(html.contains(r#"<tr class="changes">"#), "{html}");
+    assert!(html.contains(&digest(0xbb)), "{html}");
+    assert!(html.contains("<li>storage</li>"), "{html}");
+    assert!(
+        html.contains(r#"<input type="hidden" name="revision" value="1">"#),
+        "{html}"
+    );
+    assert!(
+        html.contains("Apply and redeploy 1 service</button>"),
+        "{html}"
+    );
+    // The preview changes nothing.
+    assert_eq!(app.stacks.calls(), [Call::ReresolvePreview("notes".into())]);
+
+    let response = app
+        .send(post(
+            "/stacks/notes/reresolve",
+            &browser,
+            FORM,
+            encoded(&[("revision", "1")]),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        crate::web::auth::tests::header(&response, "hx-redirect"),
+        "/stacks/notes/deployments/9"
+    );
+    assert!(
+        app.stacks
+            .calls()
+            .contains(&Call::Reresolve("notes".into(), 1))
+    );
+
+    // A confirmation for a revision that is no longer active is refused.
+    let response = app
+        .send(post(
+            "/stacks/notes/reresolve",
+            &browser,
+            FORM,
+            encoded(&[("revision", "4")]),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(body(response).await.contains("review the change again"));
+}
+
+#[tokio::test]
+async fn reresolve_with_unchanged_tags_offers_nothing_to_apply() {
+    let app = TestApp::new().await;
+    *app.stacks.tags_moved.lock().unwrap() = false;
+    let browser = app.sign_in().await;
+    let html = body(
+        app.send(post("/stacks/notes/reresolve/preview", &browser, FORM, ""))
+            .await,
+    )
+    .await;
+    assert!(html.contains("Every tag still resolves"), "{html}");
+    assert!(!html.contains("<button"), "{html}");
+
+    let response = app
+        .send(post(
+            "/stacks/notes/reresolve",
+            &browser,
+            FORM,
+            encoded(&[("revision", "1")]),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(html.contains("flash-info"), "{html}");
+    assert!(html.contains("nothing changed"), "{html}");
+}
+
+#[tokio::test]
+async fn reresolve_needs_the_csrf_token() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let request = Request::post("/stacks/notes/reresolve")
+        .header(header::COOKIE, &browser.cookie)
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::CONTENT_TYPE, FORM)
+        .body(Body::from("revision=1"))
+        .unwrap();
+    assert_eq!(app.send(request).await.status(), StatusCode::FORBIDDEN);
+    assert!(app.stacks.calls().is_empty());
 }

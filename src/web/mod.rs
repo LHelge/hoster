@@ -1,6 +1,7 @@
 //! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), container logs
-//! (ADR-0044, see `containers.rs`), the stack pages (ADR-0027, ADR-0049, see `stacks.rs`), and
-//! the deploy webhook handler (ADR-0042, ADR-0047).
+//! (ADR-0044, see `containers.rs`), the stack pages with their secrets (ADR-0027, ADR-0029,
+//! ADR-0049, see `stacks.rs`), Settings → Registries (ADR-0025, see `settings.rs`), and the
+//! deploy webhook handler (ADR-0042, ADR-0047).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
 //! binds the [`Listen`] address and serves until the root cancellation token is cancelled.
@@ -15,6 +16,7 @@ mod assets;
 mod auth;
 mod containers;
 mod pages;
+mod settings;
 mod stacks;
 
 use std::fmt;
@@ -42,7 +44,10 @@ use self::assets::Assets;
 use self::auth::Auth;
 use self::containers::{ContainerSource, Containers};
 use self::pages::Dashboard;
+use self::settings::{Registries, RegistryControl};
 use self::stacks::{StackControl, Stacks};
+
+pub use self::settings::RegistryAccess;
 
 /// Where the admin app listens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,31 +112,40 @@ pub struct WebApp {
     auth: Arc<Auth>,
     containers: Containers,
     stacks: Stacks,
+    registries: Registries,
 }
 
 impl WebApp {
     /// The app for `config`, with sessions in `store`, containers from `runtime`, stacks managed
-    /// through `orchestrator`, and the GitHub OAuth App's credentials read from their files or
-    /// systemd credentials. Fails when they are missing.
+    /// through `orchestrator`, registry credentials in `registry`, and the GitHub OAuth App's
+    /// credentials read from their files or systemd credentials. Fails when they are missing.
     pub fn from_config<R: ContainerRuntime>(
         config: &Config,
         store: Store,
         runtime: Arc<R>,
         orchestrator: Arc<Orchestrator<R>>,
+        registry: RegistryAccess,
     ) -> anyhow::Result<Self> {
         let auth = Auth::from_config(config, store).context("setting up the GitHub login")?;
-        Ok(WebApp::new(auth, runtime, Arc::new(orchestrator)))
+        Ok(WebApp::new(
+            auth,
+            runtime,
+            Arc::new(orchestrator),
+            Arc::new(registry),
+        ))
     }
 
     fn new(
         auth: Auth,
         containers: Arc<dyn ContainerSource>,
         stacks: Arc<dyn StackControl>,
+        registries: Arc<dyn RegistryControl>,
     ) -> Self {
         WebApp {
             auth: Arc::new(auth),
             containers: Containers::from(containers),
             stacks: Stacks::from(stacks),
+            registries: Registries::from(registries),
         }
     }
 
@@ -151,6 +165,16 @@ impl WebApp {
             .route("/stacks/{name}/deploy", post(Stacks::deploy))
             .route("/stacks/{name}/remove", post(Stacks::remove))
             .route(
+                "/stacks/{name}/secrets",
+                get(Stacks::secrets_page).post(Stacks::save_secret),
+            )
+            .route("/stacks/{name}/secrets/delete", post(Stacks::delete_secret))
+            .route(
+                "/stacks/{name}/reresolve/preview",
+                post(Stacks::reresolve_preview),
+            )
+            .route("/stacks/{name}/reresolve", post(Stacks::reresolve))
+            .route(
                 "/stacks/{name}/deployments/{id}",
                 get(Stacks::deployment_page),
             )
@@ -161,6 +185,13 @@ impl WebApp {
             .route("/apply", get(Stacks::apply_form).post(Stacks::apply))
             .route("/apply/preview", post(Stacks::preview))
             .layer(Extension(self.stacks.clone()))
+            .route(
+                "/settings/registries",
+                get(Registries::page).post(Registries::save),
+            )
+            .route("/settings/registries/delete", post(Registries::delete))
+            .route("/settings/registries/test", post(Registries::test))
+            .layer(Extension(self.registries.clone()))
             .route("/healthz", get(WebApp::healthz))
             .route("/assets/{file}", get(Assets::serve))
             .merge(Auth::routes())
