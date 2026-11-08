@@ -1,16 +1,17 @@
 ---
 id: cu8
 title: "Stack overview: KPI tiles, slowest routes, routes and volumes cards"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:20:03.989743305Z"
-updated: "2026-11-08T18:20:03.989743305Z"
+updated: "2026-11-08T20:40:22.303656095Z"
 tags:
   - web
   - ui
 depends_on:
   - "7wg"
 parent: "8bf"
+attempts: 1
 ---
 
 Add the data-driven sections of `docs/design/StackDetail.dc.html` that hoster can fill today.

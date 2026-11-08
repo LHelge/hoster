@@ -113,6 +113,12 @@ image = "ghcr.io/acme/docs"
 [[services.site.routes]]
 host = "acme.example.com"
 prefix = "/docs"
+strip_prefix = true
+port = 8080
+timeouts = { read = "60s", idle = "120s" }
+
+[[services.site.routes]]
+host = "docs.example.com"
 port = 8080
 "#;
 
@@ -586,27 +592,44 @@ impl Fixtures {
     /// Requests of every status class, slow and fast, plus the dashboard's other statistics.
     fn statistics(app: &TestApp) {
         let ms = Duration::from_millis;
-        for (host, stack, service, requests) in [
+        for (host, prefix, stack, service, requests) in [
             (
                 "notes.example.com",
+                "/",
                 "notes",
                 "api",
                 vec![(200, 12, 180), (304, 3, 12), (404, 8, 6)],
             ),
             (
                 "blog.example.com",
+                "/",
                 "blog",
                 "web",
                 vec![(200, 40, 640), (301, 9, 30), (502, 900, 4)],
             ),
             (
+                "www.blog.example.com",
+                "/",
+                "blog",
+                "web",
+                vec![(200, 15, 60), (301, 2, 41)],
+            ),
+            (
                 "shop.example.com",
+                "/",
                 "shop",
                 "storefront",
                 vec![(200, 85, 90), (500, 1200, 2), (429, 2, 11)],
             ),
+            (
+                "acme.example.com",
+                "/docs",
+                "docs",
+                "site",
+                vec![(200, 4, 30)],
+            ),
         ] {
-            let route = Self::route(stack, service, "/");
+            let route = Self::route(stack, service, prefix);
             for (status, latency, count) in requests {
                 for i in 0..count {
                     app.traffic.route(host, &route).finish(RequestOutcome {
@@ -655,6 +678,7 @@ impl Fixtures {
                 ("blog.example.com", 5 * DAY),
                 ("www.blog.example.com", 5 * DAY),
                 ("notes.example.com", 44 * DAY),
+                ("docs.example.com", 60 * DAY),
             ]
             .map(|(host, left)| CertExpiry {
                 host: host.into(),
@@ -950,6 +974,10 @@ async fn ui_preview() {
         ("/stacks/blog", "Stack: blog (crash looping)"),
         ("/stacks/shop", "Stack: shop (deploying, queued)"),
         ("/stacks/wiki", "Stack: wiki (deploy failed)"),
+        (
+            "/stacks/docs",
+            "Stack: docs (not deployed, stripped prefix with timeouts)",
+        ),
         ("/stacks/notes/secrets", "Secrets of notes"),
         ("/stacks/notes/deployments", "Deployments of notes"),
         ("/stacks/notes/deployments/3", "Deployment: live"),

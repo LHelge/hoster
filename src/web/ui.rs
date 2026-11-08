@@ -223,10 +223,6 @@ impl askama::filters::HtmlSafe for Pill {}
 /// slowest requests), drawn on the server as an SVG whose geometry is attributes: the CSP allows
 /// no inline styles, so the filled width cannot be a CSS value. The bar stretches to the width
 /// CSS gives `.meter`; the tone colours the fill.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the page tasks of epic 8bf draw the first meters")
-)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Meter {
     value: f64,
@@ -236,10 +232,6 @@ pub struct Meter {
     label: String,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the page tasks of epic 8bf draw the first meters")
-)]
 impl Meter {
     /// The viewBox width: the fill is drawn in hundredths of the track.
     const WIDTH: f64 = 100.0;
@@ -277,10 +269,9 @@ impl fmt::Display for Meter {
         let (w, h) = (Self::WIDTH, Self::HEIGHT);
         write!(
             f,
-            r#"<svg class="meter meter-{tone}" role="img" aria-label="{label}" width="{w}" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none"><rect class="meter-track" width="{w}" height="{h}" rx="{r}"></rect><rect class="meter-fill" width="{fill}" height="{h}" rx="{r}"></rect></svg>"#,
+            r#"<svg class="meter meter-{tone}" role="img" aria-label="{label}" width="{w}" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none"><rect class="meter-track" width="{w}" height="{h}"></rect><rect class="meter-fill" width="{fill}" height="{h}"></rect></svg>"#,
             tone = self.tone,
             label = Escaped(&self.label),
-            r = h / 2,
             fill = self.fill_width(),
         )
     }
@@ -288,6 +279,80 @@ impl fmt::Display for Meter {
 
 /// The label is escaped by `Display`; everything else is numbers.
 impl askama::filters::HtmlSafe for Meter {}
+
+/// A KPI tile: a small upper-case label, a large figure and a line of detail, the figure in the
+/// tone's colour when the tone is not [`Tone::Neutral`]. Tiles go in a `<dl class="kpis">`;
+/// each is a `<div>` holding the label as `<dt>` and the figure and detail as `<dd>`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kpi {
+    label: String,
+    value: String,
+    sub: String,
+    tone: Tone,
+    /// A tooltip saying what the figure counts.
+    title: Option<String>,
+}
+
+impl Kpi {
+    /// A neutral tile.
+    pub fn new(label: impl fmt::Display, value: impl fmt::Display, sub: impl fmt::Display) -> Self {
+        Self {
+            label: label.to_string(),
+            value: value.to_string(),
+            sub: sub.to_string(),
+            tone: Tone::Neutral,
+            title: None,
+        }
+    }
+
+    /// The same tile in `tone`.
+    pub fn tone(mut self, tone: Tone) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    /// The same tile with a tooltip.
+    pub fn title(mut self, title: impl fmt::Display) -> Self {
+        self.title = Some(title.to_string());
+        self
+    }
+}
+
+/// The markup; every text is escaped here, since templates insert it unescaped.
+impl fmt::Display for Kpi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, r#"<div class="kpi kpi-{}""#, self.tone)?;
+        if let Some(title) = &self.title {
+            write!(f, r#" title="{}""#, Escaped(title))?;
+        }
+        write!(
+            f,
+            r#"><dt class="kpi-label">{}</dt><dd class="kpi-value">{}</dd><dd class="kpi-sub">{}</dd></div>"#,
+            Escaped(&self.label),
+            Escaped(&self.value),
+            Escaped(&self.sub),
+        )
+    }
+}
+
+impl askama::filters::HtmlSafe for Kpi {}
+
+/// A count with its thousands grouped by commas, as the UI writes large numbers: `595,904`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Count(pub u64);
+
+impl fmt::Display for Count {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let digits = self.0.to_string();
+        for (i, digit) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
+                f.write_str(",")?;
+            }
+            write!(f, "{digit}")?;
+        }
+        Ok(())
+    }
+}
 
 /// Text HTML-escaped the way Askama escapes template values.
 struct Escaped<'a>(&'a str);
@@ -369,11 +434,40 @@ mod tests {
     }
 
     #[test]
+    fn a_kpi_renders_escaped_with_its_tone() {
+        assert_eq!(
+            Kpi::new("p95", "1.2 s", "<slowest>")
+                .tone(Tone::Warn)
+                .title("over 5 min")
+                .to_string(),
+            r#"<div class="kpi kpi-warn" title="over 5 min"><dt class="kpi-label">p95</dt><dd class="kpi-value">1.2 s</dd><dd class="kpi-sub">&#60;slowest&#62;</dd></div>"#
+        );
+        assert!(
+            Kpi::new("a", "b", "c")
+                .to_string()
+                .starts_with(r#"<div class="kpi kpi-neutral">"#)
+        );
+    }
+
+    #[test]
+    fn counts_group_thousands() {
+        for (n, text) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (595_904, "595,904"),
+            (12_345_678, "12,345,678"),
+        ] {
+            assert_eq!(Count(n).to_string(), text);
+        }
+    }
+
+    #[test]
     fn a_meter_draws_its_fraction_as_attributes() {
         let meter = Meter::new(12.0, 90.0, Tone::Warn, "12 of 90 days left");
         assert_eq!(
             meter.to_string(),
-            r#"<svg class="meter meter-warn" role="img" aria-label="12 of 90 days left" width="100" height="6" viewBox="0 0 100 6" preserveAspectRatio="none"><rect class="meter-track" width="100" height="6" rx="3"></rect><rect class="meter-fill" width="13.3" height="6" rx="3"></rect></svg>"#
+            r#"<svg class="meter meter-warn" role="img" aria-label="12 of 90 days left" width="100" height="6" viewBox="0 0 100 6" preserveAspectRatio="none"><rect class="meter-track" width="100" height="6"></rect><rect class="meter-fill" width="13.3" height="6"></rect></svg>"#
         );
         assert!(!meter.to_string().contains("style="));
     }

@@ -550,7 +550,8 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 
 /* ---- Meters (src/web/ui.rs, Meter): an SVG bar whose geometry is attributes ----------------- */
 
-.meter { display: block; width: 100%; height: 6px; }
+/* Rounded in CSS: the viewBox stretches to the meter's width, which would stretch an rx too. */
+.meter { display: block; width: 100%; height: 6px; border-radius: 3px; overflow: hidden; }
 .meter-track { fill: var(--border); }
 .meter-fill { fill: var(--muted); }
 .meter-ok .meter-fill { fill: var(--ok); }
@@ -573,6 +574,11 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .kpi-label { color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
 .kpi-value { font-family: var(--mono); font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .kpi-sub { color: var(--text-2); font-family: var(--mono); font-size: 11px; }
+.kpi dd { margin: 0; overflow-wrap: anywhere; }
+.kpi-ok .kpi-value { color: var(--ok); }
+.kpi-progress .kpi-value { color: var(--progress); }
+.kpi-warn .kpi-value { color: var(--warn); }
+.kpi-fail .kpi-value { color: var(--fail); }
 
 /* ---- Flash messages ------------------------------------------------------------------------- */
 
@@ -791,6 +797,7 @@ p.stack-stats { font-size: 12px; }
 /* Stack overview (src/web/stacks/overview.rs) */
 .card-count, .card-note { color: var(--muted); font-family: var(--mono); font-size: 12px; font-weight: 400; }
 .card > p.card-body { margin: 0; border-bottom: 1px solid var(--divider); font-size: 13px; }
+.card > p.card-body:last-child { border-bottom: 0; }
 .card-result:not(:empty) { padding: 0 18px 4px; }
 .tag {
   display: inline-block;
@@ -832,6 +839,36 @@ table.services { min-width: 640px; }
 .danger-row { display: flex; gap: 8px; }
 .danger-row input { flex: 1; min-width: 0; min-height: 44px; font: 13px/1.4 var(--mono); }
 .danger-row button.danger { min-height: 44px; }
+
+/* Slowest routes: the p95 bar in the p95 colour unless the route is flagged slow. */
+.slow-routes { display: flex; flex-direction: column; gap: 14px; margin: 0; list-style: none; font: 12px/1.5 var(--mono); }
+.slow-routes li { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.slow-route-head { display: flex; justify-content: space-between; gap: 10px; }
+.slow-route-name { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.slow-route-p95 { flex: none; color: var(--p95); font-weight: 600; font-variant-numeric: tabular-nums; }
+.slowest .meter-neutral .meter-fill { fill: var(--p95); }
+.slow-route-counts { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 0; color: var(--text-2); }
+.slow-route-counts div { display: flex; gap: 5px; }
+.slow-route-counts dt { color: var(--muted); }
+.slow-route-counts dd { margin: 0; font-variant-numeric: tabular-nums; }
+.slow-route-counts .pill { font-size: 11px; }
+
+/* Routes and volumes, side by side where there is room. */
+.card-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 0 16px; }
+.card-pair > .card { min-width: 0; }
+.route-rows, .volume-rows { display: flex; flex-direction: column; gap: 10px; margin: 0; list-style: none; font: 12px/1.6 var(--mono); }
+.route-rows li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.route-url { color: var(--link); overflow-wrap: anywhere; }
+.route-arrow { color: var(--muted); }
+.route-target { color: var(--text); }
+.route-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.route-tags .tag { margin-left: 0; }
+.route-tags .pill { font-size: 11px; }
+.route-tls { text-decoration: none; }
+.tag-ok { background: var(--ok-tint); color: var(--ok); }
+.volume-rows { gap: 6px; }
+.volume-rows li { overflow-wrap: anywhere; }
+p.card-foot { margin: 0; }
 
 @media (max-width: 760px) {
   .stack-head .page-actions { padding-top: 0; }

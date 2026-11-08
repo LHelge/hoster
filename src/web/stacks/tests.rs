@@ -1470,3 +1470,101 @@ async fn reresolve_needs_the_csrf_token() {
     assert_eq!(app.send(request).await.status(), StatusCode::FORBIDDEN);
     assert!(app.stacks.calls().is_empty());
 }
+
+#[tokio::test]
+async fn the_overview_shows_kpis_slowest_routes_routes_and_volumes() {
+    use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
+    use crate::stack::RouteTimeouts;
+    use crate::stats::{CertExpiry, RequestOutcome};
+    use crate::store::DeploymentOutcome;
+
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let toml = format!(
+        "{NOTES}\n[[services.api.routes]]\nhost = \"notes.example.com\"\nprefix = \"/files\"\nstrip_prefix = true\nport = 9000\ntimeouts = {{ read = \"60s\" }}\n\n[services.api.volumes]\ndata = \"/data\"\n"
+    );
+    app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 1, &toml);
+    let entry = |prefix: &str| RouteEntry {
+        owner: Owner::Route(RouteOwner {
+            stack: "notes".parse().unwrap(),
+            service: "api".parse().unwrap(),
+        }),
+        prefix: prefix.parse().unwrap(),
+        prefix_str: prefix.to_owned(),
+        strip_prefix: false,
+        target: Target::Unavailable {
+            retry_after: std::time::Duration::from_secs(1),
+        },
+        timeouts: RouteTimeouts::default(),
+    };
+    for (prefix, status, ms) in [("/", 200, 5), ("/", 503, 5), ("/files", 200, 2_000)] {
+        app.traffic
+            .route("notes.example.com", &entry(prefix))
+            .finish(RequestOutcome {
+                status: Some(status),
+                latency: std::time::Duration::from_millis(ms),
+                upstream_error: false,
+            });
+    }
+    app.stats
+        .deployments
+        .lock()
+        .unwrap()
+        .push(DeploymentOutcome {
+            stack: "notes".into(),
+            state: DeploymentState::Failed,
+            count: 2,
+            mean: std::time::Duration::from_secs(5),
+            max: std::time::Duration::from_secs(9),
+        });
+    app.stats.certificates.lock().unwrap().push(CertExpiry {
+        host: "notes.example.com".into(),
+        not_after: std::time::SystemTime::now() + std::time::Duration::from_secs(61 * 86_400 + 60),
+    });
+
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    // The tiles: 3 requests, one 5xx, the slowest route's p95, two failed deploys.
+    assert!(
+        html.contains(r#"<dt class="kpi-label">requests</dt><dd class="kpi-value">3</dd>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<div class="kpi kpi-fail" title="Share of 5xx responses since hoster started"><dt class="kpi-label">5xx</dt><dd class="kpi-value">33.3 %</dd><dd class="kpi-sub">1 of 3</dd>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<dt class="kpi-label">deploys · 30 d</dt><dd class="kpi-value">0 live</dd><dd class="kpi-sub">2 failed</dd>"#),
+        "{html}"
+    );
+    // The slowest route comes first.
+    let files = html.find(r#"<span class="slow-route-name">notes.example.com/files"#);
+    let root = html.find(r#"<span class="slow-route-name">notes.example.com <span"#);
+    assert!(files.is_some() && root.is_some() && files < root, "{html}");
+    assert!(html.contains("<dt>5xx</dt><dd>1</dd>"), "{html}");
+    // The routes card, with the certificate's days left and the route's settings.
+    assert!(
+        html.contains(r#"<span class="route-url">https://notes.example.com/files</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="route-target">api:9000</span>"#),
+        "{html}"
+    );
+    assert!(html.contains(">TLS · 61 d left</span>"), "{html}");
+    assert!(
+        html.contains(r#"<span class="tag">strip prefix</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="tag">read timeout 1 min</span>"#),
+        "{html}"
+    );
+    // The volumes card names where the active revision mounts each volume.
+    assert!(
+        html.contains(
+            r#"<li><code>hoster-notes-data</code> <span class="muted">→ api:/data</span></li>"#
+        ),
+        "{html}"
+    );
+    assert!(!html.contains("style="), "{html}");
+}
