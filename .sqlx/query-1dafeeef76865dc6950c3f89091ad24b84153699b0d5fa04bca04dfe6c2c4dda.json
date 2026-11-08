@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT 1 AS one FROM stacks WHERE name = ?",
+  "query": "SELECT 1 AS one FROM stacks WHERE name = ? AND removed_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -17,5 +17,5 @@
       false
     ]
   },
-  "hash": "6909dae86c025ebea8f22ef4d482a48703d00b2e3d55554dd85837fd1fea8e4c"
+  "hash": "1dafeeef76865dc6950c3f89091ad24b84153699b0d5fa04bca04dfe6c2c4dda"
 }

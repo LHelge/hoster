@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "UPDATE stacks SET last_generation = last_generation + 1\n               WHERE name = (SELECT stack FROM deployments WHERE id = ?)\n               RETURNING last_generation AS \"generation!: u32\"",
+  "query": "UPDATE stacks SET last_generation = last_generation + 1\n               WHERE name = ? AND removed_at IS NULL\n               RETURNING last_generation AS \"generation!: u32\"",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "577038e9fe35ef05c4ebade1b6fc9dbd7876d2a26dcd1f7ecd83b33b9d026a3c"
+  "hash": "c3ce5455b07c1b653cb7f96c28ab000bbb96e0b69cdf9e2c79fd942b7d10a7f6"
 }

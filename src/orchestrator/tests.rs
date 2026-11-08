@@ -625,19 +625,187 @@ async fn typed_errors_for_bad_requests() {
 }
 
 #[tokio::test]
-async fn remove_deletes_containers_network_and_records() {
+async fn remove_deletes_containers_network_and_pointers_but_keeps_history_and_volumes() {
     let h = harness().await;
     h.bootstrap().await;
-    let removed = h.orchestrator.remove("notes").await.unwrap();
+    let history = h.store.deployments("notes", 100).await.unwrap();
+    let removed = h
+        .orchestrator
+        .remove(RemoveStack::keeping_volumes("notes"))
+        .await
+        .unwrap();
     assert_eq!(removed.containers, 3);
+    assert!(removed.volumes.is_empty());
     assert!(h.runtime.containers().is_empty());
     assert!(h.runtime.networks().is_empty());
+    assert_eq!(h.runtime.volume_names(), ["hoster-notes-data"]);
+    assert!(!h.runtime.calls().contains(&Operation::RemoveVolume));
     assert!(h.store.stack("notes").await.unwrap().is_none());
+    assert!(h.store.services("notes").await.unwrap().is_empty());
     assert!(h.store.port_allocations().await.unwrap().is_empty());
+    assert!(h.orchestrator.status().await.unwrap().is_empty());
+    // The history is retained.
+    assert_eq!(h.store.deployments("notes", 100).await.unwrap(), history);
+    assert_eq!(h.store.revisions("notes").await.unwrap().len(), 1);
+
     assert!(matches!(
-        h.orchestrator.remove("notes").await.unwrap_err(),
+        h.orchestrator
+            .remove(RemoveStack::keeping_volumes("notes"))
+            .await
+            .unwrap_err(),
         OrchestratorError::UnknownStack(_)
     ));
+    // Neither the webhook nor a rollback revives a removed stack.
+    assert!(matches!(
+        h.orchestrator
+            .deploy(
+                "notes",
+                DigestSet::from([("api".into(), digest(5))]),
+                DeploymentSource::Webhook
+            )
+            .await
+            .unwrap_err(),
+        OrchestratorError::UnknownStack(_)
+    ));
+    assert!(matches!(
+        h.orchestrator
+            .rollback("notes", history[0].id)
+            .await
+            .unwrap_err(),
+        OrchestratorError::UnknownStack(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_removed_stack_can_be_applied_again_and_reuses_its_volume() {
+    let h = harness().await;
+    h.bootstrap().await;
+    let before = h.generations().await;
+    h.orchestrator
+        .remove(RemoveStack::keeping_volumes("notes"))
+        .await
+        .unwrap();
+    let applied = h.apply(NOTES).await;
+    let done = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(done.state, S::Live, "{done:?}");
+    assert_eq!(applied.revision.revision, 2);
+    // Generations carry on, so container names never repeat.
+    let storage = |g: &[(String, u32)]| g.iter().find(|(s, _)| s == "storage").unwrap().1;
+    assert!(storage(&h.generations().await) > storage(&before));
+    assert_eq!(h.runtime.volume_names(), ["hoster-notes-data"]);
+}
+
+#[tokio::test]
+async fn deleting_volumes_needs_the_stack_name_as_confirmation() {
+    let h = harness().await;
+    h.bootstrap().await;
+    let unconfirmed = RemoveStack {
+        confirmation: None,
+        ..RemoveStack::deleting_volumes("notes", "notes")
+    };
+    for request in [unconfirmed, RemoveStack::deleting_volumes("notes", "Notes")] {
+        assert!(matches!(
+            h.orchestrator.remove(request).await.unwrap_err(),
+            OrchestratorError::VolumeConfirmation { .. }
+        ));
+    }
+    // Refused before anything was touched.
+    assert_eq!(h.runtime.containers().len(), 3);
+    assert!(h.store.stack("notes").await.unwrap().is_some());
+
+    let removed = h
+        .orchestrator
+        .remove(RemoveStack::deleting_volumes("notes", "notes"))
+        .await
+        .unwrap();
+    assert_eq!(removed.containers, 3);
+    assert_eq!(removed.volumes, ["hoster-notes-data"]);
+    assert!(h.runtime.volume_names().is_empty());
+    assert!(h.store.stack("notes").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn the_kept_volumes_of_a_removed_stack_can_be_deleted_later() {
+    let h = harness().await;
+    h.bootstrap().await;
+    h.orchestrator
+        .remove(RemoveStack::keeping_volumes("notes"))
+        .await
+        .unwrap();
+    assert_eq!(h.runtime.volume_names(), ["hoster-notes-data"]);
+
+    // Still only with the confirmation.
+    assert!(matches!(
+        h.orchestrator
+            .remove(RemoveStack::deleting_volumes("notes", "nope"))
+            .await
+            .unwrap_err(),
+        OrchestratorError::VolumeConfirmation { .. }
+    ));
+    let deleted = h
+        .orchestrator
+        .remove(RemoveStack::deleting_volumes("notes", "notes"))
+        .await
+        .unwrap();
+    assert_eq!(deleted.containers, 0);
+    assert_eq!(deleted.volumes, ["hoster-notes-data"]);
+    assert!(h.runtime.volume_names().is_empty());
+    // The stack stays removed, with its history.
+    assert!(h.store.stack("notes").await.unwrap().is_none());
+    assert_eq!(h.store.revisions("notes").await.unwrap().len(), 1);
+
+    // A stack that never existed has no volumes to delete.
+    assert!(matches!(
+        h.orchestrator
+            .remove(RemoveStack::deleting_volumes("ghost", "ghost"))
+            .await
+            .unwrap_err(),
+        OrchestratorError::UnknownStack(_)
+    ));
+}
+
+#[tokio::test]
+async fn removing_a_stack_mid_deploy_aborts_the_deploy_first() {
+    // The health check would take a minute; the removal must not wait for it.
+    let h = harness_with(Duration::from_secs(60)).await;
+    let applied = h.apply(NOTES).await;
+    let active = applied.deployment.unwrap();
+    assert_ne!(active.state, S::Queued);
+    let queued = h.deploy(&[("api", 1)]).await;
+    assert_eq!(queued.state, S::Queued);
+
+    let removed = tokio::time::timeout(
+        Duration::from_secs(10),
+        h.orchestrator.remove(RemoveStack::keeping_volumes("notes")),
+    )
+    .await
+    .expect("removal does not wait for the health check")
+    .unwrap();
+    assert_eq!(removed.containers, 0, "the abort removed the new container");
+
+    let aborted = h
+        .store
+        .deployment(active.deployment)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(aborted.state, S::Failed | S::Rejected),
+        "{aborted:?}"
+    );
+    assert_eq!(aborted.error.as_deref(), Some("stack removed"));
+    let superseded = h
+        .store
+        .deployment(queued.deployment)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(superseded.state, S::Superseded);
+    assert!(h.runtime.containers().is_empty());
+    assert!(h.runtime.networks().is_empty());
+    assert!(h.store.port_allocations().await.unwrap().is_empty());
+    assert!(h.store.stack("notes").await.unwrap().is_none());
+    assert!(h.orchestrator.status().await.unwrap().is_empty());
 }
 
 /// A stack whose api reads a secret, plus a two-port service and an unrouted worker.
@@ -764,7 +932,10 @@ async fn volumes_are_created_labelled_before_their_container_and_kept_on_removal
         .unwrap();
     assert!(calls[ensure + 1..].contains(&Operation::CreateContainer));
 
-    h.orchestrator.remove("notes").await.unwrap();
+    h.orchestrator
+        .remove(RemoveStack::keeping_volumes("notes"))
+        .await
+        .unwrap();
     assert!(h.runtime.containers().is_empty());
     assert_eq!(h.runtime.volumes(), volumes);
 }
@@ -893,10 +1064,33 @@ data = "/data"
         .await
         .unwrap();
     let second = orchestrator.wait(deployed.deployment).await.unwrap();
-    let removed = orchestrator.remove("hostertest").await;
+    let kept = orchestrator
+        .remove(RemoveStack::keeping_volumes("hostertest"))
+        .await;
     assert_eq!(first.state, S::Live, "{first:?}");
     assert_eq!(second.state, S::Live, "{second:?}");
-    assert_eq!(removed.unwrap().containers, 3);
+    let kept = kept.unwrap();
+    assert_eq!(kept.containers, 3);
+    assert!(kept.volumes.is_empty());
+
+    // Re-apply (the volume is still there), then remove again deleting the volume.
+    let applied = orchestrator.apply(EXAMPLE).await.unwrap();
+    let again = orchestrator
+        .wait(applied.deployment.unwrap().deployment)
+        .await
+        .unwrap();
+    let deleted = orchestrator
+        .remove(RemoveStack::deleting_volumes("hostertest", "hostertest"))
+        .await;
+    assert_eq!(again.state, S::Live, "{again:?}");
+    assert_eq!(deleted.unwrap().volumes, ["hoster-hostertest-data"]);
+    assert!(matches!(
+        runtime.remove_volume("hoster-hostertest-data").await,
+        Err(RuntimeError::NotFound {
+            kind: ObjectKind::Volume,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
@@ -1041,7 +1235,9 @@ port = 9090
     let pointers = store.services("hostersecrets").await.unwrap();
     let app_env_2 = get(port_of(&pointers, "app", 8080), "/env");
     let runs = get(port_of(&pointers, "app", 8080), "/runs");
-    let removed = orchestrator.remove("hostersecrets").await;
+    let removed = orchestrator
+        .remove(RemoveStack::keeping_volumes("hostersecrets"))
+        .await;
     let volume_kept = std::process::Command::new("podman")
         .args(["volume", "exists", "hoster-hostersecrets-data"])
         .status()

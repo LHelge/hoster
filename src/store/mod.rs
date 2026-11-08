@@ -399,7 +399,7 @@ impl Store {
         let mut tx = self.begin().await?;
         sqlx::query!(
             "INSERT INTO stacks (name, created_at, updated_at) VALUES (?1, ?2, ?2)
-             ON CONFLICT (name) DO UPDATE SET updated_at = excluded.updated_at",
+             ON CONFLICT (name) DO UPDATE SET updated_at = excluded.updated_at, removed_at = NULL",
             stack,
             now,
         )
@@ -448,38 +448,56 @@ impl Store {
         .collect())
     }
 
-    /// One stack, if it exists.
+    /// One stack, if it exists and has not been removed.
     pub async fn stack(&self, name: &str) -> Result<Option<Stack>> {
         Ok(sqlx::query_as!(
             Stack,
             r#"SELECT name, last_generation AS "last_generation: u32",
                       created_at AS "created_at: Timestamp", updated_at AS "updated_at: Timestamp"
-               FROM stacks WHERE name = ?"#,
+               FROM stacks WHERE name = ? AND removed_at IS NULL"#,
             name,
         )
         .fetch_optional(&self.pool)
         .await?)
     }
 
-    /// Every stack, by name.
+    /// Every stack that has not been removed, by name.
     pub async fn stacks(&self) -> Result<Vec<Stack>> {
         Ok(sqlx::query_as!(
             Stack,
             r#"SELECT name, last_generation AS "last_generation: u32",
                       created_at AS "created_at: Timestamp", updated_at AS "updated_at: Timestamp"
-               FROM stacks ORDER BY name"#,
+               FROM stacks WHERE removed_at IS NULL ORDER BY name"#,
         )
         .fetch_all(&self.pool)
         .await?)
     }
 
-    /// Removes a stack with its revisions, deployment history, service pointers and port
-    /// reservations. Returns whether it existed.
+    /// Removes a stack: deletes its service pointers and port reservations and marks it
+    /// removed. Its revisions and deployment history are kept; applying the stack again revives
+    /// it. Returns whether a stack of that name existed and was not removed yet.
     pub async fn remove_stack(&self, name: &str) -> Result<bool> {
-        let done = sqlx::query!("DELETE FROM stacks WHERE name = ?", name)
-            .execute(&self.pool)
+        let now = Timestamp::now();
+        let mut tx = self.begin().await?;
+        let done = sqlx::query!(
+            "UPDATE stacks SET removed_at = ?1, updated_at = ?1
+             WHERE name = ?2 AND removed_at IS NULL",
+            now,
+            name,
+        )
+        .execute(&mut *tx)
+        .await?;
+        if done.rows_affected() == 0 {
+            return Ok(false);
+        }
+        sqlx::query!("DELETE FROM services WHERE stack = ?", name)
+            .execute(&mut *tx)
             .await?;
-        Ok(done.rows_affected() > 0)
+        sqlx::query!("DELETE FROM port_allocations WHERE stack = ?", name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// One revision by id.
@@ -495,13 +513,16 @@ impl Store {
         .await?)
     }
 
-    /// The newest revision of a stack.
+    /// The newest revision of a stack: its active one. A removed stack has none, although
+    /// [`Store::revisions`] still lists its history.
     pub async fn latest_revision(&self, stack: &str) -> Result<Option<StackRevision>> {
         Ok(sqlx::query_as!(
             StackRevision,
-            r#"SELECT id AS "id: RevisionId", stack, revision AS "revision: u32", toml,
-                      hash AS "hash: ContentHash", created_at AS "created_at: Timestamp"
-               FROM stack_revisions WHERE stack = ? ORDER BY revision DESC LIMIT 1"#,
+            r#"SELECT r.id AS "id: RevisionId", r.stack, r.revision AS "revision: u32", r.toml,
+                      r.hash AS "hash: ContentHash", r.created_at AS "created_at: Timestamp"
+               FROM stack_revisions r JOIN stacks s ON s.name = r.stack
+               WHERE r.stack = ? AND s.removed_at IS NULL
+               ORDER BY r.revision DESC LIMIT 1"#,
             stack,
         )
         .fetch_optional(&self.pool)
@@ -567,10 +588,13 @@ impl Store {
         let now = Timestamp::now();
         let state = DeploymentState::Received;
         let mut tx = self.begin().await?;
-        let exists = sqlx::query_scalar!("SELECT 1 AS one FROM stacks WHERE name = ?", new.stack)
-            .fetch_optional(&mut *tx)
-            .await?
-            .is_some();
+        let exists = sqlx::query_scalar!(
+            "SELECT 1 AS one FROM stacks WHERE name = ? AND removed_at IS NULL",
+            new.stack
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
         if !exists {
             return Err(StoreError::UnknownStack(new.stack.clone()));
         }
@@ -638,18 +662,24 @@ impl Store {
         Ok(())
     }
 
-    /// Takes the stack's next generation for a deployment (its `Validating` step, §5.1).
+    /// Takes the stack's next generation for a deployment (its `Validating` step, §5.1). A
+    /// removed stack hands out none, so a deployment that slipped past its removal is rejected
+    /// before it creates anything.
     pub async fn assign_generation(&self, id: DeploymentId) -> Result<u32> {
         let mut tx = self.begin().await?;
+        let stack = sqlx::query_scalar!("SELECT stack FROM deployments WHERE id = ?", id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(StoreError::UnknownDeployment(id))?;
         let generation = sqlx::query_scalar!(
             r#"UPDATE stacks SET last_generation = last_generation + 1
-               WHERE name = (SELECT stack FROM deployments WHERE id = ?)
+               WHERE name = ? AND removed_at IS NULL
                RETURNING last_generation AS "generation!: u32""#,
-            id,
+            stack,
         )
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or(StoreError::UnknownDeployment(id))?;
+        .ok_or_else(|| StoreError::UnknownStack(stack.clone()))?;
         sqlx::query!(
             "UPDATE deployments SET generation = ?, updated_at = ? WHERE id = ?",
             generation,
@@ -986,11 +1016,13 @@ impl Store {
     ) -> Result<Option<PortAllocation>> {
         let now = Timestamp::now();
         let mut tx = self.begin().await?;
-        let exists =
-            sqlx::query_scalar!("SELECT 1 AS one FROM stacks WHERE name = ?", request.stack)
-                .fetch_optional(&mut *tx)
-                .await?
-                .is_some();
+        let exists = sqlx::query_scalar!(
+            "SELECT 1 AS one FROM stacks WHERE name = ? AND removed_at IS NULL",
+            request.stack
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
         if !exists {
             return Err(StoreError::UnknownStack(request.stack.clone()));
         }

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT name, last_generation AS \"last_generation: u32\",\n                      created_at AS \"created_at: Timestamp\", updated_at AS \"updated_at: Timestamp\"\n               FROM stacks WHERE name = ?",
+  "query": "SELECT name, last_generation AS \"last_generation: u32\",\n                      created_at AS \"created_at: Timestamp\", updated_at AS \"updated_at: Timestamp\"\n               FROM stacks WHERE name = ? AND removed_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -58,5 +58,5 @@
       false
     ]
   },
-  "hash": "c27f5e3b36ad598a31d339d26f3e9db174661aed61a55fa9de7045cb6fa30f07"
+  "hash": "2497a0039fe9512434dbdc685d3bb5818599afb08de5ef72334fb0029c57ffd1"
 }

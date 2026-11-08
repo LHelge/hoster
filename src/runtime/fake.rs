@@ -1,9 +1,9 @@
 //! [`FakeRuntime`]: an in-memory [`ContainerRuntime`] for deploy-engine and reconciler tests.
 //!
 //! It models just enough of podman to catch ordering mistakes: containers need their image
-//! pulled and their network and volumes present, names are unique, networks with containers
-//! cannot be removed, and volumes are never removed. Failures are injected per [`Operation`],
-//! and every call is recorded.
+//! pulled and their network and volumes present, names are unique, and networks and volumes
+//! with containers cannot be removed. Failures are injected per [`Operation`], and every call
+//! is recorded.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
@@ -141,9 +141,14 @@ impl FakeRuntime {
         self.lock().networks.values().cloned().collect()
     }
 
-    /// Every volume ever created (volumes are never removed).
+    /// Every volume that currently exists.
     pub fn volumes(&self) -> Vec<VolumeSpec> {
         self.lock().volumes.values().cloned().collect()
+    }
+
+    /// The names of every volume that currently exists.
+    pub fn volume_names(&self) -> Vec<String> {
+        self.lock().volumes.keys().cloned().collect()
     }
 
     pub fn has_image(&self, image: &PinnedImage) -> bool {
@@ -306,6 +311,29 @@ impl ContainerRuntime for FakeRuntime {
         state.enter(Operation::Remove)?;
         state.container(id)?;
         state.containers.remove(id);
+        Ok(())
+    }
+
+    async fn remove_volume(&self, name: &str) -> Result<(), RuntimeError> {
+        let mut state = self.lock();
+        state.enter(Operation::RemoveVolume)?;
+        if !state.volumes.contains_key(name) {
+            return Err(RuntimeError::NotFound {
+                kind: ObjectKind::Volume,
+                name: name.to_owned(),
+            });
+        }
+        if state
+            .containers
+            .values()
+            .any(|c| c.spec.volumes.iter().any(|v| v.volume() == name))
+        {
+            return Err(RuntimeError::InUse {
+                kind: ObjectKind::Volume,
+                name: name.to_owned(),
+            });
+        }
+        state.volumes.remove(name);
         Ok(())
     }
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO stacks (name, created_at, updated_at) VALUES (?1, ?2, ?2)\n             ON CONFLICT (name) DO UPDATE SET updated_at = excluded.updated_at, removed_at = NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "78aa16348af345e3094c8b7a91c5a55ab357955fac035bd730e9ee784fb7d2b9"
+}

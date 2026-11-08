@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE stacks SET removed_at = ?1, updated_at = ?1\n             WHERE name = ?2 AND removed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "90cb347b4f220ce14af290517d8863086c251a851300e100b1e2f643fdfabe66"
+}

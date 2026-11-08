@@ -110,6 +110,11 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// Removes a container, killing it first if it is still running.
     fn remove(&self, id: &ContainerId) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
+    /// Removes a named volume and its data. Fails with [`RuntimeError::NotFound`] when there is
+    /// no such volume and [`RuntimeError::InUse`] while a container mounts it. Only stack removal
+    /// with an explicit confirmation calls this (ADR-0030).
+    fn remove_volume(&self, name: &str) -> impl Future<Output = Result<(), RuntimeError>> + Send;
+
     /// The current state of one container.
     fn inspect(
         &self,
@@ -559,6 +564,7 @@ pub enum Operation {
     Start,
     Stop,
     Remove,
+    RemoveVolume,
     Inspect,
     ListManaged,
     Logs,
@@ -576,6 +582,7 @@ impl fmt::Display for Operation {
             Self::Start => "start container",
             Self::Stop => "stop container",
             Self::Remove => "remove container",
+            Self::RemoveVolume => "remove volume",
             Self::Inspect => "inspect container",
             Self::ListManaged => "list containers",
             Self::Logs => "read logs",

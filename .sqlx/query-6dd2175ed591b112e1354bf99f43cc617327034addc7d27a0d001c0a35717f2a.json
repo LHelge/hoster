@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "DELETE FROM stacks WHERE name = ?",
+  "query": "DELETE FROM services WHERE stack = ?",
   "describe": {
     "columns": [],
     "parameters": {
@@ -8,5 +8,5 @@
     },
     "nullable": []
   },
-  "hash": "0f0731198edfe204db62a26d6763b3854d14daa0c51e73e74efcf0edcacc1be3"
+  "hash": "6dd2175ed591b112e1354bf99f43cc617327034addc7d27a0d001c0a35717f2a"
 }

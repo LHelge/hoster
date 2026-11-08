@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id: RevisionId\", stack, revision AS \"revision: u32\", toml,\n                      hash AS \"hash: ContentHash\", created_at AS \"created_at: Timestamp\"\n               FROM stack_revisions WHERE stack = ? ORDER BY revision DESC LIMIT 1",
+  "query": "SELECT r.id AS \"id: RevisionId\", r.stack, r.revision AS \"revision: u32\", r.toml,\n                      r.hash AS \"hash: ContentHash\", r.created_at AS \"created_at: Timestamp\"\n               FROM stack_revisions r JOIN stacks s ON s.name = r.stack\n               WHERE r.stack = ? AND s.removed_at IS NULL\n               ORDER BY r.revision DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -82,5 +82,5 @@
       false
     ]
   },
-  "hash": "ae1cdc5a059adffbd51c01f712b00caa60a8992146a8868ce1ee4ee9cb87d7a6"
+  "hash": "0f69a5b84a3ccc0401439d53687c350edcc840026768f294547cc34231a957b3"
 }

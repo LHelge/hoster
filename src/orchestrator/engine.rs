@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 
 use futures_util::future::try_join_all;
@@ -167,11 +167,51 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
         };
         for effect in effects {
+            if let Some(event) = self.cancelled(run, &effect) {
+                tracing::info!(deployment = %run.id, "stack is being removed; aborting the deployment");
+                return Some(event);
+            }
             if let Some(event) = self.execute(run, effect).await {
                 return Some(event);
             }
         }
         None
+    }
+
+    /// While the stack is being removed, the work of a state before the commit point is skipped
+    /// and replaced by the event that ends the deployment: `Validating` rejects, the later
+    /// states abort (which undoes what the deployment did). From `Switching` on the
+    /// deployment runs to its end, since committed pointers cannot be undone (ADR-0048).
+    fn cancelled(&self, run: &Run, effect: &Effect) -> Option<Event> {
+        let reason = || super::STACK_REMOVED.to_owned();
+        let event = match effect {
+            Effect::Validate => Event::Invalid(reason()),
+            Effect::PullImages
+            | Effect::StartContainers
+            | Effect::Probe
+            | Effect::ReplaceStopFirst => Event::Failed(reason()),
+            _ => return None,
+        };
+        self.is_removing(run.target.stack().as_ref())
+            .then_some(event)
+    }
+
+    /// Runs `work` unless the stack's removal starts first; `None` when it did (`work` is
+    /// dropped). Used for the waits a removal should not sit through: pulls and health checks.
+    async fn unless_removed<T>(&self, run: &Run, work: impl Future<Output = T>) -> Option<T> {
+        let stack = run.target.stack().as_ref();
+        let mut work = pin!(work);
+        loop {
+            let mut removal = pin!(self.removal.notified());
+            removal.as_mut().enable();
+            if self.is_removing(stack) {
+                return None;
+            }
+            tokio::select! {
+                out = &mut work => return Some(out),
+                () = &mut removal => {}
+            }
+        }
     }
 
     /// Applies the pure transition function and updates the in-memory slot.
@@ -205,12 +245,19 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
             Effect::CheckRunning => Some(self.check_running(run).await),
             Effect::Validate => Some(self.validate(run).await),
-            Effect::PullImages => Some(self.pull(run).await),
+            Effect::PullImages => Some(
+                self.unless_removed(run, self.pull(run))
+                    .await
+                    .unwrap_or_else(|| Event::Failed(super::STACK_REMOVED.to_owned())),
+            ),
             Effect::StartContainers => Some(self.start_new(run).await),
-            Effect::Probe => Some(match self.settle(&run.created).await {
-                Ok(()) => Event::Healthy,
-                Err(reason) => Event::Failed(reason),
-            }),
+            Effect::Probe => Some(
+                match self.unless_removed(run, self.settle(&run.created)).await {
+                    Some(Ok(())) => Event::Healthy,
+                    Some(Err(reason)) => Event::Failed(reason),
+                    None => Event::Failed(super::STACK_REMOVED.to_owned()),
+                },
+            ),
             Effect::ReplaceStopFirst => Some(self.replace_stop_first(run).await),
             // M3: there is no proxy to publish a RouteTable to (§5.1).
             Effect::PublishRoutes => None,
@@ -405,8 +452,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 return Event::Failed(reason);
             }
             let new = run.created.last().cloned().into_iter().collect::<Vec<_>>();
-            if let Err(reason) = self.settle(&new).await {
-                return Event::Failed(reason);
+            match self.unless_removed(run, self.settle(&new)).await {
+                Some(Ok(())) => {}
+                Some(Err(reason)) => return Event::Failed(reason),
+                None => return Event::Failed(super::STACK_REMOVED.to_owned()),
             }
         }
         Event::Replaced

@@ -262,16 +262,35 @@ async fn unknown_stack_and_deployment_are_errors() {
         .unwrap_err();
     assert!(matches!(err, StoreError::UnknownStack(s) if s == "ghost"));
 
-    store.add_revision("blog", "x").await.unwrap();
-    let d = deployment(&store, "blog").await;
-    store.remove_stack("blog").await.unwrap();
     let err = store
-        .transition(d.id, DeploymentState::Live, None)
+        .transition(DeploymentId::from(999), DeploymentState::Live, None)
         .await
         .unwrap_err();
     assert!(matches!(err, StoreError::UnknownDeployment(_)));
-    assert!(store.assign_generation(d.id).await.is_err());
-    assert_eq!(store.deployment(d.id).await.unwrap(), None);
+    assert!(
+        store
+            .assign_generation(DeploymentId::from(999))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.deployment(DeploymentId::from(999)).await.unwrap(),
+        None
+    );
+
+    // A removed stack takes no new deployments.
+    store.add_revision("blog", "x").await.unwrap();
+    store.remove_stack("blog").await.unwrap();
+    let err = store
+        .create_deployment(&NewDeployment {
+            stack: "blog".into(),
+            revision: None,
+            source: DeploymentSource::Poller,
+            target: DigestSet::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::UnknownStack(s) if s == "blog"));
 }
 
 #[tokio::test]
@@ -471,20 +490,44 @@ async fn ports_are_reserved_once_and_released() {
 }
 
 #[tokio::test]
-async fn removing_a_stack_cascades() {
+async fn removing_a_stack_keeps_its_history() {
     let (_dir, store) = open().await;
     store.add_revision("blog", "x").await.unwrap();
     let d = deployment(&store, "blog").await;
+    let generation = store.assign_generation(d.id).await.unwrap();
     store
-        .commit(d.id, &[pointer("api", 1, None)], &[])
+        .commit(d.id, &[pointer("api", generation, Some(20000))], &[])
         .await
         .unwrap();
 
+    // A deployment created before the removal gets no generation after it.
+    let stale = deployment(&store, "blog").await;
     assert!(store.remove_stack("blog").await.unwrap());
     assert!(!store.remove_stack("blog").await.unwrap());
-    assert!(store.revisions("blog").await.unwrap().is_empty());
+    assert!(matches!(
+        store.assign_generation(stale.id).await.unwrap_err(),
+        StoreError::UnknownStack(s) if s == "blog"
+    ));
+    // Gone as a stack: no pointers, no active revision, not listed.
+    assert!(store.stack("blog").await.unwrap().is_none());
+    assert!(store.stacks().await.unwrap().is_empty());
+    assert!(store.latest_revision("blog").await.unwrap().is_none());
     assert!(store.services("blog").await.unwrap().is_empty());
-    assert!(store.events(d.id).await.unwrap().is_empty());
+    // The history stays.
+    assert_eq!(store.revisions("blog").await.unwrap().len(), 1);
+    assert_eq!(store.deployments("blog", 10).await.unwrap().len(), 2);
+    assert!(!store.events(d.id).await.unwrap().is_empty());
+
+    // Applying it again revives it; revisions and generations carry on.
+    let revision = store.add_revision("blog", "y").await.unwrap();
+    assert_eq!(revision.revision, 2);
+    assert_eq!(store.latest_revision("blog").await.unwrap(), Some(revision));
+    assert_eq!(store.stacks().await.unwrap().len(), 1);
+    let again = deployment(&store, "blog").await;
+    assert_eq!(
+        store.assign_generation(again.id).await.unwrap(),
+        generation + 1
+    );
 }
 
 #[tokio::test]

@@ -19,7 +19,8 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    LogsOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
+    LogsOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveVolumeOptions,
+    StopContainerOptionsBuilder,
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use futures_util::StreamExt;
@@ -252,6 +253,7 @@ impl<'a> Call<'a> {
                 (Operation::RemoveNetwork, _) if Self::in_use(&message) => {
                     RuntimeError::InUse { kind, name }
                 }
+                (Operation::RemoveVolume, 409) => RuntimeError::InUse { kind, name },
                 _ => RuntimeError::Api {
                     operation: self.operation,
                     message: format!("{kind} {name}: {message} (HTTP {status_code})"),
@@ -697,6 +699,15 @@ impl ContainerRuntime for PodmanRuntime {
             .inspect_container(id.as_ref(), None)
             .await
             .map(ContainerInfo::from)
+            .map_err(|err| call.error(err))
+    }
+
+    async fn remove_volume(&self, name: &str) -> Result<(), RuntimeError> {
+        let call = Call::new(Operation::RemoveVolume, ObjectKind::Volume, name);
+        // Not forced: a volume a container still mounts is reported as in use.
+        self.docker
+            .remove_volume(name, None::<RemoveVolumeOptions>)
+            .await
             .map_err(|err| call.error(err))
     }
 
