@@ -1,28 +1,36 @@
-<section class="preview">
-  <h2>Applying {{ stack }}</h2>
-  <p>{% if let Some(replaces) = replaces %}Replaces the active <a href="{{ stack_url }}">{{ replaces }}</a>.{% else %}Creates the new stack <strong>{{ stack }}</strong>.{% endif %}</p>
-  {%- if !warnings.is_empty() %}
-  <h3>Warnings</h3>
-  {%- let problems = warnings %}
-  {%- include "problems.html" %}
-  {%- endif %}
-  <h3>Will be redeployed</h3>
-  {%- if changed.is_empty() %}
-  <p class="redeploy-none">No service: every service already runs this configuration.</p>
-  {%- else %}
-  <ul class="redeploy">
-    {%- for service in changed %}
-    <li>{{ service }}</li>
+<section class="card plan-card" aria-labelledby="plan-title">
+  <div class="card-head"><h2 id="plan-title">Plan</h2><span class="card-note">{{ stack }}</span></div>
+  <ol class="plan">
+    {%- for step in steps %}
+    {%- include "plan_step.html" %}
+    {%- endfor %}
+    {%- include "pins.html" %}
+  </ol>
+</section>
+<section class="card plan-card" aria-labelledby="preflight-title">
+  <div class="card-head"><h2 id="preflight-title">Pre-flight</h2><span class="card-note">{% if warnings.is_empty() %}passed{% else %}{{ warnings.len() }} warning{% if warnings.len() != 1 %}s{% endif %}{% endif %}</span></div>
+  <ul class="checks">
+    {%- for check in checks %}
+    <li class="check-ok"><span class="check-mark" aria-hidden="true">✓</span><span class="check-body">{{ check }}</span></li>
     {%- endfor %}
   </ul>
+  {%- if !warnings.is_empty() %}
+  {%- let problems = warnings %}
+  {%- let problem_kind = "warn" %}
+  {%- include "problems.html" %}
   {%- endif %}
-  {%- if !pins.is_empty() %}
-  <h3>Third-party images</h3>
-  {%- include "pins.html" %}
-  {%- endif %}
-  <h3>Stack file</h3>
+</section>
+<form class="plan-confirm" hx-post="/apply" hx-target="#apply-result">
+  <input type="hidden" name="toml" value="{{ toml }}">
+  <button class="primary" type="submit">{{ crate::web::Icon::Apply }}{% if changed.is_empty() %}Apply{% else %}Apply and redeploy {{ changed.len() }} service{% if changed.len() != 1 %}s{% endif %}{% endif %}</button>
+  <p class="plan-hint">Tags are resolved again when you confirm.</p>
+  <a class="plan-cancel" href="/stacks">cancel</a>
+</form>
+<div id="apply-diff" hx-swap-oob="innerHTML">
+<section class="card diff-card" aria-labelledby="diff-title">
+  <div class="card-head"><h2 id="diff-title">Changes to the stack file</h2><span class="card-note">{{ against }}</span></div>
   {%- if diff.is_empty() %}
-  <p>The file is the same as the active revision.</p>
+  <p class="card-body">The file is the same as the active revision.</p>
   {%- else %}
   <div class="diff">
     {%- for hunk in diff.hunks %}
@@ -34,9 +42,5 @@
     {%- endfor %}
   </div>
   {%- endif %}
-  <form class="stack-form" hx-post="/apply" hx-target="#apply-result">
-    <input type="hidden" name="toml" value="{{ toml }}">
-    <p class="muted">Tags are resolved again when you confirm.</p>
-    <button type="submit">{{ crate::web::Icon::Apply }}{% if changed.is_empty() %}Apply{% else %}Apply and redeploy {{ changed.len() }} service{% if changed.len() != 1 %}s{% endif %}{% endif %}</button>
-  </form>
 </section>
+</div>

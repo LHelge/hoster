@@ -1,16 +1,17 @@
 ---
 id: uf5
 title: "Apply page as \"New stack\": editor with a Plan and Pre-flight aside"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:21:22.678694309Z"
-updated: "2026-11-08T18:21:22.678694309Z"
+updated: "2026-11-08T23:29:27.134423425Z"
 tags:
   - web
   - ui
 depends_on:
   - xhh
 parent: "8bf"
+attempts: 1
 ---
 
 Restyle `/apply` and its preview after the layout of `docs/design/NewStack.dc.html`. Stacks still come from a pasted or uploaded stack file (ADR-0027). The repo/branch/compose picker is not adopted.

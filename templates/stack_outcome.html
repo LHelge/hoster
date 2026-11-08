@@ -1,6 +1,7 @@
 <div class="flash flash-{{ kind }}" role="status">
   <p>{{ message }}{% if let Some(link) = link %} <a href="{{ link.href }}">{{ link.label }}</a>{% endif %}</p>
   {%- if !problems.is_empty() %}
+  {%- let problem_kind = "fail" %}
   {%- include "problems.html" %}
   {%- endif %}
 </div>

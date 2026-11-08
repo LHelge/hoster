@@ -1,14 +1,32 @@
 {% extends "base.html" %}
 {% block title %}Apply a stack file{% endblock %}
-{% block crumb %}<a href="/stacks">~/stacks</a>/apply{% endblock %}
+{% block crumb %}<a href="/stacks">~/stacks</a>/new{% endblock %}
 {% block heading %}Apply a stack file{% endblock %}
 {% block content %}
-<p class="muted">Paste the stack file or upload it. hoster checks it and shows what changes before anything is applied. <a href="/stacks">All stacks</a></p>
-<form class="stack-form" hx-post="/apply/preview" hx-target="#apply-result" enctype="multipart/form-data">
-  <label for="stack-toml">Stack file</label>
-  <textarea id="stack-toml" name="toml" rows="20" spellcheck="false"></textarea>
-  <label>or upload <input type="file" name="file" accept=".toml,text/plain,application/toml"></label>
-  <button type="submit">Check</button>
-</form>
-<div id="apply-result" aria-live="polite"></div>
+<p class="page-help">Paste the stack file or upload it. hoster checks it and shows what changes before anything is applied.</p>
+<div class="apply-layout">
+  <section class="card apply-editor" aria-labelledby="apply-file">
+    <div class="card-head step-head">
+      <span class="step-no" aria-hidden="true">1</span>
+      <h2 id="apply-file">Stack file</h2>
+    </div>
+    <form class="apply-form" hx-post="/apply/preview" hx-target="#apply-result" enctype="multipart/form-data">
+      <label class="visually-hidden" for="stack-toml">Stack file</label>
+      <textarea id="stack-toml" name="toml" rows="22" spellcheck="false" autocomplete="off" placeholder="version = 1&#10;name = &#34;…&#34;&#10;&#10;[services.web]&#10;image = &#34;…&#34;"></textarea>
+      <div class="apply-form-foot">
+        <label class="apply-upload">or upload <input type="file" name="file" accept=".toml,text/plain,application/toml"></label>
+        <button class="primary" type="submit">Check</button>
+      </div>
+    </form>
+  </section>
+  <aside class="apply-aside" aria-label="Plan">
+    <div id="apply-result" class="apply-result" aria-live="polite">
+      <section class="card plan-card">
+        <div class="card-head"><h2>Plan</h2></div>
+        <p class="card-body plan-empty">Nothing checked yet. <strong>Check</strong> the file to see what applying it changes, the pre-flight checks it passes and its diff against the active revision.</p>
+      </section>
+    </div>
+  </aside>
+</div>
+<div id="apply-diff"></div>
 {% endblock %}

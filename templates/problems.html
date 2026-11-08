@@ -1,9 +1,12 @@
-<ul class="problems">
+<ul class="checks problems">
   {%- for problem in problems %}
-  <li>
-    {%- if let Some(line) = problem.line %}<span class="problem-at">line {{ line }}{% if let Some(column) = problem.column %}, column {{ column }}{% endif %}</span> {% endif %}
-    {%- if !problem.path.is_empty() %}<code>{{ problem.path }}</code>: {% endif %}{{ problem.message }}
+  <li class="check-{{ problem_kind }}"><span class="check-mark" aria-hidden="true">{% if problem_kind == "warn" %}!{% else %}✗{% endif %}</span><span class="check-body"><span class="visually-hidden">{% if problem_kind == "warn" %}Warning:{% else %}Problem:{% endif %} </span>
+    {%- if problem.line.is_some() || !problem.path.is_empty() %}<span class="problem-where">
+    {%- if let Some(line) = problem.line %}<span class="problem-at">line {{ line }}{% if let Some(column) = problem.column %}, column {{ column }}{% endif %}</span>{% endif %}
+    {%- if problem.line.is_some() && !problem.path.is_empty() %} · {% endif %}
+    {%- if !problem.path.is_empty() %}<code class="problem-path">{{ problem.path }}</code>{% endif %}</span>{% endif %}
+    <span class="problem-message">{{ problem.message }}</span>
     {%- if let Some(source) = problem.source %}<pre class="problem-source">{{ source }}</pre>{% endif %}
-  </li>
+  </span></li>
   {%- endfor %}
 </ul>

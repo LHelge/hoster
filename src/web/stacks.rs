@@ -12,7 +12,8 @@
 //! against the active revision, the digests third-party tags resolve to (ADR-0025) and the
 //! services that will be redeployed. Its confirm form posts the same file to `POST /apply`,
 //! which applies and redeploys in one step (there is no "apply without redeploy", ADR-0049) and
-//! sends the browser to the resulting deployment's page, which follows it until it ends.
+//! sends the browser to the resulting deployment's page, which follows it until it ends. The
+//! page and its preview (the plan, the pre-flight checks and the diff) are in `apply.rs`.
 //!
 //! "Re-resolve tags" (ADR-0025) works the same way for the active revision: the preview shows
 //! the digests every third-party tag resolves to now and the services that would move, and the
@@ -34,13 +35,12 @@ use axum::extract::{Form, FromRequest, Multipart, Path, Request};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use similar::{ChangeTag, TextDiff};
 use tokio::sync::broadcast;
 
 use super::pages::{FlashKind, Layout, Page, Section, Shell};
 use crate::orchestrator::{
-    ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, PinChange,
-    RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent, WebhookDeploy,
+    ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, RemoveOutcome,
+    RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent, WebhookDeploy,
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
@@ -310,7 +310,9 @@ impl Stacks {
     ) -> Response {
         match stacks.0.preview(&toml).await {
             Ok(preview) => Page(PreviewView::new(preview, toml)).into_response(),
-            Err(err) => Outcome::from(err).quoting(&toml).into_response(),
+            Err(err) => {
+                ApplyFailed::new(Attempt::Check, Outcome::from(err).quoting(&toml)).into_response()
+            }
         }
     }
 
@@ -322,7 +324,9 @@ impl Stacks {
     ) -> Response {
         match stacks.0.apply(&toml).await {
             Ok(outcome) => Self::applied(outcome),
-            Err(err) => Outcome::from(err).quoting(&toml).into_response(),
+            Err(err) => {
+                ApplyFailed::new(Attempt::Apply, Outcome::from(err).quoting(&toml)).into_response()
+            }
         }
     }
 
@@ -810,165 +814,6 @@ impl fmt::Display for When {
     }
 }
 
-/// What applying a file would do, with the file itself for the confirm form.
-#[derive(Template)]
-#[template(path = "apply_preview.html")]
-pub struct PreviewView {
-    stack: String,
-    stack_url: String,
-    /// The revision being replaced, as "revision N (hash)"; `None` for a new stack.
-    replaces: Option<String>,
-    warnings: Vec<Problem>,
-    pins: Vec<PinView>,
-    changed: Vec<String>,
-    diff: FileDiff,
-    toml: String,
-}
-
-impl PreviewView {
-    fn new(preview: ApplyPreview, toml: String) -> Self {
-        let current = preview.current.as_ref();
-        let old = current.map_or("", |r| r.toml.as_str());
-        let lines: Vec<&str> = toml.lines().collect();
-        let warnings = preview
-            .warnings
-            .iter()
-            .map(|w| {
-                let mut problem = Problem::from(w);
-                problem.quote(&lines);
-                problem
-            })
-            .collect();
-        Self {
-            stack_url: StackView::url(&preview.stack),
-            replaces: current.map(|r| {
-                let hash = r.hash.to_string();
-                format!(
-                    "revision {} ({})",
-                    r.revision,
-                    hash.get(..12).unwrap_or(&hash)
-                )
-            }),
-            warnings,
-            pins: preview.pins.iter().map(PinView::from).collect(),
-            changed: preview.changed,
-            diff: FileDiff::between(old, &toml),
-            stack: preview.stack,
-            toml,
-        }
-    }
-}
-
-/// A third-party service's pinned digest, before and after.
-#[derive(Debug)]
-struct PinView {
-    service: String,
-    before: Option<String>,
-    after: String,
-    changes: bool,
-}
-
-impl From<&PinChange> for PinView {
-    fn from(pin: &PinChange) -> Self {
-        Self {
-            service: pin.service.clone(),
-            before: pin.before.clone(),
-            after: pin.after.clone(),
-            changes: pin.before.as_deref() != Some(pin.after.as_str()),
-        }
-    }
-}
-
-/// What "re-resolve tags" would do: the pins before and after, and what moves.
-#[derive(Template)]
-#[template(path = "reresolve_preview.html")]
-pub struct ReresolveView {
-    stack: String,
-    confirm_url: String,
-    /// The revision being re-resolved, which the confirmation names.
-    revision: u32,
-    pins: Vec<PinView>,
-    changed: Vec<String>,
-    /// Whether any digest differs from the active revision's.
-    moves: bool,
-}
-
-impl ReresolveView {
-    fn new(preview: ApplyPreview, revision: u32) -> Self {
-        let pins: Vec<PinView> = preview.pins.iter().map(PinView::from).collect();
-        Self {
-            confirm_url: format!("{}/reresolve", StackView::url(&preview.stack)),
-            moves: pins.iter().any(|p| p.changes),
-            pins,
-            changed: preview.changed,
-            stack: preview.stack,
-            revision,
-        }
-    }
-}
-
-/// A line diff between the active revision and the new file, in hunks with context.
-#[derive(Debug, Default)]
-struct FileDiff {
-    hunks: Vec<Vec<DiffLine>>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct DiffLine {
-    /// `add`, `remove` or `same`: the CSS class suffix.
-    kind: &'static str,
-    /// `+`, `-` or a space.
-    sign: char,
-    old: Option<usize>,
-    new: Option<usize>,
-    text: String,
-}
-
-impl FileDiff {
-    /// Unchanged lines shown around each change.
-    const CONTEXT: usize = 3;
-
-    fn between(old: &str, new: &str) -> Self {
-        let diff = TextDiff::from_lines(old, new);
-        let hunks = diff
-            .grouped_ops(Self::CONTEXT)
-            .iter()
-            .map(|group| {
-                group
-                    .iter()
-                    .flat_map(|op| diff.iter_changes(op))
-                    .map(|change| {
-                        let (kind, sign) = match change.tag() {
-                            ChangeTag::Insert => ("add", '+'),
-                            ChangeTag::Delete => ("remove", '-'),
-                            ChangeTag::Equal => ("same", ' '),
-                        };
-                        DiffLine {
-                            kind,
-                            sign,
-                            old: change.old_index().map(|i| i + 1),
-                            new: change.new_index().map(|i| i + 1),
-                            text: change.value().trim_end_matches(['\n', '\r']).to_owned(),
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-        Self { hunks }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.hunks.is_empty()
-    }
-}
-
-/// `GET /apply`.
-#[derive(Template)]
-#[template(path = "apply.html")]
-pub struct ApplyPage {
-    layout: Layout,
-}
-
 /// A read-only page that could not be shown; the reason is in the flash.
 #[derive(Template)]
 #[template(path = "error.html")]
@@ -976,6 +821,7 @@ pub struct ErrorPage {
     layout: Layout,
 }
 
+mod apply;
 mod deployments;
 mod environment;
 mod frame;
@@ -983,6 +829,7 @@ mod list;
 mod logs;
 mod overview;
 
+use apply::{ApplyFailed, ApplyPage, Attempt, PreviewView, ReresolveView};
 pub use deployments::DeploymentView;
 pub(super) use overview::StackView;
 

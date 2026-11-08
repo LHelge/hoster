@@ -1,12 +1,5 @@
-<div class="table-scroll"><table class="list pins">
-  <thead><tr><th scope="col">Service</th><th scope="col">Active revision</th><th scope="col">Resolved now</th></tr></thead>
-  <tbody>
-    {%- for pin in pins %}
-    <tr{% if pin.changes %} class="changes"{% endif %}>
-      <td>{{ pin.service }}</td>
-      <td>{% if let Some(before) = pin.before %}<code class="wrap">{{ before }}</code>{% else %}<span class="muted">new</span>{% endif %}</td>
-      <td><code class="wrap">{{ pin.after }}</code></td>
-    </tr>
-    {%- endfor %}
-  </tbody>
-</table></div>
+{%- for pin in pins %}
+<li class="plan-{{ pin.mark().kind() }}"><span class="plan-mark" aria-hidden="true">{{ pin.mark() }}</span><span class="plan-text"><span class="visually-hidden">{{ pin.mark().label() }}: </span>{{ pin.verb() }} <strong>{{ pin.service }}</strong>{% if !pin.changes %} <span class="plan-note">{% if pin.before.is_some() %}unchanged{% else %}new{% endif %}</span>{% endif %}
+  {%- if pin.changes %}{% if let Some(before) = pin.before %}<span class="plan-detail">from <code>{{ before }}</code></span>{% endif %}{% endif %}
+  <span class="plan-detail">{% if pin.changes && pin.before.is_some() %}to {% endif %}<code>{{ pin.after }}</code></span></span></li>
+{%- endfor %}

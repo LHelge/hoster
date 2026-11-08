@@ -1,0 +1,12 @@
+<section class="card plan-card preflight-fail">
+  <div class="card-head"><h2>{{ title() }}</h2><span class="card-note">failed</span></div>
+  <p class="card-body">{{ outcome.message }}{% if let Some(link) = outcome.link %} <a href="{{ link.href }}">{{ link.label }}</a>{% endif %}</p>
+  {%- if !outcome.problems.is_empty() %}
+  {%- let problems = outcome.problems %}
+  {%- let problem_kind = "fail" %}
+  {%- include "problems.html" %}
+  {%- endif %}
+</section>
+{%- if clears_diff() %}
+<div id="apply-diff" hx-swap-oob="innerHTML"></div>
+{%- endif %}
