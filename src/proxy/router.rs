@@ -9,11 +9,14 @@
 //! The rewriting of ADR-0010 lives on [`Forwarding`], which is pure and unit-tested; bodies are
 //! streamed because no body filter is installed (ADR-0011), and each route's timeouts end up in
 //! the upstream [`PeerOptions`].
+//!
+//! Every request, answered or failed, ends in the `logging` hook, which writes one
+//! [`AccessRecord`] line to the access log (target [`ACCESS_TARGET`]).
 
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -26,7 +29,8 @@ use pingora::{Error, ErrorSource, ErrorType, OkOrErr, OrErr, Result};
 
 use super::resolver::Sni;
 use crate::config::Timeouts;
-use crate::routing::{InflightGuard, RouteEntry, RouteTable, Target};
+use crate::logging::ACCESS_TARGET;
+use crate::routing::{InflightGuard, Owner, RouteEntry, RouteTable, Target};
 use crate::stack::RouteTimeouts;
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
@@ -49,14 +53,27 @@ impl RoutingProxy {
 }
 
 /// Per-request state: what the request matched in the snapshot it loaded.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RequestCtx {
+    /// When the request header had been read, for the access log's duration.
+    started: Instant,
     /// The request host as the client sent it, for `X-Forwarded-Host`.
     host: String,
     /// The matched route, taken from the request's table snapshot.
     route: Option<RouteEntry>,
     /// Counts the request against its loopback upstream until it is done, for draining.
     inflight: Option<InflightGuard>,
+}
+
+impl Default for RequestCtx {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            host: String::new(),
+            route: None,
+            inflight: None,
+        }
+    }
 }
 
 #[async_trait]
@@ -70,10 +87,10 @@ impl ProxyHttp for RoutingProxy {
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let table = self.routes.load_full();
         let req = session.req_header();
-        let host = Forwarding::request_host(req).map(str::to_owned);
+        ctx.host = Forwarding::request_host(req).unwrap_or_default().to_owned();
         let sni_allows = match Sni::of(session) {
             Ok(None) => true,
-            Ok(Some(sni)) => host.as_deref().is_none_or(|host| sni.allows(host)),
+            Ok(Some(sni)) => ctx.host.is_empty() || sni.allows(&ctx.host),
             Err(()) => false,
         };
         if !sni_allows {
@@ -82,25 +99,18 @@ impl ProxyHttp for RoutingProxy {
                 .await;
             return Ok(true);
         }
-        let route = host
-            .as_deref()
-            .and_then(|host| table.lookup(host, req.uri.path()))
-            .cloned();
-        let Some(route) = route else {
-            ErrorPage::from(StatusCode::NOT_FOUND).send(session).await;
-            return Ok(true);
-        };
-        match &route.target {
-            Target::Unavailable { retry_after } => {
-                ErrorPage::unavailable(*retry_after).send(session).await;
-                return Ok(true);
+        ctx.route = table.lookup(&ctx.host, req.uri.path()).cloned();
+        let page = match ctx.route.as_ref().map(|route| &route.target) {
+            None => ErrorPage::from(StatusCode::NOT_FOUND),
+            Some(Target::Unavailable { retry_after }) => ErrorPage::unavailable(*retry_after),
+            Some(Target::Loopback(upstream)) => {
+                ctx.inflight = Some(upstream.track());
+                return Ok(false);
             }
-            Target::Loopback(upstream) => ctx.inflight = Some(upstream.track()),
-            Target::Unix(_) => {}
-        }
-        ctx.host = host.unwrap_or_default();
-        ctx.route = Some(route);
-        Ok(false)
+            Some(Target::Unix(_)) => return Ok(false),
+        };
+        page.send(session).await;
+        Ok(true)
     }
 
     async fn upstream_peer(
@@ -136,10 +146,7 @@ impl ProxyHttp for RoutingProxy {
     ) -> Result<()> {
         let forwarding = Forwarding {
             host: &ctx.host,
-            client: session
-                .client_addr()
-                .and_then(|addr| addr.as_inet())
-                .map(|addr| addr.ip()),
+            client: Forwarding::client_ip(session),
             https: session.digest().is_some_and(|d| d.ssl_digest.is_some()),
         };
         forwarding.apply(ctx.route()?, upstream_request)
@@ -198,6 +205,98 @@ impl ProxyHttp for RoutingProxy {
             can_reuse_downstream: false,
         }
     }
+
+    /// One access log line per request, whether it was proxied, answered by hoster or failed.
+    async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
+        AccessRecord::new(session, &ctx.host, ctx.route.as_ref(), ctx.started, e).emit();
+    }
+}
+
+/// One line of the proxy's access log.
+#[derive(Debug)]
+pub(super) struct AccessRecord<'a> {
+    /// The request host as sent; empty when the request named none.
+    host: &'a str,
+    method: &'a str,
+    /// The request path, without the query (which may carry secrets).
+    path: &'a str,
+    /// The route the request matched, if any.
+    route: Option<&'a RouteEntry>,
+    /// The status sent to the client; `None` when no response header went out.
+    status: Option<u16>,
+    duration: Duration,
+    /// Response body bytes sent to the client.
+    bytes: usize,
+    client: Option<IpAddr>,
+    /// The fatal error that ended the request, if one did.
+    error: Option<&'a Error>,
+}
+
+impl<'a> AccessRecord<'a> {
+    /// The record of the request `session` served, which arrived for `host` at `started`,
+    /// matched `route` and ended in `error`, if any.
+    pub(super) fn new(
+        session: &'a Session,
+        host: &'a str,
+        route: Option<&'a RouteEntry>,
+        started: Instant,
+        error: Option<&'a Error>,
+    ) -> Self {
+        let req = session.req_header();
+        Self {
+            host,
+            method: req.method.as_str(),
+            path: req.uri.path(),
+            route,
+            status: session.response_written().map(|resp| resp.status.as_u16()),
+            duration: started.elapsed(),
+            bytes: session.body_bytes_sent(),
+            client: Forwarding::client_ip(session),
+            error,
+        }
+    }
+
+    /// Writes the line to the [`ACCESS_TARGET`] target at `info`.
+    pub(super) fn emit(&self) {
+        let route = self.route.map(|route| route.prefix_str.as_str());
+        let (stack, service) = match self.route.map(|route| &route.owner) {
+            Some(Owner::Route(owner)) => (Some(owner.stack.as_ref()), Some(owner.service.as_ref())),
+            Some(Owner::Reserved(purpose)) => (Some("hoster"), Some(*purpose)),
+            None => (None, None),
+        };
+        let target = self.route.map(|route| &route.target);
+        let generation = match target {
+            Some(Target::Loopback(upstream)) => Some(upstream.generation),
+            _ => None,
+        };
+        let upstream = match target {
+            Some(Target::Loopback(upstream)) => Some(upstream.addr.to_string()),
+            Some(Target::Unix(upstream)) => {
+                let path: &Path = upstream.as_ref().as_ref();
+                Some(format!("unix:{}", path.display()))
+            }
+            Some(Target::Unavailable { .. }) | None => None,
+        };
+        let client = self.client.map(tracing::field::display);
+        let error = self.error.map(tracing::field::display);
+        tracing::info!(
+            target: ACCESS_TARGET,
+            host = self.host,
+            method = self.method,
+            path = self.path,
+            route,
+            stack,
+            service,
+            generation,
+            upstream,
+            status = self.status,
+            duration_ms = self.duration.as_secs_f64() * 1000.0,
+            bytes = self.bytes,
+            client,
+            error,
+            "request"
+        );
+    }
 }
 
 impl RequestCtx {
@@ -220,6 +319,14 @@ pub(super) struct Forwarding<'a> {
 }
 
 impl Forwarding<'_> {
+    /// The client's IP address, when it connected over TCP.
+    fn client_ip(session: &Session) -> Option<IpAddr> {
+        session
+            .client_addr()
+            .and_then(|addr| addr.as_inet())
+            .map(|addr| addr.ip())
+    }
+
     /// The host a request is for: the URI authority (HTTP/2 `:authority`, or an HTTP/1
     /// absolute-form target) and otherwise the `Host` header. Any userinfo is dropped.
     pub(super) fn request_host(req: &RequestHeader) -> Option<&str> {
@@ -601,6 +708,87 @@ mod tests {
         );
         assert_eq!(status(HTTPStatus(413), ErrorSource::Downstream), Some(413));
         assert_eq!(status(InternalError, ErrorSource::Internal), Some(500));
+    }
+
+    #[test]
+    fn access_records_log_the_request_route_and_outcome() {
+        use crate::logging::LogFormat;
+        use crate::logging::capture::subscriber;
+        use crate::routing::{RouteOwner, Upstream};
+
+        let upstream =
+            Upstream::loopback(20001, "blog".parse().unwrap(), "web".parse().unwrap(), 4);
+        let entry = RouteEntry {
+            owner: Owner::Route(RouteOwner {
+                stack: "blog".parse().unwrap(),
+                service: "web".parse().unwrap(),
+            }),
+            target: Target::Loopback(Arc::new(upstream)),
+            ..route("/api", false)
+        };
+        let error = Error::new(ErrorType::ReadTimedout).into_up();
+        let (buffer, subscriber) = subscriber(LogFormat::Json, "info");
+        tracing::subscriber::with_default(subscriber, || {
+            AccessRecord {
+                host: "blog.example.com",
+                method: "POST",
+                path: "/api/posts",
+                route: Some(&entry),
+                status: Some(504),
+                duration: Duration::from_micros(1500),
+                bytes: 24,
+                client: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+                error: Some(&error),
+            }
+            .emit();
+            AccessRecord {
+                host: "",
+                method: "GET",
+                path: "/",
+                route: None,
+                status: None,
+                duration: Duration::ZERO,
+                bytes: 0,
+                client: None,
+                error: None,
+            }
+            .emit();
+        });
+        let lines = buffer.json();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let line = &lines[0];
+        assert_eq!(line["target"], "hoster::access");
+        assert_eq!(line["host"], "blog.example.com");
+        assert_eq!(line["method"], "POST");
+        assert_eq!(line["path"], "/api/posts");
+        assert_eq!(line["route"], "/api");
+        assert_eq!(line["stack"], "blog");
+        assert_eq!(line["service"], "web");
+        assert_eq!(line["generation"], 4);
+        assert_eq!(line["upstream"], "127.0.0.1:20001");
+        assert_eq!(line["status"], 504);
+        assert_eq!(line["duration_ms"], 1.5);
+        assert_eq!(line["bytes"], 24);
+        assert_eq!(line["client"], "203.0.113.7");
+        assert!(
+            line["error"].as_str().unwrap().contains("ReadTimedout"),
+            "{line}"
+        );
+
+        let bare = lines[1].as_object().unwrap();
+        for absent in [
+            "route",
+            "stack",
+            "service",
+            "generation",
+            "upstream",
+            "status",
+            "client",
+            "error",
+        ] {
+            assert!(!bare.contains_key(absent), "{absent}: {bare:?}");
+        }
+        assert_eq!(bare["host"], "");
     }
 
     #[test]

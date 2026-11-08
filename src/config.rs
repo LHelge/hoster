@@ -30,6 +30,8 @@ use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider};
 use serde::Deserialize;
 
+use crate::logging::LogFormat;
+
 /// Prefix of every environment override.
 const ENV_PREFIX: &str = "HOSTER_";
 /// Separator between nested keys in environment overrides.
@@ -73,6 +75,8 @@ pub struct Config {
     pub webhook: WebhookConfig,
     #[serde(default)]
     pub web: WebConfig,
+    #[serde(default)]
+    pub log: LogConfig,
     /// Secret sources; never part of the file.
     #[serde(skip)]
     pub credentials: Credentials,
@@ -202,6 +206,14 @@ impl Default for PollerConfig {
 pub struct WebhookConfig {
     /// Expected OIDC `aud` claim; `https://<admin_host>` when unset.
     audience: Option<String>,
+}
+
+/// hoster's own log output (ADR-0044); verbosity is `RUST_LOG`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LogConfig {
+    /// `text` (default) or `json` lines on stderr.
+    pub format: LogFormat,
 }
 
 /// Admin web app settings (ADR-0021, ADR-0031).
@@ -483,6 +495,7 @@ impl EnvOverrides {
         "web.dev_listen",
         "web.github_client_id_file",
         "web.github_client_secret_file",
+        "log.format",
     ];
 
     fn new() -> Self {
@@ -1226,6 +1239,28 @@ mod tests {
             let toml = format!("{MINIMAL}[webhook]\naudience = \"hoster-deploy\"\n");
             let config = load(jail, &toml).map_err(|e| e.to_string())?;
             assert_eq!(config.webhook_audience(), "hoster-deploy");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn log_format_defaults_to_text_and_can_be_json() {
+        Jail::expect_with(|jail| {
+            with_admin(jail);
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(config.log.format, LogFormat::Text);
+
+            let toml = format!("{MINIMAL}[log]\nformat = \"json\"\n");
+            let config = load(jail, &toml).map_err(|e| e.to_string())?;
+            assert_eq!(config.log.format, LogFormat::Json);
+
+            jail.set_env("HOSTER_LOG__FORMAT", "text");
+            let config = load(jail, &toml).map_err(|e| e.to_string())?;
+            assert_eq!(config.log.format, LogFormat::Text);
+
+            jail.set_env("HOSTER_LOG__FORMAT", "yaml");
+            let problems = invalid(load(jail, MINIMAL));
+            assert!(has_problem(&problems, "HOSTER_LOG__FORMAT"), "{problems:?}");
             Ok(())
         });
     }

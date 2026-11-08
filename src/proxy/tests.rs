@@ -1386,3 +1386,108 @@ async fn one_gib_streams_with_bounded_memory() {
         .unwrap_or(1024 * 1024 * 1024);
     stream_through(bytes).await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Access log
+
+/// The access log line of the one request to `path`, waiting for Pingora's `logging` hook,
+/// which runs after the response went out.
+async fn access_line(path: &str) -> Value {
+    let log = crate::logging::capture::global();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let lines: Vec<Value> = log
+            .json()
+            .into_iter()
+            .filter(|line| line["target"] == "hoster::access" && line["path"] == path)
+            .collect();
+        match lines.as_slice() {
+            [line] => return line.clone(),
+            [] if Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(20)).await,
+            _ => panic!("expected one access log line for {path}, got {lines:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_request_gets_an_access_log_line() {
+    crate::logging::capture::global();
+    let h = Harness::start().await;
+
+    let reply = h.get("app.example.com", "/access/proxied?secret=1").await;
+    assert_eq!(reply.status, 200);
+    let line = access_line("/access/proxied").await;
+    assert_eq!(line["target"], "hoster::access");
+    assert_eq!(line["level"], "INFO");
+    assert_eq!(line["message"], "request");
+    assert_eq!(line["host"], "app.example.com");
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/");
+    assert_eq!(line["stack"], "site");
+    assert_eq!(line["service"], "web");
+    assert_eq!(line["generation"], 1);
+    assert_eq!(line["upstream"], format!("127.0.0.1:{}", h.web_port));
+    assert_eq!(line["status"], 200);
+    assert_eq!(line["client"], "127.0.0.1");
+    assert_eq!(line["bytes"], reply.body.len());
+    assert!(line["duration_ms"].as_f64().unwrap() >= 0.0, "{line}");
+    assert!(line.get("error").is_none(), "{line}");
+    assert!(!line.to_string().contains("secret"), "{line}");
+
+    let reply = h.get("noroute.example.com", "/access/unknown").await;
+    assert_eq!(reply.status, 404);
+    let line = access_line("/access/unknown").await;
+    assert_eq!(line["host"], "noroute.example.com");
+    assert_eq!(line["status"], 404);
+    assert!(line.get("route").is_none(), "{line}");
+    assert!(line.get("upstream").is_none(), "{line}");
+
+    let head =
+        "GET /access/misdirected HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n";
+    let reply = h.request_with_sni("app.example.com", head).await;
+    assert_eq!(reply.status, 421);
+    let line = access_line("/access/misdirected").await;
+    assert_eq!(line["host"], "api.example.com");
+    assert_eq!(line["status"], 421);
+    assert!(line.get("route").is_none(), "{line}");
+
+    // The `:80` service logs its redirects too.
+    let reply = h.get_http("app.example.com", "/access/plain?token=1").await;
+    assert_eq!(reply.status, 308);
+    let line = access_line("/access/plain").await;
+    assert_eq!(line["host"], "app.example.com");
+    assert_eq!(line["status"], 308);
+    assert_eq!(line["client"], "127.0.0.1");
+    assert!(line.get("route").is_none(), "{line}");
+    assert!(!line.to_string().contains("token"), "{line}");
+
+    let reply = h.get("gap.example.com", "/access/gap").await;
+    assert_eq!(reply.status, 503);
+    let line = access_line("/access/gap").await;
+    assert_eq!(line["route"], "/");
+    assert_eq!(line["service"], "gapped");
+    assert_eq!(line["status"], 503);
+    assert!(line.get("upstream").is_none(), "{line}");
+
+    let reply = h.get("down.example.com", "/access/down").await;
+    assert_eq!(reply.status, 502);
+    let line = access_line("/access/down").await;
+    assert_eq!(line["service"], "down");
+    assert_eq!(line["status"], 502);
+    assert!(
+        line["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{line}"
+    );
+
+    let reply = h.get("admin.example.com", "/access/admin").await;
+    assert_eq!(reply.status, 200);
+    let line = access_line("/access/admin").await;
+    assert_eq!(line["stack"], "hoster");
+    assert_eq!(line["service"], "admin UI");
+    assert!(
+        line["upstream"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("unix:") && u.ends_with("admin.sock")),
+        "{line}"
+    );
+}

@@ -718,3 +718,45 @@ data = "/data"
     assert_eq!(second.state, S::Live, "{second:?}");
     assert_eq!(removed.unwrap().containers, 3);
 }
+
+#[tokio::test]
+async fn deploy_work_logs_inside_the_deployment_and_service_spans() {
+    use crate::logging::LogFormat;
+    use crate::logging::capture::subscriber;
+
+    let h = harness().await;
+    let (buffer, subscriber) = subscriber(LogFormat::Json, "hoster=info");
+    // A current-thread test runtime: the spawned deploy task logs on this thread too.
+    let guard = tracing::subscriber::set_default(subscriber);
+    let applied = h.apply(NOTES).await;
+    let outcome = applied.deployment.as_ref().unwrap();
+    let deployment = h.finish(outcome).await;
+    drop(guard);
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+
+    let lines = buffer.json();
+    let deployment_span = serde_json::json!({
+        "name": "deployment",
+        "stack": "notes",
+        "deployment_id": outcome.deployment.to_string(),
+        "generation": 1,
+    });
+    let live = lines
+        .iter()
+        .find(|l| l["target"] == "hoster::deploy" && l["to"] == "Live")
+        .unwrap_or_else(|| panic!("no Live event in {lines:?}"));
+    assert_eq!(live["spans"][0], deployment_span, "{live}");
+
+    let started = lines
+        .iter()
+        .find(|l| l["message"] == "container started")
+        .unwrap_or_else(|| panic!("no container start in {lines:?}"));
+    assert_eq!(
+        started["spans"],
+        serde_json::json!([
+            deployment_span,
+            {"name": "service", "stack": "notes", "service": "storage", "generation": 1},
+        ]),
+        "{started}"
+    );
+}

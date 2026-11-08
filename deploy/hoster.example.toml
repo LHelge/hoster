@@ -18,7 +18,9 @@
 # They are read from separate 0600 files or systemd credentials ($CREDENTIALS_DIRECTORY, set by
 # LoadCredential= in the unit).
 #
-# Logging verbosity is set with RUST_LOG (default "info"), e.g. RUST_LOG=hoster=debug.
+# Logging verbosity is set with RUST_LOG (default "info"), e.g. RUST_LOG=hoster=debug. The proxy
+# access log (target hoster::access) and deployment events (hoster::deploy) can be tuned on their
+# own, e.g. RUST_LOG=info,hoster::access=off turns the access log off.
 #
 # Durations are humantime strings: "500ms", "30s", "5m", "1h 30m".
 # Values shown are the defaults unless marked "required".
@@ -102,3 +104,9 @@ interval = "5m"
 # github_client_secret_file = "/home/hoster/.config/hoster/github_client_secret"
 # An admin session ends after this long without a request, and 12h after login at the latest.
 session_idle_timeout = "1h"
+
+[log]
+# hoster's own log lines on stderr (the user journal under systemd): "text" or "json" (one object
+# per line, event fields at the top level, enclosing spans such as stack, service, generation and
+# deployment_id under "spans").
+format = "text"

@@ -596,11 +596,12 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
-        Self::log_event(&mut tx, id, None, state, None, now).await?;
+        let event = Self::log_event(&mut tx, id, None, state, None, now).await?;
         let deployment = Self::load_deployment(&mut tx, id)
             .await?
             .ok_or(StoreError::UnknownDeployment(id))?;
         tx.commit().await?;
+        event.log(id, &new.stack);
         Ok(deployment)
     }
 
@@ -695,8 +696,12 @@ impl Store {
         )
         .execute(&mut *tx)
         .await?;
-        Self::log_event(&mut tx, id, Some(from), to, message, now).await?;
+        let stack = sqlx::query_scalar!("SELECT stack FROM deployments WHERE id = ?", id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let event = Self::log_event(&mut tx, id, Some(from), to, message, now).await?;
         tx.commit().await?;
+        event.log(id, &stack);
         Ok(())
     }
 
@@ -822,6 +827,8 @@ impl Store {
         .await?)
     }
 
+    /// Appends an event to a deployment's transition log. The caller writes the returned event
+    /// to hoster's log once the transaction has committed.
     async fn log_event(
         conn: &mut SqliteConnection,
         id: DeploymentId,
@@ -829,7 +836,7 @@ impl Store {
         to: DeploymentState,
         message: Option<&str>,
         at: Timestamp,
-    ) -> Result<()> {
+    ) -> Result<DeploymentEvent> {
         sqlx::query!(
             "INSERT INTO deployment_events (deployment_id, from_state, to_state, message, at)
              VALUES (?, ?, ?, ?, ?)",
@@ -841,7 +848,12 @@ impl Store {
         )
         .execute(conn)
         .await?;
-        Ok(())
+        Ok(DeploymentEvent {
+            from,
+            to,
+            message: message.map(str::to_owned),
+            at,
+        })
     }
 
     async fn load_deployments(

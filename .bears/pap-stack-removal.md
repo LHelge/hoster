@@ -1,15 +1,16 @@
 ---
 id: pap
 title: Stack removal
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-07T14:45:17.214788036Z"
-updated: "2026-11-07T14:45:17.214788036Z"
+updated: "2026-11-08T00:12:01.450182134Z"
 tags:
   - orchestrator
 depends_on:
   - "8w4"
 parent: ame
+attempts: 1
 ---
 
 ## Summary

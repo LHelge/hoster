@@ -2,6 +2,7 @@
 //! and sends everything else for a known host to HTTPS. It never proxies.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -12,7 +13,7 @@ use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, Result};
 
-use super::router::{ErrorPage, Forwarding};
+use super::router::{AccessRecord, ErrorPage, Forwarding};
 use crate::acme::ChallengeMap;
 use crate::routing::RouteTable;
 
@@ -35,9 +36,12 @@ impl ChallengeOrRedirect {
 
 #[async_trait]
 impl ProxyHttp for ChallengeOrRedirect {
-    type CTX = ();
+    /// When the request header had been read, for the access log's duration.
+    type CTX = Instant;
 
-    fn new_ctx(&self) -> Self::CTX {}
+    fn new_ctx(&self) -> Self::CTX {
+        Instant::now()
+    }
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
         let answer = PlainAnswer::new(session.req_header(), &self.routes.load(), &self.challenges);
@@ -51,6 +55,13 @@ impl ProxyHttp for ChallengeOrRedirect {
         _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         Error::e_explain(ErrorType::InternalError, "the :80 service never proxies")
+    }
+
+    /// One access log line per request, like the `:443` service's (without a route: `:80`
+    /// never proxies).
+    async fn logging(&self, session: &mut Session, e: Option<&Error>, started: &mut Self::CTX) {
+        let host = Forwarding::request_host(session.req_header()).unwrap_or_default();
+        AccessRecord::new(session, host, None, *started, e).emit();
     }
 }
 

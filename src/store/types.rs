@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use crate::logging::DEPLOY_TARGET;
+
 /// A point in time, stored as milliseconds since the Unix epoch (UTC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, sqlx::Type)]
 #[sqlx(transparent)]
@@ -162,6 +164,15 @@ impl DeploymentState {
                 | Self::Superseded
         )
     }
+
+    /// Whether reaching this state is worth a warning in the log: the deployment did not go
+    /// (entirely) as planned.
+    fn is_trouble(self) -> bool {
+        matches!(
+            self,
+            Self::Rejected | Self::Aborting | Self::Failed | Self::LiveWithWarnings
+        )
+    }
 }
 
 impl fmt::Display for DeploymentState {
@@ -255,6 +266,28 @@ pub struct DeploymentEvent {
     pub to: DeploymentState,
     pub message: Option<String>,
     pub at: Timestamp,
+}
+
+impl DeploymentEvent {
+    /// Writes this event to hoster's log as well (target [`DEPLOY_TARGET`]): at `warn` when the
+    /// deployment ran into trouble, `info` otherwise.
+    pub(super) fn log(&self, deployment_id: DeploymentId, stack: &str) {
+        let from = self.from.map(|from| from.to_string());
+        let detail = self.message.as_deref();
+        if self.to.is_trouble() {
+            tracing::warn!(
+                target: DEPLOY_TARGET,
+                %deployment_id, stack, from, to = %self.to, detail,
+                "deployment event"
+            );
+        } else {
+            tracing::info!(
+                target: DEPLOY_TARGET,
+                %deployment_id, stack, from, to = %self.to, detail,
+                "deployment event"
+            );
+        }
+    }
 }
 
 /// Loopback host ports of a container, by the container port they publish (ADR-0007, ADR-0026).

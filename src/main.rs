@@ -8,6 +8,7 @@
 mod acme;
 mod config;
 mod doctor;
+mod logging;
 mod orchestrator;
 mod ports;
 mod proxy;
@@ -19,15 +20,14 @@ mod store;
 mod supervisor;
 mod web;
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
 
 use crate::config::{Config, ConfigError};
 use crate::doctor::Doctor;
+use crate::logging::{LogFormat, Logging};
 use crate::store::Store;
 use crate::supervisor::Supervisor;
 
@@ -45,28 +45,18 @@ struct Cli {
 }
 
 impl Cli {
-    /// Runs the selected command with the configuration it names.
+    /// Runs the selected command with the configuration it names. Logging starts once the
+    /// configuration is loaded, in its `log.format` (text when it did not load).
     async fn execute(self) -> anyhow::Result<()> {
         let config_path = self.config.clone();
         let command = Command::from(self);
+        let config = Config::load(config_path.as_deref());
+        let format = config
+            .as_ref()
+            .map_or(LogFormat::default(), |config| config.log.format);
+        Logging::from(format).init();
         tracing::debug!(?command, "starting");
-        command.execute(Config::load(config_path.as_deref())).await
-    }
-}
-
-/// Logging to stderr (journald under systemd): compact text, filtered by `RUST_LOG`
-/// (default `info`), coloured only when stderr is a terminal.
-struct Tracing;
-
-impl Tracing {
-    fn init() {
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        tracing_subscriber::fmt()
-            .compact()
-            .with_env_filter(filter)
-            .with_ansi(std::io::stderr().is_terminal())
-            .with_writer(std::io::stderr)
-            .init();
+        command.execute(config).await
     }
 }
 
@@ -157,7 +147,6 @@ impl OrchestratorRuntime {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    Tracing::init();
     let result = OrchestratorRuntime::build()
         .map_err(|err| anyhow::Error::new(err).context("building the tokio runtime"))
         .and_then(|runtime| runtime.block_on(cli.execute()));

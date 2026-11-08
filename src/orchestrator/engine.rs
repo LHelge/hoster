@@ -7,10 +7,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use super::machine::{Effect, Event};
 use super::plan::{Change, Plan};
 use super::{Orchestrator, Result};
+use crate::logging::LogSpan;
 use crate::routing::RouteClaims;
 use crate::runtime::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, NetworkSpec, PortBinding,
@@ -121,13 +123,21 @@ impl Run {
 impl<R: ContainerRuntime> Orchestrator<R> {
     /// The deploy task: feeds `event` to the machine and keeps going until no effect produces
     /// another event (a terminal state, `Queued`, or a halted commit).
+    ///
+    /// The task runs in the deployment's [`LogSpan`], so everything it logs carries the stack,
+    /// the deployment id and, once `Validating` assigned it, the generation.
     pub(super) fn drive(self: Arc<Self>, mut run: Run, event: Event) -> BoxFuture {
-        Box::pin(async move {
-            let mut next = Some(event);
-            while let Some(event) = next {
-                next = self.step(&mut run, event).await;
+        let generation = (run.generation != 0).then_some(run.generation);
+        let span = LogSpan::deployment(run.target.stack().as_ref(), run.id, generation);
+        Box::pin(
+            async move {
+                let mut next = Some(event);
+                while let Some(event) = next {
+                    next = self.step(&mut run, event).await;
+                }
             }
-        })
+            .instrument(span),
+        )
     }
 
     /// One transition: the pure machine under the lock (ADR-0050), then its effects in order.
@@ -156,7 +166,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         event: Event,
     ) -> std::result::Result<Vec<Effect>, super::machine::InvalidTransition> {
         let transition = run.state.on(event)?;
-        tracing::info!(deployment = %run.id, from = %run.state, to = %transition.to, "deployment transition");
+        // The store logs the persisted transition (target `hoster::deploy`) at `info`.
+        tracing::debug!(deployment = %run.id, from = %run.state, to = %transition.to, "deployment transition");
         run.state = transition.to;
         let mut slots = self.lock();
         if let Some(slot) = slots.get_mut(run.target.stack().as_ref())
@@ -248,6 +259,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             Ok(generation) => generation,
             Err(err) => return Event::Invalid(err.to_string()),
         };
+        tracing::Span::current().record("generation", run.generation);
         let stack = run.stack_name();
         let wanted: Vec<(Name, Vec<u16>)> = run
             .plan()
@@ -466,17 +478,28 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// Creates and starts the new container of `change`; it is recorded in `run.created`
     /// as soon as it exists, so an abort removes it.
     async fn create_and_start(&self, run: &mut Run, change: &Change) -> Result<(), String> {
-        let spec = run.spec(change)?;
-        let id = self
-            .runtime
-            .create_container(&spec)
-            .await
-            .map_err(|err| format!("cannot create {}: {err}", spec.name))?;
-        run.created.push(id.clone());
-        self.runtime
-            .start(&id)
-            .await
-            .map_err(|err| format!("cannot start {}: {err}", spec.name))
+        let span = LogSpan::service(
+            run.target.stack().as_ref(),
+            change.service.as_ref(),
+            run.generation,
+        );
+        async {
+            let spec = run.spec(change)?;
+            let id = self
+                .runtime
+                .create_container(&spec)
+                .await
+                .map_err(|err| format!("cannot create {}: {err}", spec.name))?;
+            run.created.push(id.clone());
+            self.runtime
+                .start(&id)
+                .await
+                .map_err(|err| format!("cannot start {}: {err}", spec.name))?;
+            tracing::info!(container = %spec.name, image = %change.image, "container started");
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 
     /// The built-in health check (§5.1, M3): every container stays running for

@@ -704,3 +704,53 @@ async fn failed_snapshot_leaves_nothing_behind() {
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
+
+#[tokio::test]
+async fn deployment_events_are_written_to_the_log_too() {
+    use crate::logging::LogFormat;
+    use crate::logging::capture::subscriber;
+
+    let (_dir, store) = open().await;
+    store.add_revision("blog", "x").await.unwrap();
+    let (buffer, subscriber) = subscriber(LogFormat::Json, "hoster::deploy=info");
+    // A current-thread test runtime: everything below logs on this thread.
+    let guard = tracing::subscriber::set_default(subscriber);
+    let d = deployment(&store, "blog").await;
+    store
+        .transition(d.id, DeploymentState::Validating, None)
+        .await
+        .unwrap();
+    store
+        .transition(d.id, DeploymentState::Failed, Some("pull failed"))
+        .await
+        .unwrap();
+    drop(guard);
+
+    let lines = buffer.json();
+    let steps: Vec<_> = lines
+        .iter()
+        .map(|l| {
+            (
+                l["level"].as_str().unwrap(),
+                l["from"].as_str(),
+                l["to"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            ("INFO", None, "Received"),
+            ("INFO", Some("Received"), "Validating"),
+            ("WARN", Some("Validating"), "Failed"),
+        ]
+    );
+    for line in &lines {
+        assert_eq!(line["target"], "hoster::deploy");
+        assert_eq!(line["stack"], "blog");
+        assert_eq!(line["deployment_id"], d.id.to_string());
+    }
+    // The event message is its own field, next to the fixed line text.
+    assert_eq!(lines[2]["message"], "deployment event");
+    assert_eq!(lines[2]["detail"], "pull failed");
+}

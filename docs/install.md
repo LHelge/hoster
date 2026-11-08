@@ -224,6 +224,17 @@ systemctl --user status hoster
 | Logs, as root | `sudo journalctl _SYSTEMD_USER_UNIT=hoster.service` |
 | Stop, start, restart | `systemctl --user stop hoster` (`start`, `restart`) |
 | More log detail | `Environment=RUST_LOG=hoster=debug` in the drop-in, then `restart` |
+| JSON log lines | `[log] format = "json"` in `hoster.toml` (or `HOSTER_LOG__FORMAT=json`), then `journalctl --user -u hoster -o cat \| jq` |
+| Only the access log | `journalctl --user -u hoster -o cat \| grep hoster::access` |
+| No access log | `Environment=RUST_LOG=info,hoster::access=off` in the drop-in |
+
+**Log lines.** The proxy writes one line per request under the `hoster::access` target: host,
+method, path (without the query), matched route, stack, service, generation, upstream, status,
+duration in ms, response body bytes, client IP and, for a failed request, the error. Every
+deployment state change is logged under `hoster::deploy` (at `warn` when it failed, was
+rejected or went live with warnings), in addition to its deployment page. Deploy work runs in
+spans carrying `stack`, `deployment_id`, `generation` and `service`; JSON lines list them under
+`spans`.
 
 **Stopping.** On SIGTERM hoster stops taking new work, lets in-flight deploys reach a safe
 point, drains the proxy for `proxy.grace_period` (default 10 s), waits up to
