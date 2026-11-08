@@ -17,7 +17,7 @@
 {%- if stats.routes.is_empty() && stats.unrouted.requests == 0 %}
 <p>No requests yet.</p>
 {%- else %}
-<table class="list traffic">
+<div class="table-scroll"><table class="list traffic">
   <thead>
     <tr><th scope="col">Route</th><th scope="col">Service</th>
       {%- for class in stats.classes() %}<th scope="col">{{ class }}</th>{% endfor %}
@@ -29,14 +29,14 @@
       <td>{% if row.owner.is_empty() %}<span class="muted">{{ row.route }}</span>{% else %}{{ row.route }}{% endif %}</td>
       <td>{{ row.owner }}</td>
       {%- for (_, count) in row.statuses %}<td>{{ count }}</td>{% endfor %}
-      <td>{% if row.upstream_errors > 0 %}<span class="badge badge-error">{{ crate::web::Icon::Warning }}{{ row.upstream_errors }}</span>{% else %}0{% endif %}</td>
+      <td>{% if row.upstream_errors > 0 %}{{ crate::web::Tone::Fail.pill(row.upstream_errors) }}{% else %}0{% endif %}</td>
       <td>{{ row.inflight }}</td>
       <td>{{ row.p50 }}</td>
       <td>{{ row.p95 }}</td>
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 
 <h3>Deployments</h3>
@@ -44,7 +44,7 @@
 {%- if stats.deployments.is_empty() %}
 <p>No deployments yet.</p>
 {%- else %}
-<table class="list deployments">
+<div class="table-scroll"><table class="list deployments">
   <thead>
     <tr><th scope="col">Stack</th><th scope="col">Live</th><th scope="col">Failed</th><th scope="col">Skipped</th><th scope="col">Mean</th><th scope="col">Longest</th></tr>
   </thead>
@@ -53,21 +53,21 @@
     <tr>
       <td><a href="/stacks/{{ row.stack }}">{{ row.stack }}</a></td>
       <td>{{ row.succeeded }}</td>
-      <td>{% if row.failed > 0 %}<span class="badge badge-error">{{ crate::web::Icon::Warning }}{{ row.failed }}</span>{% else %}0{% endif %}</td>
+      <td>{% if row.failed > 0 %}{{ crate::web::Tone::Fail.pill(row.failed) }}{% else %}0{% endif %}</td>
       <td>{{ row.skipped }}</td>
       <td>{{ row.mean }}</td>
       <td>{{ row.max }}</td>
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 
 <h3>Restarts</h3>
 {%- if stats.services.is_empty() %}
 <p>No services running.</p>
 {%- else %}
-<table class="list restarts">
+<div class="table-scroll"><table class="list restarts">
   <thead>
     <tr><th scope="col">Service</th><th scope="col">Generation</th><th scope="col">Restarts</th></tr>
   </thead>
@@ -75,20 +75,20 @@
     {%- for service in stats.services %}
     <tr>
       <td>{{ service.service }} <span class="muted">({{ service.stack }})</span>
-        {%- if service.crash_looping %} <span class="badge badge-error">{{ crate::web::Icon::Warning }}crash looping</span>{% endif %}</td>
+        {%- if service.crash_looping %} {{ crate::web::Tone::Fail.pill("crash looping") }}{% endif %}</td>
       <td>{{ service.generation }}</td>
       <td>{{ service.restarts }}</td>
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 
 <h3>Certificates</h3>
 {%- if stats.certificates.is_empty() %}
 <p>No certificates yet.</p>
 {%- else %}
-<table class="list certificates">
+<div class="table-scroll"><table class="list certificates">
   <thead>
     <tr><th scope="col">Host</th><th scope="col">Expires</th><th scope="col">Left</th></tr>
   </thead>
@@ -97,10 +97,10 @@
     <tr>
       <td>{{ cert.host }}</td>
       <td>{{ cert.not_after }}</td>
-      <td>{% if cert.expiring %}<span class="badge badge-error">{{ crate::web::Icon::Warning }}{{ cert.left }}</span>{% else %}{{ cert.left }}{% endif %}</td>
+      <td>{% if let Some(pill) = cert.state.pill(cert.left) %}{{ pill }}{% else %}{{ cert.left }}{% endif %}</td>
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 {% endblock %}

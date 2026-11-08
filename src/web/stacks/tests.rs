@@ -589,12 +589,18 @@ async fn stacks_list_shows_services_digests_revision_and_last_deploy() {
         "{html}"
     );
     assert!(
-        html.contains(r##"<a href="/stacks/notes/deployments/3">#3</a> Live"##),
+        html.contains(&format!(
+            r##"<a href="/stacks/notes/deployments/3">#3</a> <span class="pill pill-ok">{}Live</span>"##,
+            crate::web::Icon::Ok
+        )),
         "{html}"
     );
     // The failed-deploy flag (ADR-0049), escaped.
     assert!(
-        html.contains("deploy failed: &#60;pull&#62; denied"),
+        html.contains(&format!(
+            r#"<span class="pill pill-fail pill-long">{}revision 1: deploy failed: &#60;pull&#62; denied</span>"#,
+            crate::web::Icon::Failed
+        )),
         "{html}"
     );
 }
@@ -689,7 +695,7 @@ async fn preview_shows_the_diff_pins_and_services_to_redeploy() {
         "{html}"
     );
     assert!(
-        html.contains(&format!("<code>{}</code>", digest(0xbb))),
+        html.contains(&format!(r#"<code class="wrap">{}</code>"#, digest(0xbb))),
         "{html}"
     );
     assert!(html.contains("Apply and redeploy 1 service<"), "{html}");
@@ -917,7 +923,13 @@ async fn the_deployment_page_follows_a_running_deployment_until_it_ends() {
         !partial.contains("hx-sse"),
         "the partial never opens a stream itself"
     );
-    assert!(partial.contains("<strong>Live</strong>"), "{partial}");
+    assert!(
+        partial.contains(&format!(
+            r#"<span class="pill pill-ok">{}Live</span>"#,
+            crate::web::Icon::Ok
+        )),
+        "{partial}"
+    );
 
     for path in [
         "/stacks/other/deployments/7",

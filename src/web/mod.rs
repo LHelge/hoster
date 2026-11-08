@@ -26,6 +26,7 @@ mod pages;
 mod settings;
 mod stacks;
 mod system;
+mod ui;
 mod webhook;
 
 use std::fmt;
@@ -63,6 +64,7 @@ pub(crate) use self::icons::Icon;
 use self::settings::{Registries, RegistryControl};
 use self::stacks::{StackControl, Stacks};
 use self::system::System;
+pub(crate) use self::ui::Tone;
 use self::webhook::{OidcVerifier, Webhook};
 
 pub use self::settings::RegistryAccess;
@@ -450,6 +452,8 @@ impl WebServer {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ui_preview;
 
 /// The admin app with a mock GitHub and fake containers and stacks, for tests elsewhere in the
 /// crate (the proxy's admin-host tests).

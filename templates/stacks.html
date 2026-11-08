@@ -6,7 +6,7 @@
 {%- if stacks.is_empty() %}
 <p>No stacks yet. Apply a stack file to create one.</p>
 {%- else %}
-<table class="list stacks">
+<div class="table-scroll"><table class="list stacks">
   <thead>
     <tr><th scope="col">Stack</th><th scope="col">Revision</th><th scope="col">Services</th><th scope="col">Last deployment</th></tr>
   </thead>
@@ -14,7 +14,7 @@
     {%- for stack in stacks %}
     <tr>
       <td><a href="{{ stack.url }}">{{ stack.name }}</a>
-        {%- if let Some(flag) = stack.flag %}<br><span class="badge badge-error">{{ crate::web::Icon::Warning }}{{ flag }}</span>{% endif %}</td>
+        {%- if let Some(flag) = stack.flag %}<br>{{ crate::web::Tone::Fail.pill(flag) }}{% endif %}</td>
       <td>{{ stack.revision }} <code title="{{ stack.full_hash }}">{{ stack.hash }}</code></td>
       <td>
         <ul class="plain">
@@ -32,6 +32,6 @@
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 {% endblock %}

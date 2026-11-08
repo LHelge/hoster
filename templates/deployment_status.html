@@ -1,6 +1,6 @@
 <section id="deployment-status">
   <p class="deployment-state">
-    <strong>{{ deployment.state }}</strong>
+    {{ deployment.state }}
     {%- if deployment.finished %}{% if let Some(at) = deployment.finished_at %} at {{ at }}{% endif %}, after {{ deployment.duration }}{% else %} for {{ deployment.duration }} <span class="muted">(in progress; this updates by itself, or <a href="{{ deployment.url }}">reload</a>)</span>{% endif %}
   </p>
   {%- if deployment.cancellable %}
@@ -35,12 +35,12 @@
   </ul>
   {%- endif %}
   <h2>Transitions</h2>
-  <table class="list events">
+  <div class="table-scroll"><table class="list events">
     <thead><tr><th scope="col">Time</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Detail</th></tr></thead>
     <tbody>
       {%- for event in deployment.events %}
       <tr><td>{{ event.at }}</td><td>{{ event.from }}</td><td>{{ event.to }}</td><td>{{ event.message }}</td></tr>
       {%- endfor %}
     </tbody>
-  </table>
+  </table></div>
 </section>

@@ -7,7 +7,7 @@
 {%- if entries.is_empty() %}
 <p>No credentials are stored: every registry is accessed anonymously.</p>
 {%- else %}
-<table class="list registries">
+<div class="table-scroll"><table class="list registries">
   <thead>
     <tr><th scope="col">Registry</th><th scope="col">Username</th><th scope="col">Last changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
   </thead>
@@ -30,7 +30,7 @@
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 <div id="registry-result" aria-live="polite"></div>
 

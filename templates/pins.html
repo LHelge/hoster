@@ -1,12 +1,12 @@
-<table class="list pins">
+<div class="table-scroll"><table class="list pins">
   <thead><tr><th scope="col">Service</th><th scope="col">Active revision</th><th scope="col">Resolved now</th></tr></thead>
   <tbody>
     {%- for pin in pins %}
     <tr{% if pin.changes %} class="changes"{% endif %}>
       <td>{{ pin.service }}</td>
-      <td>{% if let Some(before) = pin.before %}<code>{{ before }}</code>{% else %}<span class="muted">new</span>{% endif %}</td>
-      <td><code>{{ pin.after }}</code></td>
+      <td>{% if let Some(before) = pin.before %}<code class="wrap">{{ before }}</code>{% else %}<span class="muted">new</span>{% endif %}</td>
+      <td><code class="wrap">{{ pin.after }}</code></td>
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>

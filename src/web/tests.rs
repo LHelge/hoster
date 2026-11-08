@@ -146,16 +146,16 @@ async fn dashboard_shows_the_statistics() {
     assert!(
         compact.contains(&format!(
             "<td>blog.example.com/</td> <td>web (blog)</td><td>0</td><td>0</td><td>2</td>\
-             <td>0</td><td>0</td><td>1</td> <td><span class=\"badge badge-error\">{}1</span></td> \
+             <td>0</td><td>0</td><td>1</td> <td><span class=\"pill pill-fail\">{}1</span></td> \
              <td>1</td>",
-            crate::web::Icon::Warning
+            crate::web::Icon::Failed
         )),
         "{compact}"
     );
     assert!(
         compact.contains(&format!(
-            "<td>7</td> <td><span class=\"badge badge-error\">{}2</span></td>",
-            crate::web::Icon::Warning
+            "<td>7</td> <td><span class=\"pill pill-fail\">{}2</span></td>",
+            crate::web::Icon::Failed
         )),
         "{compact}"
     );
@@ -163,10 +163,10 @@ async fn dashboard_shows_the_statistics() {
         compact.contains("<td>12.0 s</td> <td>40.0 s</td>"),
         "{compact}"
     );
-    assert!(compact.contains(&format!("worker <span class=\"muted\">(blog)</span> <span class=\"badge badge-error\">{}crash looping</span>", crate::web::Icon::Warning)), "{compact}");
+    assert!(compact.contains(&format!("worker <span class=\"muted\">(blog)</span> <span class=\"pill pill-fail\">{}crash looping</span>", crate::web::Icon::Failed)), "{compact}");
     assert!(
         compact.contains(&format!(
-            "<span class=\"badge badge-error\">{}3 d</span>",
+            "<span class=\"pill pill-warn\">{}3 d</span>",
             crate::web::Icon::Warning
         )),
         "{compact}"
@@ -196,6 +196,25 @@ async fn htmx_is_served_with_a_long_cache_and_javascript_type() {
         "public, max-age=31536000, immutable"
     );
     assert!(body(response).await.starts_with("var htmx="));
+}
+
+#[tokio::test]
+async fn fonts_are_served_as_woff2_with_a_long_cache_under_the_csp() {
+    for font in &Assets::get().fonts {
+        let response = get(&font.url()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header(&response, "content-type"), "font/woff2");
+        assert_eq!(
+            header(&response, "cache-control"),
+            "public, max-age=31536000, immutable"
+        );
+        // Same-origin, so `default-src 'self'` covers it with no font-src of its own.
+        let csp = header(&response, "content-security-policy");
+        assert!(csp.starts_with("default-src 'self';"), "{csp}");
+        assert!(!csp.contains("font-src"), "{csp}");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.starts_with(b"wOF2"));
+    }
 }
 
 #[tokio::test]

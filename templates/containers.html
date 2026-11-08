@@ -5,7 +5,7 @@
 {%- if rows.is_empty() %}
 <p>No containers yet. hoster's containers appear here once a stack is deployed.</p>
 {%- else %}
-<table class="containers">
+<div class="table-scroll"><table class="containers">
   <thead>
     <tr><th scope="col">Container</th><th scope="col">Stack</th><th scope="col">Service</th><th scope="col">Generation</th><th scope="col">State</th><th scope="col"></th></tr>
   </thead>
@@ -21,6 +21,6 @@
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 {% endblock %}

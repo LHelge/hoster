@@ -7,7 +7,7 @@
 {%- if deployments.is_empty() %}
 <p>No deployments yet.</p>
 {%- else %}
-<table class="list deployments">
+<div class="table-scroll"><table class="list deployments">
   <thead>
     <tr><th scope="col">#</th><th scope="col">State</th><th scope="col">Source</th><th scope="col">Digests</th><th scope="col">Started</th><th scope="col">Duration</th><th scope="col">Reason</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
   </thead>
@@ -15,7 +15,7 @@
     {%- for deployment in deployments %}
     <tr>
       <td><a href="{{ deployment.url }}">{{ deployment.id }}</a></td>
-      <td>{% if deployment.failed %}<strong class="state-failed">{{ crate::web::Icon::Failed }}{{ deployment.state }}</strong>{% else %}{{ deployment.state }}{% endif %}</td>
+      <td>{{ deployment.state }}</td>
       <td>{{ deployment.source }}</td>
       <td>
         {%- for (service, short, digest) in deployment.digests %}
@@ -35,6 +35,6 @@
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 {% endblock %}
