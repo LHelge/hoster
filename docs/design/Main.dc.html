@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dashboard</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0;background:#1e1e2e}
+*{box-sizing:border-box}
+a{color:#89b4fa;text-decoration:none}a:hover{color:#b4befe}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+table{border-collapse:collapse;width:100%}
+th{text-align:left;font-weight:500;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#9399b2;padding:10px 14px;border-bottom:1px solid #313244;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #26263a;font-size:13px;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover td{background:#1e1e2e}
+button{font:inherit;cursor:pointer}
+.nav a:hover{background:#313244}
+</style>
+</helmet>
+<div style="min-height: 100vh; display: flex; flex-wrap: wrap; background: #1e1e2e; color: #cdd6f4; font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<nav aria-label="Main" style="flex: 1 1 232px; background: #181825; border-right: 1px solid #313244; padding: 20px 14px; display: flex; flex-direction: column; gap: 22px">
+  <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px">
+    <div aria-hidden="true" style="width: 30px; height: 30px; border-radius: 8px; background: {{accent}}; display: flex; align-items: center; justify-content: center; color: #11111b">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+    </div>
+    <div style="display: flex; flex-direction: column; line-height: 1.25">
+      <span class="mono" style="font-weight: 700; font-size: 15px">[app name]</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">v0.14.2 · srv-01</span>
+    </div>
+  </div>
+  <div class="nav" style="display: flex; flex-direction: column; gap: 2px">
+    <a href="Main.dc.html" aria-current="page" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; background: #313244; color: #cdd6f4; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>
+      Dashboard
+    </a>
+    <a href="Stacks.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+      Stacks
+      <span class="mono" style="margin-left: auto; font-size: 11px; color: #a6adc8">9</span>
+    </a>
+    <a href="Certificates.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+      Certificates
+      <span class="mono" aria-label="1 failing" style="margin-left: auto; font-size: 11px; font-weight: 700; color: #11111b; background: #f38ba8; border-radius: 9px; padding: 1px 7px">1</span>
+    </a>
+    <a href="Settings.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>
+      Settings
+    </a>
+    <a href="System.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"></rect><rect x="2" y="13" width="20" height="8" rx="2"></rect><path d="M6 7h.01M6 17h.01"></path></svg>
+      System
+      <span class="mono" style="margin-left: auto; font-size: 10px; color: #89b4fa; border: 1px solid #89b4fa; border-radius: 9px; padding: 0 6px">update</span>
+    </a>
+  </div>
+  <div style="flex-grow: 1"></div>
+  <div style="background: #1e1e2e; border: 1px solid #313244; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px">
+    <div class="mono" style="font-size: 11px; color: #9399b2; letter-spacing: .06em">HOST · srv-01</div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">cpu</span><span>23%</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 23%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">mem</span><span>11.2 / 32 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 35%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">disk</span><span>412 / 1000 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 41%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px; border-top: 1px solid #313244; padding: 14px 4px 0">
+    <div aria-hidden="true" class="mono" style="width: 32px; height: 32px; border-radius: 50%; background: #45475a; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px">A</div>
+    <div style="display: flex; flex-direction: column; line-height: 1.3; min-width: 0">
+      <span style="font-weight: 500">admin</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">session · 6h left</span>
+    </div>
+    <button aria-label="Log out" style="margin-left: auto; width: 44px; height: 44px; border-radius: 8px; border: 1px solid #313244; background: transparent; color: #bac2de; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></svg>
+    </button>
+  </div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px 48px; display: flex; flex-direction: column; gap: 22px">
+  <header style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
+    <div>
+      <div class="mono" style="font-size: 12px; color: #9399b2">~/dashboard</div>
+      <h1 style="margin: 4px 0 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em">Dashboard</h1>
+    </div>
+    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap">
+      <span class="mono" style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a6adc8"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1; box-shadow: 0 0 0 3px #a6e3a133"></span>live · refresh 30s</span>
+      <div role="group" aria-label="Time range" class="mono" style="display: flex; background: #181825; border: 1px solid #313244; border-radius: 8px; padding: 3px; gap: 2px">
+        <sc-for list="{{ranges}}" as="r" hint-placeholder-count="4">
+          <button aria-pressed="{{r.on}}" onClick="{{r.pick}}" style="border: 0; border-radius: 6px; padding: 7px 12px; font-size: 12px; {{r.style}}">{{r.label}}</button>
+        </sc-for>
+      </div>
+    </div>
+  </header>
+
+  <section aria-label="Key metrics" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px">
+    <sc-for list="{{kpis}}" as="k" hint-placeholder-count="6">
+      <div style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px">
+        <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">{{k.label}}</span>
+        <span class="mono" style="font-size: 24px; font-weight: 600; letter-spacing: -0.02em">{{k.value}}</span>
+        <span class="mono" style="font-size: 12px; color: {{k.tone}}">{{k.sub}}</span>
+      </div>
+    </sc-for>
+  </section>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 16px">
+    <section style="flex: 3 1 520px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 16px 18px">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 14px">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Responses by status <span class="mono" style="color: #9399b2; font-weight: 400">· 24h · all stacks</span></h2>
+        <div class="mono" style="display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #a6adc8">
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #a6e3a1"></span>2xx 1,231,402</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #89b4fa"></span>3xx 28,190</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #fab387"></span>4xx 19,877</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #f38ba8"></span>5xx 5,401</span>
+        </div>
+      </div>
+      <div role="img" aria-label="Stacked bar chart of hourly responses by status class over the last 24 hours, with a 5xx spike 10 hours ago" style="display: flex; gap: 10px">
+        <div class="mono" aria-hidden="true" style="display: flex; flex-direction: column; justify-content: space-between; font-size: 10px; color: #9399b2; height: 180px; text-align: right; width: 34px">
+          <span>90k</span><span>60k</span><span>30k</span><span>0</span>
+        </div>
+        <div style="flex: 1; min-width: 0">
+          <div style="height: 180px; display: flex; align-items: flex-end; gap: 4px; border-bottom: 1px solid #313244; background-image: linear-gradient(#26263a 1px, transparent 1px); background-size: 100% 60px">
+            <sc-for list="{{bars}}" as="b" hint-placeholder-count="24">
+              <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+                <div style="height: {{b.h5}}px; background: #f38ba8; border-radius: 2px 2px 0 0"></div>
+                <div style="height: {{b.h4}}px; background: #fab387"></div>
+                <div style="height: {{b.h3}}px; background: #89b4fa"></div>
+                <div style="height: {{b.h2}}px; background: #a6e3a1; opacity: .85"></div>
+              </div>
+            </sc-for>
+          </div>
+          <div class="mono" style="display: flex; justify-content: space-between; font-size: 10px; color: #9399b2; margin-top: 6px">
+            <span>-24h</span><span>-18h</span><span>-12h</span><span>-6h</span><span>now</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section style="flex: 2 1 380px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 16px 18px">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 14px">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Response time <span class="mono" style="color: #9399b2; font-weight: 400">· 24h</span></h2>
+        <div class="mono" style="display: flex; gap: 14px; font-size: 12px; color: #a6adc8">
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 14px; height: 2px; background: #94e2d5"></span>p50</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 14px; height: 2px; background: #f9e2af"></span>p95</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 14px; height: 0; border-top: 2px dashed #6c7086"></span>slo 300ms</span>
+        </div>
+      </div>
+      <div style="display: flex; gap: 10px">
+        <div class="mono" aria-hidden="true" style="display: flex; flex-direction: column; justify-content: space-between; font-size: 10px; color: #9399b2; height: 180px; text-align: right; width: 40px">
+          <span>450ms</span><span>300ms</span><span>150ms</span><span>0</span>
+        </div>
+        <div style="flex: 1; min-width: 0">
+          <svg role="img" aria-label="p50 around 40 ms and p95 around 200 ms, p95 peaked at 412 ms ten hours ago" viewBox="0 0 600 180" preserveAspectRatio="none" style="width: 100%; height: 180px; display: block; border-bottom: 1px solid #313244">
+            <line x1="0" y1="60" x2="600" y2="60" stroke="#26263a" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+            <line x1="0" y1="120" x2="600" y2="120" stroke="#26263a" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+            <line x1="0" y1="60" x2="600" y2="60" stroke="#6c7086" stroke-width="1.5" stroke-dasharray="5 5" vector-effect="non-scaling-stroke"></line>
+            <polyline points="{{p95}}" fill="none" stroke="#f9e2af" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"></polyline>
+            <polyline points="{{p50}}" fill="none" stroke="#94e2d5" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"></polyline>
+          </svg>
+          <div class="mono" style="display: flex; justify-content: space-between; font-size: 10px; color: #9399b2; margin-top: 6px">
+            <span>-24h</span><span>-12h</span><span>now</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+      <h2 style="margin: 0; font-size: 14px; font-weight: 600">Stacks <span class="mono" style="color: #9399b2; font-weight: 400">· 6 running · 1 degraded · 1 deploying · 1 stopped</span></h2>
+      <a href="Stacks.dc.html" class="mono" style="font-size: 12px">all stacks →</a>
+    </div>
+    <div style="overflow-x: auto">
+      <table style="min-width: 900px">
+        <thead>
+          <tr><th>Stack</th><th>Status</th><th>Containers</th><th style="text-align: right">req/min</th><th style="text-align: right">p50</th><th style="text-align: right">p95</th><th style="text-align: right">4xx</th><th style="text-align: right">5xx</th><th>Last hour</th><th>Deployed</th></tr>
+        </thead>
+        <tbody>
+          <sc-for list="{{stacks}}" as="s" hint-placeholder-count="9">
+            <tr>
+              <td><a href="StackDetail.dc.html" class="mono" style="color: #cdd6f4; font-weight: 600">{{s.name}}</a></td>
+              <td><span class="mono" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 9px; border-radius: 10px; color: {{s.c}}; background: {{s.bg}}"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: {{s.c}}"></span>{{s.status}}</span></td>
+              <td class="mono" style="color: #a6adc8">{{s.svc}}</td>
+              <td class="mono" style="text-align: right">{{s.rpm}}</td>
+              <td class="mono" style="text-align: right">{{s.p50}}</td>
+              <td class="mono" style="text-align: right; color: {{s.p95c}}">{{s.p95}}</td>
+              <td class="mono" style="text-align: right; color: #a6adc8">{{s.e4}}</td>
+              <td class="mono" style="text-align: right; color: {{s.e5c}}">{{s.e5}}</td>
+              <td><svg aria-hidden="true" width="96" height="28" viewBox="0 0 96 28"><polyline points="{{s.spark}}" fill="none" stroke="{{s.sc}}" stroke-width="1.5" stroke-linejoin="round"></polyline></svg></td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{s.when}}</td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 16px">
+    <section style="flex: 1 1 440px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px">
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Certificates <span class="mono" style="color: #9399b2; font-weight: 400">· 14 held</span></h2>
+        <a href="Certificates.dc.html" class="mono" style="font-size: 12px">manage →</a>
+      </div>
+      <div style="display: flex; flex-direction: column">
+        <sc-for list="{{certs}}" as="c" hint-placeholder-count="6">
+          <div style="display: flex; align-items: center; gap: 14px; padding: 11px 18px; border-bottom: 1px solid #26263a">
+            <span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; flex: none; background: {{c.c}}"></span>
+            <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+              <div style="display: flex; justify-content: space-between; gap: 10px">
+                <span class="mono" style="font-size: 13px">{{c.domain}}</span>
+                <span class="mono" style="font-size: 12px; color: {{c.c}}">{{c.label}}</span>
+              </div>
+              <div style="height: 3px; background: #313244; border-radius: 2px"><div style="height: 100%; border-radius: 2px; width: {{c.pct}}%; background: {{c.c}}"></div></div>
+            </div>
+            <span class="mono" style="font-size: 12px; color: #a6adc8; width: 44px; text-align: right">{{c.days}}</span>
+          </div>
+        </sc-for>
+        <div class="mono" style="padding: 11px 18px; font-size: 12px; color: #9399b2">+ 8 more valid · auto-renew at 30 days left</div>
+      </div>
+    </section>
+
+    <section style="flex: 1 1 440px; min-width: 0; background: #181825; border: 1px solid #313244; border-radius: 10px">
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Recent events</h2>
+        <span class="mono" style="font-size: 12px; color: #9399b2">today</span>
+      </div>
+      <ol style="list-style: none; margin: 0; padding: 6px 0">
+        <sc-for list="{{events}}" as="e" hint-placeholder-count="6">
+          <li style="display: flex; gap: 14px; padding: 9px 18px; align-items: flex-start">
+            <span class="mono" style="font-size: 12px; color: #9399b2; width: 40px; flex: none; padding-top: 1px">{{e.t}}</span>
+            <span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 2px; flex: none; margin-top: 5px; background: {{e.c}}"></span>
+            <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+              <span style="font-size: 13px">{{e.text}}</span>
+              <span class="mono" style="font-size: 11px; color: #9399b2">{{e.meta}}</span>
+            </div>
+          </li>
+        </sc-for>
+      </ol>
+    </section>
+  </div>
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#cba6f7","options":["#cba6f7","#89b4fa","#94e2d5","#fab387"]},"$preview":{"width":1440,"height":1640}}'>
+class Component extends DCLogic {
+  constructor(props) { super(props); this.state = { range: '24h' }; }
+  renderVals() {
+    const accent = this.props.accent ?? '#cba6f7';
+    const ranges = ['1h', '6h', '24h', '7d', '30d'].map((label) => {
+      const on = this.state.range === label;
+      return { label, on: on ? 'true' : 'false', pick: () => this.setState({ range: label }),
+        style: on ? 'background: #313244; color: #cdd6f4' : 'background: transparent; color: #a6adc8' };
+    });
+    const kpis = [
+      { label: 'REQUESTS · 24H', value: '1.28M', sub: '▲ 6.2% vs prev', tone: '#a6adc8' },
+      { label: '5XX RATE', value: '0.42%', sub: '▲ outline incident', tone: '#f38ba8' },
+      { label: 'P50 LATENCY', value: '38 ms', sub: '▼ 2 ms vs prev', tone: '#a6adc8' },
+      { label: 'P95 LATENCY', value: '212 ms', sub: 'slo 300 ms · ok', tone: '#a6e3a1' },
+      { label: 'STACKS', value: '6 / 9', sub: '1 degraded · 1 deploying', tone: '#fab387' },
+      { label: 'CERTIFICATES', value: '12 / 14', sub: '1 failed · 1 renewing', tone: '#f38ba8' }
+    ];
+    const load = [38,31,26,22,20,24,35,52,68,74,79,82,80,84,88,86,83,90,95,92,84,71,58,46];
+    const bars = load.map((v, i) => {
+      const t = v * 1.78;
+      const h5 = i === 14 ? 18 : Math.max(1, t * 0.006);
+      const h4 = t * 0.035, h3 = t * 0.022;
+      const h2 = Math.max(0, t - h5 - h4 - h3);
+      return { h2: h2.toFixed(1), h3: h3.toFixed(1), h4: h4.toFixed(1), h5: h5.toFixed(1) };
+    });
+    const line = (arr) => arr.map((ms, i) => (i * 600 / 23).toFixed(1) + ',' + (180 - ms / 450 * 180).toFixed(1)).join(' ');
+    const p50 = line([34,33,31,30,30,31,33,36,38,39,40,41,40,42,58,44,41,43,45,44,41,39,37,35]);
+    const p95 = line([160,150,142,138,136,140,155,178,196,204,210,214,212,220,412,236,224,232,248,240,226,205,188,172]);
+    const tone = {
+      running: ['#a6e3a1', '#a6e3a11a'], degraded: ['#fab387', '#fab3871f'],
+      deploying: ['#89b4fa', '#89b4fa1f'], stopped: ['#9399b2', '#9399b21a']
+    };
+    const spark = (a) => { const mx = Math.max(...a), mn = Math.min(...a);
+      return a.map((v, i) => (i * 96 / (a.length - 1)).toFixed(1) + ',' + (25 - (v - mn) / ((mx - mn) || 1) * 22).toFixed(1)).join(' '); };
+    const raw = [
+      ['gitea', 'running', '3/3', '412', '21 ms', '118 ms', '0.8%', '0.02%', [5,6,5,7,8,7,9,8,7,8,9,10], '2h ago'],
+      ['immich', 'running', '5/5', '186', '64 ms', '480 ms', '0.3%', '0.10%', [3,4,6,5,4,8,9,7,5,4,6,5], '3d ago'],
+      ['vaultwarden', 'running', '1/1', '38', '9 ms', '31 ms', '1.9%', '0.00%', [4,4,5,4,4,5,4,5,5,4,4,5], '12d ago'],
+      ['plausible', 'running', '3/3', '1,240', '14 ms', '66 ms', '0.1%', '0.01%', [6,7,7,8,9,9,10,9,10,11,10,11], '5d ago'],
+      ['outline', 'degraded', '2/3', '57', '140 ms', '1.9 s', '0.6%', '6.80%', [5,5,6,5,4,9,12,11,6,5,8,10], '1d ago'],
+      ['grafana', 'running', '3/3', '92', '33 ms', '210 ms', '0.2%', '0.00%', [3,3,4,3,5,4,3,4,4,3,4,4], '8d ago'],
+      ['paperless', 'deploying', '3/4', '11', '48 ms', '260 ms', '0.0%', '0.00%', [2,2,3,2,2,1,1,0,0,1,2,2], 'now'],
+      ['uptime-kuma', 'running', '1/1', '24', '12 ms', '40 ms', '0.0%', '0.00%', [4,4,4,4,4,4,4,4,4,4,4,4], '21d ago'],
+      ['portfolio', 'stopped', '0/1', '—', '—', '—', '—', '—', [0,0,0,0,0,0,0,0,0,0,0,0], '34d ago']
+    ];
+    const stacks = raw.map((r) => ({
+      name: r[0], status: r[1], c: tone[r[1]][0], bg: tone[r[1]][1], svc: r[2], rpm: r[3], p50: r[4], p95: r[5],
+      p95c: r[5] === '1.9 s' ? '#fab387' : '#cdd6f4', e4: r[6], e5: r[7], e5c: r[7] === '6.80%' ? '#f38ba8' : '#a6adc8',
+      spark: spark(r[8]), sc: r[1] === 'degraded' ? '#fab387' : r[1] === 'stopped' ? '#585b70' : '#94e2d5', when: r[9]
+    }));
+    const certs = [
+      ['wiki.example.net', 'renewal failed', '#f38ba8', 3],
+      ['stats.example.net', 'renewing', '#89b4fa', 9],
+      ['photos.example.net', 'valid', '#a6e3a1', 44],
+      ['grafana.example.net', 'valid', '#a6e3a1', 58],
+      ['git.example.net', 'valid', '#a6e3a1', 61],
+      ['vault.example.net', 'valid', '#a6e3a1', 72]
+    ].map((c) => ({ domain: c[0], label: c[1], c: c[2], days: c[3] + 'd', pct: Math.round(c[3] / 90 * 100) }));
+    const events = [
+      { t: '18:42', c: '#89b4fa', text: 'paperless deploy started', meta: 'a91f3c2 · push to main · "bump paperless-ngx to 2.14"' },
+      { t: '18:31', c: '#fab387', text: 'outline-app restarted (exit 137, OOM killed)', meta: 'restart 4 of 5 in the last hour' },
+      { t: '17:05', c: '#f38ba8', text: 'wiki.example.net renewal failed', meta: 'HTTP-01 · A record resolves to 198.51.100.7, expected 203.0.113.42' },
+      { t: '08:12', c: '#f38ba8', text: '5xx spike on outline', meta: '312 responses in 5 min · p95 1.9 s' },
+      { t: '06:00', c: '#89b4fa', text: 'stats.example.net entered renew window', meta: 'renewal queued · 9 days left' },
+      { t: '03:14', c: '#a6e3a1', text: 'gitea deployed', meta: '4e0b7d1 · webhook · 41 s' }
+    ];
+    return { accent, ranges, kpis, bars, p50, p95, stacks, certs, events };
+  }
+}
+</script>
+</body>
+</html>

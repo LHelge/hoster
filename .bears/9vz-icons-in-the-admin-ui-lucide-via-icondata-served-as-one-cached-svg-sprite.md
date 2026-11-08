@@ -1,10 +1,10 @@
 ---
 id: "9vz"
 title: "Icons in the admin UI: Lucide via icondata, served as one cached SVG sprite"
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-08T17:36:13.652227767Z"
-updated: "2026-11-08T17:36:19.267803125Z"
+updated: "2026-11-08T18:06:50.579726516Z"
 tags:
   - web
   - ui

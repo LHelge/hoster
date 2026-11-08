@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Certificates</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0;background:#1e1e2e}
+*{box-sizing:border-box}
+a{color:#89b4fa;text-decoration:none}a:hover{color:#b4befe}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+table{border-collapse:collapse;width:100%}
+th{text-align:left;font-weight:500;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#9399b2;padding:10px 14px;border-bottom:1px solid #313244;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+td{padding:11px 14px;border-bottom:1px solid #26263a;font-size:13px;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+button,input{font:inherit}
+button{cursor:pointer}
+.nav a:hover{background:#313244}
+.ghost:hover{background:#313244}
+</style>
+</helmet>
+<div style="min-height: 100vh; display: flex; flex-wrap: wrap; background: #1e1e2e; color: #cdd6f4; font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<nav aria-label="Main" style="flex: 1 1 232px; background: #181825; border-right: 1px solid #313244; padding: 20px 14px; display: flex; flex-direction: column; gap: 22px">
+  <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px">
+    <div aria-hidden="true" style="width: 30px; height: 30px; border-radius: 8px; background: {{accent}}; display: flex; align-items: center; justify-content: center; color: #11111b">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+    </div>
+    <div style="display: flex; flex-direction: column; line-height: 1.25">
+      <span class="mono" style="font-weight: 700; font-size: 15px">[app name]</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">v0.14.2 · srv-01</span>
+    </div>
+  </div>
+  <div class="nav" style="display: flex; flex-direction: column; gap: 2px">
+    <a href="Main.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>
+      Dashboard
+    </a>
+    <a href="Stacks.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+      Stacks
+      <span class="mono" style="margin-left: auto; font-size: 11px; color: #a6adc8">9</span>
+    </a>
+    <a href="Certificates.dc.html" aria-current="page" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; background: #313244; color: #cdd6f4; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+      Certificates
+      <span class="mono" aria-label="1 failing" style="margin-left: auto; font-size: 11px; font-weight: 700; color: #11111b; background: #f38ba8; border-radius: 9px; padding: 1px 7px">1</span>
+    </a>
+    <a href="Settings.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>
+      Settings
+    </a>
+    <a href="System.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"></rect><rect x="2" y="13" width="20" height="8" rx="2"></rect><path d="M6 7h.01M6 17h.01"></path></svg>
+      System
+      <span class="mono" style="margin-left: auto; font-size: 10px; color: #89b4fa; border: 1px solid #89b4fa; border-radius: 9px; padding: 0 6px">update</span>
+    </a>
+  </div>
+  <div style="flex-grow: 1"></div>
+  <div style="background: #1e1e2e; border: 1px solid #313244; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px">
+    <div class="mono" style="font-size: 11px; color: #9399b2; letter-spacing: .06em">HOST · srv-01</div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">cpu</span><span>23%</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 23%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">mem</span><span>11.2 / 32 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 35%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">disk</span><span>412 / 1000 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 41%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px; border-top: 1px solid #313244; padding: 14px 4px 0">
+    <div aria-hidden="true" class="mono" style="width: 32px; height: 32px; border-radius: 50%; background: #45475a; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px">A</div>
+    <div style="display: flex; flex-direction: column; line-height: 1.3; min-width: 0">
+      <span style="font-weight: 500">admin</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">session · 6h left</span>
+    </div>
+    <button aria-label="Log out" style="margin-left: auto; width: 44px; height: 44px; border-radius: 8px; border: 1px solid #313244; background: transparent; color: #bac2de; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></svg>
+    </button>
+  </div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px 48px; display: flex; flex-direction: column; gap: 20px">
+  <header style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
+    <div>
+      <div class="mono" style="font-size: 12px; color: #9399b2">~/certificates</div>
+      <h1 style="margin: 4px 0 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em">Certificates</h1>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 8px">
+      <button class="ghost" style="height: 40px; padding: 0 14px; border-radius: 8px; border: 1px solid #45475a; background: transparent; color: #cdd6f4">Check all DNS</button>
+      <button style="height: 40px; padding: 0 16px; border-radius: 8px; border: 0; background: {{accent}}; color: #11111b; font-weight: 600">Renew due now (2)</button>
+    </div>
+  </header>
+
+  <section aria-label="Summary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px">
+    <div style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px"><span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">HELD</span><span class="mono" style="font-size: 22px; font-weight: 600">14</span><span class="mono" style="font-size: 11px; color: #a6adc8">22 names · 1 wildcard</span></div>
+    <div style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px"><span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">VALID</span><span class="mono" style="font-size: 22px; font-weight: 600; color: #a6e3a1">12</span><span class="mono" style="font-size: 11px; color: #a6adc8">&gt; 30 days left</span></div>
+    <div style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px"><span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">RENEWING</span><span class="mono" style="font-size: 22px; font-weight: 600; color: #89b4fa">1</span><span class="mono" style="font-size: 11px; color: #a6adc8">order pending · stats</span></div>
+    <div style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px"><span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">FAILED</span><span class="mono" style="font-size: 22px; font-weight: 600; color: #f38ba8">1</span><span class="mono" style="font-size: 11px; color: #a6adc8">3 attempts · wiki</span></div>
+    <div style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px"><span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">ACME ACCOUNT</span><span class="mono" style="font-size: 15px; font-weight: 600; padding: 4px 0 3px">letsencrypt · prod</span><span class="mono" style="font-size: 11px; color: #a6adc8">ecdsa p-256 · renew at 30d</span></div>
+  </section>
+
+  <div role="alert" style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; padding: 14px 18px; border-radius: 10px; border: 1px solid #f38ba866; background: #f38ba812">
+    <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f38ba8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 21h20L12 3z"></path><path d="M12 10v5M12 18h.01"></path></svg>
+    <div style="flex: 1 1 400px; display: flex; flex-direction: column; gap: 3px">
+      <span style="font-weight: 600">wiki.example.net expires in 3 days and renewal is failing</span>
+      <span class="mono" style="font-size: 12px; color: #bac2de">HTTP-01 challenge never reached this server: the A record points to 198.51.100.7, expected 203.0.113.42. Next automatic attempt in 1h 52m.</span>
+    </div>
+    <div style="display: flex; gap: 8px">
+      <button class="ghost mono" onClick="{{selWiki}}" style="height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #f38ba8; background: transparent; color: #f38ba8; font-size: 12px">show dns check</button>
+      <button class="mono" style="height: 36px; padding: 0 12px; border-radius: 8px; border: 0; background: #f38ba8; color: #11111b; font-size: 12px; font-weight: 600">retry now</button>
+    </div>
+  </div>
+
+  <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 18px; border-bottom: 1px solid #313244">
+      <div style="flex: 1 1 260px; max-width: 360px; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; background: #1e1e2e; border: 1px solid #313244; border-radius: 8px; color: #9399b2">
+        <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+        <input aria-label="Filter certificates" placeholder="Filter domains" class="mono" style="flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #cdd6f4; font-size: 12px">
+      </div>
+      <span class="mono" style="font-size: 12px; color: #9399b2">sorted by expiry · 10 of 14</span>
+    </div>
+    <div style="overflow-x: auto">
+      <table style="min-width: 1040px">
+        <thead><tr><th>Domain</th><th>Stack</th><th>Issuer</th><th>Challenge</th><th>Expires</th><th>Status</th><th style="text-align: right">Actions</th></tr></thead>
+        <tbody>
+          <sc-for list="{{certs}}" as="c" hint-placeholder-count="10">
+            <tr style="{{c.row}}">
+              <td class="mono"><div style="font-weight: 500">{{c.domain}}</div><div style="font-size: 11px; color: #9399b2">{{c.sans}}</div></td>
+              <td class="mono" style="font-size: 12px"><a href="StackDetail.dc.html">{{c.stack}}</a></td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{c.issuer}}</td>
+              <td class="mono" style="font-size: 12px; color: #a6adc8">{{c.challenge}}</td>
+              <td class="mono" style="font-size: 12px; min-width: 170px"><div style="display: flex; justify-content: space-between; gap: 8px"><span>{{c.date}}</span><span style="color: {{c.c}}">{{c.days}}</span></div><div style="height: 3px; background: #313244; border-radius: 2px; margin-top: 6px"><div style="height: 100%; border-radius: 2px; width: {{c.pct}}%; background: {{c.c}}"></div></div></td>
+              <td><span class="mono" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 9px; border-radius: 10px; color: {{c.c}}; background: {{c.bg}}"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: {{c.c}}"></span>{{c.status}}</span></td>
+              <td style="text-align: right; white-space: nowrap">
+                <button class="mono ghost" onClick="{{c.pick}}" aria-pressed="{{c.selOn}}" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: #89b4fa; border-radius: 6px">test dns</button>
+                <button class="mono ghost" style="font-size: 12px; padding: 6px 8px; border: 0; background: transparent; color: #89b4fa; border-radius: 6px">renew</button>
+              </td>
+            </tr>
+          </sc-for>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-label="DNS check" style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+    <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid #313244">
+      <h2 style="margin: 0; font-size: 14px; font-weight: 600">DNS check · <span class="mono" style="color: #89b4fa">{{sel.domain}}</span></h2>
+      <span class="mono" style="font-size: 12px; color: #9399b2">ran 4 s ago · server public ip 203.0.113.42 / 2001:db8::42</span>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 0">
+      <div style="flex: 3 1 560px; min-width: 0; overflow-x: auto; border-right: 1px solid #313244">
+        <table style="min-width: 620px">
+          <thead><tr><th>Record</th><th>Expected</th><th>1.1.1.1</th><th>8.8.8.8</th><th>9.9.9.9</th><th>Authoritative</th></tr></thead>
+          <tbody>
+            <sc-for list="{{sel.records}}" as="r" hint-placeholder-count="4">
+              <tr>
+                <td class="mono" style="font-weight: 600">{{r.type}}</td>
+                <td class="mono" style="font-size: 12px; color: #a6adc8">{{r.exp}}</td>
+                <sc-for list="{{r.res}}" as="x" hint-placeholder-count="4">
+                  <td class="mono" style="font-size: 12px; color: {{x.c}}">{{x.mark}} {{x.v}}</td>
+                </sc-for>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </div>
+      <div style="flex: 2 1 340px; min-width: 0; padding: 16px 18px; display: flex; flex-direction: column; gap: 14px">
+        <div style="display: flex; flex-direction: column; gap: 6px">
+          <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">HTTP-01 REACHABILITY</span>
+          <div class="mono" style="font-size: 12px; background: #11111b; border: 1px solid #313244; border-radius: 8px; padding: 10px 12px; line-height: 1.7">
+            <div style="color: #a6adc8">GET http://{{sel.domain}}/.well-known/acme-challenge/probe-7f3a</div>
+            <div style="color: {{sel.httpC}}">{{sel.http}}</div>
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 6px">
+          <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">VERDICT</span>
+          <p style="margin: 0; font-size: 13px; line-height: 1.55; color: {{sel.verdictC}}">{{sel.verdict}}</p>
+        </div>
+        <div style="display: flex; gap: 8px; margin-top: auto">
+          <button class="ghost mono" style="height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; font-size: 12px">re-run check</button>
+          <button class="ghost mono" style="height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; font-size: 12px">switch to dns-01</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#cba6f7","options":["#cba6f7","#89b4fa","#94e2d5","#fab387"]},"$preview":{"width":1440,"height":1560}}'>
+class Component extends DCLogic {
+  constructor(props) { super(props); this.state = { sel: 'wiki.example.net' }; }
+  renderVals() {
+    const accent = this.props.accent ?? '#cba6f7';
+    const tone = { valid: ['#a6e3a1', '#a6e3a11a'], renewing: ['#89b4fa', '#89b4fa1f'], failed: ['#f38ba8', '#f38ba81f'], unused: ['#9399b2', '#9399b21a'] };
+    const raw = [
+      ['wiki.example.net', '1 name', 'outline', 'LE R11', 'http-01', 'Nov 11', 3, 'failed'],
+      ['stats.example.net', '1 name', 'plausible', 'LE E6', 'http-01', 'Nov 17', 9, 'renewing'],
+      ['docs.example.net', '1 name', 'paperless', 'LE E5', 'http-01', 'Dec 15', 37, 'valid'],
+      ['photos.example.net', '1 name', 'immich', 'LE E6', 'http-01', 'Dec 22', 44, 'valid'],
+      ['status.example.net', '1 name', 'uptime-kuma', 'LE R10', 'http-01', 'Dec 29', 51, 'valid'],
+      ['grafana.example.net', '+ loki, prom', 'grafana', 'LE E5', 'http-01', 'Jan 05', 58, 'valid'],
+      ['git.example.net', '1 name', 'gitea', 'LE E6', 'http-01', 'Jan 08', 61, 'valid'],
+      ['*.lab.example.net', 'wildcard + apex', 'shared', 'LE R11', 'dns-01 · cloudflare', 'Jan 13', 66, 'valid'],
+      ['vault.example.net', '1 name', 'vaultwarden', 'LE E6', 'http-01', 'Jan 19', 72, 'valid'],
+      ['example.net', '+ www', 'portfolio', 'LE R10', 'http-01', 'Jan 27', 80, 'unused']
+    ];
+    const certs = raw.map(([domain, sans, stack, issuer, challenge, date, d, status]) => {
+      const on = this.state.sel === domain;
+      return { domain, sans, stack, issuer, challenge, date, days: d + 'd', pct: Math.round(d / 90 * 100),
+        status: status === 'unused' ? 'valid · stack stopped' : status, c: tone[status][0], bg: tone[status][1],
+        row: on ? 'background: #313244' : '', selOn: on ? 'true' : 'false', pick: () => this.setState({ sel: domain }) };
+    });
+    const ok = (v) => ({ mark: '✓', v, c: '#a6e3a1' });
+    const bad = (v) => ({ mark: '✗', v, c: '#f38ba8' });
+    const none = () => ({ mark: '–', v: 'no record', c: '#9399b2' });
+    const s = this.state.sel;
+    let sel;
+    if (s === 'wiki.example.net') {
+      sel = { domain: s,
+        records: [
+          { type: 'A', exp: '203.0.113.42', res: [bad('198.51.100.7'), bad('198.51.100.7'), bad('198.51.100.7'), bad('198.51.100.7')] },
+          { type: 'AAAA', exp: '2001:db8::42', res: [none(), none(), none(), none()] },
+          { type: 'CAA', exp: 'letsencrypt.org', res: [ok('issue letsencrypt.org'), ok('issue letsencrypt.org'), ok('issue letsencrypt.org'), ok('issue letsencrypt.org')] },
+          { type: 'TTL', exp: '—', res: [ok('300'), ok('300'), ok('300'), ok('300')] }
+        ],
+        http: '✗ timeout after 10 s · reached 198.51.100.7, not this host', httpC: '#f38ba8',
+        verdict: 'All resolvers agree, so this is not propagation. The A record still points at the old host. Update it at your DNS provider to 203.0.113.42, or switch this domain to the DNS-01 challenge if it is meant to stay private.',
+        verdictC: '#f9e2af' };
+    } else {
+      sel = { domain: s,
+        records: [
+          { type: 'A', exp: '203.0.113.42', res: [ok('203.0.113.42'), ok('203.0.113.42'), ok('203.0.113.42'), ok('203.0.113.42')] },
+          { type: 'AAAA', exp: '2001:db8::42', res: [ok('2001:db8::42'), ok('2001:db8::42'), ok('2001:db8::42'), ok('2001:db8::42')] },
+          { type: 'CAA', exp: 'letsencrypt.org', res: [ok('issue letsencrypt.org'), ok('issue letsencrypt.org'), ok('issue letsencrypt.org'), ok('issue letsencrypt.org')] },
+          { type: 'TTL', exp: '—', res: [ok('3600'), ok('3600'), ok('3600'), ok('3600')] }
+        ],
+        http: '✓ 200 OK in 38 ms · token served by this host', httpC: '#a6e3a1',
+        verdict: 'DNS resolves to this server on every resolver and the challenge path is reachable. Renewal should succeed.',
+        verdictC: '#a6e3a1' };
+    }
+    return { accent, certs, sel, selWiki: () => this.setState({ sel: 'wiki.example.net' }) };
+  }
+}
+</script>
+</body>
+</html>
