@@ -115,3 +115,33 @@ table.containers th, table.containers td {
 .log-stderr { border-left-color: #cf222e; background: var(--error-bg); }
 .log-legend .log-stdout { border-left-color: var(--border); }
 .log-notice { display: block; padding: 0.25rem 0.75rem; color: var(--muted); font-style: italic; }
+
+/* Stack pages: lists, forms, the apply preview and its diff. */
+table.list { width: 100%; border-collapse: collapse; margin: 0 0 1rem; }
+table.list th, table.list td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+table.pins tr.changes td { background: var(--info-bg); }
+ul.plain { margin: 0; padding: 0; list-style: none; }
+.badge { display: inline-block; padding: 0 0.4rem; border-radius: 6px; font-size: 0.85em; }
+.badge-error { background: var(--error-bg); }
+.stack-form { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; margin: 0 0 1rem; }
+.stack-form textarea {
+  width: 100%;
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+button.danger { border-color: #cf222e; color: #cf222e; }
+.problems { margin: 0.5rem 0 0; padding-left: 1.25rem; }
+.problem-at { font-weight: 600; }
+.problem-source { margin: 0.25rem 0; padding: 0.25rem 0.5rem; border-radius: 6px; background: var(--bg); overflow-x: auto; }
+.diff { margin: 0 0 1rem; border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; }
+.diff-hunk { width: 100%; border-collapse: collapse; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.diff-hunk + .diff-hunk { border-top: 1px dashed var(--border); }
+.diff-hunk td { padding: 0 0.5rem; white-space: pre; }
+.diff-no { width: 3rem; color: var(--muted); text-align: right; user-select: none; }
+.diff-sign { width: 1rem; user-select: none; }
+.diff-add { background: var(--success-bg); }
+.diff-remove { background: var(--error-bg); }

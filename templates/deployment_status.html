@@ -1,0 +1,27 @@
+<section id="deployment-status"{% if !deployment.finished %} hx-get="{{ deployment.status_url() }}" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+  <p class="deployment-state">
+    <strong>{{ deployment.state }}</strong>
+    {%- if deployment.finished %}{% if let Some(at) = deployment.finished_at %} at {{ at }}{% endif %}{% else %} <span class="muted">(in progress; this updates by itself, or <a href="{{ deployment.url }}">reload</a>)</span>{% endif %}
+  </p>
+  {%- if let Some(error) = deployment.error %}
+  <p class="flash flash-error">{{ error }}</p>
+  {%- endif %}
+  <p class="muted">Started by {{ deployment.source }} at {{ deployment.created_at }}{% if let Some(generation) = deployment.generation %}, generation {{ generation }}{% endif %}.</p>
+  {%- if !deployment.target.is_empty() %}
+  <h2>Target digests</h2>
+  <ul class="plain">
+    {%- for (service, digest) in deployment.target %}
+    <li><strong>{{ service }}</strong> <code>{{ digest }}</code></li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
+  <h2>Transitions</h2>
+  <table class="list events">
+    <thead><tr><th scope="col">Time</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Detail</th></tr></thead>
+    <tbody>
+      {%- for event in deployment.events %}
+      <tr><td>{{ event.at }}</td><td>{{ event.from }}</td><td>{{ event.to }}</td><td>{{ event.message }}</td></tr>
+      {%- endfor %}
+    </tbody>
+  </table>
+</section>

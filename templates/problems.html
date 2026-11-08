@@ -1,0 +1,9 @@
+<ul class="problems">
+  {%- for problem in problems %}
+  <li>
+    {%- if let Some(line) = problem.line %}<span class="problem-at">line {{ line }}{% if let Some(column) = problem.column %}, column {{ column }}{% endif %}</span> {% endif %}
+    {%- if !problem.path.is_empty() %}<code>{{ problem.path }}</code>: {% endif %}{{ problem.message }}
+    {%- if let Some(source) = problem.source %}<pre class="problem-source">{{ source }}</pre>{% endif %}
+  </li>
+  {%- endfor %}
+</ul>

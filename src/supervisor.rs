@@ -383,10 +383,6 @@ pub struct Supervisor {
     store: Option<Store>,
     /// The secret store (ADR-0029), opened with the state store; its key is generated on the
     /// first start.
-    #[allow(
-        dead_code,
-        reason = "handed to the orchestrator and web UI when they are wired"
-    )]
     secrets: Option<SecretStore>,
     /// The certificates served by SNI, loaded from disk in startup step 3.
     certs: Option<CertMap>,
@@ -638,11 +634,18 @@ impl Startup for Supervisor {
                     .store
                     .clone()
                     .context("the state store opens before the admin app")?;
-                let runtime = self
-                    .runtime
+                let runtime = Arc::new(
+                    self.runtime
+                        .clone()
+                        .context("podman is connected before the admin app")?,
+                );
+                // The one orchestrator, built in step 5: it is the single writer of desired
+                // state (ADR-0050), so the web UI must not get a second one.
+                let orchestrator = self
+                    .orchestrator
                     .clone()
-                    .context("podman is connected before the admin app")?;
-                let web = WebApp::from_config(&self.config, store, runtime)?
+                    .context("the orchestrator is built before the admin app")?;
+                let web = WebApp::from_config(&self.config, store, runtime, orchestrator)?
                     .start(listen, self.teardown.token.child_token())
                     .await?;
                 self.teardown.web = Some(web);

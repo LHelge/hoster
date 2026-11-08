@@ -16,15 +16,17 @@ use super::auth::Session;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Dashboard,
+    Stacks,
     Containers,
 }
 
 impl Section {
-    const ALL: [Section; 2] = [Section::Dashboard, Section::Containers];
+    const ALL: [Section; 3] = [Section::Dashboard, Section::Stacks, Section::Containers];
 
     fn href(self) -> &'static str {
         match self {
             Section::Dashboard => "/",
+            Section::Stacks => "/stacks",
             Section::Containers => "/containers",
         }
     }
@@ -34,6 +36,7 @@ impl fmt::Display for Section {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Section::Dashboard => "Dashboard",
+            Section::Stacks => "Stacks",
             Section::Containers => "Containers",
         })
     }
@@ -48,7 +51,6 @@ pub struct NavItem {
 
 /// How a flash message is styled; its `Display` is the CSS class suffix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "used by the pages that report outcomes")]
 pub enum FlashKind {
     Info,
     Success,

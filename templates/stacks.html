@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Stacks{% endblock %}
+{% block content %}
+<h1>Stacks</h1>
+<p><a class="button" href="/apply">Apply a stack file</a></p>
+{%- if stacks.is_empty() %}
+<p>No stacks yet. Apply a stack file to create one.</p>
+{%- else %}
+<table class="list stacks">
+  <thead>
+    <tr><th scope="col">Stack</th><th scope="col">Revision</th><th scope="col">Services</th><th scope="col">Last deployment</th></tr>
+  </thead>
+  <tbody>
+    {%- for stack in stacks %}
+    <tr>
+      <td><a href="{{ stack.url }}">{{ stack.name }}</a>
+        {%- if let Some(flag) = stack.flag %}<br><span class="badge badge-error">{{ flag }}</span>{% endif %}</td>
+      <td>{{ stack.revision }} <code title="{{ stack.full_hash }}">{{ stack.hash }}</code></td>
+      <td>
+        <ul class="plain">
+          {%- for service in stack.services %}
+          <li><strong>{{ service.name }}</strong>: {% if let Some(digest) = service.short_digest %}<code>{{ digest }}</code>, {% endif %}{{ service.state }}</li>
+          {%- endfor %}
+        </ul>
+      </td>
+      <td>
+        {%- if let Some((id, state, url)) = stack.active %}<a href="{{ url }}">#{{ id }}</a> running: {{ state }}
+        {%- else if let Some(last) = stack.last %}<a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} <span class="muted">({{ last.source }}, {{ last.at }})</span>
+        {%- else %}<span class="muted">none</span>{% endif %}
+        {%- if let Some(queued) = stack.queued %}<br><span class="muted">#{{ queued }} queued</span>{% endif %}
+      </td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+{% endblock %}

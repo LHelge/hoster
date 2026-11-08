@@ -1,10 +1,10 @@
 ---
 id: "3g2"
 title: "Web UI: stacks list, apply (validate + diff), manual deploy, remove"
-status: in_progress
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.225800435Z"
-updated: "2026-11-08T00:31:25.316896475Z"
+updated: "2026-11-08T00:51:59.954828507Z"
 tags:
   - web
 depends_on:

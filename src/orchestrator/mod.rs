@@ -2,10 +2,11 @@
 //! reconciler that keeps containers running (ADR-0028).
 //!
 //! [`Orchestrator`] is the single writer of desired state. Callers (the web UI, the webhook, the
-//! poller) hold an `Arc<Orchestrator>` and call its async methods: [`apply`](Orchestrator::apply),
+//! poller) hold an `Arc<Orchestrator>` and call its async methods:
+//! [`preview`](Orchestrator::preview) and [`apply`](Orchestrator::apply),
 //! [`deploy`](Orchestrator::deploy), [`remove`](Orchestrator::remove) (see [`RemoveStack`]),
-//! [`rollback`](Orchestrator::rollback) and [`status`](Orchestrator::status), each answering with
-//! a typed result. The per-stack deploy slots live in one `std::sync::Mutex`, held only for
+//! [`rollback`](Orchestrator::rollback), [`status`](Orchestrator::status) and
+//! [`deployment`](Orchestrator::deployment), each answering with a typed result. The per-stack deploy slots live in one `std::sync::Mutex`, held only for
 //! in-memory work, never across an `.await`.
 //!
 //! A deployment is driven by a spawned deploy task through the pure state machine of
@@ -44,8 +45,8 @@ use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, Vo
 use crate::secrets::{SecretError, SecretStore};
 use crate::stack::{Diagnostic, ImageRef, Name, PinnedImage, Stack, StackError};
 use crate::store::{
-    Deployment, DeploymentId, DeploymentSource, DeploymentState, DigestSet, NewDeployment,
-    StackRevision, Store, StoreError,
+    Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
+    NewDeployment, StackRevision, Store, StoreError,
 };
 
 use engine::{Run, Target};
@@ -162,6 +163,39 @@ pub struct ApplyOutcome {
     pub deployment: Option<DeployOutcome>,
 }
 
+/// The reply to [`Orchestrator::preview`]: what applying a stack file would do.
+#[derive(Debug, Clone)]
+pub struct ApplyPreview {
+    /// The stack the file defines.
+    pub stack: String,
+    /// The stack's active revision, which the file would replace; `None` for a new stack.
+    pub current: Option<StackRevision>,
+    pub warnings: Vec<Diagnostic>,
+    /// The digest every third-party image resolves to, next to the active revision's.
+    pub pins: Vec<PinChange>,
+    /// Services the apply would redeploy: their (digest, config hash) changes, or they leave
+    /// the stack.
+    pub changed: Vec<String>,
+}
+
+/// A third-party service's pinned digest (ADR-0025), before and after an apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinChange {
+    pub service: String,
+    /// The active revision's digest; `None` when the service is new.
+    pub before: Option<String>,
+    pub after: String,
+}
+
+/// A stack file that passed the apply checks.
+struct Prepared {
+    definition: Arc<Stack>,
+    images: DigestSet,
+    warnings: Vec<Diagnostic>,
+    changed: Vec<String>,
+    noop: bool,
+}
+
 /// Why a deployment ended when its stack was removed under it.
 const STACK_REMOVED: &str = "stack removed";
 
@@ -237,6 +271,11 @@ pub struct StackStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceStatus {
     pub name: String,
+    /// The image reference as the stack file writes it.
+    pub image: String,
+    /// Whether the image is built in CI, so its digest comes from deploys (webhook, poller or
+    /// a manual deploy) rather than from the stack revision.
+    pub ci_built: bool,
     pub state: ServiceState,
     /// How often the reconciler restarted the running generation, and whether it is crash
     /// looping (ADR-0028).
@@ -383,11 +422,68 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         })
     }
 
+    /// Checks a stack file the way [`apply`](Self::apply) would, without storing or deploying
+    /// anything (ADR-0027, ADR-0049): validates it, checks its routes, resolves third-party
+    /// tags (ADR-0025) and lists the services an apply would redeploy. The UI shows this as the
+    /// diff the admin confirms. The apply itself resolves the tags again.
+    #[tracing::instrument(skip_all)]
+    pub async fn preview(&self, toml: &str) -> Result<ApplyPreview> {
+        let prepared = self.prepare(toml).await?;
+        let stack = prepared.definition.name.to_string();
+        let current = self.store.latest_revision(&stack).await?;
+        let before = match &current {
+            Some(revision) => self.store.revision_images(revision.id).await?,
+            None => DigestSet::new(),
+        };
+        let pins = prepared
+            .images
+            .iter()
+            .map(|(service, digest)| PinChange {
+                service: service.clone(),
+                before: before.get(service).cloned(),
+                after: digest.clone(),
+            })
+            .collect();
+        Ok(ApplyPreview {
+            stack,
+            current,
+            warnings: prepared.warnings,
+            pins,
+            changed: prepared.changed,
+        })
+    }
+
     /// Applies a stack file (ADR-0027, ADR-0049): validates it, checks its routes against the
     /// other stacks, resolves third-party tags to digests (ADR-0025), stores it as the active
     /// revision and redeploys every service whose (digest, config hash) changes.
     #[tracing::instrument(skip_all)]
     pub async fn apply(self: &Arc<Self>, toml: &str) -> Result<ApplyOutcome> {
+        let Prepared {
+            definition,
+            images,
+            warnings,
+            changed,
+            noop,
+        } = self.prepare(toml).await?;
+        let name = definition.name.to_string();
+        let revision = self.store.add_pinned_revision(&name, toml, &images).await?;
+        tracing::info!(stack = %name, revision = revision.revision, "applied stack revision");
+        let deployment = if noop && !self.is_busy(&name) {
+            None
+        } else {
+            let target = Target::new(definition, revision.clone(), images, DigestSet::new());
+            Some(self.submit(target, DeploymentSource::Apply).await?)
+        };
+        Ok(ApplyOutcome {
+            revision,
+            warnings,
+            changed,
+            deployment,
+        })
+    }
+
+    /// The checks an apply runs before it stores anything, and the plan they lead to.
+    async fn prepare(&self, toml: &str) -> Result<Prepared> {
         let parsed = Stack::parse(toml)?;
         let definition = Arc::new(parsed.stack);
         if self.is_removing(definition.name.as_ref()) {
@@ -395,10 +491,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
         self.check_routes(&definition).await?;
         let images = self.resolve_images(&definition).await?;
-        let name = definition.name.to_string();
-        let revision = self.store.add_pinned_revision(&name, toml, &images).await?;
-        tracing::info!(stack = %name, revision = revision.revision, "applied stack revision");
-        let running = self.store.services(&name).await?;
+        let running = self.store.services(definition.name.as_ref()).await?;
         let secrets = self.secret_versions(&definition).await?;
         let plan = Plan::new(&definition, &images, &DigestSet::new(), &running, &secrets)?;
         let changed = plan
@@ -407,17 +500,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .map(|c| c.service.to_string())
             .chain(plan.removed.iter().map(|p| p.service.clone()))
             .collect();
-        let deployment = if plan.is_noop() && !self.is_busy(&name) {
-            None
-        } else {
-            let target = Target::new(definition, revision.clone(), images, DigestSet::new());
-            Some(self.submit(target, DeploymentSource::Apply).await?)
-        };
-        Ok(ApplyOutcome {
-            revision,
+        let noop = plan.is_noop();
+        Ok(Prepared {
+            definition,
+            images,
             warnings: parsed.warnings,
             changed,
-            deployment,
+            noop,
         })
     }
 
@@ -698,6 +787,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         };
                         ServiceStatus {
                             name: name.to_string(),
+                            image: service.image.to_string(),
+                            ci_built: service.image.is_ci_built(),
                             state,
                             restarts,
                         }
@@ -738,6 +829,22 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             });
         }
         Ok(out)
+    }
+
+    /// Deployment `id` of `stack`, with its state transitions in order.
+    pub async fn deployment(
+        &self,
+        stack: &str,
+        id: DeploymentId,
+    ) -> Result<(Deployment, Vec<DeploymentEvent>)> {
+        let deployment = self
+            .store
+            .deployment(id)
+            .await?
+            .filter(|d| d.stack == stack)
+            .ok_or(OrchestratorError::UnknownDeployment(id))?;
+        let events = self.store.events(id).await?;
+        Ok((deployment, events))
     }
 
     /// Waits until `id` is over (a terminal state, or halted) and returns it.

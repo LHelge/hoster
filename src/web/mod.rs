@@ -1,5 +1,6 @@
 //! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), container logs
-//! (ADR-0044, see `containers.rs`), and the deploy webhook handler (ADR-0042, ADR-0047).
+//! (ADR-0044, see `containers.rs`), the stack pages (ADR-0027, ADR-0049, see `stacks.rs`), and
+//! the deploy webhook handler (ADR-0042, ADR-0047).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
 //! binds the [`Listen`] address and serves until the root cancellation token is cancelled.
@@ -14,6 +15,7 @@ mod assets;
 mod auth;
 mod containers;
 mod pages;
+mod stacks;
 
 use std::fmt;
 use std::io;
@@ -25,13 +27,14 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Extension, Router};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::orchestrator::Orchestrator;
 use crate::runtime::ContainerRuntime;
 use crate::store::Store;
 
@@ -39,6 +42,7 @@ use self::assets::Assets;
 use self::auth::Auth;
 use self::containers::{ContainerSource, Containers};
 use self::pages::Dashboard;
+use self::stacks::{StackControl, Stacks};
 
 /// Where the admin app listens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,25 +111,32 @@ impl SecurityHeaders {
 pub struct WebApp {
     auth: Arc<Auth>,
     containers: Containers,
+    stacks: Stacks,
 }
 
 impl WebApp {
-    /// The app for `config`, with sessions in `store`, containers from `runtime`, and the GitHub
-    /// OAuth App's credentials read from their files or systemd credentials. Fails when they are
-    /// missing.
+    /// The app for `config`, with sessions in `store`, containers from `runtime`, stacks managed
+    /// through `orchestrator`, and the GitHub OAuth App's credentials read from their files or
+    /// systemd credentials. Fails when they are missing.
     pub fn from_config<R: ContainerRuntime>(
         config: &Config,
         store: Store,
-        runtime: R,
+        runtime: Arc<R>,
+        orchestrator: Arc<Orchestrator<R>>,
     ) -> anyhow::Result<Self> {
         let auth = Auth::from_config(config, store).context("setting up the GitHub login")?;
-        Ok(WebApp::new(auth, Arc::new(runtime)))
+        Ok(WebApp::new(auth, runtime, Arc::new(orchestrator)))
     }
 
-    fn new(auth: Auth, containers: Arc<dyn ContainerSource>) -> Self {
+    fn new(
+        auth: Auth,
+        containers: Arc<dyn ContainerSource>,
+        stacks: Arc<dyn StackControl>,
+    ) -> Self {
         WebApp {
             auth: Arc::new(auth),
             containers: Containers::from(containers),
+            stacks: Stacks::from(stacks),
         }
     }
 
@@ -140,6 +151,21 @@ impl WebApp {
                 get(Containers::log_stream),
             )
             .layer(Extension(self.containers.clone()))
+            .route("/stacks", get(Stacks::list))
+            .route("/stacks/{name}", get(Stacks::show))
+            .route("/stacks/{name}/deploy", post(Stacks::deploy))
+            .route("/stacks/{name}/remove", post(Stacks::remove))
+            .route(
+                "/stacks/{name}/deployments/{id}",
+                get(Stacks::deployment_page),
+            )
+            .route(
+                "/stacks/{name}/deployments/{id}/status",
+                get(Stacks::deployment_status),
+            )
+            .route("/apply", get(Stacks::apply_form).post(Stacks::apply))
+            .route("/apply/preview", post(Stacks::preview))
+            .layer(Extension(self.stacks.clone()))
             .route("/healthz", get(WebApp::healthz))
             .route("/assets/{file}", get(Assets::serve))
             .merge(Auth::routes())

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Stack {{ stack.name }}{% endblock %}
+{% block content %}
+<h1>Stack {{ stack.name }}</h1>
+<p class="muted">Revision {{ stack.revision }} <code title="{{ stack.full_hash }}">{{ stack.hash }}</code>, applied {{ stack.applied_at }}. <a href="/stacks">All stacks</a></p>
+{%- if let Some(flag) = stack.flag %}
+<p class="flash flash-error">{{ flag }}</p>
+{%- endif %}
+<p>
+  {%- if let Some((id, state, url)) = stack.active %}Deployment <a href="{{ url }}">#{{ id }}</a> is running: {{ state }}.
+  {%- else if let Some(last) = stack.last %}Last deployment: <a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} ({{ last.source }}, {{ last.at }}).
+  {%- else %}No deployments yet.{% endif %}
+  {%- if let Some(queued) = stack.queued %} Deployment #{{ queued }} is queued.{% endif %}
+</p>
+
+<h2>Services</h2>
+<table class="list services">
+  <thead>
+    <tr><th scope="col">Service</th><th scope="col">Image</th><th scope="col">Digest</th><th scope="col">State</th></tr>
+  </thead>
+  <tbody>
+    {%- for service in stack.services %}
+    <tr>
+      <td>{{ service.name }}</td>
+      <td><code>{{ service.image }}</code>{% if service.ci_built %} <span class="muted">(CI-built)</span>{% endif %}</td>
+      <td>{% if let Some(digest) = service.digest %}<code title="{{ digest }}">{% if let Some(short) = service.short_digest %}{{ short }}{% endif %}</code>{% endif %}</td>
+      <td>{{ service.state }}</td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+
+<h2>Apply a new revision</h2>
+<p><a class="button" href="/apply">Apply a stack file</a> <span class="muted">Applying redeploys the services whose configuration changes.</span></p>
+
+{%- if stack.deployable %}
+<h2>Deploy</h2>
+<form class="stack-form" hx-post="{{ stack.deploy_url() }}" hx-target="#deploy-result">
+  {%- for service in stack.services %}{% if service.ci_built %}
+  <label>{{ service.name }} <input type="text" name="digest.{{ service.name }}" placeholder="sha256:…" size="40" autocomplete="off" spellcheck="false"></label>
+  {%- endif %}{% endfor %}
+  <p class="muted">Services left empty keep the digest they run.</p>
+  <button type="submit">Deploy</button>
+</form>
+<div id="deploy-result" aria-live="polite"></div>
+{%- endif %}
+
+<h2>Remove</h2>
+<form class="stack-form" hx-post="{{ stack.remove_url() }}" hx-target="#remove-result">
+  <p>Removes the stack's containers, network and routes. Its revisions and deployment history are kept, and so are its named volumes unless you delete them.</p>
+  <label>Type <strong>{{ stack.name }}</strong> to confirm <input type="text" name="confirm" required autocomplete="off" spellcheck="false"></label>
+  <label><input type="checkbox" name="delete_volumes"> Also delete the stack's volumes and their data</label>
+  <button type="submit" class="danger">Remove stack</button>
+</form>
+<div id="remove-result" aria-live="polite"></div>
+{% endblock %}

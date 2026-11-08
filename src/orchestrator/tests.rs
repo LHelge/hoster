@@ -339,6 +339,70 @@ async fn apply_with_a_config_change_redeploys_only_that_service() {
 }
 
 #[tokio::test]
+async fn preview_shows_what_an_apply_would_do_without_doing_it() {
+    let h = harness().await;
+    let first = h.orchestrator.preview(NOTES).await.unwrap();
+    assert_eq!(first.stack, "notes");
+    assert!(first.current.is_none(), "a new stack");
+    assert_eq!(
+        first.pins,
+        [PinChange {
+            service: "storage".into(),
+            before: None,
+            after: digest(0xaa),
+        }]
+    );
+    assert_eq!(first.changed, ["storage"]);
+    assert!(
+        h.store.stack("notes").await.unwrap().is_none(),
+        "nothing stored"
+    );
+    assert!(h.runtime.containers().is_empty(), "nothing deployed");
+
+    h.bootstrap().await;
+    let edited = NOTES.replace(
+        "prefix = \"/api\"",
+        "prefix = \"/api\"\nstrip_prefix = true",
+    );
+    let preview = h.orchestrator.preview(&edited).await.unwrap();
+    let current = preview.current.expect("the active revision");
+    assert_eq!(current.revision, 1);
+    assert_eq!(current.toml, NOTES);
+    assert_eq!(preview.pins[0].before, Some(digest(0xaa)));
+    assert_eq!(preview.changed, ["api"]);
+    assert_eq!(h.store.revisions("notes").await.unwrap().len(), 1);
+
+    let unchanged = h.orchestrator.preview(NOTES).await.unwrap();
+    assert!(unchanged.changed.is_empty());
+
+    let err = h
+        .orchestrator
+        .preview("version = 1\nname = \"Bad\"\n")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, OrchestratorError::Invalid(_)), "{err}");
+}
+
+#[tokio::test]
+async fn deployment_lookup_returns_the_transitions_of_that_stack_only() {
+    let h = harness().await;
+    let applied = h.apply(NOTES).await;
+    let outcome = applied.deployment.unwrap();
+    h.finish(&outcome).await;
+    let (deployment, events) = h
+        .orchestrator
+        .deployment("notes", outcome.deployment)
+        .await
+        .unwrap();
+    assert_eq!(deployment.state, S::Live);
+    assert_eq!(events.last().unwrap().to, S::Live);
+    assert!(matches!(
+        h.orchestrator.deployment("other", outcome.deployment).await,
+        Err(OrchestratorError::UnknownDeployment(_))
+    ));
+}
+
+#[tokio::test]
 async fn pull_failure_aborts_and_leaves_the_old_generation() {
     let h = harness().await;
     h.bootstrap().await;

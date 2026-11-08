@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Apply a stack file{% endblock %}
+{% block content %}
+<h1>Apply a stack file</h1>
+<p class="muted">Paste the stack file or upload it. hoster checks it and shows what changes before anything is applied. <a href="/stacks">All stacks</a></p>
+<form class="stack-form" hx-post="/apply/preview" hx-target="#apply-result" enctype="multipart/form-data">
+  <label for="stack-toml">Stack file</label>
+  <textarea id="stack-toml" name="toml" rows="20" spellcheck="false"></textarea>
+  <label>or upload <input type="file" name="file" accept=".toml,text/plain,application/toml"></label>
+  <button type="submit">Check</button>
+</form>
+<div id="apply-result" aria-live="polite"></div>
+{% endblock %}

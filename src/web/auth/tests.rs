@@ -12,6 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 use crate::runtime::FakeRuntime;
 use crate::web::WebApp;
+use crate::web::stacks::tests::FakeStacks;
 
 pub const ORIGIN: &str = "https://hoster.example.com";
 const TOKEN_PATH: &str = "/login/oauth/access_token";
@@ -23,6 +24,8 @@ pub struct TestApp {
     pub store: Store,
     /// The containers the app shows.
     pub runtime: Arc<FakeRuntime>,
+    /// The orchestrator the stack pages talk to.
+    pub stacks: Arc<FakeStacks>,
     pub app: WebApp,
     _dir: TempDir,
 }
@@ -63,11 +66,17 @@ impl TestApp {
             idle_timeout,
         };
         let runtime = Arc::new(FakeRuntime::new());
-        let app = WebApp::new(Auth::new(settings, store.clone(), client), runtime.clone());
+        let stacks = Arc::new(FakeStacks::default());
+        let app = WebApp::new(
+            Auth::new(settings, store.clone(), client),
+            runtime.clone(),
+            stacks.clone(),
+        );
         TestApp {
             github,
             store,
             runtime,
+            stacks,
             app,
             _dir: dir,
         }

@@ -71,6 +71,14 @@ impl From<Timestamp> for SystemTime {
 #[sqlx(transparent)]
 pub struct RevisionId(i64);
 
+/// Ids are handed out by the store; tests elsewhere fabricate them.
+#[cfg(test)]
+impl From<i64> for RevisionId {
+    fn from(id: i64) -> Self {
+        Self(id)
+    }
+}
+
 impl fmt::Display for RevisionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
@@ -87,6 +95,15 @@ pub struct DeploymentId(i64);
 impl From<i64> for DeploymentId {
     fn from(id: i64) -> Self {
         Self(id)
+    }
+}
+
+/// As [`Display`](fmt::Display) writes it, e.g. in a URL.
+impl std::str::FromStr for DeploymentId {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(Self)
     }
 }
 
