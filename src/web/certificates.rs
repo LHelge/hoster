@@ -29,6 +29,7 @@ use serde::Deserialize;
 use super::auth::Session;
 use super::pages::{Layout, Page, Section};
 use super::stacks::Outcome;
+use super::ui::{CertState, Pill, Tone};
 use crate::acme::{Backoff, BackoffStore, CertMap, DnsCheck, DnsMismatch, DnsVerdict, Validity};
 use crate::orchestrator::{CertStatus, Orchestrator};
 use crate::runtime::ContainerRuntime;
@@ -280,11 +281,30 @@ impl std::fmt::Display for Left {
     }
 }
 
+/// What the DNS cell says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DnsState {
+    Matches,
+    Mismatch,
+    /// hoster's own addresses are unknown, so nothing was compared.
+    Unknown,
+    Unchecked,
+}
+
+impl From<DnsState> for Tone {
+    fn from(state: DnsState) -> Self {
+        match state {
+            DnsState::Matches => Tone::Ok,
+            DnsState::Mismatch => Tone::Warn,
+            DnsState::Unknown | DnsState::Unchecked => Tone::Neutral,
+        }
+    }
+}
+
 /// The DNS cell of a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsView {
-    /// `ok`, `mismatch`, `unchecked` or `unknown`.
-    state: &'static str,
+    state: DnsState,
     /// The host's addresses, comma-separated, for a mismatch.
     observed: String,
     expected: String,
@@ -292,10 +312,19 @@ pub struct DnsView {
 
 impl DnsView {
     const UNCHECKED: DnsView = DnsView {
-        state: "unchecked",
+        state: DnsState::Unchecked,
         observed: String::new(),
         expected: String::new(),
     };
+
+    /// The verdict as a pill; `None` when there is none to show.
+    fn pill(&self) -> Option<Pill> {
+        match self.state {
+            DnsState::Matches => Some(Tone::from(self.state).pill("ok")),
+            DnsState::Mismatch => Some(Tone::from(self.state).pill("mismatch")),
+            DnsState::Unknown | DnsState::Unchecked => None,
+        }
+    }
 
     fn list(addresses: &[IpAddr]) -> String {
         addresses
@@ -309,7 +338,7 @@ impl DnsView {
 impl From<&DnsMismatch> for DnsView {
     fn from(mismatch: &DnsMismatch) -> Self {
         DnsView {
-            state: "mismatch",
+            state: DnsState::Mismatch,
             observed: Self::list(&mismatch.observed),
             expected: Self::list(&mismatch.expected),
         }
@@ -320,12 +349,12 @@ impl From<&DnsVerdict> for DnsView {
     fn from(verdict: &DnsVerdict) -> Self {
         match verdict {
             DnsVerdict::Matches => DnsView {
-                state: "ok",
+                state: DnsState::Matches,
                 ..Self::UNCHECKED
             },
             DnsVerdict::Mismatch(mismatch) => Self::from(mismatch),
             DnsVerdict::Unknown => DnsView {
-                state: "unknown",
+                state: DnsState::Unknown,
                 ..Self::UNCHECKED
             },
         }
@@ -385,6 +414,12 @@ impl RowView {
             next_attempt,
             dns: DnsView::of_status(&row.status, public_known),
         }
+    }
+
+    /// The "Valid until" cell of a host without a certificate: pending, or failing once an
+    /// attempt reported an error.
+    fn pending_pill(&self) -> Pill {
+        Tone::from(CertState::unissued(self.error.as_deref())).pill("TLS pending")
     }
 }
 

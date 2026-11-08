@@ -32,7 +32,7 @@ async fn the_page_lists_names_times_and_users_but_no_values() {
     assert!(
         html.contains(&format!(
             r#"<code>notes/missing</code></td>
-      <td><span class="badge badge-error">{}not set</span>"#,
+      <td><span class="pill pill-warn">{}not set</span>"#,
             crate::web::Icon::Warning
         )),
         "{html}"

@@ -174,7 +174,7 @@ fn the_page_shows_the_public_addresses_and_one_row_per_host() {
     );
     assert!(
         admin.contains(&format!(
-            r#"<span class="badge badge-ok">{}ok</span>"#,
+            r#"<span class="pill pill-ok">{}ok</span>"#,
             crate::web::Icon::Ok
         )),
         "{admin}"
@@ -189,10 +189,17 @@ fn the_page_shows_the_public_addresses_and_one_row_per_host() {
 
     // The mismatch row: observed vs expected, the escaped error, the time to the retry.
     let notes = row(&html, "notes.example.com");
-    assert!(notes.contains("TLS pending"), "{notes}");
+    // No certificate yet, and the last attempt failed.
     assert!(
         notes.contains(&format!(
-            r#"<span class="badge badge-error">{}mismatch</span>"#,
+            r#"<span class="pill pill-fail">{}TLS pending</span>"#,
+            crate::web::Icon::Failed
+        )),
+        "{notes}"
+    );
+    assert!(
+        notes.contains(&format!(
+            r#"<span class="pill pill-warn">{}mismatch</span>"#,
             crate::web::Icon::Warning
         )),
         "{notes}"
@@ -240,13 +247,13 @@ fn an_attempt_without_known_public_addresses_is_not_shown_as_ok() {
     .unwrap();
     assert!(html.contains("<strong>unknown</strong>"), "{html}");
     let admin = row(&html, "admin.example.com");
-    assert!(!admin.contains("badge-ok"), "{admin}");
+    assert!(!admin.contains("pill-ok"), "{admin}");
     assert!(admin.contains("public addresses are unknown"), "{admin}");
     // A mismatch recorded earlier still names the addresses it was compared with.
     let notes = row(&html, "notes.example.com");
     assert!(
         notes.contains(&format!(
-            "badge-error\">{}mismatch",
+            "pill-warn\">{}mismatch",
             crate::web::Icon::Warning
         )),
         "{notes}"
@@ -323,7 +330,7 @@ async fn check_dns_now_answers_with_the_hosts_dns_cell() {
     assert_eq!(
         html,
         format!(
-            r#"<span class="badge badge-ok">{}ok</span>"#,
+            r#"<span class="pill pill-ok">{}ok</span>"#,
             crate::web::Icon::Ok
         )
     );

@@ -11,7 +11,7 @@
 {%- if rows.is_empty() %}
 <p>No hosts need a certificate yet.</p>
 {%- else %}
-<table class="list certificates">
+<div class="table-scroll"><table class="list certificates">
   <thead>
     <tr><th scope="col">Host</th><th scope="col">Issuer</th><th scope="col">Valid until</th><th scope="col">Last error</th><th scope="col">Next attempt</th><th scope="col">DNS</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
   </thead>
@@ -20,7 +20,7 @@
     <tr>
       <td><code>{{ row.host }}</code></td>
       <td>{% if let Some(issuer) = row.issuer %}{{ issuer }}{% else %}<span class="muted">none</span>{% endif %}</td>
-      <td>{% if let Some(at) = row.not_after %}{{ at }}{% else %}<span class="badge badge-error">{{ crate::web::Icon::Pending }}TLS pending</span>{% endif %}</td>
+      <td>{% if let Some(at) = row.not_after %}{{ at }}{% else %}{{ row.pending_pill() }}{% endif %}</td>
       <td>{% if let Some(error) = row.error %}<span class="cert-error">{{ error }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
       <td>{{ row.next_attempt }}</td>
       <td id="dns-{{ row.index }}">{% let dns = row.dns %}{% include "cert_dns.html" %}</td>
@@ -37,7 +37,7 @@
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 <div id="cert-result" aria-live="polite"></div>
 {% endblock %}

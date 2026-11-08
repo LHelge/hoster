@@ -15,7 +15,7 @@
 </p>
 
 <h2>Services</h2>
-<table class="list services">
+<div class="table-scroll"><table class="list services">
   <thead>
     <tr><th scope="col">Service</th><th scope="col">Image</th><th scope="col">Digest</th><th scope="col">State</th></tr>
   </thead>
@@ -23,16 +23,16 @@
     {%- for service in stack.services %}
     <tr>
       <td>{{ service.name }}</td>
-      <td><code>{{ service.image }}</code>{% if service.ci_built %} <span class="muted">(CI-built)</span>{% endif %}</td>
+      <td><code class="wrap">{{ service.image }}</code>{% if service.ci_built %} <span class="muted">(CI-built)</span>{% endif %}</td>
       <td>{% if let Some(digest) = service.digest %}<code title="{{ digest }}">{% if let Some(short) = service.short_digest %}{{ short }}{% endif %}</code>{% endif %}</td>
       <td>{{ service.state }}</td>
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 
 <h2>Apply a new revision</h2>
-<p><a class="button" href="/apply">Apply a stack file</a> <span class="muted">Applying redeploys the services whose configuration changes.</span></p>
+<p class="actions"><a class="button" href="/apply">Apply a stack file</a> <span class="muted">Applying redeploys the services whose configuration changes.</span></p>
 {%- if stack.third_party %}
 <form class="stack-form" hx-post="{{ stack.reresolve_url() }}" hx-target="#reresolve-result">
   <p class="muted">Third-party tags were resolved to digests when the revision was applied. Re-resolving looks them up again and shows what would change before anything is applied.</p>
@@ -42,7 +42,7 @@
 <div id="reresolve-result" aria-live="polite"></div>
 
 <h2>Secrets</h2>
-<p><a class="button" href="{{ stack.secrets_url() }}">Manage secrets</a> <span class="muted">Values are encrypted and write-only.</span></p>
+<p class="actions"><a class="button" href="{{ stack.secrets_url() }}">Manage secrets</a> <span class="muted">Values are encrypted and write-only.</span></p>
 
 {%- if stack.deployable %}
 <h2>Deploy</h2>
@@ -59,7 +59,7 @@
 {%- if !stack.rejections.is_empty() %}
 <h2>Refused webhook deploys</h2>
 <p class="muted">Attempts with a valid GitHub Actions token that were refused, newest first. To allow a repository, put its <code>repository_id</code> in the stack file's <code>[deploy]</code> section.</p>
-<table class="list rejections">
+<div class="table-scroll"><table class="list rejections">
   <thead>
     <tr><th scope="col">Time</th><th scope="col">Repository</th><th scope="col">repository_id</th><th scope="col">Ref</th><th scope="col">Environment</th><th scope="col">Workflow</th><th scope="col">Run</th><th scope="col">Reason</th></tr>
   </thead>
@@ -69,15 +69,15 @@
       <td>{{ rejection.at }}</td>
       <td>{{ rejection.repository }} <span class="muted">({{ rejection.actor }})</span></td>
       <td><code>{{ rejection.repository_id }}</code></td>
-      <td><code>{{ rejection.git_ref }}</code></td>
+      <td><code class="wrap">{{ rejection.git_ref }}</code></td>
       <td>{{ rejection.environment }}</td>
-      <td><code>{{ rejection.workflow_ref }}</code>{% if let Some(job) = rejection.job_workflow_ref %}<br><span class="muted">job_workflow_ref</span> <code>{{ job }}</code>{% endif %}</td>
+      <td><code class="wrap">{{ rejection.workflow_ref }}</code>{% if let Some(job) = rejection.job_workflow_ref %}<br><span class="muted">job_workflow_ref</span> <code class="wrap">{{ job }}</code>{% endif %}</td>
       <td>{{ rejection.run_id }}</td>
       <td>{{ rejection.reason }}</td>
     </tr>
     {%- endfor %}
   </tbody>
-</table>
+</table></div>
 {%- endif %}
 
 <h2>Remove</h2>

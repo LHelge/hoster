@@ -35,6 +35,7 @@ use tokio::sync::broadcast;
 
 use super::auth::Session;
 use super::pages::{FlashKind, Layout, Page, Section};
+use super::ui::Pill;
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, PinChange,
     RemoveOutcome, RemoveStack, SecretChange, ServiceState, StackSecret, StackStatus, UiEvent,
@@ -1031,7 +1032,7 @@ impl From<&crate::orchestrator::ServiceStatus> for ServiceView {
 struct DeploymentSummary {
     id: String,
     url: String,
-    state: String,
+    state: Pill,
     source: String,
     at: String,
 }
@@ -1041,7 +1042,7 @@ impl From<&Deployment> for DeploymentSummary {
         Self {
             id: deployment.id.to_string(),
             url: DeploymentView::url(&deployment.stack, deployment.id),
-            state: deployment.state.to_string(),
+            state: Pill::from(deployment.state),
             source: deployment.source.to_string(),
             at: When(deployment.updated_at).to_string(),
         }
@@ -1055,7 +1056,7 @@ pub struct DeploymentView {
     stack: String,
     stack_url: String,
     url: String,
-    state: String,
+    state: Pill,
     source: String,
     generation: Option<u32>,
     error: Option<String>,
@@ -1091,7 +1092,7 @@ impl DeploymentView {
             stack: deployment.stack.clone(),
             stack_url: StackView::url(&deployment.stack),
             url: Self::url(&deployment.stack, deployment.id),
-            state: deployment.state.to_string(),
+            state: Pill::from(deployment.state),
             source: deployment.source.to_string(),
             generation: deployment.generation,
             error: deployment.error.clone(),

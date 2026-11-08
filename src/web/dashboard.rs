@@ -16,7 +16,7 @@
 //!
 //! A warning is raised for a live service whose health probe fails, a service in a crash loop
 //! (by the health monitor or the reconciler, ADR-0028), a served certificate that expires within
-//! [`CertRow::WARN_WITHIN`], and a stack whose latest deployment failed or was rejected.
+//! [`CertState::WARN_WITHIN`], and a stack whose latest deployment failed or was rejected.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -35,6 +35,7 @@ use tokio::sync::broadcast;
 use super::auth::{Auth, Session};
 use super::pages::{Layout, Page, Section};
 use super::stacks::{DeploymentView, ShortDigest, StackView, Stacks, When};
+use super::ui::{CertState, Pill, Tone};
 use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus, UiEvent};
 use crate::routing::Owner;
@@ -257,7 +258,7 @@ impl Overview {
             .collect();
         for cert in certificates {
             let left = cert.remaining(now);
-            if left < CertRow::WARN_WITHIN {
+            if CertState::from(left).is_flagged() {
                 // A host no stack routes is hoster's own, a removed stack's, or one whose
                 // stacks cannot be read: who uses it is not known here, so nobody is named.
                 let detail = match routed.get(&cert.host) {
@@ -293,14 +294,21 @@ struct Warning {
     href: String,
 }
 
-/// The kinds of [`Warning`]; the `Display` is the badge text.
+impl Warning {
+    /// The kind, as a pill in its tone.
+    fn pill(&self) -> Pill {
+        Tone::from(self.kind).pill(self.kind)
+    }
+}
+
+/// The kinds of [`Warning`]; the `Display` is the pill text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WarningKind {
     /// The health probe of a live service fails (ADR-0038).
     Unhealthy,
     /// A service keeps crashing (ADR-0028).
     CrashLooping,
-    /// A served certificate expires within [`CertRow::WARN_WITHIN`].
+    /// A served certificate expires within [`CertState::WARN_WITHIN`].
     CertExpiring,
     /// A stack's latest deployment failed or was rejected.
     DeployFailed,
@@ -314,6 +322,19 @@ impl fmt::Display for WarningKind {
             Self::CertExpiring => "certificate expiring",
             Self::DeployFailed => "deploy failed",
         })
+    }
+}
+
+/// The same tone the condition has in its own cell: a failing probe and a crash loop as in
+/// [`HealthStatus`], a failed deploy as [`DeploymentState::Failed`].
+impl From<WarningKind> for Tone {
+    fn from(kind: WarningKind) -> Self {
+        match kind {
+            WarningKind::Unhealthy | WarningKind::CrashLooping | WarningKind::DeployFailed => {
+                Tone::Fail
+            }
+            WarningKind::CertExpiring => Tone::Warn,
+        }
     }
 }
 
@@ -361,9 +382,8 @@ impl StackRow {
             (Some((id, state)), _) => Some(DeployCell {
                 id: id.to_string(),
                 url: DeploymentView::url(&status.name, id),
-                state: state.to_string(),
+                state,
                 detail: "running".to_owned(),
-                failed: false,
             }),
             (None, Some(last)) => Some(DeployCell::from(last)),
             (None, None) => None,
@@ -416,7 +436,7 @@ impl StackRow {
                 href: self.url.clone(),
             });
         }
-        if let Some(deployment) = self.deployment.as_ref().filter(|d| d.failed) {
+        if let Some(deployment) = self.deployment.as_ref().filter(|d| d.failed()) {
             let error = status
                 .last
                 .as_ref()
@@ -440,11 +460,20 @@ impl StackRow {
 struct DeployCell {
     id: String,
     url: String,
-    state: String,
+    state: DeploymentState,
     /// "running", or "webhook, <when>".
     detail: String,
+}
+
+impl DeployCell {
     /// It ended `Failed` or `Rejected`.
-    failed: bool,
+    fn failed(&self) -> bool {
+        Tone::from(self.state) == Tone::Fail
+    }
+
+    fn pill(&self) -> Pill {
+        Pill::from(self.state)
+    }
 }
 
 impl From<&Deployment> for DeployCell {
@@ -452,16 +481,12 @@ impl From<&Deployment> for DeployCell {
         DeployCell {
             id: deployment.id.to_string(),
             url: DeploymentView::url(&deployment.stack, deployment.id),
-            state: deployment.state.to_string(),
+            state: deployment.state,
             detail: if deployment.state.is_terminal() {
                 format!("{}, {}", deployment.source, When(deployment.updated_at))
             } else {
                 "running".to_owned()
             },
-            failed: matches!(
-                deployment.state,
-                DeploymentState::Failed | DeploymentState::Rejected
-            ),
         }
     }
 }
@@ -514,12 +539,12 @@ impl ServiceRow {
         }
     }
 
-    /// The badge class of the health cell.
-    fn health_class(&self) -> &'static str {
-        match self.health {
-            HealthStatus::Healthy => "badge badge-ok",
-            HealthStatus::Unhealthy | HealthStatus::CrashLooping => "badge badge-error",
-            HealthStatus::Unknown => "muted",
+    /// The health cell, with what the last probe said as its tooltip.
+    fn health_pill(&self) -> Pill {
+        let pill = Pill::from(self.health);
+        match &self.health_detail {
+            Some(detail) => pill.title(detail),
+            None => pill,
         }
     }
 }
@@ -532,8 +557,8 @@ struct CertCell {
     left: Option<String>,
     /// The end of validity, RFC 3339.
     not_after: String,
-    /// Expires within [`CertRow::WARN_WITHIN`].
-    expiring: bool,
+    /// `Valid`, `Expiring` or `Expired`; `Pending` while none is served.
+    state: CertState,
 }
 
 impl CertCell {
@@ -545,8 +570,15 @@ impl CertCell {
             not_after: cert
                 .map(|cert| humantime::format_rfc3339_seconds(cert.not_after).to_string())
                 .unwrap_or_default(),
-            expiring: left.is_some_and(|left| left < CertRow::WARN_WITHIN),
+            state: left.map_or(CertState::Pending, CertState::from),
         }
+    }
+
+    /// The served certificate's time left as a pill with its end of validity as the tooltip;
+    /// `None` when it is still valid for long (plain text) or none is served.
+    fn pill(&self) -> Option<Pill> {
+        let left = self.left.as_ref()?;
+        Some(self.state.pill(left)?.title(&self.not_after))
     }
 
     /// `left` in words: `expired`, or how long.
@@ -604,13 +636,7 @@ pub struct CertRow {
     pub host: String,
     pub not_after: String,
     pub left: String,
-    /// Expires within [`CertRow::WARN_WITHIN`].
-    pub expiring: bool,
-}
-
-impl CertRow {
-    /// Certificates closer to expiry than this are flagged (renewal starts well before).
-    pub const WARN_WITHIN: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+    pub state: CertState,
 }
 
 impl StatsView {
@@ -696,7 +722,7 @@ impl From<Snapshot> for StatsView {
                     } else {
                         Elapsed(left).to_string()
                     },
-                    expiring: left < CertRow::WARN_WITHIN,
+                    state: CertState::from(left),
                 }
             })
             .collect();

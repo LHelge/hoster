@@ -52,7 +52,7 @@ async fn the_history_shows_each_deployment_newest_first() {
     assert!(rows[1].contains(">4</a>"), "{}", rows[1]);
     assert!(
         rows[1].contains(&format!(
-            r#"<strong class="state-failed">{}Failed</strong>"#,
+            r#"<span class="pill pill-fail">{}Failed</span>"#,
             crate::web::Icon::Failed
         )),
         "{}",
@@ -204,7 +204,7 @@ async fn the_progress_stream_sends_each_change_until_the_deployment_ends() {
     let mut stream = response.into_body();
     let mut text = String::new();
     // The current status at once.
-    read_until(&mut stream, &mut text, "<strong>Pulling</strong>").await;
+    read_until(&mut stream, &mut text, "Pulling</span>").await;
     assert!(
         text.starts_with("data: <section id=\"deployment-status\">"),
         "{text}"
@@ -230,7 +230,7 @@ async fn the_progress_stream_sends_each_change_until_the_deployment_ends() {
         .send(event(5, DeploymentState::Starting))
         .unwrap();
     text.clear();
-    read_until(&mut stream, &mut text, "<strong>Starting</strong>").await;
+    read_until(&mut stream, &mut text, "Starting</span>").await;
     assert!(!text.contains("event: end"), "{text}");
 
     set(DeploymentState::Live);
@@ -239,7 +239,8 @@ async fn the_progress_stream_sends_each_change_until_the_deployment_ends() {
         .send(event(5, DeploymentState::Live))
         .unwrap();
     let rest = body(axum::response::Response::new(stream)).await;
-    assert!(rest.contains("<strong>Live</strong>"), "{rest}");
+    assert!(rest.contains("pill-ok\">"), "{rest}");
+    assert!(rest.contains("Live</span>"), "{rest}");
     assert!(rest.contains("Redeploy this one"), "{rest}");
     assert!(!rest.contains("Cancel deployment"), "{rest}");
     assert!(rest.trim_end().ends_with("event: end"), "{rest:?}");
@@ -254,7 +255,13 @@ async fn a_finished_deployments_stream_ends_at_once() {
         .get("/stacks/notes/deployments/3/events", Some(&browser.cookie))
         .await;
     let text = body(response).await;
-    assert!(text.contains("<strong>Live</strong>"), "{text}");
+    assert!(
+        text.contains(&format!(
+            r#"<span class="pill pill-ok">{}Live</span>"#,
+            crate::web::Icon::Ok
+        )),
+        "{text}"
+    );
     assert!(text.trim_end().ends_with("event: end"), "{text:?}");
 
     for path in [

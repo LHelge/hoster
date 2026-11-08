@@ -1,16 +1,17 @@
 ---
 id: dfs
 title: Design tokens, vendored JetBrains Mono and base components in hoster.css
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:19:15.316536146Z"
-updated: "2026-11-08T18:19:15.316536146Z"
+updated: "2026-11-08T19:11:02.093069204Z"
 tags:
   - web
   - ui
 depends_on:
   - qde
 parent: "8bf"
+attempts: 1
 ---
 
 The foundation every page task builds on. Existing pages must keep rendering, restyled by the new base rules.

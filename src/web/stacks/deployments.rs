@@ -32,6 +32,7 @@ use crate::stats::Elapsed;
 use crate::store::{Deployment, DeploymentId, DeploymentState};
 use crate::web::auth::{Auth, Session};
 use crate::web::pages::{Layout, Page, Section};
+use crate::web::ui::Pill;
 
 impl Stacks {
     /// How many deployments the history page shows.
@@ -211,9 +212,7 @@ impl DeploymentEvents {
 struct HistoryRow {
     id: String,
     url: String,
-    state: String,
-    /// Whether it ended badly: `Failed` or `Rejected`.
-    failed: bool,
+    state: Pill,
     source: String,
     /// Target digests as (service, short digest, digest).
     digests: Vec<(String, String, String)>,
@@ -230,11 +229,7 @@ impl From<&Deployment> for HistoryRow {
         let url = DeploymentView::url(&deployment.stack, deployment.id);
         Self {
             id: deployment.id.to_string(),
-            state: deployment.state.to_string(),
-            failed: matches!(
-                deployment.state,
-                DeploymentState::Failed | DeploymentState::Rejected
-            ),
+            state: Pill::from(deployment.state),
             source: deployment.source.to_string(),
             digests: deployment
                 .target
