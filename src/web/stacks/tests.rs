@@ -66,7 +66,7 @@ pub(super) fn deployment(id: i64, state: DeploymentState) -> Deployment {
 }
 
 /// The `notes` stack, at revision 1 of [`NOTES`], api running generation 2.
-pub(super) fn notes_status() -> StackStatus {
+pub(crate) fn notes_status() -> StackStatus {
     StackStatus {
         name: "notes".into(),
         revision: revision("notes", 1, NOTES),
@@ -641,7 +641,7 @@ async fn stacks_list_shows_cards_with_services_revision_and_last_deploy() {
     );
     assert!(
         html.contains(&format!(
-            r##"<a href="/stacks/notes/deployments/3">#3</a> <span class="pill pill-ok">{}Live</span> <span class="muted">apply</span>"##,
+            r##"<a href="/stacks/notes/deployments/3">#3</a> <span class="pill pill-ok">{}live</span> <span class="muted">apply</span>"##,
             crate::web::Icon::Ok
         )),
         "{html}"
@@ -688,7 +688,7 @@ async fn the_stack_header_has_the_status_deployments_actions_and_tabs() {
     );
     assert!(
         html.contains(&format!(
-            r##"<a href="/stacks/notes/deployments/3">#3</a> <span class="pill pill-ok">{}Live</span> · apply"##,
+            r##"<a href="/stacks/notes/deployments/3">#3</a> <span class="pill pill-ok">{}live</span> · apply"##,
             crate::web::Icon::Ok
         )),
         "{html}"
@@ -989,7 +989,7 @@ async fn redeploy_falls_back_to_the_latest_live_deployment_in_the_history() {
         "{html}"
     );
     assert!(
-        html.contains(r#"<a href="/stacks/notes/deployments/6">#6</a> running: Pulling"#),
+        html.contains(r#"<a href="/stacks/notes/deployments/6">#6</a> running: pulling"#),
         "{html}"
     );
     assert!(html.contains("<span>#7 queued</span>"), "{html}");

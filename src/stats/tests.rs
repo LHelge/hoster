@@ -9,7 +9,6 @@ pub(crate) struct FakeStats {
     pub deployments: Mutex<Vec<DeploymentOutcome>>,
     /// Reading the deployments fails.
     pub broken: AtomicBool,
-    pub services: Mutex<Vec<ServiceRestarts>>,
     pub certificates: Mutex<Vec<CertExpiry>>,
 }
 
@@ -20,10 +19,6 @@ impl StatsSource for FakeStats {
             anyhow::bail!("database is locked");
         }
         Ok(self.deployments.lock().unwrap().clone())
-    }
-
-    async fn services(&self) -> anyhow::Result<Vec<ServiceRestarts>> {
-        Ok(self.services.lock().unwrap().clone())
     }
 
     fn certificates(&self) -> Vec<CertExpiry> {
@@ -63,29 +58,13 @@ fn deployment_outcomes_are_grouped_per_stack() {
 }
 
 #[tokio::test]
-async fn a_snapshot_combines_traffic_and_sources() {
+async fn the_handle_reads_traffic_and_sources() {
     let source = Arc::new(FakeStats::default());
     source
         .deployments
         .lock()
         .unwrap()
         .push(outcome("blog", DeploymentState::Live, 2, 4));
-    source.services.lock().unwrap().extend([
-        ServiceRestarts {
-            stack: "blog".into(),
-            service: "web".into(),
-            generation: 3,
-            restarts: 6,
-            crash_looping: true,
-        },
-        ServiceRestarts {
-            stack: "blog".into(),
-            service: "worker".into(),
-            generation: 3,
-            restarts: 0,
-            crash_looping: false,
-        },
-    ]);
     let now = SystemTime::now();
     let day = Duration::from_secs(86_400);
     source.certificates.lock().unwrap().extend([
@@ -106,35 +85,21 @@ async fn a_snapshot_combines_traffic_and_sources() {
     });
     let stats = Stats::new(traffic, source);
 
-    let snapshot = stats.snapshot().await;
-    assert!(snapshot.problems.is_empty(), "{:?}", snapshot.problems);
-    assert_eq!(snapshot.traffic.unrouted.statuses.total(), 1);
-    assert_eq!(snapshot.deployments[0].succeeded(), 2);
-    let looping: Vec<_> = snapshot
-        .services
-        .iter()
-        .filter(|s| s.crash_looping)
-        .map(|s| s.service.as_str())
-        .collect();
-    assert_eq!(looping, ["web"]);
-    assert_eq!(snapshot.certificates[0].host, "soon.example.com");
-    let left = snapshot.certificates[0].remaining(now);
+    assert_eq!(stats.traffic().unrouted.statuses.total(), 1);
+    assert_eq!(stats.deployments().await.unwrap()[0].succeeded(), 2);
+    let certificates = stats.certificates();
+    assert_eq!(certificates[0].host, "soon.example.com");
+    let left = certificates[0].remaining(now);
     assert!(left <= day * 3 && left > day * 2, "{left:?}");
 }
 
 #[tokio::test]
-async fn a_failing_source_leaves_the_rest_of_the_snapshot() {
+async fn a_failing_source_names_its_problem() {
     let source = FakeStats::default();
     source.broken.store(true, Ordering::Relaxed);
     let stats = Stats::new(Traffic::default(), Arc::new(source));
-    let snapshot = stats.snapshot().await;
-    assert!(snapshot.deployments.is_empty());
-    assert_eq!(snapshot.problems.len(), 1);
-    assert!(
-        snapshot.problems[0].contains("database is locked"),
-        "{:?}",
-        snapshot.problems
-    );
+    let err = stats.deployments().await.unwrap_err();
+    assert!(err.to_string().contains("database is locked"), "{err}");
 }
 
 #[test]

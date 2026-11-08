@@ -40,7 +40,7 @@ same deploy. Both triggers are idempotent: a digest that is already running depl
 
 | Page | What you see and do |
 |---|---|
-| **Dashboard** | Every stack and service: running digest, health, last deploy outcome, certificate expiry. |
+| **Dashboard** | Request, error-rate, latency, stack and certificate figures; warnings; every stack with its status, healthy services, latency, error shares, restarts and last deploy; the certificates closest to expiry. |
 | **Stack** | Services, routes and generations. Apply a new revision of the stack file (with a diff), manage secrets, see the `[deploy]` rule and refused webhook attempts, redeploy, remove the stack. |
 | **Deployments** | History per stack, with each step and failure reasons. "Redeploy this one" is the rollback. |
 | **Logs** | Tail and follow logs per container. |

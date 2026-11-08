@@ -831,6 +831,7 @@ mod overview;
 
 use apply::{ApplyFailed, ApplyPage, Attempt, PreviewView, ReresolveView};
 pub use deployments::DeploymentView;
+pub(super) use list::{Condition, LastDeploy, TrafficLine};
 pub(super) use overview::StackView;
 
 #[cfg(test)]

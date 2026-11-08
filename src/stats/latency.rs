@@ -5,6 +5,10 @@
 //! percentile is reported to within 25 %); the first sample of a new slot period clears the slot
 //! it reuses. Reading sums the slots of the last [`LatencyWindow::WINDOW`].
 //!
+//! A [`Latency`] keeps the summed histogram beside its percentiles, so the latencies of several
+//! routes add up (`Sum`) to the percentiles of all their requests together: a stack's, or the
+//! whole proxy's.
+//!
 //! Recording and clearing race benignly: a sample added while another thread clears its slot
 //! may be lost. That is fine for a dashboard and keeps the hot path to two atomic adds.
 
@@ -40,6 +44,69 @@ pub struct Latency {
     /// `None` without samples.
     pub p50: Option<Duration>,
     pub p95: Option<Duration>,
+    /// The samples behind the percentiles, for adding latencies up.
+    histogram: Histogram,
+}
+
+/// Samples per bucket.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Histogram([u64; BUCKETS]);
+
+impl Default for Histogram {
+    fn default() -> Self {
+        Histogram([0; BUCKETS])
+    }
+}
+
+/// Only the buckets that hold samples, by index.
+impl std::fmt::Debug for Histogram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map()
+            .entries(self.0.iter().enumerate().filter(|(_, count)| **count > 0))
+            .finish()
+    }
+}
+
+impl Histogram {
+    /// The upper bound of the bucket holding the `percent`-th percentile sample.
+    fn percentile(&self, samples: u64, percent: u64) -> Option<Duration> {
+        if samples == 0 {
+            return None;
+        }
+        let rank = (samples * percent).div_ceil(100).max(1);
+        let mut seen = 0;
+        self.0.iter().enumerate().find_map(|(index, count)| {
+            seen += count;
+            (seen >= rank).then(|| Bucket(index).upper())
+        })
+    }
+}
+
+/// The percentiles of a histogram.
+impl From<Histogram> for Latency {
+    fn from(histogram: Histogram) -> Self {
+        let samples = histogram.0.iter().sum();
+        Latency {
+            samples,
+            p50: histogram.percentile(samples, 50),
+            p95: histogram.percentile(samples, 95),
+            histogram,
+        }
+    }
+}
+
+/// The latency of all the requests together: their histograms summed, the percentiles taken
+/// again.
+impl<'a> std::iter::Sum<&'a Latency> for Latency {
+    fn sum<I: Iterator<Item = &'a Latency>>(latencies: I) -> Self {
+        let mut total = Histogram::default();
+        for latency in latencies {
+            for (sum, count) in total.0.iter_mut().zip(&latency.histogram.0) {
+                *sum += count;
+            }
+        }
+        Latency::from(total)
+    }
 }
 
 impl Default for LatencyWindow {
@@ -91,39 +158,21 @@ impl LatencyWindow {
     /// The percentiles of the samples of the window that ends `at` after the base instant.
     pub(super) fn summary(&self, at: Duration) -> Latency {
         let current = Self::period(at) + 1;
-        let mut counts = [0u64; BUCKETS];
+        let mut counts = Histogram::default();
         for slot in &self.slots {
             let tag = slot.period.load(Ordering::Acquire);
             if tag == 0 || tag > current || tag + Self::SLOTS as u64 <= current {
                 continue;
             }
-            for (sum, bucket) in counts.iter_mut().zip(&slot.buckets) {
+            for (sum, bucket) in counts.0.iter_mut().zip(&slot.buckets) {
                 *sum += bucket.load(Ordering::Relaxed);
             }
         }
-        let samples = counts.iter().sum();
-        Latency {
-            samples,
-            p50: Self::percentile(&counts, samples, 50),
-            p95: Self::percentile(&counts, samples, 95),
-        }
+        Latency::from(counts)
     }
 
     fn period(at: Duration) -> u64 {
         at.as_secs() / Self::SLOT.as_secs()
-    }
-
-    /// The upper bound of the bucket holding the `percent`-th percentile sample.
-    fn percentile(counts: &[u64; BUCKETS], samples: u64, percent: u64) -> Option<Duration> {
-        if samples == 0 {
-            return None;
-        }
-        let rank = (samples * percent).div_ceil(100).max(1);
-        let mut seen = 0;
-        counts.iter().enumerate().find_map(|(index, count)| {
-            seen += count;
-            (seen >= rank).then(|| Bucket(index).upper())
-        })
     }
 }
 
@@ -235,6 +284,28 @@ mod tests {
         let summary = window.summary(Duration::ZERO);
         assert!(summary.p50.unwrap() < 3 * MS, "{summary:?}");
         assert!(summary.p95.unwrap() >= 800 * MS, "{summary:?}");
+    }
+
+    #[test]
+    fn latencies_add_up_to_the_percentiles_of_all_their_samples() {
+        let fast = LatencyWindow::default();
+        let slow = LatencyWindow::default();
+        for _ in 0..90 {
+            fast.record(Duration::ZERO, 2 * MS);
+        }
+        for _ in 0..10 {
+            slow.record(Duration::ZERO, 800 * MS);
+        }
+        let parts = [fast.summary(Duration::ZERO), slow.summary(Duration::ZERO)];
+        let all: Latency = parts.iter().sum();
+        assert_eq!(all.samples, 100);
+        // Neither route alone has these: fast's p95 is 2 ms, slow's p50 800 ms.
+        assert!(all.p50.unwrap() < 3 * MS, "{all:?}");
+        assert!(all.p95.unwrap() >= 800 * MS, "{all:?}");
+        assert_eq!(
+            std::iter::empty::<&Latency>().sum::<Latency>(),
+            Latency::default()
+        );
     }
 
     #[test]

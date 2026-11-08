@@ -6,12 +6,11 @@
 //!   updates the atomic counters from its `logging` hook; they reset when hoster restarts.
 //! - **Deployments**: outcome counts and durations per stack, read from SQLite on demand, so
 //!   they survive restarts.
-//! - **Services**: the reconciler's restart count and crash-loop state of every running
-//!   service (ADR-0028).
 //! - **Certificates**: the `not_after` of every certificate the proxy serves.
 //!
-//! [`Stats::snapshot`] gathers all of it for one page render. Everything but the traffic comes
-//! from a [`StatsSource`]; [`HostStats`] is the real one.
+//! Restarts and crash loops (ADR-0028) are not kept here: pages read them from the stacks'
+//! status. Everything but the traffic comes from a [`StatsSource`]; [`HostStats`] is the real
+//! one.
 
 mod latency;
 mod traffic;
@@ -23,8 +22,6 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 
 use crate::acme::CertMap;
-use crate::orchestrator::{Orchestrator, ServiceState};
-use crate::runtime::ContainerRuntime;
 use crate::store::{DeploymentOutcome, DeploymentState, Store, Timestamp};
 
 pub use self::latency::Latency;
@@ -38,9 +35,6 @@ pub trait StatsSource: Send + Sync + 'static {
     /// Deployment outcomes per stack and terminal state, over the last
     /// [`Stats::DEPLOY_HISTORY`].
     async fn deployments(&self) -> anyhow::Result<Vec<DeploymentOutcome>>;
-
-    /// The restart statistics of every running service.
-    async fn services(&self) -> anyhow::Result<Vec<ServiceRestarts>>;
 
     /// The certificates served now.
     fn certificates(&self) -> Vec<CertExpiry>;
@@ -87,53 +81,6 @@ impl Stats {
     pub async fn deployments(&self) -> anyhow::Result<Vec<DeployStats>> {
         Ok(DeployStats::group(self.source.deployments().await?))
     }
-
-    /// Everything, as of now. A source that fails leaves its part empty and names the problem
-    /// in [`Snapshot::problems`], so the rest still shows.
-    pub async fn snapshot(&self) -> Snapshot {
-        let mut problems = Vec::new();
-        let deployments = match self.deployments().await {
-            Ok(deployments) => deployments,
-            Err(err) => {
-                tracing::warn!(
-                    error = format!("{err:#}"),
-                    "cannot read deployment statistics"
-                );
-                problems.push(format!("deployment statistics: {err:#}"));
-                Vec::new()
-            }
-        };
-        let services = match self.source.services().await {
-            Ok(services) => services,
-            Err(err) => {
-                tracing::warn!(error = format!("{err:#}"), "cannot read service statistics");
-                problems.push(format!("service statistics: {err:#}"));
-                Vec::new()
-            }
-        };
-        Snapshot {
-            traffic: self.traffic.snapshot(),
-            deployments,
-            services,
-            certificates: self.certificates(),
-            problems,
-            taken_at: SystemTime::now(),
-        }
-    }
-}
-
-/// All statistics at one moment.
-#[derive(Debug, Clone)]
-pub struct Snapshot {
-    pub traffic: TrafficSnapshot,
-    /// Per stack, sorted by name.
-    pub deployments: Vec<DeployStats>,
-    pub services: Vec<ServiceRestarts>,
-    /// Soonest expiry first.
-    pub certificates: Vec<CertExpiry>,
-    /// The parts that could not be read.
-    pub problems: Vec<String>,
-    pub taken_at: SystemTime,
 }
 
 /// How the finished deployments of one stack went.
@@ -211,17 +158,6 @@ impl DeployStats {
     }
 }
 
-/// The reconciler's view of one running service (ADR-0028).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceRestarts {
-    pub stack: String,
-    pub service: String,
-    pub generation: u32,
-    /// Restarts of this generation since hoster started.
-    pub restarts: u32,
-    pub crash_looping: bool,
-}
-
 /// When one served certificate expires.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertExpiry {
@@ -236,37 +172,18 @@ impl CertExpiry {
     }
 }
 
-/// The statistics of the running hoster: deployments from the store, restarts from the
-/// orchestrator's reconciler and certificates from the proxy's [`CertMap`].
-pub struct HostStats<R> {
-    pub orchestrator: Arc<Orchestrator<R>>,
+/// The statistics of the running hoster: deployments from the store and certificates from the
+/// proxy's [`CertMap`].
+pub struct HostStats {
     pub store: Store,
     pub certs: CertMap,
 }
 
 #[async_trait]
-impl<R: ContainerRuntime> StatsSource for HostStats<R> {
+impl StatsSource for HostStats {
     async fn deployments(&self) -> anyhow::Result<Vec<DeploymentOutcome>> {
         let since = Timestamp::now() - Stats::DEPLOY_HISTORY;
         Ok(self.store.deployment_outcomes(since).await?)
-    }
-
-    async fn services(&self) -> anyhow::Result<Vec<ServiceRestarts>> {
-        let mut out = Vec::new();
-        for stack in self.orchestrator.status().await? {
-            for service in stack.services {
-                if let ServiceState::Running { generation, .. } = service.state {
-                    out.push(ServiceRestarts {
-                        stack: stack.name.clone(),
-                        service: service.name,
-                        generation,
-                        restarts: service.restarts.restarts,
-                        crash_looping: service.restarts.crash_looping,
-                    });
-                }
-            }
-        }
-        Ok(out)
     }
 
     fn certificates(&self) -> Vec<CertExpiry> {

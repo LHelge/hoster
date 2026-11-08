@@ -760,7 +760,6 @@ impl Startup for Supervisor {
                 let stats = Stats::new(
                     self.traffic.clone(),
                     Arc::new(HostStats {
-                        orchestrator: Arc::clone(&orchestrator),
                         store: store.clone(),
                         certs: certs.clone(),
                     }),
