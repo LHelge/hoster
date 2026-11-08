@@ -1,10 +1,10 @@
 ---
 id: nra
 title: ":443 rustls listener and :80 challenge/redirect service"
-status: open
+status: done
 priority: P1
 created: "2026-11-07T14:45:17.262028217Z"
-updated: "2026-11-07T14:45:17.262028217Z"
+updated: "2026-11-08T00:07:46.158910Z"
 tags:
   - tls
   - proxy
@@ -13,6 +13,7 @@ depends_on:
   - wks
   - ngr
 parent: "52q"
+attempts: 1
 ---
 
 ## Summary

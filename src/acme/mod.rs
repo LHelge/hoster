@@ -11,6 +11,8 @@ mod atomic;
     reason = "insert and validity are consumed by the ACME task"
 )]
 mod certs;
+#[allow(dead_code, reason = "insert and remove are consumed by the ACME task")]
+mod challenge;
 
 #[allow(
     unused_imports,
@@ -22,3 +24,4 @@ pub use account::{AccountError, AccountStore};
     reason = "CertEntry and Validity are consumed by the ACME task"
 )]
 pub use certs::{CertEntry, CertError, CertMap, LoadReport, Validity};
+pub use challenge::ChallengeMap;

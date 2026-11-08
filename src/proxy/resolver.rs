@@ -1,12 +1,19 @@
-//! `CertResolver`: the rustls certificate selection for the `:443` listener (ADR-0014,
-//! docs/architecture.md §7.1), installed with `TlsSettings::set_cert_resolver`.
+//! The TLS side of the `:443` listener (ADR-0014, docs/architecture.md §7.1): [`CertResolver`]
+//! picks the certificate by SNI, and [`SniCapture`] remembers that name on the connection so
+//! the routing proxy can compare it with each request's host (ADR-0032).
 
+use std::any::Any;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use pingora::listeners::TlsAccept;
+use pingora::protocols::tls::TlsRef;
+use pingora::proxy::Session;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
 use crate::acme::CertMap;
+use crate::routing::RouteTable;
 
 /// Picks the certificate for a handshake by SNI from the current [`CertMap`] snapshot.
 ///
@@ -44,6 +51,49 @@ impl ResolvesServerCert for CertResolver {
     }
 }
 
+/// The SNI name a TLS connection was established for, lowercased and without a trailing dot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sni(String);
+
+impl From<&str> for Sni {
+    fn from(server_name: &str) -> Self {
+        Sni(RouteTable::normalize_host(server_name).into_owned())
+    }
+}
+
+impl Sni {
+    /// The SNI name of the connection `session` arrived on: `Ok(None)` for plain HTTP, `Err`
+    /// for a TLS connection without a recorded name (which the strict resolver never lets
+    /// through, so it is treated as a mismatch).
+    pub fn of(session: &Session) -> Result<Option<&Sni>, ()> {
+        match session.digest().and_then(|d| d.ssl_digest.as_ref()) {
+            None => Ok(None),
+            Some(ssl) => ssl.extension.get::<Sni>().map(Some).ok_or(()),
+        }
+    }
+
+    /// Whether a request for `host` (as sent in `:authority` or `Host`) may use this
+    /// connection. Port, case and a trailing dot are ignored; anything else is a 421
+    /// (ADR-0032), which also stops HTTP/2 connection coalescing across hostnames.
+    pub fn allows(&self, host: &str) -> bool {
+        RouteTable::normalize_host(host) == self.0
+    }
+}
+
+/// Records the handshake's SNI name as the connection's [`Sni`] (Pingora's `SslDigest`
+/// extension), where [`Sni::of`] finds it for every request on the connection.
+pub struct SniCapture;
+
+#[async_trait]
+impl TlsAccept for SniCapture {
+    async fn handshake_complete_callback(
+        &self,
+        tls: &TlsRef,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
+        Some(Arc::new(Sni::from(tls.server_name()?)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
@@ -61,6 +111,17 @@ mod tests {
             .self_signed(&key)
             .unwrap();
         (cert.pem(), key.serialize_pem())
+    }
+
+    #[test]
+    fn sni_allows_its_own_host_in_any_spelling_only() {
+        let sni = Sni::from("App.Example.com");
+        for host in ["app.example.com", "APP.example.com:443", "app.example.com."] {
+            assert!(sni.allows(host), "{host}");
+        }
+        for host in ["api.example.com", "example.com", "", "[::1]"] {
+            assert!(!sni.allows(host), "{host}");
+        }
     }
 
     #[test]

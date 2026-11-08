@@ -1,16 +1,17 @@
 ---
 id: fcs
 title: Structured logging, proxy access log, deploy event log
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-07T14:45:17.359289409Z"
-updated: "2026-11-07T14:45:17.359289409Z"
+updated: "2026-11-07T23:52:10.771413446Z"
 tags:
   - observability
 depends_on:
   - wks
   - ej8
 parent: "6gn"
+attempts: 1
 ---
 
 ## Summary

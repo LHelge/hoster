@@ -71,6 +71,8 @@ struct Sandbox {
     dir: PathBuf,
     /// The proxy's plain-HTTP listen address: a loopback port that was free a moment ago.
     http: SocketAddr,
+    /// The proxy's TLS listen address, chosen the same way.
+    https: SocketAddr,
 }
 
 impl Sandbox {
@@ -93,11 +95,11 @@ impl Sandbox {
         std::fs::create_dir_all(&credentials).unwrap();
         std::fs::write(credentials.join("github_client_id"), "test-client\n").unwrap();
         std::fs::write(credentials.join("github_client_secret"), "test-secret\n").unwrap();
-        let http = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        Sandbox { dir, http }
+        // Both listeners are held at once, so the two ports differ.
+        let bind = || TcpListener::bind("127.0.0.1:0").unwrap();
+        let (http, https) = (bind(), bind());
+        let (http, https) = (http.local_addr().unwrap(), https.local_addr().unwrap());
+        Sandbox { dir, http, https }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -117,6 +119,7 @@ impl Sandbox {
             .env("CREDENTIALS_DIRECTORY", self.path("credentials"))
             .env("HOSTER_PODMAN_SOCKET", self.path("podman.sock"))
             .env("HOSTER_PROXY__HTTP_LISTEN", self.http.to_string())
+            .env("HOSTER_PROXY__HTTPS_LISTEN", self.https.to_string())
             .env("HOSTER_PROXY__THREADS", "1")
             .env("HOSTER_PROXY__GRACE_PERIOD", "1s")
             .env("HOSTER_PROXY__GRACEFUL_SHUTDOWN_TIMEOUT", "1s")
@@ -315,10 +318,12 @@ fn proxy_answers_404_and_sigterm_drains_within_the_grace_period() {
     // grace_period (1s) + graceful_shutdown_timeout (1s), with slack for a loaded machine.
     let took = stopping.elapsed();
     assert!(took < Duration::from_secs(5), "shutdown took {took:?}");
-    assert!(
-        TcpStream::connect(sandbox.http).is_err(),
-        "the listener is closed after exit"
-    );
+    for addr in [sandbox.http, sandbox.https] {
+        assert!(
+            TcpStream::connect(addr).is_err(),
+            "the listener on {addr} is closed after exit"
+        );
+    }
 }
 
 #[test]

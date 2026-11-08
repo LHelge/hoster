@@ -189,6 +189,26 @@ fn lookup_normalizes_the_request_host() {
 }
 
 #[test]
+fn known_host_answers_in_table_spelling() {
+    let table = example();
+    for h in ["example.com", "EXAMPLE.com.:80", "example.com:443"] {
+        assert_eq!(table.known_host(h), Some("example.com"), "{h:?}");
+    }
+    assert_eq!(
+        table.known_host("Hoster.Example.com"),
+        Some("hoster.example.com"),
+        "reserved hosts are known"
+    );
+    for h in ["", "www.example.com", "[::1]:80"] {
+        assert!(table.known_host(h).is_none(), "{h:?}");
+    }
+    assert_eq!(
+        RouteTable::normalize_host("A.Example.COM.:8443"),
+        "a.example.com"
+    );
+}
+
+#[test]
 fn targets_are_loopback_unix_or_unavailable() {
     let table = example();
     let Target::Loopback(upstream) = &table.lookup("example.com", "/api").unwrap().target else {

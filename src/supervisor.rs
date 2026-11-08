@@ -21,9 +21,9 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::acme::CertMap;
+use crate::acme::{CertMap, ChallengeMap};
 use crate::config::{Config, ProxyConfig};
-use crate::proxy::{Proxy, ProxyEvents, ProxyThread};
+use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
 use crate::registry::FileCredentials;
 use crate::routing::RouteTable;
 use crate::runtime::{PodmanRuntime, PodmanSocket};
@@ -277,17 +277,17 @@ impl ProxyHandle {
     const JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
     /// Spawns the Pingora thread and waits until its listeners accept connections.
-    async fn start(
-        &mut self,
-        config: &ProxyConfig,
-        routes: Arc<ArcSwap<RouteTable>>,
-    ) -> anyhow::Result<()> {
+    async fn start(&mut self, config: &ProxyConfig, state: ProxyState) -> anyhow::Result<()> {
         let ProxyThread { thread, events } =
-            Proxy::new(config, routes).spawn(self.shutdown_tx.subscribe())?;
+            Proxy::new(config, state).spawn(self.shutdown_tx.subscribe())?;
         self.thread = Some(thread);
         let events = self.events.insert(events);
         events.ready(PROXY_READY_TIMEOUT).await?;
-        tracing::info!(http = %config.http_listen, "proxy is listening");
+        tracing::info!(
+            http = %config.http_listen,
+            https = %config.https_listen,
+            "proxy is listening"
+        );
         Ok(())
     }
 
@@ -379,11 +379,9 @@ pub struct Supervisor {
     /// The state store, opened in startup step 2.
     store: Option<Store>,
     /// The certificates served by SNI, loaded from disk in startup step 3.
-    #[allow(
-        dead_code,
-        reason = "handed to the :443 listener and the ACME task when they land"
-    )]
     certs: Option<CertMap>,
+    /// The HTTP-01 challenges the `:80` listener answers; the ACME task fills it.
+    challenges: ChallengeMap,
     /// The podman connection, made in startup step 4.
     runtime: Option<PodmanRuntime>,
     /// The route table the proxy reads (architecture §3.2); empty until the orchestrator
@@ -398,6 +396,7 @@ impl Supervisor {
             config,
             store: None,
             certs: None,
+            challenges: ChallengeMap::default(),
             runtime: None,
             routes: Arc::default(),
             teardown: Teardown::default(),
@@ -538,8 +537,15 @@ impl Startup for Supervisor {
                 Ok(())
             }
             Phase::Proxy => {
-                let routes = Arc::clone(&self.routes);
-                self.teardown.proxy.start(&self.config.proxy, routes).await
+                let state = ProxyState {
+                    routes: Arc::clone(&self.routes),
+                    certs: self
+                        .certs
+                        .clone()
+                        .context("certificates load before the proxy starts")?,
+                    challenges: self.challenges.clone(),
+                };
+                self.teardown.proxy.start(&self.config.proxy, state).await
             }
             Phase::Certificates => {
                 let (certs, report) = CertMap::open(

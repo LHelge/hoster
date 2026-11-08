@@ -545,6 +545,10 @@ In `upstream_request_filter`:
   1. Takes `server_name()`, lowercases it, and loads `CertMap`.
   2. On a hit returns that host's `Arc<CertifiedKey>`. On a miss returns `None`, which fails the
      handshake (ADR-0032).
+- **Host vs SNI.** A `TlsAccept::handshake_complete_callback` stores the handshake's SNI name in
+  the connection's `SslDigest` extension. The routing proxy compares every request's host
+  (`:authority` or `Host`, without port or trailing dot, any case) with it and answers `421` on a
+  mismatch (ADR-0032).
 - **Building certified keys.** `CertifiedKey`s are built with the same rustls crypto provider
   Pingora installs (`ring`), using `rustls::crypto::ring::sign::any_supported_type`.
 
@@ -554,7 +558,9 @@ The `:80` service implements `request_filter`:
 
 1. If the path is `/.well-known/acme-challenge/<token>`, it answers with
    `ChallengeMap[token]` (`200 text/plain`) or `404`.
-2. Otherwise it answers `308 Permanent Redirect` to `https://<host><path+query>`.
+2. Otherwise, for a host in the `RouteTable`, it answers `308 Permanent Redirect` to
+   `https://<host><path+query>` (host lowercased, without port). Any other host gets `404`
+   (ADR-0032).
 
 It never proxies.
 

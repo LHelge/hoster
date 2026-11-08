@@ -1,6 +1,6 @@
-//! End-to-end tests of the routing proxy: a real Pingora server on loopback in front of
-//! in-process axum upstreams, driven by a small raw HTTP/1.1 client so every byte on the wire is
-//! under the test's control.
+//! End-to-end tests of the proxy: a real Pingora server on loopback in front of in-process axum
+//! upstreams, driven by a small raw HTTP/1.1 client (over rustls for `:443`, with certificates
+//! from a test CA) so every byte on the wire is under the test's control.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -21,12 +21,18 @@ use axum::routing::{any, get, post};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use pingora::server::ShutdownSignal;
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::{ClientConfig, RootCertStore};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, watch};
+use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 
-use super::{Proxy, ProxyThread};
+use super::{Proxy, ProxyError, ProxyState, ProxyThread};
+use crate::acme::{CertMap, ChallengeMap};
 use crate::config::ProxyConfig;
 use crate::routing::{
     DesiredStack, DesiredState, DrainOutcome, Reserved, RouteTable, Target, UnixUpstream, Upstream,
@@ -176,8 +182,19 @@ fn service(routes: Vec<Route>) -> Service {
 ///   each connection and closes on the second, counting requests
 /// - `gap.example.com` `/` → a service in its stop-first gap
 /// - `admin.example.com` → the app on a Unix socket (reserved host)
+///
+/// Every routed host has a certificate from one test CA, and so does `noroute.example.com`,
+/// which has no routes.
 struct Harness {
+    /// The `:443` listener.
     proxy: SocketAddr,
+    /// The `:80` listener.
+    http: SocketAddr,
+    ca: TestCa,
+    /// An HTTP/1.1-only client trusting `ca`.
+    tls: TlsConnector,
+    certs: CertMap,
+    challenges: ChallengeMap,
     web: Arc<Upstream>,
     web_port: u16,
     routes: Arc<ArcSwap<RouteTable>>,
@@ -189,6 +206,67 @@ struct Harness {
     shutdown: watch::Sender<Option<ShutdownSignal>>,
     thread: Option<std::thread::JoinHandle<()>>,
     _socket_dir: tempfile::TempDir,
+}
+
+/// A throwaway CA issuing one leaf per host.
+struct TestCa {
+    issuer: Issuer<'static, KeyPair>,
+    root: CertificateDer<'static>,
+    root_pem: String,
+}
+
+impl TestCa {
+    fn new() -> Self {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "hoster test CA");
+        let cert = params.self_signed(&key).unwrap();
+        TestCa {
+            root: cert.der().clone(),
+            root_pem: cert.pem(),
+            issuer: Issuer::new(params, key),
+        }
+    }
+
+    /// (fullchain PEM, key PEM) for `host`.
+    fn issue(&self, host: &str) -> (String, String) {
+        let key = KeyPair::generate().unwrap();
+        let leaf = CertificateParams::new(vec![host.to_owned()])
+            .unwrap()
+            .signed_by(&key, &self.issuer)
+            .unwrap();
+        (
+            format!("{}{}", leaf.pem(), self.root_pem),
+            key.serialize_pem(),
+        )
+    }
+
+    /// A ring client trusting only this CA, offering `alpn`.
+    fn connector(&self, alpn: &[&[u8]]) -> TlsConnector {
+        TlsConnector::from(Arc::new(self.client_config(alpn)))
+    }
+
+    /// The rustls client configuration behind [`TestCa::connector`].
+    fn client_config(&self, alpn: &[&[u8]]) -> ClientConfig {
+        let mut roots = RootCertStore::empty();
+        roots.add(self.root.clone()).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut config = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+        config
+    }
+}
+
+/// The SNI name a client uses for a request `Host`: no port, no trailing dot, lowercase.
+fn sni_for(host: &str) -> String {
+    RouteTable::normalize_host(host).into_owned()
 }
 
 impl Harness {
@@ -310,24 +388,64 @@ impl Harness {
         );
         let table = RouteTable::build(&desired, &reserved).unwrap();
 
-        let proxy = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let config = ProxyConfig {
-            http_listen: proxy,
-            threads: NonZeroUsize::new(2).unwrap(),
-            grace_period: Duration::from_secs(1),
-            graceful_shutdown_timeout: Duration::from_secs(1),
-            ..ProxyConfig::default()
-        };
+        let ca = TestCa::new();
+        let (certs, _) = CertMap::open(socket_dir.path(), None).unwrap();
+        for host in [
+            "app.example.com",
+            "api.example.com",
+            "slow.example.com",
+            "down.example.com",
+            "reset.example.com",
+            "flaky.example.com",
+            "gap.example.com",
+            "admin.example.com",
+            "noroute.example.com",
+        ] {
+            let (chain, key) = ca.issue(host);
+            certs.insert(host, chain, key).unwrap();
+        }
+
+        let challenges = ChallengeMap::default();
         let routes = Arc::new(ArcSwap::from_pointee(table));
+        let proxy_state = ProxyState {
+            routes: Arc::clone(&routes),
+            certs: certs.clone(),
+            challenges: challenges.clone(),
+        };
         let (shutdown, rx) = watch::channel(None);
-        let ProxyThread { thread, mut events } =
-            Proxy::new(&config, Arc::clone(&routes)).spawn(rx).unwrap();
+        // A port free a moment ago can be taken by another test's outgoing connection before
+        // the proxy binds it; pick again then.
+        let mut attempts = 0;
+        let (proxy, http, ProxyThread { thread, mut events }) = loop {
+            // Both listeners are held at once, so the two ports differ.
+            let bind = || std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let (proxy, http) = {
+                let (proxy, http) = (bind(), bind());
+                (proxy.local_addr().unwrap(), http.local_addr().unwrap())
+            };
+            let config = ProxyConfig {
+                http_listen: http,
+                https_listen: proxy,
+                threads: NonZeroUsize::new(2).unwrap(),
+                grace_period: Duration::from_secs(1),
+                graceful_shutdown_timeout: Duration::from_secs(1),
+                ..ProxyConfig::default()
+            };
+            attempts += 1;
+            match Proxy::new(&config, proxy_state.clone()).spawn(rx.clone()) {
+                Ok(running) => break (proxy, http, running),
+                Err(ProxyError::Bind { .. }) if attempts < 5 => continue,
+                Err(e) => panic!("{e}"),
+            }
+        };
         events.ready(Duration::from_secs(10)).await.unwrap();
         Harness {
             proxy,
+            http,
+            tls: ca.connector(&[b"http/1.1"]),
+            ca,
+            certs,
+            challenges,
             web,
             web_port,
             routes,
@@ -356,13 +474,32 @@ impl Harness {
         self.routes.store(Arc::new(table));
     }
 
-    async fn connect(&self) -> Client {
-        Client(BufReader::new(
-            TcpStream::connect(self.proxy).await.unwrap(),
-        ))
+    /// A TLS handshake with `connector` for the SNI name `sni`.
+    async fn handshake(
+        &self,
+        connector: &TlsConnector,
+        sni: &str,
+    ) -> std::io::Result<TlsStream<TcpStream>> {
+        let tcp = TcpStream::connect(self.proxy).await.unwrap();
+        let name = ServerName::try_from(sni.to_owned()).unwrap();
+        connector.connect(name, tcp).await
     }
 
-    /// One `GET` with `Connection: close`.
+    /// An HTTP/1.1 connection to `:443` for the SNI name `sni`.
+    async fn connect(&self, sni: &str) -> Client<TlsStream<TcpStream>> {
+        let stream = self
+            .handshake(&self.tls, sni)
+            .await
+            .unwrap_or_else(|e| panic!("handshake for {sni}: {e}"));
+        Client(BufReader::new(stream))
+    }
+
+    /// A plain connection to `:80`.
+    async fn connect_http(&self) -> Client<TcpStream> {
+        Client(BufReader::new(TcpStream::connect(self.http).await.unwrap()))
+    }
+
+    /// One `GET` with `Connection: close` over TLS for `host`.
     async fn get(&self, host: &str, target: &str) -> Reply {
         self.request(&format!(
             "GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
@@ -370,9 +507,30 @@ impl Harness {
         .await
     }
 
+    /// Sends `head` over TLS, with the SNI name taken from its `Host` header.
     async fn request(&self, head: &str) -> Reply {
-        let mut client = self.connect().await;
+        let host = head
+            .split("\r\n")
+            .find_map(|line| line.strip_prefix("Host: "))
+            .expect("request has a Host header");
+        self.request_with_sni(&sni_for(host), head).await
+    }
+
+    async fn request_with_sni(&self, sni: &str, head: &str) -> Reply {
+        let mut client = self.connect(sni).await;
         client.write(head.as_bytes()).await;
+        client.reply().await
+    }
+
+    /// One `GET` with `Connection: close` to `:80`.
+    async fn get_http(&self, host: &str, target: &str) -> Reply {
+        let mut client = self.connect_http().await;
+        client
+            .write(
+                format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await;
         client.reply().await
     }
 }
@@ -391,7 +549,7 @@ impl Drop for Harness {
 // ---------------------------------------------------------------------------------------------
 // A minimal HTTP/1.1 client
 
-struct Client(BufReader<TcpStream>);
+struct Client<S>(BufReader<S>);
 
 #[derive(Debug)]
 struct Reply {
@@ -430,9 +588,14 @@ fn echoed(reply: &Reply, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-impl Client {
+impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
+    /// Writes and flushes `bytes`. Over TLS the flush matters: `write_all` can return while the
+    /// last records still sit in the rustls session (when the socket was not writable), and the
+    /// server would then wait for them forever.
     async fn write(&mut self, bytes: &[u8]) {
-        self.0.get_mut().write_all(bytes).await.unwrap();
+        let stream = self.0.get_mut();
+        stream.write_all(bytes).await.unwrap();
+        stream.flush().await.unwrap();
     }
 
     async fn line(&mut self) -> String {
@@ -553,7 +716,8 @@ async fn routes_by_host_and_prefix_and_rejects_the_rest() {
         assert_eq!(reply.text(), "404 Not Found\n");
     }
 
-    let reply = h.get("unknown.example.com", "/").await;
+    // A host with a certificate but no routes.
+    let reply = h.get("noroute.example.com", "/").await;
     assert_eq!(reply.status, 404);
     assert_eq!(
         reply.header("content-type"),
@@ -611,7 +775,7 @@ async fn a_request_with_a_body_is_not_retried() {
 async fn only_bodyless_idempotent_requests_are_retried_on_a_dead_pooled_connection() {
     let h = Harness::start().await;
     let count = || h.flaky_requests.load(Ordering::SeqCst);
-    let mut client = h.connect().await;
+    let mut client = h.connect("flaky.example.com").await;
     let mut send = async |head: &str| {
         client.write(head.as_bytes()).await;
         client.reply().await
@@ -631,7 +795,7 @@ async fn only_bodyless_idempotent_requests_are_retried_on_a_dead_pooled_connecti
         "the POST reached the upstream once and was not replayed"
     );
 
-    let mut client = h.connect().await;
+    let mut client = h.connect("flaky.example.com").await;
     let mut send = async |head: &str| {
         client.write(head.as_bytes()).await;
         client.reply().await
@@ -641,6 +805,162 @@ async fn only_bodyless_idempotent_requests_are_retried_on_a_dead_pooled_connecti
     let reply = send(get).await;
     assert_eq!(reply.status, 200, "{}", reply.text());
     assert_eq!(count(), 5, "the GET was replayed on a fresh connection");
+}
+
+// ---------------------------------------------------------------------------------------------
+// TLS on :443 (ADR-0014, ADR-0032, ADR-0033)
+
+#[tokio::test]
+async fn serves_the_certificate_for_each_sni_name() {
+    let h = Harness::start().await;
+    for host in ["app.example.com", "api.example.com", "admin.example.com"] {
+        let stream = h.handshake(&h.tls, host).await.unwrap();
+        let served = stream.get_ref().1.peer_certificates().unwrap()[0].clone();
+        let expected = h.certs.get(host).unwrap();
+        assert_eq!(&served, expected.end_entity_cert().unwrap(), "{host}");
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_sni_name_fails_the_handshake() {
+    let h = Harness::start().await;
+    let err = h
+        .handshake(&h.tls, "unknown.example.com")
+        .await
+        .expect_err("no default certificate");
+    // The server aborts with an alert; the client never sees a certificate to reject.
+    assert!(err.to_string().contains("alert"), "{err}");
+}
+
+#[tokio::test]
+async fn certificates_inserted_later_are_served_without_a_restart() {
+    let h = Harness::start().await;
+    assert!(h.handshake(&h.tls, "late.example.com").await.is_err());
+    let ca = TestCa::new();
+    let (chain, key) = ca.issue("late.example.com");
+    h.certs.insert("late.example.com", chain, key).unwrap();
+    let stream = h
+        .handshake(&ca.connector(&[b"http/1.1"]), "late.example.com")
+        .await
+        .expect("the new certificate is served");
+    drop(stream);
+}
+
+#[tokio::test]
+async fn h2_is_negotiated_and_served() {
+    let h = Harness::start().await;
+    let h2 = h.ca.connector(&[b"h2", b"http/1.1"]);
+    let mut stream = h.handshake(&h2, "app.example.com").await.unwrap();
+    assert_eq!(stream.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+
+    // The connection preface and an empty SETTINGS frame get the server's SETTINGS back.
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    let mut frame = [0; 9];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut frame))
+        .await
+        .expect("server SETTINGS")
+        .unwrap();
+    assert_eq!(frame[3], 0x04, "SETTINGS frame type: {frame:?}");
+
+    let h1 = h.ca.connector(&[b"http/1.1"]);
+    let stream = h.handshake(&h1, "app.example.com").await.unwrap();
+    assert_eq!(stream.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
+}
+
+/// Requests over h2 are routed like h1 ones: the SNI recorded on the connection is visible to
+/// every stream, so a matching `:authority` is proxied rather than answered with 421.
+#[tokio::test]
+async fn h2_requests_are_routed() {
+    let h = Harness::start().await;
+    let client = reqwest::Client::builder()
+        .tls_backend_preconfigured(h.ca.client_config(&[b"h2"]))
+        .resolve("app.example.com", h.proxy)
+        .resolve("api.example.com", h.proxy)
+        .build()
+        .unwrap();
+    let port = h.proxy.port();
+    for url in [
+        format!("https://app.example.com:{port}/"),
+        format!("https://api.example.com:{port}/v1/x"),
+    ] {
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(response.version(), reqwest::Version::HTTP_2, "{url}");
+        assert_eq!(response.status(), 200, "{url}");
+    }
+}
+
+#[tokio::test]
+async fn a_host_that_is_not_the_sni_name_is_misdirected() {
+    let h = Harness::start().await;
+    let head = "GET /v1/x HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n";
+    let reply = h.request_with_sni("app.example.com", head).await;
+    assert_eq!(reply.status, 421, "{}", reply.text());
+    assert_eq!(reply.text(), "421 Misdirected Request\n");
+
+    // Port, case and a trailing dot do not make a mismatch.
+    let head = "GET /v1/x HTTP/1.1\r\nHost: API.example.com.:443\r\nConnection: close\r\n\r\n";
+    let reply = h.request_with_sni("api.example.com", head).await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+
+    // On a kept-alive connection, every request is checked.
+    let mut client = h.connect("app.example.com").await;
+    client
+        .write(b"GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n")
+        .await;
+    assert_eq!(client.reply().await.status, 200);
+    client
+        .write(b"GET /v1/x HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n")
+        .await;
+    assert_eq!(client.reply().await.status, 421);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Port 80 (ADR-0015, ADR-0032)
+
+#[tokio::test]
+async fn plain_http_redirects_known_hosts_and_keeps_path_and_query() {
+    let h = Harness::start().await;
+    let reply = h.get_http("app.example.com", "/a/b?c=d&e=%20f").await;
+    assert_eq!(reply.status, 308, "{}", reply.text());
+    assert_eq!(
+        reply.header("location"),
+        Some("https://app.example.com/a/b?c=d&e=%20f")
+    );
+
+    let reply = h.get_http("Admin.Example.com:80", "/").await;
+    assert_eq!(reply.status, 308);
+    assert_eq!(reply.header("location"), Some("https://admin.example.com/"));
+
+    let reply = h.get_http("evil.example.com", "/x").await;
+    assert_eq!(reply.status, 404, "no open redirect");
+    assert_eq!(reply.header("location"), None);
+
+    // A certificate alone does not make a host known on :80.
+    let reply = h.get_http("noroute.example.com", "/").await;
+    assert_eq!(reply.status, 404);
+}
+
+#[tokio::test]
+async fn plain_http_answers_acme_challenges_for_any_host() {
+    let h = Harness::start().await;
+    let path = "/.well-known/acme-challenge/tok-1_A";
+    let reply = h.get_http("new.example.com", path).await;
+    assert_eq!(reply.status, 404, "no challenge yet");
+
+    h.challenges.insert("tok-1_A", "tok-1_A.thumbprint");
+    for host in ["new.example.com", "app.example.com"] {
+        let reply = h.get_http(host, path).await;
+        assert_eq!(reply.status, 200, "{host}");
+        assert_eq!(reply.header("content-type"), Some("text/plain"));
+        assert_eq!(reply.text(), "tok-1_A.thumbprint");
+    }
+
+    h.challenges.remove("tok-1_A");
+    assert_eq!(h.get_http("new.example.com", path).await.status, 404);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -688,8 +1008,7 @@ async fn forwarding_headers_are_set_and_client_values_overwritten() {
         echoed(&reply, "x-forwarded-for"),
         ["198.51.100.1, 127.0.0.1"]
     );
-    // This listener is plain HTTP; behind TLS it says https.
-    assert_eq!(echoed(&reply, "x-forwarded-proto"), ["http"]);
+    assert_eq!(echoed(&reply, "x-forwarded-proto"), ["https"]);
     assert_eq!(echoed(&reply, "x-forwarded-host"), ["App.example.com:8443"]);
     assert!(echoed(&reply, "x-forwarded-prefix").is_empty());
 }
@@ -764,7 +1083,7 @@ async fn read_timeouts_are_per_route() {
 #[tokio::test]
 async fn server_sent_events_are_not_buffered() {
     let h = Harness::start().await;
-    let mut client = h.connect().await;
+    let mut client = h.connect("app.example.com").await;
     client
         .write(b"GET /api/sse HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n")
         .await;
@@ -813,9 +1132,8 @@ async fn drain_waits_for_a_request_in_flight_across_a_table_swap() {
     let old = Arc::clone(&h.web);
     let sent = Instant::now();
     let slow = tokio::spawn({
-        let proxy = h.proxy;
+        let mut client = h.connect("app.example.com").await;
         async move {
-            let mut client = Client(BufReader::new(TcpStream::connect(proxy).await.unwrap()));
             client
                 .write(
                     b"GET /slow/800 HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n",
@@ -865,9 +1183,8 @@ async fn drain_waits_for_a_request_in_flight_across_a_table_swap() {
 async fn drain_times_out_while_a_request_is_still_in_flight() {
     let h = Harness::start().await;
     let slow = tokio::spawn({
-        let proxy = h.proxy;
+        let mut client = h.connect("app.example.com").await;
         async move {
-            let mut client = Client(BufReader::new(TcpStream::connect(proxy).await.unwrap()));
             client
                 .write(b"GET /slow/1500 HTTP/1.1\r\nHost: app.example.com\r\nConnection: close\r\n\r\n")
                 .await;
@@ -913,7 +1230,7 @@ async fn failed_requests_release_the_inflight_guard() {
 #[tokio::test]
 async fn client_abort_releases_the_inflight_guard() {
     let h = Harness::start().await;
-    let mut client = h.connect().await;
+    let mut client = h.connect("app.example.com").await;
     client
         .write(b"GET /slow/5000 HTTP/1.1\r\nHost: app.example.com\r\n\r\n")
         .await;
@@ -934,7 +1251,7 @@ async fn client_abort_releases_the_inflight_guard() {
 #[tokio::test]
 async fn websockets_pass_through() {
     let h = Harness::start().await;
-    let mut client = h.connect().await;
+    let mut client = h.connect("app.example.com").await;
     client
         .write(
             b"GET /api/ws HTTP/1.1\r\nHost: app.example.com\r\nUpgrade: websocket\r\n\
@@ -1008,7 +1325,7 @@ async fn stream_through(bytes: usize) {
     let h = Harness::start().await;
     let watch = RssWatch::start();
 
-    let mut client = h.connect().await;
+    let mut client = h.connect("app.example.com").await;
     client
         .write(
             format!(
@@ -1032,7 +1349,7 @@ async fn stream_through(bytes: usize) {
         "upstream got the whole upload"
     );
 
-    let mut client = h.connect().await;
+    let mut client = h.connect("app.example.com").await;
     client
         .write(
             format!(

@@ -56,6 +56,7 @@ nix = { version = "0.31.3", features = ["signal"] }
 proptest = "1.11.0"
 rcgen = "0.14.10"
 tempfile = "3.27.0"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6.5"
 

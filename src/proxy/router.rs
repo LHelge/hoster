@@ -3,7 +3,8 @@
 //! Every request loads the current [`RouteTable`] snapshot once and keeps the matched
 //! [`RouteEntry`] in its context, so a table published mid-request never changes where that
 //! request goes. Requests for an unknown host or prefix, or for a service in its stop-first gap,
-//! get a built-in [`ErrorPage`] (ADR-0032).
+//! get a built-in [`ErrorPage`] (ADR-0032), and so does a request whose host is not the TLS
+//! connection's SNI name (421).
 //!
 //! The rewriting of ADR-0010 lives on [`Forwarding`], which is pure and unit-tested; bodies are
 //! streamed because no body filter is installed (ADR-0011), and each route's timeouts end up in
@@ -23,6 +24,7 @@ use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::{HttpPeer, PeerOptions};
 use pingora::{Error, ErrorSource, ErrorType, OkOrErr, OrErr, Result};
 
+use super::resolver::Sni;
 use crate::config::Timeouts;
 use crate::routing::{InflightGuard, RouteEntry, RouteTable, Target};
 use crate::stack::RouteTimeouts;
@@ -69,6 +71,17 @@ impl ProxyHttp for RoutingProxy {
         let table = self.routes.load_full();
         let req = session.req_header();
         let host = Forwarding::request_host(req).map(str::to_owned);
+        let sni_allows = match Sni::of(session) {
+            Ok(None) => true,
+            Ok(Some(sni)) => host.as_deref().is_none_or(|host| sni.allows(host)),
+            Err(()) => false,
+        };
+        if !sni_allows {
+            ErrorPage::from(StatusCode::MISDIRECTED_REQUEST)
+                .send(session)
+                .await;
+            return Ok(true);
+        }
         let route = host
             .as_deref()
             .and_then(|host| table.lookup(host, req.uri.path()))
@@ -197,7 +210,7 @@ impl RequestCtx {
 
 /// How one request is rewritten for its upstream (ADR-0010, architecture §6.3).
 #[derive(Debug, Clone, Copy)]
-struct Forwarding<'a> {
+pub(super) struct Forwarding<'a> {
     /// The request host as sent, for `X-Forwarded-Host`.
     host: &'a str,
     /// The client's address, appended to `X-Forwarded-For`.
@@ -209,7 +222,7 @@ struct Forwarding<'a> {
 impl Forwarding<'_> {
     /// The host a request is for: the URI authority (HTTP/2 `:authority`, or an HTTP/1
     /// absolute-form target) and otherwise the `Host` header. Any userinfo is dropped.
-    fn request_host(req: &RequestHeader) -> Option<&str> {
+    pub(super) fn request_host(req: &RequestHeader) -> Option<&str> {
         let host = match req.uri.authority() {
             Some(authority) => authority.as_str(),
             None => req.headers.get(header::HOST)?.to_str().ok()?,
@@ -300,7 +313,7 @@ impl Timeouts {
 
 /// A minimal built-in response: a status line as plain text (ADR-0032).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ErrorPage {
+pub(super) struct ErrorPage {
     status: StatusCode,
     retry_after: Option<Duration>,
 }
@@ -340,12 +353,12 @@ impl ErrorPage {
         Some(status.into())
     }
 
-    fn body(&self) -> Bytes {
+    pub(super) fn body(&self) -> Bytes {
         let reason = self.status.canonical_reason().unwrap_or_default();
         Bytes::from(format!("{} {reason}\n", self.status.as_u16()))
     }
 
-    fn header(&self, body_len: usize) -> Result<ResponseHeader> {
+    pub(super) fn header(&self, body_len: usize) -> Result<ResponseHeader> {
         let mut resp = ResponseHeader::build(self.status, Some(4))?;
         resp.insert_header(header::CONTENT_TYPE, "text/plain; charset=utf-8")?;
         resp.insert_header(header::CONTENT_LENGTH, body_len)?;
@@ -360,7 +373,7 @@ impl ErrorPage {
     }
 
     /// Writes the page unless a response has already started; the connection is not reused.
-    async fn send(&self, session: &mut Session) {
+    pub(super) async fn send(&self, session: &mut Session) {
         let body = self.body();
         let result = match self.header(body.len()) {
             Ok(resp) => session.write_error_response(resp, body).await,

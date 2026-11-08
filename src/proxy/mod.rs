@@ -12,12 +12,17 @@
 //!
 //! `Server::run_forever` (which calls `process::exit`) and daemon mode are never used.
 //!
-//! The proxy itself is [`RoutingProxy`]: routing against the published
-//! `ArcSwap<RouteTable>`, the forwarding headers of ADR-0010 and per-route timeouts (ADR-0011).
-//! For now it serves the plain-HTTP listener; the `:443` TLS listener takes it over and `:80`
-//! becomes the ACME challenge and redirect service in a later task. With an empty route table
-//! (nothing publishes one yet) it answers 404 to everything.
+//! Two services share the server (architecture §7):
+//!
+//! - `:443` ([`ProxyConfig::https_listen`]) is TLS with the SNI [`CertResolver`] and ALPN
+//!   h2 + http/1.1 (ADR-0033), serving [`RoutingProxy`]: routing against the published
+//!   `ArcSwap<RouteTable>`, the forwarding headers of ADR-0010, per-route timeouts (ADR-0011)
+//!   and 421 for a request whose host is not the connection's SNI name (ADR-0032).
+//! - `:80` ([`ProxyConfig::http_listen`]) is [`ChallengeOrRedirect`]: ACME HTTP-01 answers from
+//!   the [`ChallengeMap`], 308 to HTTPS for known hosts and 404 for the rest. It never proxies.
 
+mod plain;
+mod resolver;
 mod router;
 
 use std::io;
@@ -29,23 +34,18 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use pingora::listeners::tls::TlsSettings;
 use pingora::proxy::http_proxy_service_with_name;
 use pingora::server::configuration::ServerConf;
 use pingora::server::{ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch};
 use tokio::sync::{broadcast, watch};
 
+use self::plain::ChallengeOrRedirect;
+use self::resolver::{CertResolver, SniCapture};
 use self::router::RoutingProxy;
+use crate::acme::{CertMap, ChallengeMap};
 use crate::config::ProxyConfig;
 use crate::routing::RouteTable;
-
-#[allow(dead_code, reason = "installed on the :443 listener when it lands")]
-mod resolver;
-
-#[allow(
-    unused_imports,
-    reason = "installed on the :443 listener when it lands"
-)]
-pub use resolver::CertResolver;
 
 /// Why the proxy did not come up.
 #[derive(Debug, thiserror::Error)]
@@ -91,16 +91,29 @@ impl ShutdownSignalWatch for ChannelShutdownWatch {
     }
 }
 
+/// The shared state the proxy reads on every request or handshake; the orchestrator and the
+/// ACME task replace what is inside.
+#[derive(Debug, Clone)]
+pub struct ProxyState {
+    /// The published route table (architecture §6).
+    pub routes: Arc<ArcSwap<RouteTable>>,
+    /// The certificates the `:443` listener serves, by SNI name.
+    pub certs: CertMap,
+    /// The HTTP-01 challenges the `:80` listener answers.
+    pub challenges: ChallengeMap,
+}
+
 /// A configured, not yet running Pingora server.
 pub struct Proxy {
     server: Server,
-    http_listen: SocketAddr,
+    /// Every listen address, checked before and probed after the server starts.
+    listen: [SocketAddr; 2],
 }
 
 impl Proxy {
-    /// Builds the server and its services from `config`, routing by whatever table `routes`
-    /// holds at the time of each request.
-    pub fn new(config: &ProxyConfig, routes: Arc<ArcSwap<RouteTable>>) -> Self {
+    /// Builds the server and its two services from `config`, reading `state` at the time of
+    /// each request or handshake.
+    pub fn new(config: &ProxyConfig, state: ProxyState) -> Self {
         let conf = ServerConf {
             daemon: false,
             threads: config.threads.get(),
@@ -109,29 +122,56 @@ impl Proxy {
             ..ServerConf::default()
         };
         let mut server = Server::new_with_opt_and_conf(None, conf);
+        let ProxyState {
+            routes,
+            certs,
+            challenges,
+        } = state;
+
+        let mut https = http_proxy_service_with_name(
+            &server.configuration,
+            RoutingProxy::new(Arc::clone(&routes), config.timeouts),
+            "hoster https",
+        );
+        let mut tls = TlsSettings::with_callbacks(Box::new(SniCapture))
+            .expect("rustls TlsSettings::with_callbacks cannot fail");
+        tls.set_cert_resolver(Arc::new(CertResolver::from(certs)));
+        tls.enable_h2();
+        https.add_tls_with_settings(&config.https_listen.to_string(), None, tls);
+        server.add_service(https);
+
         let mut http = http_proxy_service_with_name(
             &server.configuration,
-            RoutingProxy::new(routes, config.timeouts),
+            ChallengeOrRedirect::new(routes, challenges),
             "hoster http",
         );
         http.add_tcp(&config.http_listen.to_string());
         server.add_service(http);
+
         Proxy {
             server,
-            http_listen: config.http_listen,
+            listen: [config.http_listen, config.https_listen],
         }
     }
 
     /// Runs the server on a dedicated thread until `shutdown` carries a signal.
     ///
-    /// The listen address is checked first: Pingora binds inside a service task and only logs a
-    /// panic when that fails, so a busy or privileged port would otherwise go unnoticed.
+    /// The listen addresses are checked first: Pingora binds inside a service task and only
+    /// logs a panic when that fails, so a busy or privileged port would otherwise go unnoticed.
     pub fn spawn(
         self,
         shutdown: impl Into<ChannelShutdownWatch>,
     ) -> Result<ProxyThread, ProxyError> {
-        let addr = self.http_listen;
-        TcpListener::bind(addr).map_err(|source| ProxyError::Bind { addr, source })?;
+        // All are held at once, so two addresses that cannot coexist (`[::]:8080` and
+        // `0.0.0.0:8080` on a dual-stack host) fail here too.
+        let held = self
+            .listen
+            .iter()
+            .map(|&addr| {
+                TcpListener::bind(addr).map_err(|source| ProxyError::Bind { addr, source })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(held);
         let phases = self.server.watch_execution_phase();
         let shutdown = shutdown.into();
         let server = self.server;
@@ -147,7 +187,7 @@ impl Proxy {
             thread,
             events: ProxyEvents {
                 phases,
-                probe: Probe::from(addr),
+                probes: self.listen.map(Probe::from).to_vec(),
             },
         })
     }
@@ -184,29 +224,38 @@ impl Probe {
 /// Pingora's `ExecutionPhase` broadcast (§3.3 #4), seen from the supervisor.
 pub struct ProxyEvents {
     phases: broadcast::Receiver<ExecutionPhase>,
-    probe: Probe,
+    /// One per listener; all must accept before the proxy is ready.
+    probes: Vec<Probe>,
 }
 
 impl ProxyEvents {
     /// How often readiness re-checks the listener.
     const PROBE_INTERVAL: Duration = Duration::from_millis(20);
 
-    /// Waits until Pingora reports `Running` and its listener accepts connections.
+    /// Waits until Pingora reports `Running` and all its listeners accept connections.
     ///
     /// `Running` alone is not enough: Pingora sends it before its service tasks have bound their
-    /// listeners. Fails if Pingora terminates first or `timeout` passes.
+    /// listeners. Fails if Pingora terminates first or `timeout` passes; the error names the
+    /// first listener that was not accepting yet.
     pub async fn ready(&mut self, timeout: Duration) -> Result<(), ProxyError> {
-        let addr = self.probe.0;
-        tokio::time::timeout(timeout, async {
+        let probes = self.probes.clone();
+        let mut waiting = probes.first().map(|probe| probe.0);
+        let result = tokio::time::timeout(timeout, async {
             self.wait_for(|phase| matches!(phase, ExecutionPhase::Running))
                 .await?;
-            while !self.probe.accepts().await {
-                tokio::time::sleep(Self::PROBE_INTERVAL).await;
+            for probe in &probes {
+                waiting = Some(probe.0);
+                while !probe.accepts().await {
+                    tokio::time::sleep(Self::PROBE_INTERVAL).await;
+                }
             }
             Ok(())
         })
-        .await
-        .map_err(|_| ProxyError::NotReady { addr, timeout })?
+        .await;
+        result.map_err(|_| ProxyError::NotReady {
+            addr: waiting.unwrap_or(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))),
+            timeout,
+        })?
     }
 
     /// Resolves once Pingora has terminated or its thread is gone.
@@ -245,8 +294,16 @@ mod thread_tests {
     use super::*;
 
     fn config(http_listen: SocketAddr) -> ProxyConfig {
+        // A free port that is not `http_listen` (which the caller may have just freed).
+        let https_listen = loop {
+            let https = free_port();
+            if https != http_listen {
+                break https;
+            }
+        };
         ProxyConfig {
             http_listen,
+            https_listen,
             threads: NonZeroUsize::MIN,
             grace_period: Duration::from_secs(1),
             graceful_shutdown_timeout: Duration::from_secs(1),
@@ -259,6 +316,18 @@ mod thread_tests {
             .unwrap()
             .local_addr()
             .unwrap()
+    }
+
+    /// Empty shared state; the certificate directory lives as long as the returned guard.
+    fn state() -> (ProxyState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let (certs, _) = CertMap::open(dir.path(), None).unwrap();
+        let state = ProxyState {
+            routes: Arc::default(),
+            certs,
+            challenges: ChallengeMap::default(),
+        };
+        (state, dir)
     }
 
     fn get(addr: SocketAddr) -> String {
@@ -308,8 +377,9 @@ mod thread_tests {
     async fn serves_404_and_stops_on_the_channel() {
         let addr = free_port();
         let (tx, rx) = watch::channel(None);
+        let (state, _dir) = state();
         let ProxyThread { thread, mut events } =
-            Proxy::new(&config(addr), Arc::default()).spawn(rx).unwrap();
+            Proxy::new(&config(addr), state).spawn(rx).unwrap();
         events.ready(Duration::from_secs(10)).await.unwrap();
 
         let response = tokio::task::spawn_blocking(move || get(addr))
@@ -330,7 +400,7 @@ mod thread_tests {
     fn phase_events(phases: broadcast::Receiver<ExecutionPhase>) -> ProxyEvents {
         ProxyEvents {
             phases,
-            probe: Probe::from(free_port()),
+            probes: vec![Probe::from(free_port())],
         }
     }
 
@@ -376,11 +446,27 @@ mod thread_tests {
         let busy = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = busy.local_addr().unwrap();
         let (_tx, rx) = watch::channel(None);
-        let err = Proxy::new(&config(addr), Arc::default())
+        let (state, _dir) = state();
+        let err = Proxy::new(&config(addr), state.clone())
             .spawn(rx)
             .err()
             .unwrap();
         assert!(matches!(err, ProxyError::Bind { .. }), "{err}");
+        assert!(err.to_string().contains(&addr.to_string()), "{err}");
+
+        // The TLS listener's address is checked too.
+        let (_tx, rx) = watch::channel(None);
+        let config = ProxyConfig {
+            https_listen: addr,
+            http_listen: loop {
+                let http = free_port();
+                if http != addr {
+                    break http;
+                }
+            },
+            ..config(addr)
+        };
+        let err = Proxy::new(&config, state).spawn(rx).err().unwrap();
         assert!(err.to_string().contains(&addr.to_string()), "{err}");
     }
 }

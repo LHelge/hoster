@@ -59,6 +59,9 @@ last = 29999
 [proxy]
 # Address of the plain-HTTP listener (ACME HTTP-01 challenges and redirects to HTTPS).
 http_listen = "0.0.0.0:80"
+# Address of the TLS listener that proxies to the routes. "[::]" also accepts IPv4 unless the
+# host disables dual-stack sockets.
+https_listen = "[::]:443"
 # Pingora worker threads per listener. Default: the number of CPUs.
 # threads = 2
 # After a stop signal, how long in-flight requests may finish (Pingora grace_period_seconds).

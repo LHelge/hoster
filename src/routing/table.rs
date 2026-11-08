@@ -125,6 +125,14 @@ impl RouteTable {
         routes.iter().find(|entry| entry.matches(path))
     }
 
+    /// The table's spelling of `host` (as sent in `:authority` or `Host`) if any route serves
+    /// it: lowercase, without port or trailing dot. `None` for a host hoster does not know.
+    pub fn known_host(&self, host: &str) -> Option<&str> {
+        self.hosts
+            .get_key_value(Self::normalize_host(host).as_ref())
+            .map(|(host, _)| host.as_str())
+    }
+
     /// What changed from `previous` to this table, for the log line of a publish.
     pub fn diff(&self, previous: &RouteTable) -> RouteDiff {
         let old = previous.keyed();
@@ -167,8 +175,9 @@ impl RouteTable {
             .collect()
     }
 
-    /// Request host → table key: lowercase, no port, no trailing dot.
-    fn normalize_host(raw: &str) -> Cow<'_, str> {
+    /// Request host → table key: lowercase, no port, no trailing dot. The proxy compares a
+    /// TLS SNI name against the request host in this form too (ADR-0032).
+    pub fn normalize_host(raw: &str) -> Cow<'_, str> {
         let host = raw.trim();
         let host = match host.strip_prefix('[') {
             // An IPv6 literal never matches a route, but must not be cut at its colons.
