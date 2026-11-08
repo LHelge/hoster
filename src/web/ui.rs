@@ -103,8 +103,6 @@ impl From<HealthStatus> for Tone {
 pub enum CertState {
     /// None is served yet, and no attempt has failed.
     Pending,
-    /// None is served yet, and the last attempt failed.
-    Failing,
     /// Served, with more than [`CertState::WARN_WITHIN`] left.
     Valid,
     /// Served, and expiring within [`CertState::WARN_WITHIN`].
@@ -116,15 +114,6 @@ pub enum CertState {
 impl CertState {
     /// Certificates closer to expiry than this are flagged (renewal starts well before).
     pub const WARN_WITHIN: Duration = Duration::from_secs(14 * 24 * 60 * 60);
-
-    /// A host without a certificate, failing when an attempt reported `error`.
-    pub fn unissued(error: Option<&str>) -> Self {
-        if error.is_some() {
-            CertState::Failing
-        } else {
-            CertState::Pending
-        }
-    }
 
     /// Whether the certificate needs the operator's attention soon.
     pub fn is_flagged(self) -> bool {
@@ -155,7 +144,7 @@ impl From<CertState> for Tone {
     fn from(state: CertState) -> Self {
         match state {
             CertState::Pending => Tone::Progress,
-            CertState::Failing | CertState::Expired => Tone::Fail,
+            CertState::Expired => Tone::Fail,
             CertState::Expiring => Tone::Warn,
             CertState::Valid => Tone::Ok,
         }
@@ -389,10 +378,7 @@ mod tests {
         assert_eq!(CertState::from(Duration::ZERO), CertState::Expired);
         assert_eq!(CertState::from(3 * day), CertState::Expiring);
         assert_eq!(CertState::from(60 * day), CertState::Valid);
-        assert_eq!(CertState::unissued(None), CertState::Pending);
-        assert_eq!(CertState::unissued(Some("boom")), CertState::Failing);
         assert_eq!(Tone::from(CertState::Pending), Tone::Progress);
-        assert_eq!(Tone::from(CertState::Failing), Tone::Fail);
         assert_eq!(Tone::from(CertState::Expiring), Tone::Warn);
         assert_eq!(Tone::from(CertState::Expired), Tone::Fail);
         assert_eq!(CertState::Valid.pill("60 d"), None);

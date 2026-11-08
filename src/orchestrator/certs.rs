@@ -203,6 +203,20 @@ impl CertHosts {
         status
     }
 
+    /// The stacks routing each host, by host.
+    pub(super) fn owners(&self) -> BTreeMap<String, BTreeSet<String>> {
+        let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (stack, hosts) in &self.by_stack {
+            for host in hosts {
+                owners
+                    .entry(host.clone())
+                    .or_default()
+                    .insert(stack.clone());
+            }
+        }
+        owners
+    }
+
     fn ensure(&mut self, hosts: BTreeSet<String>) {
         for host in &hosts {
             self.forgotten.remove(host);
@@ -254,6 +268,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// reported on it), by host.
     pub fn certificates(&self) -> BTreeMap<String, CertStatus> {
         self.lock().certs.status()
+    }
+
+    /// The stacks whose latest applied definition routes each host, by host (the certificates
+    /// page's stack column). The admin host is routed by none.
+    pub fn certificate_owners(&self) -> BTreeMap<String, BTreeSet<String>> {
+        self.lock().certs.owners()
     }
 
     /// Records the outcome of a DNS comparison for `host` made from the certificates page, so
@@ -339,6 +359,34 @@ mod tests {
         );
         certs.apply(&stack("jobs", &[]));
         assert_eq!(drain(&mut rx), []);
+    }
+
+    #[test]
+    fn owners_are_the_stacks_routing_each_host() {
+        let mut certs = CertHosts::default();
+        certs.restore([
+            &stack("blog", &["blog.example.com"]),
+            &stack("notes", &["notes.example.com", "blog.example.com"]),
+            &stack("jobs", &[]),
+        ]);
+        assert_eq!(
+            certs.owners(),
+            BTreeMap::from([
+                (
+                    "blog.example.com".to_owned(),
+                    BTreeSet::from(["blog".to_owned(), "notes".to_owned()])
+                ),
+                (
+                    "notes.example.com".to_owned(),
+                    BTreeSet::from(["notes".to_owned()])
+                ),
+            ])
+        );
+        certs.remove("notes");
+        assert_eq!(
+            certs.owners().keys().collect::<Vec<_>>(),
+            ["blog.example.com"]
+        );
     }
 
     #[test]

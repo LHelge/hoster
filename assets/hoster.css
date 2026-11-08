@@ -736,7 +736,6 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 /* ---- Stack pages: forms, problems, the apply preview and its diff --------------------------- */
 
 .dns-detail { display: block; margin-top: 0.25rem; font-size: 12px; }
-.cert-error { font-size: 12px; overflow-wrap: anywhere; }
 .problems { margin: 0.5rem 0 0; padding-left: 1.25rem; }
 .problem-at { font-weight: 600; }
 .problem-source {
@@ -1123,6 +1122,60 @@ pre.release-notes {
   font: 12.5px/1.5 var(--mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Certificates (src/web/certificates.rs) */
+.page-help { max-width: 72rem; margin: -10px 0 18px; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.page-help code { color: var(--text-2); }
+.page-help strong { color: var(--text-2); }
+#cert-result:empty { display: none; }
+/* The ACME tile's figure is a name, not a number. */
+.cert-kpis .kpi:last-child .kpi-value { font-size: 15px; line-height: 1.9; }
+/* An alert banner for the page's worst problem: the fail tint with a red rule. */
+.alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px 14px;
+  margin: 0 0 1.25rem;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--fail) 40%, var(--border));
+  border-radius: var(--radius-card);
+  background: var(--fail-tint);
+}
+.alert > .icon { width: 18px; height: 18px; margin: 1px 0 0; color: var(--fail); }
+.alert-text { display: flex; flex: 1 1 0; flex-direction: column; gap: 4px; min-width: min(100%, 220px); }
+.alert-dns:empty { display: none; }
+.alert-dns { font-size: 12px; }
+.alert-text p { margin: 0; }
+.alert-title { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.alert-detail { color: var(--text-2); font: 12px/1.55 var(--mono); overflow-wrap: anywhere; }
+.alert-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.alert-actions .inline-form { margin: 0; }
+.alert-actions button { min-height: 32px; padding: 0 12px; font: 500 12px/1.2 var(--mono); }
+table.certificates { min-width: 1040px; }
+table.certificates th, table.certificates td { padding-inline: 10px; }
+table.certificates th:first-child, table.certificates td:first-child { padding-left: 18px; }
+table.certificates th:last-child, table.certificates td:last-child { padding-right: 18px; }
+table.certificates .cert-host { color: var(--text); font-weight: 500; }
+td.cert-expiry { min-width: 9rem; font-family: var(--mono); font-size: 12px; }
+.cert-expiry-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 5px; white-space: nowrap; }
+.cert-expiry-head span { color: var(--text-2); }
+td.cert-status { min-width: 12rem; max-width: 17rem; }
+/* The two row actions stack, so the table fits a laptop-width card. */
+table.certificates td.row-actions { width: 1%; }
+table.certificates td.row-actions .inline-form { display: flex; justify-content: flex-end; }
+table.certificates td.row-actions .row-button { margin-left: 0; }
+td.cert-nowrap { white-space: nowrap; }
+.cert-error { display: block; margin-top: 4px; color: var(--fail); font: 11.5px/1.5 var(--mono); overflow-wrap: break-word; }
+.cert-next { display: block; margin-top: 3px; color: var(--muted); font: 11.5px/1.5 var(--mono); }
+td.cert-dns { min-width: 9rem; max-width: 15rem; }
+td.row-actions .inline-form { margin: 0; }
+
+@media (max-width: 760px) {
+  .page-help { margin-top: -6px; }
+  .alert-actions button { min-height: 44px; }
+  table.certificates .row-button, .page-actions button { min-height: 44px; }
 }
 
 /* ---- Icons (ADR-0053): an inline <svg> that <use>s a symbol of the sprite. It is sized to the

@@ -1,43 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Certificates{% endblock %}
 {% block heading %}Certificates{% endblock %}
+{% block actions %}
+<form class="inline-form" hx-post="/certificates/dns/all" hx-target="#cert-body">
+  <button type="submit" class="ghost" title="Compares every host's A/AAAA records with hoster's public addresses now">Check all DNS</button>
+</form>
+{%- let failing = body.failing() %}
+{%- if failing > 0 %}
+<form class="inline-form" hx-post="/certificates/retry/failing" hx-target="#cert-result">
+  <button type="submit" class="primary" title="Asks the ACME task to attempt every failing host now; hosts still backing off are skipped">Retry failing ({{ failing }})</button>
+</form>
+{%- endif %}
+{% endblock %}
 {% block content %}
-<p class="public-addresses">hoster's public addresses:
+<p class="page-help">hoster's public addresses:
   {%- if public.is_empty() %} <strong>unknown</strong>
   {%- else %} <code>{{ public }}</code>
-  {%- endif %} <span class="muted">(from {{ source }})</span></p>
-<p class="muted">Before each attempt, hoster compares a host's A/AAAA records with these addresses. The check is advisory: a host that resolves elsewhere (for example behind a CDN) is still issued a certificate, but a mismatch is the likely cause of a failing one. Failed attempts back off from 5 minutes to 24 hours.</p>
-
-{%- if rows.is_empty() %}
-<p>No hosts need a certificate yet.</p>
-{%- else %}
-<div class="table-scroll"><table class="list certificates">
-  <thead>
-    <tr><th scope="col">Host</th><th scope="col">Issuer</th><th scope="col">Valid until</th><th scope="col">Last error</th><th scope="col">Next attempt</th><th scope="col">DNS</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
-  </thead>
-  <tbody>
-    {%- for row in rows %}
-    <tr>
-      <td><code>{{ row.host }}</code></td>
-      <td>{% if let Some(issuer) = row.issuer %}{{ issuer }}{% else %}<span class="muted">none</span>{% endif %}</td>
-      <td>{% if let Some(at) = row.not_after %}{{ at }}{% else %}{{ row.pending_pill() }}{% endif %}</td>
-      <td>{% if let Some(error) = row.error %}<span class="cert-error">{{ error }}</span>{% else %}<span class="muted">none</span>{% endif %}</td>
-      <td>{{ row.next_attempt }}</td>
-      <td id="dns-{{ row.index }}">{% let dns = row.dns %}{% include "cert_dns.html" %}</td>
-      <td>
-        <form class="inline-form" hx-post="/certificates/dns" hx-target="#dns-{{ row.index }}">
-          <input type="hidden" name="host" value="{{ row.host }}">
-          <button type="submit">Check DNS now</button>
-        </form>
-        <form class="inline-form" hx-post="/certificates/retry" hx-target="#cert-result">
-          <input type="hidden" name="host" value="{{ row.host }}">
-          <button type="submit">Retry now</button>
-        </form>
-      </td>
-    </tr>
-    {%- endfor %}
-  </tbody>
-</table></div>
-{%- endif %}
+  {%- endif %} (from {{ source }}). Before each attempt, hoster compares a host's A/AAAA records with these addresses. The check is advisory: a host that resolves elsewhere (for example behind a CDN) is still issued a certificate, but a mismatch is the likely cause of a failing one. Failed attempts back off from 5 minutes to 24 hours. Certificates are ordered from the ACME directory <code>{{ directory }}</code>.</p>
 <div id="cert-result" aria-live="polite"></div>
+<div id="cert-body">
+{%- include "cert_body.html" %}
+</div>
 {% endblock %}
