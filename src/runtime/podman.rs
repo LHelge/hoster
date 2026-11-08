@@ -29,8 +29,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use super::{
-    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
-    LogOptions, LogStream, NetworkSpec, ObjectKind, Operation, PortBinding, PublishedPort,
+    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, EngineInfo,
+    LogLine, LogOptions, LogStream, NetworkSpec, ObjectKind, Operation, PortBinding, PublishedPort,
     RuntimeError, VolumeSpec, label,
 };
 use crate::registry::{Anonymous, RegistryCredential, RegistryCredentials};
@@ -789,6 +789,28 @@ impl ContainerRuntime for PodmanRuntime {
         Ok(containers)
     }
 
+    /// podman's compat `/info`: its version, whether it runs rootless (a `name=rootless`
+    /// security option) and the cgroups version and manager.
+    async fn engine(&self) -> Result<EngineInfo, RuntimeError> {
+        let info = self
+            .docker
+            .info()
+            .await
+            .map_err(|err| RuntimeError::Unreachable {
+                socket: self.socket.display().to_string(),
+                message: err.to_string(),
+            })?;
+        let named = |value: String| Some(value).filter(|v| !v.is_empty());
+        Ok(EngineInfo {
+            version: info.server_version.and_then(named),
+            rootless: info
+                .security_options
+                .map(|options| options.iter().any(|o| o == "name=rootless")),
+            cgroup_version: info.cgroup_version.map(|v| v.to_string()).and_then(named),
+            cgroup_driver: info.cgroup_driver.map(|d| d.to_string()).and_then(named),
+        })
+    }
+
     /// Reads the log through the compat `logs` endpoint, with timestamps, and joins podman's
     /// frames into lines (see [`ContainerLog`]). Dropping the stream closes the request, so a
     /// followed log stops being read as soon as its reader goes away.
@@ -1150,6 +1172,12 @@ mod tests {
         let negotiated = runtime.docker.client_version();
         assert!(negotiated <= *API_DEFAULT_VERSION, "{negotiated}");
         runtime.docker.ping().await.expect("ping after negotiation");
+
+        // The System page's runtime facts (ADR-0002: hoster only runs rootless).
+        let engine = runtime.engine().await.expect("read podman's /info");
+        assert!(engine.version.is_some(), "{engine:?}");
+        assert_eq!(engine.rootless, Some(true), "{engine:?}");
+        assert!(engine.cgroup_version.is_some(), "{engine:?}");
     }
 
     fn pinned() -> PinnedImage {

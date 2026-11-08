@@ -18,7 +18,11 @@ use crate::web::stacks::tests::{FORM, body, encoded, post};
 async fn app_on(host: &Host, source: FakeReleases, running: &str) -> (TestApp, ShutdownRequest) {
     let mut app = TestApp::new().await;
     let shutdown = ShutdownRequest::default();
-    app.app.system = System::new(host.updater(source, running), shutdown.clone());
+    app.app.system = System::new(
+        host.updater(source, running),
+        shutdown.clone(),
+        Arc::new(Facts::sample()),
+    );
     (app, shutdown)
 }
 
@@ -59,22 +63,137 @@ async fn the_page_shows_version_target_schema_and_installed_versions() {
         "{html}"
     );
     assert!(
-        html.contains("<dt>Running version</dt><dd><code>v0.1.0</code></dd>"),
-        "{html}"
-    );
-    assert!(html.contains(&format!("<code>{TARGET}</code>")), "{html}");
-    assert!(
-        html.contains(&format!("<code>{}</code>", schema())),
+        html.contains(r#"<span class="version-now">v0.1.0</span>"#),
         "{html}"
     );
     assert!(
-        html.contains("<dt>Installed (previous)</dt><dd><code>v0.0.9</code></dd>"),
+        html.contains(&format!(
+            "<code>{TARGET}</code> · schema <code>{}</code> · up ",
+            schema()
+        )),
         "{html}"
     );
-    assert!(html.contains(r#"hx-post="/system/check""#), "{html}");
-    // Rollback is CLI-only; the page says how.
-    assert!(html.contains("<code>hoster rollback</code>"), "{html}");
+    assert!(
+        html.contains("installed current: <code>v0.1.0</code>"),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="version-prev">v0.0.9</span>"#),
+        "{html}"
+    );
+    // The check is the header's action; the result goes into the update card.
+    assert!(
+        html.contains(r##"hx-post="/system/check" hx-target="#update-check""##),
+        "{html}"
+    );
+    assert!(html.contains(r#"id="update-check""#), "{html}");
+    // Rollback is CLI-only; the page says how and links the manual recovery.
+    assert!(
+        html.contains("ssh … &amp;&amp; hoster rollback</code>"),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"href="https://docs.hoster.lhelge.se/wiki/install/#manual-recovery""#),
+        "{html}"
+    );
     assert!(!html.contains("/system/rollback"), "{html}");
+    assert!(!html.contains("roll back</button>"), "{html}");
+}
+
+#[tokio::test]
+async fn the_page_explains_why_there_is_nothing_to_roll_back_to() {
+    // One version installed: nothing older to return to.
+    let host = Host::new(&[("0.1.0", schema())]).await;
+    let (app, _) = app_on(&host, FakeReleases::default(), "0.1.0").await;
+    let browser = app.sign_in().await;
+    let html = body(app.get("/system", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"<span class="version-prev muted">none</span>"#),
+        "{html}"
+    );
+    assert!(html.contains("nothing to roll back to"), "{html}");
+    assert!(!html.contains("not installed with"), "{html}");
+
+    // No versioned layout at all.
+    let host = Host::new(&[]).await;
+    let (app, _) = app_on(&host, FakeReleases::default(), "0.1.0").await;
+    let browser = app.sign_in().await;
+    let html = body(app.get("/system", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains("installed current: <span class=\"muted\">none</span>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("not installed with <code>install.sh</code>"),
+        "{html}"
+    );
+    assert!(!html.contains("nothing to roll back to"), "{html}");
+}
+
+#[tokio::test]
+async fn an_unreadable_layout_is_unknown_not_missing() {
+    let host = Host::new(&[("0.0.9", schema()), ("0.1.0", schema())]).await;
+    // `current` points outside `versions/`: hoster cannot tell what is installed.
+    let link = host.installation.root().join("current");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("/elsewhere/v0.1.0", &link).unwrap();
+    let (app, _) = app_on(&host, FakeReleases::default(), "0.1.0").await;
+    let browser = app.sign_in().await;
+    let response = app.get("/system", Some(&browser.cookie)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(
+        html.contains("Cannot read the installed versions: "),
+        "{html}"
+    );
+    assert!(
+        html.contains("installed current: <span class=\"muted\">unknown</span>"),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="version-prev muted">unknown</span>"#),
+        "{html}"
+    );
+    assert!(!html.contains("not installed with"), "{html}");
+    assert!(!html.contains("nothing to roll back to"), "{html}");
+}
+
+#[tokio::test]
+async fn the_page_shows_the_host_facts_and_unknown_for_missing_ones() {
+    let host = Host::new(&[("0.1.0", schema())]).await;
+    let (mut app, _) = app_on(&host, FakeReleases::default(), "0.1.0").await;
+    let browser = app.sign_in().await;
+    let html = body(app.get("/system", Some(&browser.cookie)).await).await;
+    for row in [
+        "<dt>hostname</dt>\n    <dd>srv-01</dd>",
+        "<dt>os</dt>\n    <dd>Debian GNU/Linux 13 (trixie)</dd>",
+        "<dt>kernel</dt>\n    <dd>6.12.48-amd64</dd>",
+        "<dt>arch</dt>\n    <dd>x86_64 · 8 CPU</dd>",
+        "<dt>memory</dt>\n    <dd>32.0 GiB</dd>",
+        "<dt>runtime</dt>\n    <dd>podman 5.4.2 · rootless</dd>",
+        "<dt>cgroups</dt>\n    <dd>v2 · systemd</dd>",
+        "<dd>203.0.113.42 · 2001:db8::42 <span class=\"host-note\">· the A/AAAA records of admin.example.com</span></dd>",
+        "<dt>data dir</dt>\n    <dd>/home/hoster/.local/state/hoster</dd>",
+        "<dt>uptime</dt>\n    <dd>41d 7h</dd>",
+    ] {
+        assert!(html.contains(row), "{row}\n{html}");
+    }
+
+    // Nothing known still renders the page, every fact as unknown.
+    app.app.system = System::new(
+        host.updater(FakeReleases::default(), "0.1.0"),
+        ShutdownRequest::default(),
+        Arc::new(Facts::default()),
+    );
+    let response = app.get("/system", Some(&browser.cookie)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert_eq!(
+        html.matches(r#"<dd><span class="muted">unknown</span></dd>"#)
+            .count(),
+        10,
+        "{html}"
+    );
 }
 
 #[tokio::test]
@@ -99,12 +218,13 @@ async fn checking_shows_the_new_version_with_escaped_notes_and_the_update_button
     let browser = app.sign_in().await;
     let (status, html) = check(&app, &browser).await;
     assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Update available"), "{html}");
     assert!(
-        html.contains("v0.2.0 is available; this is v0.1.0"),
+        html.contains(r#"<span class="update-version">v0.2.0 <span class="update-meta">· this is v0.1.0</span>"#),
         "{html}"
     );
     assert!(
-        html.contains(r#"<pre class="release-notes">## Features"#),
+        html.contains(r#"aria-label="Release notes for v0.2.0">## Features"#),
         "{html}"
     );
     assert!(
@@ -114,11 +234,48 @@ async fn checking_shows_the_new_version_with_escaped_notes_and_the_update_button
     assert!(!html.contains("<script>"), "{html}");
     assert!(html.contains(r#"hx-post="/system/update""#), "{html}");
     assert!(html.contains(r#"name="version" value="v0.2.0""#), "{html}");
-    assert!(html.contains("Update to v0.2.0"), "{html}");
+    assert!(html.contains(r#"class="primary">"#), "{html}");
+    assert!(html.contains("Apply update"), "{html}");
+    assert!(
+        html.contains(r#"hx-confirm="Update hoster to v0.2.0?"#),
+        "{html}"
+    );
+    assert!(
+        html.contains("Stacks keep running while hoster restarts"),
+        "{html}"
+    );
+    // The fake release names no date or page.
+    assert!(!html.contains("released"), "{html}");
+    assert!(!html.contains("full changelog"), "{html}");
     assert!(!html.contains("disabled"), "{html}");
     // Checking applies nothing.
     assert_eq!(host.current(), Some(v("0.1.0")));
     assert!(!shutdown.is_requested());
+}
+
+#[tokio::test]
+async fn checking_shows_the_release_date_and_the_changelog_link() {
+    let host = Host::new(&[("0.1.0", schema())]).await;
+    let mut source = FakeReleases::default().publish_binary("0.2.0", script("0.2.0", schema()));
+    source.releases[0].published = Some(humantime::parse_rfc3339("2026-11-06T09:30:00Z").unwrap());
+    source.releases[0].page = Some(
+        "https://github.com/LHelge/hoster/releases/tag/v0.2.0"
+            .parse()
+            .unwrap(),
+    );
+    let (app, _) = app_on(&host, source, "0.1.0").await;
+    let browser = app.sign_in().await;
+    let (_, html) = check(&app, &browser).await;
+    assert!(
+        html.contains("· released 2026-11-06 · this is v0.1.0"),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"href="https://github.com/LHelge/hoster/releases/tag/v0.2.0">full changelog"#
+        ),
+        "{html}"
+    );
 }
 
 #[tokio::test]
@@ -129,8 +286,29 @@ async fn updating_switches_and_requests_a_graceful_shutdown() {
     let browser = app.sign_in().await;
     let (status, html) = update(&app, &browser, "v0.2.0").await;
     assert_eq!(status, StatusCode::OK, "{html}");
-    assert!(html.contains("Switched from v0.1.0 to v0.2.0"), "{html}");
-    assert!(html.contains("Restarting"), "{html}");
+    assert!(html.contains("v0.1.0 → v0.2.0"), "{html}");
+    // The steps the updater did, then the restart.
+    assert!(
+        html.contains(&format!(
+            "downloaded <code>hoster-{TARGET}</code> and verified it against <code>SHA256SUMS</code>"
+        )),
+        "{html}"
+    );
+    assert!(html.contains("installed v0.2.0 under"), "{html}");
+    assert!(
+        html.contains("snapshotted the database to <code>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("switched <code>current</code> to v0.2.0"),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"<li class="step-now"><span aria-hidden="true">●</span> restarting into v0.2.0"#
+        ),
+        "{html}"
+    );
     assert!(
         html.contains(r#"hx-get="/system/version?from=v0.1.0" hx-trigger="every 2s""#),
         "{html}"
@@ -140,6 +318,31 @@ async fn updating_switches_and_requests_a_graceful_shutdown() {
         shutdown.is_requested(),
         "the supervisor is asked to restart"
     );
+}
+
+#[tokio::test]
+async fn the_restart_steps_list_pruned_versions() {
+    let host = Host::new(&[("0.0.9", schema()), ("0.1.0", schema())]).await;
+    let source = FakeReleases::default().publish_binary("0.2.0", script("0.2.0", schema()));
+    let (app, _) = app_on(&host, source, "0.1.0").await;
+    let browser = app.sign_in().await;
+    let (status, html) = update(&app, &browser, "v0.2.0").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("removed old v0.0.9</li>"), "{html}");
+}
+
+#[tokio::test]
+async fn the_restart_steps_say_when_there_was_no_database() {
+    let host = Host::new(&[("0.1.0", schema())]).await;
+    std::fs::remove_file(host.state_dir.join(Store::FILE_NAME)).unwrap();
+    let source = FakeReleases::default().publish_binary("0.2.0", script("0.2.0", schema()));
+    let (app, _) = app_on(&host, source, "0.1.0").await;
+    let browser = app.sign_in().await;
+    let (status, html) = update(&app, &browser, "v0.2.0").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("no database to snapshot yet"), "{html}");
+    assert!(!html.contains("snapshotted the database"), "{html}");
+    assert!(!html.contains("removed old"), "{html}");
 }
 
 #[tokio::test]

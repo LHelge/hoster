@@ -1,10 +1,10 @@
 ---
 id: "8qb"
 title: "System page: version cards, update flow, host facts"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:21:22.668782812Z"
-updated: "2026-11-08T18:21:22.668782812Z"
+updated: "2026-11-08T23:11:46.630533322Z"
 tags:
   - web
   - ui
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - xhh
 parent: "8bf"
+attempts: 1
 ---
 
 Redesign `/system` after `docs/design/System.dc.html`, without the images & storage and update-history parts (follow-ups).

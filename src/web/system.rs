@@ -1,5 +1,6 @@
-//! The System page (ADR-0052): the running version, target and schema, the installed current
-//! and previous versions, "Check for updates" and "Update to vX.Y.Z".
+//! The System page (ADR-0052): a version card (the running version with its target, schema and
+//! hoster's uptime, the installed current and previous versions), an update card for "check for
+//! updates" and "Apply update", and the host's facts ([`HostFacts`], read on every render).
 //!
 //! - Checking asks GitHub only when the button is clicked (`POST /system/check`); the release
 //!   notes are shown as escaped preformatted text, never as HTML from the release body.
@@ -9,11 +10,14 @@
 //!   updater switched `current`, hoster shuts down gracefully through the supervisor
 //!   ([`ShutdownRequest`], the same path as SIGTERM) so systemd starts the new binary. The
 //!   response polls `GET /system/version` until a different version answers, then reloads.
+//! - The restart step list names only what the updater did (verified, installed, snapshotted,
+//!   switched, pruned) and the restart that follows; it invents no health checks.
 //! - Rollback is CLI-only (`hoster rollback`); the page says how.
 //!
 //! Every update error is shown inline; the updater applies nothing on error.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use askama::Template;
 use axum::Extension;
@@ -22,8 +26,10 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
+use self::host::Fact;
 use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::Outcome;
+use super::ui::Uptime;
 use crate::installation::Version;
 use crate::supervisor::ShutdownRequest;
 use crate::update::{
@@ -37,6 +43,9 @@ pub struct System(Arc<Inner>);
 struct Inner {
     updater: Updater,
     shutdown: ShutdownRequest,
+    host: Arc<dyn HostFacts>,
+    /// When this hoster started, for its uptime.
+    started: SystemTime,
     /// Held while an update runs: a second one (a double submit, another tab) is refused
     /// instead of racing it over the same `versions/` directory and `current` link.
     updating: tokio::sync::Mutex<()>,
@@ -93,13 +102,25 @@ pub struct VersionQuery {
 }
 
 impl System {
-    /// The page for `updater`; a successful update requests `shutdown`.
-    pub fn new(updater: Updater, shutdown: ShutdownRequest) -> Self {
+    /// The page for `updater`, showing the facts of `host`; a successful update requests
+    /// `shutdown`. hoster's uptime counts from now.
+    pub fn new(updater: Updater, shutdown: ShutdownRequest, host: Arc<dyn HostFacts>) -> Self {
         Self(Arc::new(Inner {
             updater,
             shutdown,
+            host,
+            started: SystemTime::now(),
             updating: tokio::sync::Mutex::new(()),
         }))
+    }
+
+    /// The same page, with hoster started at `started` (the UI preview).
+    #[cfg(test)]
+    pub fn started_at(mut self, started: SystemTime) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("set before the page is shared")
+            .started = started;
+        self
     }
 
     fn updater(&self) -> &Updater {
@@ -140,14 +161,19 @@ impl System {
                 )),
             ),
         };
+        let up = SystemTime::now()
+            .duration_since(system.0.started)
+            .unwrap_or_default();
         Page(SystemPage {
             layout: shell.layout(Section::System),
             running: system.running().to_string(),
             target: info.target.clone(),
             schema: info.schema,
+            up: Uptime(up),
             current: installed.current.map(|v| v.to_string()),
             previous: installed.previous.map(|v| v.to_string()),
             problem,
+            host: system.0.host.read().await.rows(),
         })
         .into_response()
     }
@@ -170,6 +196,8 @@ impl System {
         Page(CheckResult {
             running: check.running.to_string(),
             latest: check.latest.to_string(),
+            released: check.published.map(Self::date),
+            page: check.page.map(String::from),
             notes: check.notes,
             blocked: system.blocked().await.map(|b| b.to_string()),
         })
@@ -212,7 +240,10 @@ impl System {
             .informing()
             .into_response(),
             Ok(UpdateOutcome::Switched {
-                from, to, snapshot, ..
+                from,
+                to,
+                snapshot,
+                pruned,
             }) => {
                 // The response still reaches the browser: a graceful shutdown lets in-flight
                 // admin requests finish before the proxy stops.
@@ -220,7 +251,9 @@ impl System {
                 Page(Restarting {
                     from: from.to_string(),
                     to: to.to_string(),
+                    binary: crate::update::Release::binary_name(&system.updater().running().target),
                     snapshot: snapshot.map(|path| path.display().to_string()),
+                    pruned: pruned.iter().map(ToString::to_string).collect(),
                 })
                 .into_response()
             }
@@ -251,6 +284,13 @@ impl System {
         } else {
             StatusCode::NO_CONTENT.into_response()
         }
+    }
+
+    /// The day of `time` (`2026-11-06`, UTC).
+    fn date(time: SystemTime) -> String {
+        let mut text = humantime::format_rfc3339_seconds(time).to_string();
+        text.truncate(10);
+        text
     }
 
     /// An error with its sources, for showing inline.
@@ -297,10 +337,18 @@ pub struct SystemPage {
     running: String,
     target: String,
     schema: i64,
+    /// How long this hoster has been running.
+    up: Uptime,
     current: Option<String>,
     previous: Option<String>,
     /// Shown when the installed versions cannot be read.
     problem: Option<String>,
+    host: Vec<Fact>,
+}
+
+impl SystemPage {
+    /// The manual recovery guide, for when `hoster rollback` cannot run.
+    const RECOVERY: &str = "https://docs.hoster.lhelge.se/wiki/install/#manual-recovery";
 }
 
 /// `POST /system/check` when a newer release exists.
@@ -309,6 +357,10 @@ pub struct SystemPage {
 pub struct CheckResult {
     running: String,
     latest: String,
+    /// The day it was published, if known.
+    released: Option<String>,
+    /// Its page on GitHub with the full notes, if known.
+    page: Option<String>,
     /// The release notes, rendered escaped as preformatted text.
     notes: String,
     /// Why the Update button is disabled.
@@ -321,8 +373,18 @@ pub struct CheckResult {
 pub struct Restarting {
     from: String,
     to: String,
+    /// The binary that was downloaded and verified (`hoster-<target>`).
+    binary: String,
     snapshot: Option<String>,
+    /// The old versions removed after the switch.
+    pruned: Vec<String>,
 }
+
+mod host;
+
+#[cfg(test)]
+pub use host::Facts;
+pub use host::{HostFacts, LocalHost};
 
 #[cfg(test)]
 mod tests;

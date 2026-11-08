@@ -342,6 +342,10 @@ struct GithubRelease {
     prerelease: bool,
     #[serde(default)]
     assets: Vec<GithubAsset>,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    html_url: Option<Url>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,9 +363,17 @@ impl TryFrom<GithubRelease> for Release {
         let version = release.tag_name.parse().map_err(|e| {
             SourceError::Malformed(format!("tag {:?} is not a version: {e}", release.tag_name))
         })?;
+        // Only shown as a link, never fetched; still only GitHub's own https pages.
+        let page = release
+            .html_url
+            .filter(|url| url.scheme() == "https" && url.host_str() == Some("github.com"));
         Ok(Release {
             version,
             notes: release.body.unwrap_or_default(),
+            published: release
+                .published_at
+                .and_then(|at| humantime::parse_rfc3339(&at).ok()),
+            page,
             assets: release
                 .assets
                 .into_iter()

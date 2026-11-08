@@ -54,6 +54,8 @@ impl FakeReleases {
             version: version.clone(),
             notes: format!("notes for {version}"),
             assets,
+            published: None,
+            page: None,
         });
         self
     }

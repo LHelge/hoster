@@ -34,7 +34,7 @@ use http_body_util::BodyExt as _;
 use super::assets::Assets;
 use super::certificates::{AcmeDirectory, CertOverview, CertOwner, CertRow};
 use super::settings::{EffectiveConfig, Settings};
-use super::system::System;
+use super::system::{Facts, System};
 use crate::acme::{Backoff, DnsMismatch, DnsVerdict, Validity};
 use crate::config::ConfigSource;
 use crate::health::{HealthStats, HealthStatus};
@@ -1181,10 +1181,18 @@ async fn ui_preview() {
     let mut releases = FakeReleases::default().publish_binary("0.2.0", script("0.2.0", schema));
     releases.releases[0].notes =
         "## Features\n- Stack pages share one header and tab bar\n- JetBrains Mono for machine-derived text\n\n## Fixes\n- <script> in notes is escaped".into();
+    releases.releases[0].published = Some(SystemTime::now() - 2 * DAY);
+    releases.releases[0].page = Some(
+        "https://github.com/LHelge/hoster/releases/tag/v0.2.0"
+            .parse()
+            .unwrap(),
+    );
     app.app.system = System::new(
         host.updater(releases, env!("CARGO_PKG_VERSION")),
         ShutdownRequest::default(),
-    );
+        std::sync::Arc::new(Facts::sample()),
+    )
+    .started_at(SystemTime::now() - (9 * DAY + 4 * HOUR));
     app.app.shell = app.app.shell.clone().with_host("srv-01");
     let browser = app.sign_in().await;
     let session = Session { app: &app, browser };
@@ -1366,7 +1374,22 @@ async fn ui_preview() {
     preview.write(
         "states/system-update-available.html",
         "System: update available",
-        &Session::inject(&system, "update-check", &check),
+        &Session::replace_div(&system, "update-check", &check),
+    );
+    // Applying it switches the fake layout and asks the (unconnected) shutdown to restart.
+    let restarting = session
+        .post("/system/update", &[("version", "v0.2.0")])
+        .await;
+    preview.write(
+        "states/system-restarting.html",
+        "System: update applied, restarting",
+        &Session::replace_div(&system, "update-check", &restarting),
+    );
+    let blocked = session.post("/system/check", &[]).await;
+    preview.write(
+        "states/system-update-blocked.html",
+        "System: update available but blocked (restarting)",
+        &Session::replace_div(&system, "update-check", &blocked),
     );
     let certs = session.get("/certificates", StatusCode::OK).await;
     let retry = session

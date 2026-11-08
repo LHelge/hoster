@@ -63,7 +63,7 @@ pub(crate) use self::icons::Icon;
 use self::pages::ShellSource;
 use self::settings::{EffectiveConfig, Registries, RegistryControl, Settings};
 use self::stacks::{StackControl, Stacks};
-use self::system::System;
+use self::system::{LocalHost, System};
 pub(crate) use self::ui::Tone;
 use self::webhook::{OidcVerifier, Webhook};
 
@@ -180,6 +180,7 @@ impl WebApp {
             .context("setting up the deploy webhook")?;
         let auth =
             Auth::from_config(config, store.clone()).context("setting up the GitHub login")?;
+        let host = LocalHost::new(runtime.clone(), dns.clone(), config.state_dir.clone());
         let certificates = CertificateAccess {
             orchestrator: Arc::clone(&orchestrator),
             certs,
@@ -195,7 +196,7 @@ impl WebApp {
             Arc::new(orchestrator),
             Arc::new(registry),
             EffectiveConfig::from(config),
-            System::new(updater, shutdown),
+            System::new(updater, shutdown, Arc::new(host)),
             verifier,
             store,
             stats,

@@ -233,6 +233,10 @@ pub struct UpdateCheck {
     pub latest: Version,
     /// The latest release's notes.
     pub notes: String,
+    /// When the latest release was published, if known.
+    pub published: Option<SystemTime>,
+    /// The latest release's page with its full notes, if known.
+    pub page: Option<reqwest::Url>,
 }
 
 impl UpdateCheck {
@@ -397,6 +401,8 @@ impl Updater {
             running: self.running_version(),
             latest: release.version,
             notes: release.notes,
+            published: release.published,
+            page: release.page,
         })
     }
 

@@ -1,25 +1,60 @@
 {% extends "base.html" %}
 {% block title %}System{% endblock %}
 {% block heading %}System{% endblock %}
-{% block content %}
-<dl class="facts system-facts">
-  <dt>Running version</dt><dd><code>{{ running }}</code></dd>
-  <dt>Target</dt><dd><code>{{ target }}</code></dd>
-  <dt>Schema version</dt><dd><code>{{ schema }}</code></dd>
-  <dt>Installed (current)</dt><dd>{% if let Some(current) = current %}<code>{{ current }}</code>{% else %}<span class="muted">none</span>{% endif %}</dd>
-  <dt>Installed (previous)</dt><dd>{% if let Some(previous) = previous %}<code>{{ previous }}</code>{% else %}<span class="muted">none</span>{% endif %}</dd>
-</dl>
-{%- if let Some(problem) = problem %}
-<p class="flash flash-error" role="status">{{ problem }}</p>
-{%- endif %}
-
-<h2>Updates</h2>
-<p class="muted">hoster asks GitHub for the latest stable release only when you click the button; it never checks in the background. Updating downloads the release's binary for this architecture, verifies it against the release's <code>SHA256SUMS</code>, snapshots the database and restarts hoster, which drops connections for a few seconds.</p>
+{% block actions %}
 <form class="inline-form" hx-post="/system/check" hx-target="#update-check">
-  <button type="submit">{{ crate::web::Icon::CheckUpdates }}Check for updates</button>
+  <button type="submit" class="ghost">{{ crate::web::Icon::CheckUpdates }}check for updates</button>
 </form>
-<div id="update-check" aria-live="polite"></div>
+{% endblock %}
+{% block content %}
+<div class="system-row">
+  <section class="card version-card" aria-labelledby="versions-title">
+    <div class="version-block">
+      <h2 class="eyebrow" id="versions-title">Running</h2>
+      <span class="version-now">{{ running }}</span>
+      <span class="version-meta"><code>{{ target }}</code> · schema <code>{{ schema }}</code> · up {{ up }}</span>
+      <span class="version-meta">installed current: {% if let Some(current) = current %}<code>{{ current }}</code>{% else if problem.is_some() %}<span class="muted">unknown</span>{% else %}<span class="muted">none</span>{% endif %}</span>
+    </div>
+    <div class="version-block">
+      <h2 class="eyebrow">Previous</h2>
+      {%- if let Some(previous) = previous %}
+      <span class="version-prev">{{ previous }}</span>
+      <p class="version-hint">Rollback is CLI-only. From your machine, as the <code>hoster</code> user over SSH:</p>
+      <code class="version-command">ssh … &amp;&amp; hoster rollback</code>
+      <p class="version-hint">It undoes the migrations the newer version added, switches back to {{ previous }} and restarts the service.</p>
+      {%- else if problem.is_some() %}
+      <span class="version-prev muted">unknown</span>
+      {%- else %}
+      <span class="version-prev muted">none</span>
+      {%- if current.is_some() %}
+      <p class="version-hint">Only one version is installed, so there is nothing to roll back to. After an update, <code>hoster rollback</code> over SSH returns to the version before it.</p>
+      {%- else %}
+      <p class="version-hint">This hoster was not installed with <code>install.sh</code>: there is no versioned layout to update or roll back.</p>
+      {%- endif %}
+      {%- endif %}
+      <p class="version-hint">If hoster cannot run at all, follow the <a href="{{ Self::RECOVERY }}">manual recovery guide</a>.</p>
+    </div>
+    {%- if let Some(problem) = problem %}
+    <p class="flash flash-error" role="status">{{ problem }}</p>
+    {%- endif %}
+  </section>
 
-<h2>Rolling back</h2>
-<p>Rollback is not offered here. To return to the previous version, log in to the server over SSH as the <code>hoster</code> user and run <code>hoster rollback</code>: it undoes the database migrations the newer version added, switches back and restarts the service. If hoster cannot run at all, follow the <a href="https://docs.hoster.lhelge.se/wiki/install/#manual-recovery">manual rollback</a>.</p>
+  <section class="card update-card" aria-label="Updates">
+    <div id="update-check" class="update-check" aria-live="polite">
+      <h2 class="eyebrow">Updates</h2>
+      <p class="update-idle">Not checked. Use <strong>check for updates</strong> to ask GitHub for the latest stable release.</p>
+    </div>
+    <p class="card-foot">hoster asks GitHub only when you click the button; it never checks in the background. Updating downloads the release's binary for this architecture, verifies it against the release's <code>SHA256SUMS</code>, snapshots the database and restarts hoster, which drops its connections for a few seconds.</p>
+  </section>
+</div>
+
+<section class="card host-card" aria-labelledby="host-title">
+  <div class="card-head"><h2 id="host-title">Host</h2></div>
+  <dl class="host-facts">
+    {%- for fact in host %}
+    <dt>{{ fact.name }}</dt>
+    <dd>{% if let Some(value) = fact.value %}{{ value }}{% if let Some(note) = fact.note %} <span class="host-note">· {{ note }}</span>{% endif %}{% else %}<span class="muted">unknown</span>{% endif %}</dd>
+    {%- endfor %}
+  </dl>
+</section>
 {% endblock %}

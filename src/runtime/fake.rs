@@ -14,8 +14,8 @@ use futures_util::stream::{self, BoxStream};
 use tokio::sync::{Semaphore, mpsc};
 
 use super::{
-    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, LogLine,
-    LogOptions, NetworkSpec, ObjectKind, Operation, RuntimeError, VolumeSpec,
+    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, EngineInfo,
+    LogLine, LogOptions, NetworkSpec, ObjectKind, Operation, RuntimeError, VolumeSpec,
 };
 use crate::stack::PinnedImage;
 
@@ -477,6 +477,17 @@ impl ContainerRuntime for FakeRuntime {
         let mut state = self.lock();
         state.enter(Operation::Inspect)?;
         Ok(state.container(id)?.info(id))
+    }
+
+    /// podman 5.4.2, rootless, on cgroups v2 with systemd.
+    async fn engine(&self) -> Result<EngineInfo, RuntimeError> {
+        self.lock().enter(Operation::Engine)?;
+        Ok(EngineInfo {
+            version: Some("5.4.2".into()),
+            rootless: Some(true),
+            cgroup_version: Some("2".into()),
+            cgroup_driver: Some("systemd".into()),
+        })
     }
 
     async fn list_managed(&self) -> Result<Vec<ContainerInfo>, RuntimeError> {
