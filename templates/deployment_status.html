@@ -1,46 +1,87 @@
-<section id="deployment-status">
-  <p class="deployment-state">
-    {{ deployment.state }}
-    {%- if deployment.finished %}{% if let Some(at) = deployment.finished_at %} at {{ at }}{% endif %}, after {{ deployment.duration }}{% else %} for {{ deployment.duration }} <span class="muted">(in progress; this updates by itself, or <a href="{{ deployment.url }}">reload</a>)</span>{% endif %}
-  </p>
-  {%- if deployment.cancellable %}
-  <form class="inline-form" hx-post="{{ deployment.cancel_url() }}" hx-target="#cancel-result" hx-confirm="Cancel deployment {{ deployment.id }}? It aborts and the stack stays as it was.">
-    <button type="submit">Cancel deployment</button>
-  </form>
-  {%- endif %}
-  {%- if deployment.redeployable %}
-  <form class="inline-form" hx-post="{{ deployment.redeploy_url() }}" hx-target="#redeploy-result" hx-confirm="Redeploy deployment {{ deployment.id }}? Its digests and stack revision become the running ones again.">
-    <button type="submit">{{ crate::web::Icon::Redeploy }}Redeploy this one</button>
-  </form>
-  {%- endif %}
+<div id="deployment-status" class="deployment-status">
+<section class="card" aria-labelledby="deployment-title">
+  <header class="card-head">
+    <div class="deployment-title">
+      <h2 id="deployment-title">Deployment #{{ deployment.id }}</h2>
+      {{ deployment.status }}
+      <span class="card-note">{% if deployment.finished %}took {% else %}running for {% endif %}{{ deployment.duration }}{% if let Some(phase) = deployment.phase %} · {{ phase }}{% endif %}</span>
+    </div>
+    <div class="deployment-actions">
+      {%- if deployment.cancellable %}
+      <form class="inline-form" hx-post="{{ deployment.cancel_url() }}" hx-target="#cancel-result" hx-confirm="Cancel deployment {{ deployment.id }}? It aborts and the stack stays as it was.">
+        <button type="submit" class="danger">Cancel deployment</button>
+      </form>
+      {%- endif %}
+      {%- if let Some(redeploy) = deployment.redeploy %}
+      <form class="inline-form" hx-post="{{ redeploy.url }}" hx-target="#redeploy-result" hx-confirm="{{ redeploy.confirm }}">
+        <button type="submit" title="{{ redeploy.title() }}">{{ crate::web::Icon::Redeploy }}{% if redeploy.rollback %}Roll back to this one{% else %}Redeploy this one{% endif %}</button>
+      </form>
+      {%- endif %}
+    </div>
+  </header>
   {%- if let Some(error) = deployment.error %}
-  <p class="flash flash-error">{{ error }}</p>
+  <p class="card-body card-error">{{ error }}</p>
   {%- endif %}
-  <p class="muted">Started by {{ deployment.source }} at {{ deployment.created_at }}{% if let Some(generation) = deployment.generation %}, generation {{ generation }}{% endif %}.</p>
+  {%- if !deployment.finished %}
+  <p class="card-body muted">In progress: this page updates by itself, or <a href="{{ deployment.url }}">reload</a>.</p>
+  {%- endif %}
+  <dl class="card-body kv">
+    <dt>state</dt><dd><code>{{ deployment.state }}</code></dd>
+    <dt>trigger</dt><dd>{{ deployment.trigger.source }}{% if let Some(commit) = deployment.trigger.commit %} · <code title="{{ commit.sha }}">{{ commit.short }}</code> {{ commit.repository }}{% endif %}</dd>
+    <dt>started</dt><dd><time datetime="{{ deployment.created_at }}">{{ deployment.created_at }}</time> <span class="muted">· {{ deployment.started_ago }}</span></dd>
+    {%- if let Some(at) = deployment.finished_at %}
+    <dt>finished</dt><dd><time datetime="{{ at }}">{{ at }}</time></dd>
+    {%- endif %}
+    {%- if let Some(generation) = deployment.generation %}
+    <dt>generation</dt><dd>{{ generation }}</dd>
+    {%- endif %}
+  </dl>
+</section>
+{%- if !deployment.target.is_empty() || !deployment.provenance.is_empty() %}
+<div class="card-pair">
   {%- if !deployment.target.is_empty() %}
-  <h2>Target digests</h2>
-  <ul class="plain">
-    {%- for (service, digest) in deployment.target %}
-    <li><strong>{{ service }}</strong> <code>{{ digest }}</code></li>
-    {%- endfor %}
-  </ul>
+  <section class="card" aria-labelledby="target-title">
+    <header class="card-head">
+      <h2 id="target-title">Target digests <span class="card-count">· {{ deployment.target.len() }}</span></h2>
+    </header>
+    <dl class="card-body kv">
+      {%- for (service, digest) in deployment.target %}
+      <dt>{{ service }}</dt><dd><code class="wrap">{{ digest }}</code></dd>
+      {%- endfor %}
+    </dl>
+  </section>
   {%- endif %}
   {%- if !deployment.provenance.is_empty() %}
-  <h2>Provenance</h2>
-  <p class="muted">From the verified GitHub Actions token; the tag is what the request named.</p>
-  <ul class="plain provenance">
-    {%- for (label, value) in deployment.provenance %}
-    <li><strong>{{ label }}</strong> <code>{{ value }}</code></li>
-    {%- endfor %}
-  </ul>
+  <section class="card" aria-labelledby="provenance-title">
+    <header class="card-head">
+      <h2 id="provenance-title">Provenance</h2>
+      <span class="card-note">from the verified GitHub Actions token</span>
+    </header>
+    <dl class="card-body kv provenance">
+      {%- for (label, value) in deployment.provenance %}
+      <dt>{{ label }}</dt><dd><code class="wrap">{{ value }}</code></dd>
+      {%- endfor %}
+    </dl>
+    <p class="card-foot">The tag is what the request named; the other values are the token's claims.</p>
+  </section>
   {%- endif %}
-  <h2>Transitions</h2>
+</div>
+{%- endif %}
+<section class="card" aria-labelledby="transitions-title">
+  <header class="card-head">
+    <h2 id="transitions-title">Transitions <span class="card-count">· {{ deployment.events.len() }}</span></h2>
+  </header>
+  {%- if deployment.events.is_empty() %}
+  <p class="card-body muted">No transitions recorded.</p>
+  {%- else %}
   <div class="table-scroll"><table class="list events">
-    <thead><tr><th scope="col">Time</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Detail</th></tr></thead>
+    <thead><tr><th scope="col" class="shrink">Time</th><th scope="col" class="shrink">From</th><th scope="col" class="shrink">To</th><th scope="col">Detail</th></tr></thead>
     <tbody>
       {%- for event in deployment.events %}
-      <tr><td>{{ event.at }}</td><td>{{ event.from }}</td><td>{{ event.to }}</td><td>{{ event.message }}</td></tr>
+      <tr><td class="mono shrink">{{ event.at }}</td><td class="mono shrink">{{ event.from }}</td><td class="mono shrink">{{ event.to }}</td><td>{{ event.message }}</td></tr>
       {%- endfor %}
     </tbody>
   </table></div>
+  {%- endif %}
 </section>
+</div>

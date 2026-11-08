@@ -1,12 +1,21 @@
 {% extends "base.html" %}
 {% block title %}Deployment {{ deployment.id }}{% endblock %}
-{% block crumb %}<a href="/stacks">~/stacks</a>/<a href="{{ deployment.stack_url }}">{{ deployment.stack }}</a>/<a href="{{ deployment.history_url() }}">deployments</a>/{{ deployment.id }}{% endblock %}
-{% block heading %}Deployment {{ deployment.id }} of <a href="{{ deployment.stack_url }}">{{ deployment.stack }}</a>{% endblock %}
+{%- block head %}
+{%- if let Some(header) = header %}
+{% include "stack_header.html" %}
+{%- else %}
+<header class="page-head">
+  <div class="page-title">
+    <nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/{{ deployment.stack }}/deployments/{{ deployment.id }}</nav>
+    <h1>Deployment {{ deployment.id }} of {{ deployment.stack }}</h1>
+  </div>
+</header>
+{%- endif %}
+{%- endblock %}
 {% block content %}
-<p class="muted"><a href="{{ deployment.history_url() }}">Deployment history</a></p>
+<div id="cancel-result" aria-live="polite"></div>
+<div id="redeploy-result" aria-live="polite"></div>
 <div id="deployment-live"{% if !deployment.finished %} hx-sse:connect="{{ deployment.events_url() }}" hx-swap="innerHTML" hx-sse:close="end"{% endif %}>
 {% include "deployment_status.html" %}
 </div>
-<div id="cancel-result" aria-live="polite"></div>
-<div id="redeploy-result" aria-live="polite"></div>
 {% endblock %}

@@ -79,7 +79,10 @@ impl fmt::Display for Tab {
 pub struct TabLink {
     pub label: Tab,
     pub href: String,
+    /// The tab the page belongs to.
     pub current: bool,
+    /// The tab is the page itself, not a page below it (a deployment of the deployments tab).
+    pub page: bool,
 }
 
 /// The shared header of a stack's pages.
@@ -107,6 +110,8 @@ pub struct StackHeader {
     pub(super) redeploy: Option<RedeployAction>,
     /// Whether a service uses a third-party image, so "Re-resolve tags" has work to do.
     pub(super) third_party: bool,
+    /// The deployment the page shows, below the deployments tab.
+    pub(super) deployment: Option<String>,
 }
 
 impl StackHeader {
@@ -142,7 +147,16 @@ impl StackHeader {
             flag: status.flag.as_ref().map(|flag| Tone::Fail.pill(flag)),
             redeploy: live.map(|deployment| RedeployAction::new(status, deployment)),
             third_party: status.services.iter().any(|s| !s.ci_built),
+            deployment: None,
         }
+    }
+
+    /// The header of deployment `id`'s page: the deployments tab, its breadcrumb ending in
+    /// `/deployments/<id>`.
+    pub fn at_deployment(mut self, id: &str) -> Self {
+        self.tab = Tab::Deployments;
+        self.deployment = Some(id.to_owned());
+        self
     }
 
     /// The tabs, the current one marked.
@@ -153,6 +167,7 @@ impl StackHeader {
                 label: tab,
                 href: format!("{}{}", self.url, tab.path()),
                 current: tab == self.tab,
+                page: tab == self.tab && self.deployment.is_none(),
             })
             .collect()
     }
@@ -160,6 +175,9 @@ impl StackHeader {
     /// The breadcrumb's last segment after the name, the tab as its bar names it (`/logs`,
     /// `/environment`, …); empty on the overview.
     pub fn crumb_tail(&self) -> String {
+        if let Some(id) = &self.deployment {
+            return format!("/{}/{id}", self.tab);
+        }
         match self.tab {
             Tab::Overview => String::new(),
             tab => format!("/{tab}"),
@@ -293,6 +311,12 @@ mod tests {
         assert_eq!(crumb(Tab::Logs), "/logs");
         assert_eq!(crumb(Tab::Environment), "/environment");
         assert_eq!(crumb(Tab::Deployments), "/deployments");
+        let deployment =
+            StackHeader::new(&status, Tab::Overview, None, SystemTime::now()).at_deployment("12");
+        assert_eq!(deployment.crumb_tail(), "/deployments/12");
+        let tabs = deployment.tabs();
+        let deployments = tabs.iter().find(|t| t.label == Tab::Deployments).unwrap();
+        assert!(deployments.current && !deployments.page);
     }
 
     #[test]

@@ -1,16 +1,17 @@
 ---
 id: zbf
 title: Stack deployments tab and deployment detail page
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:20:48.393525472Z"
-updated: "2026-11-08T18:20:48.393525472Z"
+updated: "2026-11-08T22:07:23.148992952Z"
 tags:
   - web
   - ui
 depends_on:
   - "7wg"
 parent: "8bf"
+attempts: 1
 ---
 
 Restyle `/stacks/{name}/deployments` as the deployments tab, after the "Deployments" section of `docs/design/StackDetail.dc.html`, and restyle the deployment detail page to match.

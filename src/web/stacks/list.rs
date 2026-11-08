@@ -422,8 +422,8 @@ pub(super) struct LastDeploy {
     /// How long ago it last changed, and the time itself.
     pub(super) ago: String,
     pub(super) at: String,
-    /// A webhook deploy's commit (shortened, and in full) and repository (ADR-0047).
-    pub(super) commit: Option<(String, String, String)>,
+    /// A webhook deploy's commit.
+    pub(super) commit: Option<Commit>,
 }
 
 impl LastDeploy {
@@ -435,20 +435,37 @@ impl LastDeploy {
             source: Source(deployment.source).to_string(),
             ago: Ago::since(deployment.updated_at, now).to_string(),
             at: When(deployment.updated_at).to_string(),
-            commit: deployment
-                .provenance
-                .as_ref()
-                .filter(|_| deployment.source == DeploymentSource::Webhook)
-                .map(|p| {
-                    let short = p.sha.get(..7).unwrap_or(&p.sha).to_owned();
-                    (short, p.sha.clone(), p.repository.clone())
-                }),
+            commit: Commit::of(deployment),
         }
     }
 }
 
+/// The commit a webhook deploy was built from, from its provenance (ADR-0047).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Commit {
+    /// The sha's first seven characters.
+    pub(super) short: String,
+    pub(super) sha: String,
+    pub(super) repository: String,
+}
+
+impl Commit {
+    /// The commit of `deployment`, if a webhook started it.
+    pub(super) fn of(deployment: &Deployment) -> Option<Self> {
+        deployment
+            .provenance
+            .as_ref()
+            .filter(|_| deployment.source == DeploymentSource::Webhook)
+            .map(|p| Commit {
+                short: p.sha.get(..7).unwrap_or(&p.sha).to_owned(),
+                sha: p.sha.clone(),
+                repository: p.repository.clone(),
+            })
+    }
+}
+
 /// A deployment's source in lower case, as the cards write it.
-struct Source(DeploymentSource);
+pub(super) struct Source(pub(super) DeploymentSource);
 
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

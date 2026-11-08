@@ -225,11 +225,11 @@ fn a_card_shows_the_webhook_commit_the_running_deploy_and_the_queue() {
     assert_eq!(last.ago, "3 h ago");
     assert_eq!(
         last.commit,
-        Some((
-            "4f2a9c1".into(),
-            "4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39".into(),
-            "acme/notes".into()
-        ))
+        Some(Commit {
+            short: "4f2a9c1".into(),
+            sha: "4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39".into(),
+            repository: "acme/notes".into()
+        })
     );
     assert_eq!(card.routes, ["notes.example.com"]);
 
