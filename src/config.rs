@@ -84,6 +84,63 @@ pub struct Config {
     /// Secret sources; never part of the file.
     #[serde(skip)]
     pub credentials: Credentials,
+    /// Where the values came from: the file and the `HOSTER_*` keys the environment set.
+    #[serde(skip)]
+    pub source: ConfigSource,
+}
+
+/// Where a loaded [`Config`] came from, for showing the effective configuration (the admin UI's
+/// Settings). It holds the file's path and the names of the keys the environment overrides,
+/// never their values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigSource {
+    /// The `hoster.toml` that was read.
+    pub file: PathBuf,
+    /// The dotted keys (`acme.directory_url`) set by `HOSTER_*` variables, sorted.
+    env: std::collections::BTreeSet<String>,
+}
+
+impl ConfigSource {
+    /// A source reading `file`, with the dotted `env` keys overridden by the environment.
+    pub fn new<I, K>(file: impl Into<PathBuf>, env: I) -> Self
+    where
+        I: IntoIterator<Item = K>,
+        K: Into<String>,
+    {
+        Self {
+            file: file.into(),
+            env: env.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// The environment variable that sets the dotted `key`: `acme.directory_url` →
+    /// `HOSTER_ACME__DIRECTORY_URL`.
+    pub fn env_var(key: &str) -> String {
+        format!(
+            "{ENV_PREFIX}{}",
+            key.to_ascii_uppercase().replace('.', ENV_NESTING)
+        )
+    }
+
+    /// The variables that set `key` or any key inside it (`proxy.timeouts` also matches
+    /// `proxy.timeouts.read`), sorted; empty when the value comes from the file or a default.
+    pub fn overrides(&self, key: &str) -> Vec<String> {
+        self.env
+            .iter()
+            .filter(|set| {
+                set.as_str() == key
+                    || set
+                        .strip_prefix(key)
+                        .is_some_and(|rest| rest.starts_with('.'))
+            })
+            .map(|set| Self::env_var(set))
+            .collect()
+    }
+
+    /// Every `HOSTER_*` variable that set a key, sorted by key.
+    pub fn env_vars(&self) -> Vec<String> {
+        self.env.iter().map(|key| Self::env_var(key)).collect()
+    }
 }
 
 /// ACME account settings (ADR-0015, ADR-0016, ADR-0051).
@@ -317,6 +374,7 @@ impl Config {
         match config {
             Some(mut config) if problems.is_empty() => {
                 config.credentials = Credentials::from_env();
+                config.source = ConfigSource::new(path, EnvOverrides::new().keys());
                 Ok(config)
             }
             _ => Err(ConfigError::Invalid(Problems(problems))),
@@ -568,6 +626,14 @@ impl EnvOverrides {
 
     fn new() -> Self {
         Self(Env::prefixed(ENV_PREFIX).split(ENV_NESTING))
+    }
+
+    /// The dotted keys the environment sets (names only).
+    fn keys(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|(key, _)| key.as_str().to_owned())
+            .collect()
     }
 
     /// Inserts `value` at the dotted `path`, creating (or replacing non-table) parents.
@@ -1397,6 +1463,45 @@ mod tests {
             let toml = format!("{MINIMAL}[webhook]\naudience = \"hoster-deploy\"\n");
             let config = load(jail, &toml).map_err(|e| e.to_string())?;
             assert_eq!(config.webhook_audience(), "hoster-deploy");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_source_names_the_file_and_the_overridden_keys_without_values() {
+        Jail::expect_with(|jail| {
+            with_admin(jail);
+            jail.set_env("HOSTER_PROXY__TIMEOUTS__READ", "90s");
+            jail.set_env("HOSTER_ACME__CONTACT", "ops@example.com");
+            let config = load(jail, MINIMAL).map_err(|e| e.to_string())?;
+            assert_eq!(config.source.file, jail.directory().join("hoster.toml"));
+            assert_eq!(
+                config.source.overrides("admin_github"),
+                ["HOSTER_ADMIN_GITHUB"]
+            );
+            assert_eq!(
+                config.source.overrides("proxy.timeouts"),
+                ["HOSTER_PROXY__TIMEOUTS__READ"]
+            );
+            assert_eq!(
+                config.source.overrides("proxy"),
+                ["HOSTER_PROXY__TIMEOUTS__READ"]
+            );
+            // A key is not a prefix of another one's name.
+            assert!(config.source.overrides("acme.con").is_empty());
+            assert!(config.source.overrides("admin_host").is_empty());
+            assert_eq!(
+                config.source.env_vars(),
+                [
+                    "HOSTER_ACME__CONTACT",
+                    "HOSTER_ADMIN_GITHUB",
+                    "HOSTER_PROXY__TIMEOUTS__READ"
+                ]
+            );
+            assert!(
+                !format!("{:?}", config.source).contains("ops@example.com"),
+                "values are not kept"
+            );
             Ok(())
         });
     }

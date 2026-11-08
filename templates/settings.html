@@ -1,0 +1,41 @@
+{% extends "settings_base.html" %}
+{% block settings %}
+<section class="card settings-card" aria-labelledby="settings-title">
+  <div class="settings-head">
+    <h2 id="settings-title">{{ section.title }}</h2>
+    <p class="field-help">{{ section.help }}</p>
+  </div>
+  {%- for field in section.fields %}
+  <div class="field">
+    <div class="field-label">
+      <span class="field-name">{{ field.label }}</span>
+      {%- if !field.help.is_empty() %}
+      <span class="field-help">{{ field.help }}</span>
+      {%- endif %}
+    </div>
+    <div class="field-control">
+      {%- for shown in field.values %}
+      {%- match shown %}
+      {%- when Shown::Value with { text, note } %}
+      <span class="field-value"><code>{{ text }}</code>{% if let Some(note) = note %} <span class="field-note">· {{ note }}</span>{% endif %}</span>
+      {%- when Shown::Text(text) %}
+      <p class="field-text">{{ text }}</p>
+      {%- when Shown::Link with { href, text } %}
+      <p class="field-text"><a href="{{ href }}">{{ text }}</a> <span class="field-note">on docs.hoster.lhelge.se</span></p>
+      {%- when Shown::Choices(choices) %}
+      <ul class="choice-cards">
+        {%- for choice in choices %}
+        <li class="choice-card{% if choice.on %} choice-on{% endif %}"><span class="choice-mark" aria-hidden="true"></span><span class="choice-text"><span class="choice-label">{{ choice.label }}{% if choice.on %} <span class="pill pill-ok">in use</span>{% endif %}</span><span class="choice-detail">{{ choice.detail }}</span></span></li>
+        {%- endfor %}
+      </ul>
+      {%- endmatch %}
+      {%- endfor %}
+      {%- if !field.env.is_empty() %}
+      <span class="field-env">set by {% for var in field.env %}{% if !loop.first %}, {% endif %}<code>{{ var }}</code>{% endfor %}</span>
+      {%- endif %}
+    </div>
+  </div>
+  {%- endfor %}
+  <p class="card-foot settings-foot">Set in <code>hoster.toml</code> (or <code>HOSTER_…</code>); restart hoster to apply. This instance reads <code>{{ file }}</code>.</p>
+</section>
+{% endblock %}

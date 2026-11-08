@@ -1,11 +1,10 @@
 //! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), the live
 //! dashboard with hoster's in-process statistics (ADR-0045, read through [`Stats`], see
-//! `dashboard.rs`), container logs
-//! (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
-//! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029,
-//! ADR-0049, see `stacks.rs`), Settings → Registries (ADR-0025, see `settings.rs`), and the
-//! deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`), and the System page with
-//! self-update (ADR-0052, see `system.rs`).
+//! `dashboard.rs`), container logs (ADR-0044, see `containers.rs`), the certificates page
+//! (ADR-0036, ADR-0051, see `certificates.rs`), the stack pages with their secrets (ADR-0027,
+//! ADR-0029, ADR-0049, see `stacks.rs`), Settings: Registries (ADR-0025) and read-only views of
+//! the configuration (ADR-0024, see `settings.rs`), the deploy webhook (ADR-0042, ADR-0047, see
+//! `webhook.rs`), and the System page with self-update (ADR-0052, see `system.rs`).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
 //! binds the [`Listen`] address and serves until the root cancellation token is cancelled.
@@ -62,7 +61,7 @@ use self::containers::{ContainerSource, Containers};
 use self::dashboard::Dashboard;
 pub(crate) use self::icons::Icon;
 use self::pages::ShellSource;
-use self::settings::{Registries, RegistryControl};
+use self::settings::{EffectiveConfig, Registries, RegistryControl, Settings};
 use self::stacks::{StackControl, Stacks};
 use self::system::System;
 pub(crate) use self::ui::Tone;
@@ -138,6 +137,7 @@ pub struct WebApp {
     certificates: Certificates,
     stacks: Stacks,
     registries: Registries,
+    settings: Settings,
     system: System,
     webhook: Webhook,
     stats: Stats,
@@ -194,6 +194,7 @@ impl WebApp {
             Arc::new(certificates),
             Arc::new(orchestrator),
             Arc::new(registry),
+            EffectiveConfig::from(config),
             System::new(updater, shutdown),
             verifier,
             store,
@@ -211,6 +212,7 @@ impl WebApp {
         certificates: Arc<dyn CertificateControl>,
         stacks: Arc<dyn StackControl>,
         registries: Arc<dyn RegistryControl>,
+        config: EffectiveConfig,
         system: System,
         verifier: OidcVerifier,
         store: Store,
@@ -222,9 +224,10 @@ impl WebApp {
             system,
             auth: Arc::new(auth),
             containers: Containers::from(containers),
-            certificates: Certificates::from(certificates),
+            certificates: Certificates::from(Arc::clone(&certificates)),
             webhook: Webhook::new(verifier, store, Arc::clone(&stacks)),
             stacks: Stacks::from(stacks),
+            settings: Settings::new(config, Arc::clone(&certificates), Arc::clone(&registries)),
             registries: Registries::from(registries),
         }
     }
@@ -306,6 +309,9 @@ impl WebApp {
             .route("/settings/registries/delete", post(Registries::delete))
             .route("/settings/registries/test", post(Registries::test))
             .layer(Extension(self.registries.clone()))
+            .route("/settings", get(Settings::index))
+            .route("/settings/{part}", get(Settings::section))
+            .layer(Extension(self.settings.clone()))
             .route("/system", get(System::page))
             .route("/system/check", post(System::check))
             .route("/system/update", post(System::update))

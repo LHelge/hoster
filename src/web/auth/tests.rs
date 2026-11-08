@@ -108,6 +108,7 @@ impl TestApp {
             certificates.clone(),
             stacks.clone(),
             registries.clone(),
+            crate::web::settings::EffectiveConfig::sample(),
             system,
             verifier,
             store.clone(),
