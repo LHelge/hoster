@@ -56,3 +56,21 @@ The rootless podman socket (`/run/user/<uid>/podman/podman.sock`) is socket-acti
   ADR-0028.
 - **Doctor checks.** `hoster doctor` checks linger, the sysctl value, `podman.socket` and the
   delegated cgroup controllers.
+
+## Correction (2026-11-08)
+
+"Hardening is best-effort … where supported unprivileged" understated the gap. On Ubuntu ≥ 23.10
+(`kernel.apparmor_restrict_unprivileged_userns = 1`), the user manager gets a user namespace
+without capabilities. Found on the first real install (Ubuntu 26.04):
+
+- Directives that drop capabilities (`CapabilityBoundingSet=`, `PrivateDevices=`,
+  `ProtectKernelModules=`, `ProtectKernelLogs=`, `ProtectClock=`) made the unit fail at start
+  with `218/CAPABILITIES`. They are removed from the unit.
+- Every mount-namespace directive (`ProtectSystem=`, `ProtectHome=`, `ReadWritePaths=`,
+  `PrivateTmp=`, …) is silently skipped, so on such hosts the unit has no file-system sandbox.
+  Only `NoNewPrivileges=` and the seccomp-based directives apply.
+
+`hoster doctor` reports the condition (`unit_sandbox`), and CI starts the unit on an Ubuntu
+runner (`scripts/test-systemd-unit.sh`). Whether to restore the sandbox there, and how, is
+OQ-36.
+

@@ -71,6 +71,17 @@ jobs:
       - name: Check deploy/ systemd files
         run: scripts/check-systemd-units.sh --security
 
+      # verify cannot catch a unit that fails to start; start it for real in the runner user's
+      # systemd instance (a stub in place of hoster) and report which protections apply. The
+      # Ubuntu runner restricts unprivileged user namespaces like Ubuntu servers do (OQ-36).
+      - name: Start the unit
+        run: |
+          sudo loginctl enable-linger "$USER"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          for _ in $(seq 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          scripts/test-systemd-unit.sh
+
   release-script:
     name: release scripts
     runs-on: ubuntu-latest
