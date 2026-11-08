@@ -171,8 +171,15 @@ jobs:
           rustup toolchain install
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools
+          # Same as the release workflow, so rust-cache's environment hash (which covers CC*)
+          # matches and its build can restore this job's cache.
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
 
+      # Shared with the release workflow's x86_64 build; a tag run can only restore caches
+      # written on main, and this job writes them.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-x86_64-unknown-linux-musl
 
       # ADR-0037: ring is the only crypto provider; aws-lc-rs must stay out of the tree.
       - name: No aws-lc-rs in the dependency tree

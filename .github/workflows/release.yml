@@ -85,6 +85,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends musl-tools
           echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
 
+      # A tag run can only restore caches written on main: CI's static job writes the x86_64
+      # one under the same shared key. Saving from a tag would be unreachable by later tags, so
+      # only a run on main (workflow_dispatch) saves, which also seeds the aarch64 cache.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Format
         run: cargo fmt --all --check
 
