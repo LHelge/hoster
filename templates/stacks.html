@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Stacks{% endblock %}
 {% block heading %}Stacks{% endblock %}
-{% block actions %}<a class="button ghost" href="/containers">{{ crate::web::Icon::Containers }}Containers</a> <a class="button primary" href="/apply">{{ crate::web::Icon::New }}New stack</a>{% endblock %}
+{% block actions %}<a class="button primary" href="/apply">{{ crate::web::Icon::New }}New stack</a>{% endblock %}
 {% block content %}
 {%- if filters.is_empty() %}
 <p class="stacks-empty">No stacks yet. Apply a stack file to create one.</p>
@@ -69,4 +69,28 @@
     <span class="add-stack-hint">apply a stack file</span>
   </a>
 </div>
+{%- if !leftovers.is_empty() %}
+<section id="leftovers" class="card leftovers" aria-labelledby="leftovers-title">
+  <header class="card-head">
+    <h2 id="leftovers-title">Containers of removed stacks <span class="card-count">· {{ leftovers.len() }}</span></h2>
+    <span class="card-note">their stacks are gone; the reconciler removes them</span>
+  </header>
+  <div class="table-scroll"><table class="list">
+    <thead>
+      <tr><th scope="col">Container</th><th scope="col">Stack</th><th scope="col">Service</th><th scope="col">State</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+    </thead>
+    <tbody>
+      {%- for container in leftovers %}
+      <tr>
+        <td><code>{{ container.name }}</code></td>
+        <td class="mono">{% if container.stack.is_empty() %}—{% else %}{{ container.stack }}{% endif %}</td>
+        <td class="mono">{% if container.service.is_empty() %}—{% else %}{{ container.service }}{% endif %}</td>
+        <td>{{ crate::web::Tone::Neutral.pill(container.state) }}</td>
+        <td class="row-actions"><a class="mono" href="{{ container.logs }}">logs<span class="visually-hidden"> of {{ container.name }}</span></a></td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table></div>
+</section>
+{%- endif %}
 {% endblock %}

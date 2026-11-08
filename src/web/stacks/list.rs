@@ -11,6 +11,10 @@
 //! from hoster's in-process counters (ADR-0045): requests since hoster started, the p95 of the
 //! slowest route over the latency window, and the share of 5xx responses. Latency percentiles
 //! cannot be merged across routes, so the slowest route's p95 stands for the stack.
+//!
+//! Under the cards, the managed containers whose stack label names no stack hoster has (left
+//! behind by a removal that did not finish, or made by hand with hoster's labels) are listed
+//! with a link to their log, since no stack page shows them.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -26,9 +30,11 @@ use serde::Deserialize;
 use super::{DeploymentView, Outcome, ShortDigest, StackView, Stacks, When};
 use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
+use crate::runtime::{ContainerInfo, label};
 use crate::stack::Stack;
 use crate::stats::{Elapsed, Latency, RouteTraffic, Stats, StatusClass, TrafficSnapshot};
 use crate::store::{Deployment, DeploymentSource, DeploymentState, Timestamp};
+use crate::web::containers::Containers;
 use crate::web::pages::{Layout, Page, Section, Shell};
 use crate::web::ui::{Pill, Tone};
 
@@ -37,20 +43,24 @@ impl Stacks {
     pub async fn list(
         Extension(stacks): Extension<Stacks>,
         Extension(stats): Extension<Stats>,
+        Extension(containers): Extension<Containers>,
         shell: Shell,
         Query(query): Query<ListQuery>,
     ) -> Response {
         let layout = shell.layout(Section::Stacks);
         let filter = query.status.as_deref().and_then(|s| s.parse().ok());
         match stacks.0.status().await {
-            Ok(list) => Page(StackList::new(
-                layout,
-                &list,
-                &stats.traffic(),
-                filter,
-                SystemTime::now(),
-            ))
-            .into_response(),
+            Ok(list) => {
+                let managed = containers.managed().await.unwrap_or_else(|err| {
+                    tracing::warn!(error = %err, "listing the containers failed");
+                    Vec::new()
+                });
+                Page(
+                    StackList::new(layout, &list, &stats.traffic(), filter, SystemTime::now())
+                        .with_leftovers(&list, &managed),
+                )
+                .into_response()
+            }
             Err(err) => {
                 let outcome = Outcome::from(err);
                 let status = outcome.status;
@@ -84,6 +94,8 @@ pub struct StackList {
     cards: Vec<StackCard>,
     /// The condition filtered on, if one is.
     filter: Option<Condition>,
+    /// Managed containers of stacks that are gone.
+    leftovers: Vec<Leftover>,
 }
 
 impl StackList {
@@ -131,6 +143,47 @@ impl StackList {
             filters,
             cards,
             filter,
+            leftovers: Vec::new(),
+        }
+    }
+
+    /// The list with the `managed` containers whose stack is none of `stacks`.
+    fn with_leftovers(mut self, stacks: &[StackStatus], managed: &[ContainerInfo]) -> Self {
+        self.leftovers = managed
+            .iter()
+            .filter(|c| {
+                c.labels
+                    .get(label::STACK)
+                    .is_none_or(|stack| !stacks.iter().any(|s| &s.name == stack))
+            })
+            .map(Leftover::from)
+            .collect();
+        self.leftovers.sort_by(|a, b| a.name.cmp(&b.name));
+        self
+    }
+}
+
+/// A managed container whose stack hoster no longer has.
+#[derive(Debug)]
+struct Leftover {
+    name: String,
+    /// The stack and service its labels name.
+    stack: String,
+    service: String,
+    /// Its state, as podman names it.
+    state: String,
+    logs: String,
+}
+
+impl From<&ContainerInfo> for Leftover {
+    fn from(container: &ContainerInfo) -> Self {
+        let label = |key| container.labels.get(key).cloned().unwrap_or_default();
+        Self {
+            name: container.name.clone(),
+            stack: label(label::STACK),
+            service: label(label::SERVICE),
+            state: container.state.to_string(),
+            logs: format!("/containers/{}/logs", container.name),
         }
     }
 }
@@ -280,14 +333,7 @@ impl StackCard {
         now: SystemTime,
     ) -> Self {
         let hash = status.revision.hash.to_string();
-        // A deploy names the services it moves; one whose target is not known moves them all.
-        let deploying: Option<BTreeSet<&str>> =
-            status.active.map(
-                |(id, _)| match status.last.as_ref().filter(|last| last.id == id) {
-                    Some(last) => last.target.keys().map(String::as_str).collect(),
-                    None => status.services.iter().map(|s| s.name.as_str()).collect(),
-                },
-            );
+        let deploying = Self::deploying(status);
         let routes = Self::routes(status);
         StackCard {
             url: StackView::url(&status.name),
@@ -330,6 +376,17 @@ impl StackCard {
             }),
             routes,
         }
+    }
+
+    /// The services the running deployment moves, if one runs. A deploy names the services it
+    /// moves; one whose target is not known moves them all.
+    pub(super) fn deploying(status: &StackStatus) -> Option<BTreeSet<&str>> {
+        status.active.map(
+            |(id, _)| match status.last.as_ref().filter(|last| last.id == id) {
+                Some(last) => last.target.keys().map(String::as_str).collect(),
+                None => status.services.iter().map(|s| s.name.as_str()).collect(),
+            },
+        )
     }
 
     /// The routes of the active revision. Empty when the revision does not parse (it did when

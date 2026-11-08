@@ -472,6 +472,10 @@ impl From<ContainerInspectResponse> for ContainerInfo {
                 .collect(),
             state: ContainerState::reported(&status, state.exit_code),
             ports,
+            started_at: state
+                .started_at
+                .as_deref()
+                .and_then(ContainerInfo::reported_time),
         })
     }
 }
@@ -510,6 +514,7 @@ impl From<ContainerSummary> for ContainerInfo {
             labels: summary.labels.unwrap_or_default().into_iter().collect(),
             state: ContainerState::reported(&status, exit_code),
             ports,
+            started_at: None,
         })
     }
 }
@@ -519,6 +524,14 @@ impl From<ContainerSummary> for ContainerInfo {
     reason = "reached only through the runtime trait, not yet called"
 )]
 impl ContainerInfo {
+    /// A time podman reports (`State.StartedAt`, RFC 3339 with nanoseconds and an offset).
+    /// Podman writes the zero time (`0001-01-01T00:00:00Z`) for a container that never
+    /// started, which is no time at all.
+    fn reported_time(stamp: &str) -> Option<SystemTime> {
+        let time = SystemTime::from(OffsetDateTime::parse(stamp, &Rfc3339).ok()?);
+        (time > UNIX_EPOCH).then_some(time)
+    }
+
     fn sorted(mut self) -> Self {
         self.ports.sort();
         self.ports.dedup();
@@ -1416,7 +1429,11 @@ mod tests {
         let inspect: ContainerInspectResponse = serde_json::from_value(serde_json::json!({
             "Id": "abc",
             "Name": "/hoster-notes-web-g1",
-            "State": { "Status": "exited", "ExitCode": 137 },
+            "State": {
+                "Status": "exited",
+                "ExitCode": 137,
+                "StartedAt": "2026-11-08T13:00:00.5+01:00"
+            },
             "Config": { "Labels": { "hoster.managed": "true" } },
             "NetworkSettings": { "Ports": {
                 "8080/tcp": [{ "HostIp": "127.0.0.1", "HostPort": "20000" }],
@@ -1429,6 +1446,10 @@ mod tests {
         assert_eq!(info.id.as_ref(), "abc");
         assert_eq!(info.name, "hoster-notes-web-g1");
         assert_eq!(info.state, ContainerState::Exited(Some(137)));
+        assert_eq!(
+            info.started_at,
+            Some(humantime::parse_rfc3339("2026-11-08T12:00:00.5Z").unwrap())
+        );
         assert!(info.is_managed());
         assert_eq!(
             info.ports,
@@ -1458,6 +1479,13 @@ mod tests {
         let info = ContainerInfo::from(summary);
         assert_eq!(info.name, "hoster-notes-web-g2");
         assert_eq!(info.state, ContainerState::Exited(Some(3)));
+        assert_eq!(info.started_at, None, "the list does not say");
+        assert_eq!(
+            ContainerInfo::reported_time("0001-01-01T00:00:00Z"),
+            None,
+            "never started"
+        );
+        assert_eq!(ContainerInfo::reported_time("soon"), None);
         assert_eq!(
             info.ports,
             [PublishedPort {
@@ -1780,11 +1808,17 @@ mod tests {
         let created = runtime.inspect(&id).await.unwrap();
         assert_eq!(created.state, ContainerState::Created);
         assert_eq!(created.name, spec.name);
+        assert_eq!(created.started_at, None, "never started");
 
         runtime.start(&id).await.unwrap();
         runtime.start(&id).await.expect("starting twice is a no-op");
         let info = runtime.inspect(&id).await.unwrap();
         assert_eq!(info.state, ContainerState::Running);
+        let started = info.started_at.expect("a running container has started");
+        assert!(
+            started > SystemTime::now() - Duration::from_secs(600),
+            "{started:?}"
+        );
         for (key, value) in &spec.labels {
             assert_eq!(info.labels.get(key), Some(value), "label {key}");
         }

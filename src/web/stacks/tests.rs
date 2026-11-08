@@ -731,12 +731,156 @@ async fn the_stack_header_has_the_status_deployments_actions_and_tabs() {
         "{html}"
     );
 
-    // The logs tab leads to the containers until it has its own page; an unknown stack is a 404.
+    // Without containers, the logs tab leads back to the services; an unknown stack is a 404.
     let logs = app.get("/stacks/notes/logs", Some(&browser.cookie)).await;
     assert_eq!(logs.status(), StatusCode::SEE_OTHER);
-    assert_eq!(logs.headers()[header::LOCATION], "/containers");
+    assert_eq!(logs.headers()[header::LOCATION], "/stacks/notes#services");
     let missing = app.get("/stacks/nope/logs", Some(&browser.cookie)).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+/// Starts `hoster-<stack>-<service>-g<generation>` in the app's fake runtime, publishing
+/// `ports` (host port, container port), up for `up`.
+pub(crate) async fn start_container(
+    app: &TestApp,
+    stack: &str,
+    service: &str,
+    generation: u32,
+    ports: &[(u16, u16)],
+    up: std::time::Duration,
+) -> crate::runtime::ContainerId {
+    use crate::runtime::{
+        ContainerRuntime, ContainerSpec, NetworkSpec, PortBinding, ServiceGeneration,
+    };
+    let generation = ServiceGeneration {
+        stack: stack.parse().unwrap(),
+        service: service.parse().unwrap(),
+        generation,
+    };
+    let image = format!("ghcr.io/acme/{service}@{}", digest(1));
+    let mut spec = ContainerSpec::new(&generation, DeploymentId::from(1), image.parse().unwrap());
+    spec.ports = ports
+        .iter()
+        .map(|&(host_port, container_port)| PortBinding {
+            container_port,
+            host_port,
+        })
+        .collect();
+    let runtime = &app.runtime;
+    runtime
+        .ensure_network(&NetworkSpec::for_stack(&generation.stack))
+        .await
+        .unwrap();
+    runtime.pull_image(&spec.image).await.unwrap();
+    let id = runtime.create_container(&spec).await.unwrap();
+    runtime.start(&id).await.unwrap();
+    runtime.set_started_at(&id, std::time::SystemTime::now() - up);
+    id
+}
+
+#[tokio::test]
+async fn the_services_table_lists_the_containers_with_ports_and_uptime() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let hour = std::time::Duration::from_secs(3_600);
+    // api runs generation 2; generation 1 is still draining. A container of another stack is
+    // not listed.
+    start_container(&app, "notes", "api", 1, &[(20001, 8080)], 26 * hour).await;
+    start_container(&app, "notes", "api", 2, &[(20004, 8080)], 2 * hour).await;
+    start_container(&app, "blog", "web", 1, &[(20002, 8080)], hour).await;
+
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"<h2 id="services-title">Services <span class="card-count">· 2 · 2 containers</span></h2>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="mono service-name">api</span><code class="service-container"><span class="visually-hidden">container </span>hoster-notes-api-g2</code>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"<code class="service-digest" title="{}">sha256:{}</code>"#,
+            digest(1),
+            "01".repeat(6)
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<td class="mono nowrap">20004 → 8080</td>"#),
+        "{html}"
+    );
+    assert!(html.contains(">2h 00m</span>"), "{html}");
+    assert!(
+        html.contains(r#"<a class="mono" href="/stacks/notes/logs?service=api">logs<span class="visually-hidden"> of api</span></a>"#),
+        "{html}"
+    );
+    // The draining generation, muted under its service.
+    assert!(
+        html.contains(
+            r#"<td><span aria-hidden="true">↳ </span><code>hoster-notes-api-g1</code></td>"#
+        ),
+        "{html}"
+    );
+    assert!(html.contains("<td>previous generation</td>"), "{html}");
+    assert!(html.contains(">1d 2h</span>"), "{html}");
+    assert!(
+        html.contains(r#"href="/stacks/notes/logs?service=api&#38;container=hoster-notes-api-g1""#),
+        "{html}"
+    );
+    // storage is not routed and not deployed.
+    assert!(
+        html.contains(r#"<td class="mono nowrap">internal</td>"#),
+        "{html}"
+    );
+    assert!(html.contains(">stopped</span>"), "{html}");
+    assert!(!html.contains("hoster-blog-web-g1"), "{html}");
+    assert!(!html.contains("style="), "{html}");
+
+    // The logs tab leads to the running container's log, or to the one asked for.
+    for (url, location) in [
+        ("/stacks/notes/logs", "/containers/hoster-notes-api-g2/logs"),
+        (
+            "/stacks/notes/logs?service=api",
+            "/containers/hoster-notes-api-g2/logs",
+        ),
+        (
+            "/stacks/notes/logs?service=api&container=hoster-notes-api-g1",
+            "/containers/hoster-notes-api-g1/logs",
+        ),
+        (
+            "/stacks/notes/logs?service=api&container=hoster-blog-web-g1",
+            "/containers/hoster-notes-api-g2/logs",
+        ),
+        (
+            "/stacks/notes/logs?service=storage",
+            "/stacks/notes#services",
+        ),
+    ] {
+        let response = app.get(url, Some(&browser.cookie)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{url}");
+        assert_eq!(response.headers()[header::LOCATION], location, "{url}");
+    }
+
+    // When podman cannot be reached, the services are still shown, and the card says why.
+    app.runtime.fail_always(
+        crate::runtime::Operation::ListManaged,
+        crate::runtime::RuntimeError::Unreachable {
+            socket: "/run/podman.sock".into(),
+            message: "socket gone".into(),
+        },
+    );
+    let response = app.get("/stacks/notes", Some(&browser.cookie)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(
+        html.contains("Cannot list the containers: cannot reach podman at /run/podman.sock"),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="mono service-name">api</span>"#),
+        "{html}"
+    );
 }
 
 #[tokio::test]

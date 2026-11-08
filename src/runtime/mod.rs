@@ -530,6 +530,9 @@ pub struct ContainerInfo {
     pub state: ContainerState,
     /// The published ports, as podman reports them.
     pub ports: Vec<PublishedPort>,
+    /// When the container was last started, as inspect reports it. The list endpoint does not
+    /// say, so it is `None` there; so it is for a container that never started.
+    pub started_at: Option<SystemTime>,
 }
 
 impl ContainerInfo {
@@ -785,6 +788,7 @@ mod tests {
             labels: Labels::new(),
             state: ContainerState::Created,
             ports: Vec::new(),
+            started_at: None,
         };
         assert!(!info.is_managed());
         info.labels.insert(label::MANAGED.into(), "false".into());
