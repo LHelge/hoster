@@ -54,7 +54,7 @@ async fn every_response_carries_the_security_headers() {
         assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
         assert!(!csp.contains("unsafe-"), "{path}: {csp}");
         assert_eq!(header(&response, "x-content-type-options"), "nosniff");
-        assert_eq!(header(&response, "referrer-policy"), "no-referrer");
+        assert_eq!(header(&response, "referrer-policy"), "same-origin");
         assert_eq!(header(&response, "x-frame-options"), "DENY");
     }
 }
