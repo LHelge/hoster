@@ -4,9 +4,8 @@
 //!
 //! - **KPI tiles**: finished requests since hoster started, p50 and p95 over the latency window,
 //!   the share of 5xx responses since start, the restarts of the running services (ADR-0028)
-//!   and the deployments that went live or failed over [`Stats::DEPLOY_HISTORY`]. Percentiles
-//!   cannot be merged across routes, so the slowest route's (by p95) stand for the stack, as on
-//!   the stacks list.
+//!   and the deployments that went live or failed over [`Stats::DEPLOY_HISTORY`]. The
+//!   percentiles are those of all the stack's requests together, as on the stacks list.
 //! - **Slowest routes**: every route of the stack the proxy has counted, by p95 descending, each
 //!   with a meter relative to the slowest, its p50, its counts by status class, its upstream
 //!   errors and what is in flight.
@@ -108,18 +107,17 @@ impl Figures {
         routed: bool,
         deployments: Result<Option<&DeployStats>, &String>,
     ) -> Vec<Kpi> {
-        let traffic = TrafficLine::of(counted.iter().copied());
+        let traffic = TrafficLine::of(counted.iter().map(|r| &r.counts));
         let window = Elapsed(Stats::LATENCY_WINDOW);
         let latency_sub = if !routed && traffic.routes == 0 {
             "no routes".to_owned()
         } else if traffic.routes > 1 {
-            format!("slowest route · {window}")
+            format!("{} routes · {window}", traffic.routes)
         } else {
             format!("last {window}")
         };
-        let latency_title = format!(
-            "Over the last {window}; percentiles cannot be added up, so the route with the highest p95 stands for the stack"
-        );
+        let latency_title =
+            format!("Over the requests to all the stack's routes in the last {window}");
         let requests_sub = match (routed || traffic.routes > 0, traffic.inflight) {
             (false, _) => "no routes".to_owned(),
             (true, 0) => "since hoster started".to_owned(),

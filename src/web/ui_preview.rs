@@ -46,7 +46,7 @@ use crate::runtime::{
     PortBinding, RuntimeError, ServiceGeneration,
 };
 use crate::stack::RouteTimeouts;
-use crate::stats::{CertExpiry, RequestOutcome, ServiceRestarts};
+use crate::stats::{CertExpiry, RequestOutcome};
 use crate::store::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentOutcome, DeploymentSource,
     DeploymentState, DigestSet, Provenance, RevisionId, StackRevision, Timestamp, WebhookRejection,
@@ -707,6 +707,14 @@ impl Fixtures {
                 "site",
                 vec![(200, 4, 30)],
             ),
+            // A removed stack's route, counted before it went: the dashboard's note.
+            (
+                "forum.example.com",
+                "/",
+                "forum",
+                "web",
+                vec![(200, 12, 9), (502, 30, 2)],
+            ),
         ] {
             let route = Self::route(stack, service, prefix);
             for (status, latency, count) in requests {
@@ -718,6 +726,27 @@ impl Fixtures {
                     });
                 }
             }
+        }
+        // hoster's own admin UI, and requests that matched no route: the dashboard's note.
+        let admin = RouteEntry {
+            owner: Owner::Reserved("admin UI"),
+            ..Self::route("blog", "web", "/")
+        };
+        for i in 0..57 {
+            app.traffic
+                .route("admin.example.com", &admin)
+                .finish(RequestOutcome {
+                    status: Some(if i % 19 == 0 { 401 } else { 200 }),
+                    latency: ms(3 + i % 5),
+                    upstream_error: false,
+                });
+        }
+        for i in 0..23 {
+            app.traffic.unrouted().finish(RequestOutcome {
+                status: Some(if i % 4 == 0 { 400 } else { 404 }),
+                latency: ms(1),
+                upstream_error: false,
+            });
         }
         // One request still in flight; its guard is never dropped, so it stays counted.
         std::mem::forget(
@@ -732,23 +761,14 @@ impl Fixtures {
             max: Duration::from_secs(max),
         };
         app.stats.deployments.lock().unwrap().extend([
+            outcome("forum", DeploymentState::Live, 2, 18, 20),
+            outcome("forum", DeploymentState::Failed, 1, 9, 9),
             outcome("notes", DeploymentState::Live, 7, 14, 31),
             outcome("notes", DeploymentState::Failed, 1, 66, 66),
             outcome("blog", DeploymentState::Live, 12, 22, 58),
             outcome("blog", DeploymentState::Noop, 3, 1, 2),
             outcome("shop", DeploymentState::Live, 4, 41, 95),
             outcome("wiki", DeploymentState::Failed, 2, 61, 64),
-        ]);
-        let restarts = |stack: &str, service: &str, restarts, crash_looping| ServiceRestarts {
-            stack: stack.into(),
-            service: service.into(),
-            generation: 4,
-            restarts,
-            crash_looping,
-        };
-        app.stats.services.lock().unwrap().extend([
-            restarts("blog", "worker", 6, true),
-            restarts("notes", "storage", 1, false),
         ]);
         let now = SystemTime::now();
         app.stats.certificates.lock().unwrap().extend(

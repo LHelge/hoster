@@ -1,68 +1,109 @@
-{%- macro stack_head(stack) %}
-      <th scope="rowgroup" rowspan="{{ stack.rows() }}"><a href="{{ stack.url }}">{{ stack.name }}</a>
-        {%- if let Some(flag) = stack.flag %}<br>{{ crate::web::Tone::Fail.pill(flag) }}{% endif %}</th>
-{%- endmacro -%}
-{%- macro deployment_cell(stack) %}
-      <td rowspan="{{ stack.rows() }}">
-        {%- if let Some(deployment) = stack.deployment %}<a href="{{ deployment.url }}">#{{ deployment.id }}</a> {{ deployment.pill() }} <span class="muted">({{ deployment.detail }})</span>
-        {%- else %}<span class="muted">none</span>{% endif %}
-        {%- if let Some(queued) = stack.queued %}<br><span class="muted">#{{ queued }} queued</span>{% endif %}
-        <br><a class="muted" href="{{ stack.history_url }}">history</a></td>
-{%- endmacro -%}
-<section id="overview-status">
-<h2>Warnings</h2>
-{%- if let Some(problem) = problem %}
+<section aria-label="Key figures">
+<dl class="kpis dash-kpis">
+  {%- for kpi in kpis %}
+  {{ kpi }}
+  {%- endfor %}
+</dl>
+</section>
+{%- for problem in problems %}
 <p class="flash flash-error">{{ problem }}</p>
+{%- endfor %}
+{%- if !warnings.is_empty() %}
+<section class="alert alert-{{ self.alert_tone() }}" aria-labelledby="warnings-title">
+  {{ self.alert_icon() }}
+  <div class="alert-text">
+    <h2 class="alert-title" id="warnings-title">{{ warnings.len() }} {% if warnings.len() == 1 %}warning{% else %}warnings{% endif %}</h2>
+    <ul class="warnings">
+      {%- for warning in warnings %}
+      <li>{{ warning.pill() }} <a href="{{ warning.href }}">{{ warning.subject }}</a>{% if !warning.detail.is_empty() %}<span class="warning-detail">{{ warning.detail }}</span>{% endif %}</li>
+      {%- endfor %}
+    </ul>
+  </div>
+</section>
 {%- endif %}
-{%- if warnings.is_empty() %}
-<p class="muted">No warnings.</p>
-{%- else %}
-<ul class="warnings">
-  {%- for warning in warnings %}
-  <li>{{ warning.pill() }} <a href="{{ warning.href }}">{{ warning.subject }}</a>{% if !warning.detail.is_empty() %}: {{ warning.detail }}{% endif %}</li>
-  {%- endfor %}
-</ul>
-{%- endif %}
-
-<h2>Stacks</h2>
-{%- if stacks.is_empty() %}
-<p>No stacks yet. <a href="/apply">Apply a stack file</a> to create one.</p>
-{%- else %}
-<div class="table-scroll"><table class="list overview">
-  <thead>
-    <tr><th scope="col">Stack</th><th scope="col">Service</th><th scope="col">Digest</th><th scope="col">Health</th><th scope="col">Restarts</th><th scope="col">Certificate</th><th scope="col">Last deployment</th></tr>
-  </thead>
-  {%- for stack in stacks %}
-  <tbody class="stack">
-    {%- if stack.services.is_empty() %}
-    <tr>{% call stack_head(stack) %}{% endcall %}
-      <td colspan="5"><span class="muted">no services: the active revision cannot be read</span></td>{% call deployment_cell(stack) %}{% endcall %}
-    </tr>
-    {%- endif %}
-    {%- for service in stack.services %}
-    <tr>
-      {%- if loop.first %}{% call stack_head(stack) %}{% endcall %}{% endif %}
-      <td>{{ service.name }}</td>
-      <td>{% if let Some((short, full)) = service.digest %}<code title="{{ full }}">{{ short }}</code> <span class="muted">{{ service.state }}</span>{% else %}<span class="muted">{{ service.state }}</span>{% endif %}</td>
-      <td>
-        {%- if service.crash_looping %}{{ crate::web::Tone::Fail.pill("crash looping") }}
-        {%- else if service.running %}{{ service.health_pill() }}
-        {%- else %}<span class="muted">-</span>{% endif %}</td>
-      <td>{% if service.running %}{{ service.restarts }}{% else %}<span class="muted">-</span>{% endif %}</td>
-      <td>
-        {%- if service.certs.is_empty() %}<span class="muted">not routed</span>
+<section class="card" aria-labelledby="stacks-title">
+  <header class="card-head">
+    <h2 id="stacks-title">Stacks{% if !summary.is_empty() %} <span class="card-count">· {{ summary }}</span>{% endif %}</h2>
+    <a class="card-link" href="/stacks">all stacks →</a>
+  </header>
+  {%- if unreadable %}
+  <p class="card-body muted">The stacks cannot be read right now.</p>
+  {%- else if stacks.is_empty() %}
+  <p class="card-body">No stacks yet. <a href="/apply">Apply a stack file</a> to create one.</p>
+  {%- else %}
+  <div class="table-scroll"><table class="list dash-stacks">
+    <thead>
+      <tr><th scope="col">Stack</th><th scope="col">Status</th><th scope="col" class="num" title="Running services that pass their health check, out of all">Healthy</th><th scope="col" class="num">p50</th><th scope="col" class="num">p95</th><th scope="col" class="num" title="Share of 4xx responses since hoster started">4xx</th><th scope="col" class="num" title="Share of 5xx responses since hoster started">5xx</th><th scope="col" class="num">Restarts</th><th scope="col">Deploys · 30 d</th><th scope="col">Last deployment</th></tr>
+    </thead>
+    <tbody>
+      {%- for stack in stacks %}
+      <tr>
+        <th scope="row"><a class="dash-stack" href="{{ stack.url }}">{{ stack.name }}</a>
+          {%- if let Some(flag) = stack.flag %}<span class="dash-flag">{{ crate::web::Tone::Fail.pill(flag) }}</span>{% endif %}</th>
+        <td>{{ stack.condition.pill() }}</td>
+        <td class="num"><span class="stat-{{ stack.healthy_tone() }}" title="{{ stack.health_detail }}">{{ stack.healthy }}/{{ stack.services }}</span></td>
+        {%- if let Some(traffic) = stack.traffic %}
+        <td class="num">{{ traffic.p50 }}</td>
+        <td class="num stat-{{ traffic.p95_tone }}">{{ traffic.p95 }}</td>
+        <td class="num">{{ traffic.client_errors }}</td>
+        <td class="num stat-{{ traffic.errors_tone }}">{{ traffic.errors }}</td>
+        {%- else if stack.revision_unreadable %}
+        <td class="num muted" colspan="4">the active revision cannot be read</td>
         {%- else %}
-        <ul class="plain">
-          {%- for cert in service.certs %}
-          <li>{{ cert.host }}: {% if let Some(left) = cert.left %}{% if let Some(pill) = cert.pill() %}{{ pill }}{% else %}<span title="{{ cert.not_after }}">{{ left }}</span>{% endif %}{% else %}<span class="muted">none yet</span>{% endif %}</li>
-          {%- endfor %}
-        </ul>
-        {%- endif %}</td>
-      {%- if loop.first %}{% call deployment_cell(stack) %}{% endcall %}{% endif %}
-    </tr>
+        <td class="num muted" colspan="4">no routes</td>
+        {%- endif %}
+        <td class="num dash-restarts"><span class="stat-{{ stack.restarts_tone() }}" title="{{ stack.restarts_detail }}">{{ stack.restarts }}</span>{% if stack.crash_looping > 0 %}<span class="dash-sub stat-fail">{{ stack.crash_looping }} crash looping</span>{% endif %}</td>
+        <td class="dash-deploys">
+          {%- if let Some(deploys) = stack.deploys %}<span title="{{ deploys.title() }}">{{ deploys.live }} live
+          {%- if deploys.failed > 0 %} · <span class="stat-fail">{{ deploys.failed }} failed</span>{% endif %}
+          {%- if deploys.skipped > 0 %} · {{ deploys.skipped }} skipped{% endif %}</span>
+          {%- if deploys.live > 0 %}<span class="dash-sub">mean {{ deploys.mean }} · max {{ deploys.max }}</span>{% endif %}
+          {%- else %}<span class="muted">-</span>{% endif %}</td>
+        <td class="dash-last">
+          {%- if let Some((id, url, state)) = stack.active %}<a href="{{ url }}">#{{ id }}</a> {{ state }}
+          {%- else if let Some(last) = stack.last %}<a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} <time class="muted dash-ago" datetime="{{ last.at }}" title="{{ last.source }}, {{ last.at }}">{{ last.ago }}</time>
+          {%- else %}<span class="muted">none yet</span>{% endif %}
+          <span class="dash-sub">{% if let Some(queued) = stack.queued %}#{{ queued }} queued · {% endif %}<a href="{{ stack.history_url }}">history<span class="visually-hidden"> of {{ stack.name }}</span></a></span></td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table></div>
+  {%- endif %}
+  <p class="card-foot dash-other">Outside the stacks:
+    {%- for other in other %}{% if !loop.first %};{% endif %} <span class="mono">{{ other.label }}</span>
+      {%- if other.traffic.requests > 0 || other.deploys.is_none() %} <span{% if other.traffic.requests > 0 %} title="{{ other.statuses }}"{% endif %}>{{ other.requests() }} {% if other.traffic.requests == 1 %}request{% else %}requests{% endif %}
+      {%- if other.traffic.requests > 0 %} (4xx {{ other.traffic.client_errors }}, 5xx {{ other.traffic.errors }}, p50 {{ other.traffic.p50 }}, p95 {{ other.traffic.p95 }}{% if other.traffic.inflight > 0 %}, {{ other.traffic.inflight }} in flight{% endif %}{% if other.upstream_errors > 0 %}, <span class="stat-fail">{{ other.upstream_errors() }} upstream {% if other.upstream_errors == 1 %}error{% else %}errors{% endif %}</span>{% endif %}){% endif %}</span>
+      {%- endif %}
+      {%- if let Some(deploys) = other.deploys %}{% if other.traffic.requests > 0 %},{% endif %} <span title="{{ deploys.title() }}">deploys · 30 d: {{ deploys.live }} live
+      {%- if deploys.failed > 0 %} · <span class="stat-fail">{{ deploys.failed }} failed</span>{% endif %}
+      {%- if deploys.skipped > 0 %} · {{ deploys.skipped }} skipped{% endif %}
+      {%- if deploys.live > 0 %}, mean {{ deploys.mean }} · max {{ deploys.max }}{% endif %}</span>
+      {%- endif %}
+    {%- endfor %}</p>
+</section>
+<section class="card" aria-labelledby="certs-title">
+  <header class="card-head">
+    <h2 id="certs-title">Certificates <span class="card-count">· {{ certificates.total }} {% if certificates.total == 1 %}host{% else %}hosts{% endif %}</span></h2>
+    <a class="card-link" href="/certificates">manage →</a>
+  </header>
+  {%- if certificates.rows.is_empty() %}
+  <p class="card-body muted">No hosts need a certificate yet.</p>
+  {%- else %}
+  <ul class="glance">
+    {%- for row in certificates.rows %}
+    <li>
+      <span class="glance-head"><code class="glance-host">{{ row.host }}</code>{{ row.pill }}</span>
+      {%- if let Some(meter) = row.meter %}
+      {{ meter }}
+      <time class="glance-left" datetime="{{ row.at }}" title="valid until {{ row.at }}">{{ row.left }}</time>
+      {%- else %}
+      <span class="glance-left muted">{{ row.left }}</span>
+      {%- endif %}
+    </li>
     {%- endfor %}
-  </tbody>
-  {%- endfor %}
-</table></div>
-{%- endif %}
+  </ul>
+  {%- endif %}
+  {%- if certificates.more_valid > 0 %}
+  <p class="card-foot">+ {{ certificates.more_valid }} more valid · renewed with a third of their lifetime left</p>
+  {%- endif %}
 </section>

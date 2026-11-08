@@ -81,19 +81,19 @@ async fn dashboard_shows_the_statistics() {
 
     use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
     use crate::stack::RouteTimeouts;
-    use crate::stats::{CertExpiry, RequestOutcome, ServiceRestarts};
+    use crate::stats::{CertExpiry, RequestOutcome};
     use crate::store::{DeploymentOutcome, DeploymentState};
 
     let app = TestApp::new().await;
     let browser = app.sign_in().await;
     let html = body(app.get("/", Some(&browser.cookie)).await).await;
-    assert!(html.contains("No requests yet."), "{html}");
-    assert!(html.contains("No deployments yet."), "{html}");
+    assert!(html.contains("no requests yet"), "{html}");
 
+    *app.stacks.stacks.lock().unwrap() = vec![crate::web::stacks::tests::notes_status()];
     let route = RouteEntry {
         owner: Owner::Route(RouteOwner {
-            stack: "blog".parse().unwrap(),
-            service: "web".parse().unwrap(),
+            stack: "notes".parse().unwrap(),
+            service: "api".parse().unwrap(),
         }),
         prefix: "/".parse().unwrap(),
         prefix_str: "/".into(),
@@ -105,80 +105,61 @@ async fn dashboard_shows_the_statistics() {
     };
     for status in [200, 200, 502] {
         app.traffic
-            .route("blog.example.com", &route)
+            .route("notes.example.com", &route)
             .finish(RequestOutcome {
                 status: Some(status),
                 latency: Duration::from_millis(20),
                 upstream_error: status == 502,
             });
     }
-    let _in_flight = app.traffic.route("blog.example.com", &route);
+    let _in_flight = app.traffic.route("notes.example.com", &route);
     app.stats.deployments.lock().unwrap().extend([
         DeploymentOutcome {
-            stack: "blog".into(),
+            stack: "notes".into(),
             state: DeploymentState::Failed,
             count: 2,
             mean: Duration::from_secs(5),
             max: Duration::from_secs(9),
         },
         DeploymentOutcome {
-            stack: "blog".into(),
+            stack: "notes".into(),
             state: DeploymentState::Live,
             count: 7,
             mean: Duration::from_secs(12),
             max: Duration::from_secs(40),
         },
     ]);
-    app.stats.services.lock().unwrap().push(ServiceRestarts {
-        stack: "blog".into(),
-        service: "worker".into(),
-        generation: 4,
-        restarts: 6,
-        crash_looping: true,
-    });
     app.stats.certificates.lock().unwrap().push(CertExpiry {
-        host: "blog.example.com".into(),
+        host: "notes.example.com".into(),
         not_after: SystemTime::now() + Duration::from_secs(3 * 86_400 + 60),
     });
 
     let html = body(app.get("/", Some(&browser.cookie)).await).await;
     let compact: String = html.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        compact.contains(&format!(
-            "<td>blog.example.com/</td> <td>web (blog)</td><td>0</td><td>0</td><td>2</td>\
-             <td>0</td><td>0</td><td>1</td> <td><span class=\"pill pill-fail\">{}1</span></td> \
-             <td>1</td>",
-            crate::web::Icon::Failed
-        )),
+        compact.contains(r#"<dt class="kpi-label">requests</dt><dd class="kpi-value">3</dd><dd class="kpi-sub">1 in flight · since start</dd>"#),
+        "{compact}"
+    );
+    assert!(
+        compact.contains(r#"<dt class="kpi-label">5xx rate</dt><dd class="kpi-value">33.3 %</dd><dd class="kpi-sub">1 of 3 since start</dd>"#),
+        "{compact}"
+    );
+    assert!(
+        compact.contains(r#"<td class="num stat-fail">33.3 %</td>"#),
+        "{compact}"
+    );
+    assert!(
+        compact.contains(r#"7 live · <span class="stat-fail">2 failed</span></span><span class="dash-sub">mean 12.0 s · max 40.0 s</span>"#),
         "{compact}"
     );
     assert!(
         compact.contains(&format!(
-            "<td>7</td> <td><span class=\"pill pill-fail\">{}2</span></td>",
-            crate::web::Icon::Failed
-        )),
-        "{compact}"
-    );
-    assert!(
-        compact.contains("<td>12.0 s</td> <td>40.0 s</td>"),
-        "{compact}"
-    );
-    assert!(compact.contains(&format!("worker <span class=\"muted\">(blog)</span> <span class=\"pill pill-fail\">{}crash looping</span>", crate::web::Icon::Failed)), "{compact}");
-    assert!(
-        compact.contains(&format!(
-            "<span class=\"pill pill-warn\">{}3 d</span>",
+            "<span class=\"pill pill-warn\">{}certificate expiring</span> <a href=\"/certificates\">notes.example.com</a>",
             crate::web::Icon::Warning
         )),
         "{compact}"
     );
-    assert!(
-        compact.contains("latency over the last 5 min."),
-        "{compact}"
-    );
-    assert!(
-        compact.contains("Finished deployments of the last 30 d;"),
-        "{compact}"
-    );
+    assert!(compact.contains("last 5 min"), "{compact}");
     assert!(!compact.contains("Cannot show"), "{compact}");
 }
 

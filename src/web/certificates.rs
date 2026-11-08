@@ -18,6 +18,10 @@
 //!
 //! The handlers reach the orchestrator, the served certificates, the DNS check and the backoffs
 //! through [`CertificateControl`], so the tests use a fake.
+//!
+//! The dashboard shows the certificates at a glance ([`CertGlance`], from
+//! [`Certificates::glance`]): a KPI tile and the hosts soonest to expire, with the same status
+//! words as this page's table.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
@@ -457,6 +461,11 @@ pub struct HostForm {
 }
 
 impl Certificates {
+    /// The certificates at `now`, for the dashboard.
+    pub(super) async fn glance(&self, now: SystemTime) -> CertGlance {
+        CertGlance::new(&self.0.overview().await, now)
+    }
+
     /// `GET /certificates`.
     pub async fn page(Extension(certificates): Extension<Certificates>, shell: Shell) -> Response {
         let overview = certificates.0.overview().await;
@@ -1061,6 +1070,110 @@ impl CertBody {
     /// How many hosts **Retry failing** would ask for.
     fn failing(&self) -> usize {
         self.rows.iter().filter(|row| row.failing).count()
+    }
+}
+
+/// The certificates at a glance, for the dashboard: a KPI tile of the valid hosts out of all,
+/// and a card of the hosts soonest to expire, every host that needs attention among them.
+#[derive(Debug, Default)]
+pub(super) struct CertGlance {
+    /// Every managed host.
+    pub(super) total: usize,
+    /// Hosts serving a certificate that is neither failing nor expiring soon.
+    pub(super) valid: usize,
+    /// Hosts the navigation counts as failing (see [`CertRow::is_failing`]).
+    pub(super) failing: usize,
+    /// Hosts whose certificate expires within [`CertState::WARN_WITHIN`], and not failing.
+    pub(super) expiring: usize,
+    /// The hosts the card lists, soonest expiry first (hosts without a certificate before all).
+    pub(super) rows: Vec<GlanceRow>,
+    /// The valid hosts the card leaves out.
+    pub(super) more_valid: usize,
+}
+
+/// One host on the dashboard's certificates card.
+#[derive(Debug)]
+pub(super) struct GlanceRow {
+    pub(super) host: String,
+    pub(super) pill: Pill,
+    /// `37d left`, `expired 3d ago`; `no certificate yet` without one.
+    pub(super) left: String,
+    /// The end of validity in RFC 3339, for the tooltip; empty without a certificate.
+    pub(super) at: String,
+    /// Days left out of a 90-day lifetime; `None` without a certificate.
+    pub(super) meter: Option<Meter>,
+}
+
+impl CertGlance {
+    /// The card lists at least this many hosts, when there are as many.
+    const SHOWN: usize = 6;
+
+    fn new(overview: &CertOverview, now: SystemTime) -> Self {
+        let mut rows: Vec<RowView> = overview
+            .hosts
+            .iter()
+            .map(|row| RowView::new(row, false, now))
+            .collect();
+        rows.sort_by(|a, b| (a.not_after, &a.host).cmp(&(b.not_after, &b.host)));
+        let fine = |row: &RowView| matches!(row.standing, Standing::Valid | Standing::Renewing);
+        let failing = rows.iter().filter(|row| row.failing).count();
+        let expiring = rows
+            .iter()
+            .filter(|row| !row.failing && row.standing == Standing::Expiring)
+            .count();
+        let valid = rows.iter().filter(|row| fine(row)).count();
+        let total = rows.len();
+        // Every host that needs a look is listed, however many; valid ones fill up the rest.
+        let (shown, rest): (Vec<_>, Vec<_>) = rows
+            .into_iter()
+            .enumerate()
+            .partition(|(index, row)| *index < Self::SHOWN || !fine(row));
+        Self {
+            total,
+            valid,
+            failing,
+            expiring,
+            more_valid: rest.len(),
+            rows: shown
+                .into_iter()
+                .map(|(_, row)| GlanceRow {
+                    pill: row.pill(),
+                    left: row
+                        .expiry
+                        .as_ref()
+                        .map_or_else(|| "no certificate yet".to_owned(), |e| e.left.clone()),
+                    at: row
+                        .expiry
+                        .as_ref()
+                        .map_or_else(String::new, |e| e.at.clone()),
+                    meter: row.expiry.map(|e| e.meter),
+                    host: row.host,
+                })
+                .collect(),
+        }
+    }
+
+    /// The dashboard's tile: valid hosts out of all, in the tone of the worst.
+    pub(super) fn kpi(&self) -> Kpi {
+        let tone = if self.failing > 0 {
+            Tone::Fail
+        } else if self.expiring > 0 {
+            Tone::Warn
+        } else if self.total > 0 && self.valid == self.total {
+            Tone::Ok
+        } else {
+            Tone::Neutral
+        };
+        Kpi::new(
+            "certificates",
+            format!("{} / {}", self.valid, self.total),
+            format!("{} failing · {} expiring", self.failing, self.expiring),
+        )
+        .tone(tone)
+        .title(format!(
+            "Valid certificates out of every host hoster manages; expiring means less than {} left",
+            Days(CertState::WARN_WITHIN)
+        ))
     }
 }
 

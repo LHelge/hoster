@@ -444,13 +444,7 @@ pub(super) struct Phase(pub(super) DeploymentState);
 
 impl fmt::Display for Phase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, c) in self.0.to_string().chars().enumerate() {
-            if c.is_uppercase() && i > 0 {
-                f.write_str(" ")?;
-            }
-            write!(f, "{}", c.to_lowercase())?;
-        }
-        Ok(())
+        crate::web::ui::StateLabel(self.0).fmt(f)
     }
 }
 

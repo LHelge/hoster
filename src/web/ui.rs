@@ -175,7 +175,30 @@ impl Pill {
 
 impl From<DeploymentState> for Pill {
     fn from(state: DeploymentState) -> Self {
-        Tone::from(state).pill(state)
+        Tone::from(state).pill(StateLabel(state))
+    }
+}
+
+/// A deployment state in the UI's words: `live`, `live · warnings`, `skipped`, `health
+/// checking`. The store's `Display` is the variant name, which suits logs but not pills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateLabel(pub DeploymentState);
+
+impl fmt::Display for StateLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            DeploymentState::LiveWithWarnings => f.write_str("live · warnings"),
+            DeploymentState::Noop => f.write_str("skipped"),
+            state => {
+                for (i, c) in state.to_string().chars().enumerate() {
+                    if c.is_uppercase() && i > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "{}", c.to_lowercase())?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -423,11 +446,25 @@ mod tests {
     }
 
     #[test]
+    fn deployment_states_read_as_words() {
+        assert_eq!(
+            StateLabel(DeploymentState::LiveWithWarnings).to_string(),
+            "live · warnings"
+        );
+        assert_eq!(
+            StateLabel(DeploymentState::HealthChecking).to_string(),
+            "health checking"
+        );
+        assert_eq!(StateLabel(DeploymentState::Noop).to_string(), "skipped");
+        assert_eq!(StateLabel(DeploymentState::Live).to_string(), "live");
+    }
+
+    #[test]
     fn a_pill_renders_its_tone_icon_and_escaped_text() {
         assert_eq!(
             Pill::from(DeploymentState::Failed).to_string(),
             format!(
-                r#"<span class="pill pill-fail">{}Failed</span>"#,
+                r#"<span class="pill pill-fail">{}failed</span>"#,
                 Icon::Failed
             )
         );

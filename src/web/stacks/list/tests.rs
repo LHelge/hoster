@@ -247,7 +247,7 @@ fn a_card_shows_the_webhook_commit_the_running_deploy_and_the_queue() {
         card.active,
         Some((
             "3".into(),
-            "Pulling".into(),
+            "pulling".into(),
             "/stacks/notes/deployments/3".into()
         ))
     );
@@ -320,12 +320,25 @@ fn traffic_adds_up_the_stacks_routes_and_takes_the_slowest_p95() {
         snapshot
             .routes
             .iter()
-            .filter(|r| r.stack() == Some("notes")),
+            .filter(|r| r.stack() == Some("notes"))
+            .map(|r| &r.counts),
     );
     assert_eq!(line.requests, 100);
     assert_eq!(line.errors, "2.0 %");
+    assert_eq!(line.client_errors, "0 %");
     assert_eq!(line.errors_tone, Tone::Fail);
-    assert_eq!(line.p95_tone, Tone::Warn, "{}", line.p95);
+    // 97 of the 100 requests took 5 ms: the slow route's three do not make the stack slow.
+    assert_eq!(line.p95_tone, Tone::Neutral, "{}", line.p95);
+    assert_eq!(line.p50, line.p95);
+    let slow = TrafficLine::of(
+        snapshot
+            .routes
+            .iter()
+            .filter(|r| r.stack() == Some("blog"))
+            .map(|r| &r.counts),
+    );
+    assert_eq!(slow.p95_tone, Tone::Warn, "{}", slow.p95);
+    assert_eq!(slow.client_errors, "0 %");
 
     let quiet = TrafficLine::of(std::iter::empty());
     assert_eq!((quiet.requests, quiet.p95.as_str()), (0, "-"));
@@ -338,7 +351,8 @@ fn traffic_adds_up_the_stacks_routes_and_takes_the_slowest_p95() {
         snapshot
             .routes
             .iter()
-            .filter(|r| r.stack() == Some("notes") && r.prefix == "/"),
+            .filter(|r| r.stack() == Some("notes") && r.prefix == "/")
+            .map(|r| &r.counts),
     );
     assert_eq!(
         (fine.errors.as_str(), fine.p95_tone),
@@ -346,7 +360,13 @@ fn traffic_adds_up_the_stacks_routes_and_takes_the_slowest_p95() {
     );
 
     // One error in 5000 rounds to 0.0 but is not none.
-    let rare = TrafficLine::of(snapshot.routes.iter().filter(|r| r.stack() == Some("shop")));
+    let rare = TrafficLine::of(
+        snapshot
+            .routes
+            .iter()
+            .filter(|r| r.stack() == Some("shop"))
+            .map(|r| &r.counts),
+    );
     assert_eq!(
         (rare.errors.as_str(), rare.errors_tone),
         ("<0.1 %", Tone::Neutral)

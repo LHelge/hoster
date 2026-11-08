@@ -1,10 +1,10 @@
 ---
 id: mtn
 title: "Dashboard: KPI tiles, stacks table, certificates card"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:19:36.352554835Z"
-updated: "2026-11-08T18:22:42.729321870Z"
+updated: "2026-11-08T23:57:31.560971640Z"
 tags:
   - web
   - ui
@@ -13,6 +13,7 @@ depends_on:
   - cu8
   - yz5
 parent: "8bf"
+attempts: 1
 ---
 
 Redesign `/` after `docs/design/Main.dc.html`, **using only data hoster has** (ADR-0045). Leave out the time-range picker, the 24h status and latency charts, sparklines, req/min, "vs prev" deltas and the recent-events feed. Those are the `design-followup` epics. Don't draw placeholders for them.

@@ -132,6 +132,7 @@ impl StackHeader {
             applied_ago: Ago::since(status.revision.created_at, now).to_string(),
             applied_at: When(status.revision.created_at).to_string(),
             active: status.active.map(|(id, state)| {
+                let state = crate::web::ui::StateLabel(state);
                 (
                     id.to_string(),
                     state.to_string(),

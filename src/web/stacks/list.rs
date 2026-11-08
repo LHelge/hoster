@@ -8,9 +8,8 @@
 //! A card shows the stack's revision and content hash, its running or latest deployment (with
 //! the commit and repository of a webhook deploy's OIDC provenance, ADR-0047), its services as
 //! chips with a health dot, the hosts its routes serve, and a small row of request statistics
-//! from hoster's in-process counters (ADR-0045): requests since hoster started, the p95 of the
-//! slowest route over the latency window, and the share of 5xx responses. Latency percentiles
-//! cannot be merged across routes, so the slowest route's p95 stands for the stack.
+//! from hoster's in-process counters (ADR-0045): requests since hoster started, the p95 over the
+//! latency window of all the stack's routes together, and the share of 5xx responses.
 //!
 //! Under the cards, the managed containers whose stack label names no stack hoster has (left
 //! behind by a removal that did not finish, or made by hand with hoster's labels) are listed
@@ -32,7 +31,7 @@ use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::runtime::{ContainerInfo, label};
 use crate::stack::Stack;
-use crate::stats::{Elapsed, Latency, RouteTraffic, Stats, StatusClass, TrafficSnapshot};
+use crate::stats::{Counts, Elapsed, Latency, Stats, StatusClass, TrafficSnapshot};
 use crate::store::{Deployment, DeploymentSource, DeploymentState, Timestamp};
 use crate::web::containers::Containers;
 use crate::web::pages::{Layout, Page, Section, Shell};
@@ -235,7 +234,7 @@ impl Condition {
     }
 
     /// The stack's pill.
-    fn pill(self) -> Pill {
+    pub(in crate::web) fn pill(self) -> Pill {
         Tone::from(self).pill(self)
     }
 }
@@ -344,6 +343,7 @@ impl StackCard {
             full_hash: hash.clone(),
             flag: status.flag.clone(),
             active: status.active.map(|(id, state)| {
+                let state = crate::web::ui::StateLabel(state);
                 (
                     id.to_string(),
                     state.to_string(),
@@ -371,7 +371,8 @@ impl StackCard {
                     traffic
                         .routes
                         .iter()
-                        .filter(|r| r.stack() == Some(status.name.as_str())),
+                        .filter(|r| r.stack() == Some(status.name.as_str()))
+                        .map(|r| &r.counts),
                 )
             }),
             routes,
@@ -413,21 +414,21 @@ impl StackCard {
 
 /// A stack's latest deployment, when none runs.
 #[derive(Debug)]
-pub(super) struct LastDeploy {
-    pub(super) id: String,
-    pub(super) url: String,
-    pub(super) state: Pill,
+pub(in crate::web) struct LastDeploy {
+    pub(in crate::web) id: String,
+    pub(in crate::web) url: String,
+    pub(in crate::web) state: Pill,
     /// `manual`, `webhook`, `poller`, `apply`, `rollback`.
-    pub(super) source: String,
+    pub(in crate::web) source: String,
     /// How long ago it last changed, and the time itself.
-    pub(super) ago: String,
-    pub(super) at: String,
+    pub(in crate::web) ago: String,
+    pub(in crate::web) at: String,
     /// A webhook deploy's commit.
-    pub(super) commit: Option<Commit>,
+    pub(in crate::web) commit: Option<Commit>,
 }
 
 impl LastDeploy {
-    pub(super) fn new(deployment: &Deployment, now: SystemTime) -> Self {
+    pub(in crate::web) fn new(deployment: &Deployment, now: SystemTime) -> Self {
         LastDeploy {
             id: deployment.id.to_string(),
             url: DeploymentView::url(&deployment.stack, deployment.id),
@@ -442,16 +443,16 @@ impl LastDeploy {
 
 /// The commit a webhook deploy was built from, from its provenance (ADR-0047).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Commit {
+pub(in crate::web) struct Commit {
     /// The sha's first seven characters.
-    pub(super) short: String,
-    pub(super) sha: String,
-    pub(super) repository: String,
+    pub(in crate::web) short: String,
+    pub(in crate::web) sha: String,
+    pub(in crate::web) repository: String,
 }
 
 impl Commit {
     /// The commit of `deployment`, if a webhook started it.
-    pub(super) fn of(deployment: &Deployment) -> Option<Self> {
+    pub(in crate::web) fn of(deployment: &Deployment) -> Option<Self> {
         deployment
             .provenance
             .as_ref()
@@ -573,73 +574,64 @@ impl ServiceChip {
     }
 }
 
-/// A stack's request statistics, over all its routes. The stack overview's KPI tiles show
-/// them too, with the figures the card leaves out.
+/// A stack's request statistics, over all its routes. The stack overview's KPI tiles and the
+/// dashboard's stacks table show them too, with the figures the card leaves out.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct TrafficLine {
+pub(in crate::web) struct TrafficLine {
     /// Finished requests since hoster started.
-    pub(super) requests: u64,
+    pub(in crate::web) requests: u64,
     /// Of those, the 5xx responses.
-    pub(super) server_errors: u64,
+    pub(in crate::web) server_errors: u64,
     /// Requests in flight now.
-    pub(super) inflight: u64,
+    pub(in crate::web) inflight: u64,
     /// How many routes were counted.
-    pub(super) routes: usize,
-    /// The p95 of the slowest route over the latency window, `-` without samples.
-    pub(super) p95: String,
-    pub(super) p95_tone: Tone,
-    /// The p50 of that same route, `-` without samples.
-    pub(super) p50: String,
+    pub(in crate::web) routes: usize,
+    /// The p95 of all the routes' requests over the latency window, `-` without samples.
+    pub(in crate::web) p95: String,
+    pub(in crate::web) p95_tone: Tone,
+    /// The p50 of the same requests, `-` without samples.
+    pub(in crate::web) p50: String,
+    /// The share of 4xx responses, `-` without requests.
+    pub(in crate::web) client_errors: String,
     /// The share of 5xx responses, `-` without requests.
-    pub(super) errors: String,
-    pub(super) errors_tone: Tone,
+    pub(in crate::web) errors: String,
+    pub(in crate::web) errors_tone: Tone,
 }
 
 impl TrafficLine {
     /// A p95 this slow is flagged.
-    pub(super) const SLOW: Duration = Duration::from_secs(1);
+    pub(in crate::web) const SLOW: Duration = Duration::from_secs(1);
     /// A 5xx share of this many per mille or more is flagged.
     const FAILING_PER_MILLE: u64 = 10;
 
-    pub(super) fn of<'a>(routes: impl Iterator<Item = &'a RouteTraffic>) -> Self {
-        let (mut requests, mut server_errors, mut inflight, mut count) = (0, 0, 0, 0);
-        let mut slowest = None::<&Latency>;
-        for route in routes {
-            let counts = &route.counts;
-            requests += counts.statuses.total();
-            server_errors += counts.statuses.get(StatusClass::ServerError);
-            inflight += counts.inflight;
-            count += 1;
-            if counts.latency.p95 > slowest.and_then(|l| l.p95) {
-                slowest = Some(&counts.latency);
-            }
-        }
-        let p95 = slowest.and_then(|l| l.p95);
-        let errors = if requests == 0 {
-            "-".to_owned()
-        } else if server_errors == 0 {
-            "0 %".to_owned()
-        } else {
-            // Precision suits a dashboard; the cast loses nothing below 2^53 requests. A share
-            // that rounds to nothing still had errors, so it is not written as zero.
-            match format!("{:.1}", server_errors as f64 * 100.0 / requests as f64) {
-                zero if zero == "0.0" => "<0.1 %".to_owned(),
-                share => format!("{share} %"),
-            }
-        };
+    /// The statistics of the routes whose counters are `routes`.
+    pub(in crate::web) fn of<'a>(routes: impl IntoIterator<Item = &'a Counts>) -> Self {
+        let routes: Vec<&Counts> = routes.into_iter().collect();
+        let requests = routes.iter().map(|c| c.statuses.total()).sum();
+        let server_errors = routes
+            .iter()
+            .map(|c| c.statuses.get(StatusClass::ServerError))
+            .sum();
+        let client_errors = routes
+            .iter()
+            .map(|c| c.statuses.get(StatusClass::ClientError))
+            .sum();
+        let latency: Latency = routes.iter().map(|c| &c.latency).sum();
+        let p95 = latency.p95;
         TrafficLine {
             requests,
             server_errors,
-            inflight,
-            routes: count,
-            p50: Elapsed::cell(slowest.and_then(|l| l.p50)),
+            inflight: routes.iter().map(|c| c.inflight).sum(),
+            routes: routes.len(),
+            p50: Elapsed::cell(latency.p50),
             p95: Elapsed::cell(p95),
             p95_tone: if p95.is_some_and(|p| p >= Self::SLOW) {
                 Tone::Warn
             } else {
                 Tone::Neutral
             },
-            errors,
+            client_errors: Share(client_errors, requests).to_string(),
+            errors: Share(server_errors, requests).to_string(),
             errors_tone: if requests > 0
                 && server_errors * 1000 >= requests * Self::FAILING_PER_MILLE
             {
@@ -653,9 +645,30 @@ impl TrafficLine {
     /// The tooltip of the p95 figure.
     fn p95_title(&self) -> String {
         format!(
-            "p95 of the slowest route over the last {}",
+            "p95 of the requests to the stack's routes over the last {}",
             Elapsed(Stats::LATENCY_WINDOW)
         )
+    }
+}
+
+/// A part of a whole as a percentage for a dashboard: `2.0 %`, `0 %`, `<0.1 %` for a share
+/// that rounds to nothing but is not none, and `-` of nothing.
+struct Share(u64, u64);
+
+impl fmt::Display for Share {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Share(part, whole) = *self;
+        if whole == 0 {
+            f.write_str("-")
+        } else if part == 0 {
+            f.write_str("0 %")
+        } else {
+            // The cast loses nothing below 2^53 requests.
+            match format!("{:.1}", part as f64 * 100.0 / whole as f64) {
+                zero if zero == "0.0" => f.write_str("<0.1 %"),
+                share => write!(f, "{share} %"),
+            }
+        }
     }
 }
 

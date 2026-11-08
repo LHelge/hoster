@@ -543,6 +543,76 @@ fn the_tiles_count_each_standing_and_name_the_acme_directory() {
 }
 
 #[test]
+fn the_glance_lists_the_soonest_expiry_first_with_every_problem() {
+    let now = SystemTime::UNIX_EPOCH + 20_000 * 24 * HOUR;
+    let day = 24 * HOUR;
+    let mut overview = overview(now);
+    overview.hosts.extend([
+        issued("expiring.example.com", 5 * day, now),
+        issued("renewing.example.com", 20 * day, now),
+    ]);
+    for n in 0..6 {
+        overview
+            .hosts
+            .push(issued(&format!("v{n}.example.com"), (70 + n) * day, now));
+    }
+    // A failing host with a long-valid certificate is listed even past the first six.
+    let mut late = issued("late-failing.example.com", 89 * day, now);
+    late.status.error = Some("urn:ietf:params:acme:error:connection".into());
+    overview.hosts.push(late);
+
+    let glance = CertGlance::new(&overview, now);
+    let hosts: Vec<&str> = glance.rows.iter().map(|r| r.host.as_str()).collect();
+    assert_eq!(
+        hosts,
+        [
+            "new.example.com",
+            "notes.example.com",
+            "expiring.example.com",
+            "renewing.example.com",
+            "admin.example.com",
+            "v0.example.com",
+            "late-failing.example.com",
+        ],
+        "hosts without a certificate first, then by expiry"
+    );
+    assert_eq!(glance.more_valid, 5);
+    assert_eq!(glance.total, 12);
+    // Failing: notes (error), new (pending), late-failing; expiring: one.
+    assert_eq!((glance.valid, glance.failing, glance.expiring), (8, 3, 1));
+    assert_eq!(glance.rows[0].left, "no certificate yet");
+    assert!(glance.rows[0].meter.is_none());
+    assert_eq!(glance.rows[2].left, "5d left");
+    assert!(
+        glance.rows[2]
+            .meter
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("meter-warn")
+    );
+    assert!(glance.rows[2].pill.to_string().contains("expiring"));
+
+    let kpi = glance.kpi().to_string();
+    assert!(kpi.contains("kpi-fail"), "{kpi}");
+    assert!(
+        kpi.contains(
+            r#"<dd class="kpi-value">8 / 12</dd><dd class="kpi-sub">3 failing · 1 expiring</dd>"#
+        ),
+        "{kpi}"
+    );
+    let calm = CertGlance::new(
+        &CertOverview {
+            hosts: vec![issued("a.example.com", 60 * day, now)],
+            ..overview
+        },
+        now,
+    );
+    assert!(calm.kpi().to_string().contains("kpi-ok"));
+    assert_eq!(calm.more_valid, 0);
+}
+
+#[test]
 fn acme_directories_are_named_by_their_url() {
     let named = |url: &str| AcmeDirectory::from(url).to_string();
     assert_eq!(

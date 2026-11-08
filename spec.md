@@ -175,7 +175,7 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
 
 | Page | What you see and do |
 |---|---|
-| **Dashboard** | Every stack and service: running digest, health, last deploy outcome, certificate expiry. Live updates through HTMX. |
+| **Dashboard** | Request, error-rate, latency, stack and certificate figures; warnings; every stack with its status, healthy services, latency, error shares, restarts and last deploy; the certificates closest to expiry. Live updates through HTMX. |
 | **Stack** | Services, routes, generations. Apply a new revision of the stack file (with diff), manage secrets, see the `[deploy]` rule and recently rejected webhook attempts with their token claims, redeploy, remove the stack (volumes kept unless explicitly deleted). |
 | **Deployments** | History per stack, with state transitions and failure reasons. "Redeploy this one" acts as rollback (ADR-0041). |
 | **Logs** | Tail and follow logs per container. |
