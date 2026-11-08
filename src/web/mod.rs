@@ -4,7 +4,8 @@
 //! (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
 //! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029,
 //! ADR-0049, see `stacks.rs`), Settings → Registries (ADR-0025, see `settings.rs`), and the
-//! deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`).
+//! deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`), and the System page with
+//! self-update (ADR-0052, see `system.rs`).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
 //! binds the [`Listen`] address and serves until the root cancellation token is cancelled.
@@ -23,6 +24,7 @@ mod dashboard;
 mod pages;
 mod settings;
 mod stacks;
+mod system;
 mod webhook;
 
 use std::fmt;
@@ -43,10 +45,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::acme::{CertMap, DnsCheck};
 use crate::config::Config;
+use crate::installation::Installation;
 use crate::orchestrator::Orchestrator;
 use crate::runtime::ContainerRuntime;
 use crate::stats::Stats;
 use crate::store::Store;
+use crate::supervisor::ShutdownRequest;
+use crate::update::{GithubReleases, SystemdUserService, Updater};
 
 use self::assets::Assets;
 use self::auth::Auth;
@@ -55,6 +60,7 @@ use self::containers::{ContainerSource, Containers};
 use self::dashboard::Dashboard;
 use self::settings::{Registries, RegistryControl};
 use self::stacks::{StackControl, Stacks};
+use self::system::System;
 use self::webhook::{OidcVerifier, Webhook};
 
 pub use self::settings::RegistryAccess;
@@ -124,6 +130,7 @@ pub struct WebApp {
     certificates: Certificates,
     stacks: Stacks,
     registries: Registries,
+    system: System,
     webhook: Webhook,
     stats: Stats,
 }
@@ -132,9 +139,10 @@ impl WebApp {
     /// The app for `config`, with sessions in `store`, containers from `runtime`, stacks managed
     /// through `orchestrator`, the served certificates in `certs` with the DNS check `dns`
     /// (shared with the ACME task), registry credentials in `registry`, the GitHub OAuth App's
-    /// credentials read from their files or systemd credentials, and the dashboard's `stats`.
-    /// Fails when the credentials are missing. Deploy webhook tokens are verified against
-    /// GitHub's key set for the configured audience (ADR-0047).
+    /// credentials read from their files or systemd credentials, the dashboard's `stats`, and
+    /// `shutdown`, which the System page requests after a self-update (ADR-0052). Fails when the
+    /// credentials are missing. Deploy webhook tokens are verified against GitHub's key set for
+    /// the configured audience (ADR-0047).
     #[expect(
         clippy::too_many_arguments,
         reason = "the app's collaborators, each wired by the supervisor"
@@ -148,7 +156,17 @@ impl WebApp {
         dns: DnsCheck,
         registry: RegistryAccess,
         stats: Stats,
+        shutdown: ShutdownRequest,
     ) -> anyhow::Result<Self> {
+        let installation = Installation::from_env()
+            .context("HOME is not set, so the binary layout ~/.local/lib/hoster cannot be found")?;
+        let updater = Updater::new(
+            installation,
+            &config.state_dir,
+            Arc::new(GithubReleases::new().context("building the GitHub releases client")?),
+            Arc::new(store.clone()),
+            Arc::new(SystemdUserService::from_env()),
+        );
         let verifier = OidcVerifier::github(config.webhook_audience())
             .context("setting up the deploy webhook")?;
         let auth =
@@ -166,6 +184,7 @@ impl WebApp {
             Arc::new(certificates),
             Arc::new(orchestrator),
             Arc::new(registry),
+            System::new(updater, shutdown),
             verifier,
             store,
             stats,
@@ -182,12 +201,14 @@ impl WebApp {
         certificates: Arc<dyn CertificateControl>,
         stacks: Arc<dyn StackControl>,
         registries: Arc<dyn RegistryControl>,
+        system: System,
         verifier: OidcVerifier,
         store: Store,
         stats: Stats,
     ) -> Self {
         WebApp {
             stats,
+            system,
             auth: Arc::new(auth),
             containers: Containers::from(containers),
             certificates: Certificates::from(certificates),
@@ -259,6 +280,11 @@ impl WebApp {
             .route("/settings/registries/delete", post(Registries::delete))
             .route("/settings/registries/test", post(Registries::test))
             .layer(Extension(self.registries.clone()))
+            .route("/system", get(System::page))
+            .route("/system/check", post(System::check))
+            .route("/system/update", post(System::update))
+            .route("/system/version", get(System::version))
+            .layer(Extension(self.system.clone()))
             .route("/hooks/deploy", post(Webhook::deploy))
             .layer(Extension(self.webhook.clone()))
             .route("/healthz", get(WebApp::healthz))

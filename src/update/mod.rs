@@ -32,6 +32,8 @@ mod service;
 #[cfg(test)]
 mod cli_tests;
 #[cfg(test)]
+pub(crate) mod fake;
+#[cfg(test)]
 mod github_tests;
 #[cfg(test)]
 mod tests;
@@ -240,6 +242,15 @@ impl UpdateCheck {
     }
 }
 
+/// The versions in the binary layout that matter: the one `current` points at and the one
+/// `hoster rollback` would return to. Both `None` when hoster was not installed with
+/// `install.sh`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InstalledVersions {
+    pub current: Option<Version>,
+    pub previous: Option<Version>,
+}
+
 /// What [`Updater::update`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateOutcome {
@@ -340,13 +351,34 @@ impl Updater {
 
     /// Pretends to be the binary `running` describes (tests).
     #[cfg(test)]
-    fn with_running(mut self, running: BuildInfo) -> Self {
+    pub(crate) fn with_running(mut self, running: BuildInfo) -> Self {
         self.running = running;
         self
     }
 
     fn running_version(&self) -> Version {
         self.running.version.clone().into()
+    }
+
+    /// What the running binary reports about itself: version, target and schema.
+    pub fn running(&self) -> &BuildInfo {
+        &self.running
+    }
+
+    /// The current and previous installed versions.
+    pub fn installed(&self) -> Result<InstalledVersions> {
+        Ok(InstalledVersions {
+            current: self.installation.current()?,
+            previous: self.installation.previous()?,
+        })
+    }
+
+    /// How many deployments have not finished; [`update`](Self::update) refuses while any has.
+    pub async fn deployments_in_progress(&self) -> Result<usize> {
+        self.deployments
+            .in_progress()
+            .await
+            .map_err(UpdateError::Deployments)
     }
 
     /// Compares the running version with the latest stable release.
@@ -431,10 +463,9 @@ impl Updater {
     }
 
     async fn refuse_while_deploying(&self) -> Result<()> {
-        match self.deployments.in_progress().await {
-            Ok(0) => Ok(()),
-            Ok(count) => Err(UpdateError::Deploying { count }),
-            Err(e) => Err(UpdateError::Deployments(e)),
+        match self.deployments_in_progress().await? {
+            0 => Ok(()),
+            count => Err(UpdateError::Deploying { count }),
         }
     }
 

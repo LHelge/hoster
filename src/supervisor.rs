@@ -152,6 +152,29 @@ impl fmt::Display for ShutdownMode {
     }
 }
 
+/// A graceful shutdown asked for from inside hoster: the System page requests one after a
+/// self-update switched `current`, so that systemd (`Restart=always`) starts the new binary
+/// (ADR-0052). The supervisor treats it exactly like SIGTERM.
+#[derive(Debug, Clone, Default)]
+pub struct ShutdownRequest(CancellationToken);
+
+impl ShutdownRequest {
+    /// Asks the supervisor to shut down gracefully. Idempotent.
+    pub fn request(&self) {
+        self.0.cancel();
+    }
+
+    /// Whether a shutdown was requested.
+    pub fn is_requested(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    /// Resolves once a shutdown is requested.
+    async fn requested(&self) {
+        self.0.cancelled().await;
+    }
+}
+
 /// One step of the shutdown sequence (architecture §4, shutdown steps 1–4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShutdownPhase {
@@ -407,6 +430,8 @@ pub struct Supervisor {
     routes: Arc<ArcSwap<RouteTable>>,
     /// The per-route request statistics: counted by the proxy, shown by the web UI (ADR-0045).
     traffic: Traffic,
+    /// Shutdowns requested by the admin app after a self-update (ADR-0052).
+    shutdown: ShutdownRequest,
     teardown: Teardown,
 }
 
@@ -424,6 +449,7 @@ impl Supervisor {
             acme_commands: None,
             routes: Arc::default(),
             traffic: Traffic::default(),
+            shutdown: ShutdownRequest::default(),
             teardown: Teardown::default(),
         }
     }
@@ -450,13 +476,9 @@ impl Supervisor {
             None => ShutdownMode::Fast,
             Some(Ok(())) => {
                 tracing::info!("hoster is ready");
-                tokio::select! {
-                    signal = signals.recv() => {
-                        let mode = ShutdownMode::escalate(None, signal);
-                        tracing::info!(%signal, %mode, "shutting down");
-                        mode
-                    }
-                    () = self.teardown.proxy.terminated() => {
+                match self.teardown.serve(&mut signals, &self.shutdown).await {
+                    Some(mode) => mode,
+                    None => {
                         self.teardown.run(ShutdownMode::Fast, &mut signals).await;
                         anyhow::bail!("the proxy terminated unexpectedly");
                     }
@@ -481,6 +503,28 @@ struct Teardown {
 }
 
 impl Teardown {
+    /// Waits, while hoster serves, for a reason to stop: a signal, or a shutdown `request`ed
+    /// after a self-update, which is graceful like SIGTERM. Returns the mode to shut down in;
+    /// `None` when the proxy terminated on its own.
+    async fn serve(
+        &mut self,
+        signals: &mut impl SignalSource,
+        request: &ShutdownRequest,
+    ) -> Option<ShutdownMode> {
+        tokio::select! {
+            signal = signals.recv() => {
+                let mode = ShutdownMode::escalate(None, signal);
+                tracing::info!(%signal, %mode, "shutting down");
+                Some(mode)
+            }
+            () = request.requested() => {
+                tracing::info!("shutting down to restart into the updated binary");
+                Some(ShutdownMode::Graceful)
+            }
+            () = self.proxy.terminated() => None,
+        }
+    }
+
     /// Runs the shutdown sequence in `mode`. A signal arriving during a graceful shutdown
     /// escalates to a fast one: a proxy that was already asked to drain is told to stop now, and
     /// the interrupted phase restarts in fast mode.
@@ -750,6 +794,7 @@ impl Startup for Supervisor {
                     dns,
                     registry,
                     stats,
+                    self.shutdown.clone(),
                 )?
                 .start(listen, self.teardown.token.child_token())
                 .await?;
@@ -900,6 +945,43 @@ mod tests {
             requested(&teardown.proxy.shutdown_tx.borrow()),
             "Some(GracefulTerminate)"
         );
+    }
+
+    #[tokio::test]
+    async fn a_requested_shutdown_is_graceful_like_sigterm() {
+        let mut teardown = Teardown::default();
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut signals = Scripted(rx);
+        let request = ShutdownRequest::default();
+        // The admin app requests the shutdown while hoster serves.
+        let requester = request.clone();
+        tokio::spawn(async move { requester.request() });
+        let mode = tokio::time::timeout(
+            Duration::from_secs(5),
+            teardown.serve(&mut signals, &request),
+        )
+        .await
+        .expect("a requested shutdown ends serving");
+        assert_eq!(mode, Some(ShutdownMode::Graceful));
+        assert!(request.is_requested());
+
+        teardown.run(mode.unwrap(), &mut signals).await;
+        assert!(teardown.token.is_cancelled());
+        assert_eq!(
+            requested(&teardown.proxy.shutdown_tx.borrow()),
+            "Some(GracefulTerminate)"
+        );
+    }
+
+    #[tokio::test]
+    async fn signals_still_end_serving_when_no_shutdown_is_requested() {
+        let mut teardown = Teardown::default();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(Received::Int).unwrap();
+        let mode = teardown
+            .serve(&mut Scripted(rx), &ShutdownRequest::default())
+            .await;
+        assert_eq!(mode, Some(ShutdownMode::Fast));
     }
 
     #[tokio::test]

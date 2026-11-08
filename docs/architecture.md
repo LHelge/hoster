@@ -335,7 +335,8 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
    the Axum app (web UI + webhook).
 9. Notify systemd that the service is ready (`READY=1` with `Type=notify`).
 
-**Shutdown** (SIGTERM)
+**Shutdown** (SIGTERM, or the graceful shutdown the System page requests after a self-update
+switched `current`; `Restart=always` then starts the new binary, ADR-0052)
 
 1. Cancel the poller and the Axum app, and stop accepting new commands.
 2. Let in-flight deploy tasks reach a safe point (§5.4), then persist.
