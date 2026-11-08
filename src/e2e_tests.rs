@@ -17,11 +17,11 @@
 //!    v1 then v2 and never went back, the stream finished whole on v1 and the v2 deployment
 //!    waited for it (the drain), and v3 never answered a request.
 //!
-//! Skipped unless `HOSTER_PODMAN_TESTS=1`, like the other podman tests; run it with
+//! Skipped unless `TEST_HOSTER_PODMAN=1`, like the other podman tests; run it with
 //!
 //! ```sh
 //! systemctl --user start podman.socket
-//! HOSTER_PODMAN_TESTS=1 cargo test e2e_tests -- --nocapture
+//! TEST_HOSTER_PODMAN=1 cargo test e2e_tests -- --nocapture
 //! ```
 //!
 //! `HOSTER_PODMAN_SOCKET` overrides the socket path. The image is busybox pinned by digest
@@ -68,7 +68,7 @@ const TICK: &str = "0.5";
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn enabled() -> bool {
-    std::env::var("HOSTER_PODMAN_TESTS").is_ok_and(|v| v == "1")
+    std::env::var("TEST_HOSTER_PODMAN").is_ok_and(|v| v == "1")
 }
 
 /// Image tags never need resolving here: the only image is pinned by digest.
@@ -490,16 +490,12 @@ impl Stream {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deploys_without_dropping_a_request_under_load() {
     if !enabled() {
-        eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to run against rootless podman");
+        eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to run against rootless podman");
         return;
     }
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "hoster=info,hoster::access=warn".into()),
-        )
-        .with_test_writer()
-        .try_init();
+    // The process-wide subscriber is shared with the log-capturing tests; installing a second
+    // one here would make theirs fail when both run in the same `cargo test`.
+    crate::logging::capture::global();
     let hoster = Arc::new(Hoster::start().await);
     let scenario = tokio::spawn(scenario(Arc::clone(&hoster))).await;
     hoster.clean_up().await;

@@ -1251,14 +1251,14 @@ async fn a_volume_labelled_for_another_stack_is_never_mounted() {
 }
 
 /// Deploys the stack-format example (with public stand-in images) against a real rootless
-/// podman and the real registries. Run with `HOSTER_PODMAN_TESTS=1 cargo test`.
+/// podman and the real registries. Run with `TEST_HOSTER_PODMAN=1 cargo test`.
 #[tokio::test]
 async fn deploys_the_worked_example_on_real_podman() {
     use crate::registry::Anonymous;
     use crate::runtime::{PodmanRuntime, PodmanSocket};
 
-    if !std::env::var("HOSTER_PODMAN_TESTS").is_ok_and(|v| v == "1") {
-        eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to deploy on rootless podman");
+    if !std::env::var("TEST_HOSTER_PODMAN").is_ok_and(|v| v == "1") {
+        eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to deploy on rootless podman");
         return;
     }
     // The worked example's shape: a CI-built api under /api, a web frontend at /, and a
@@ -1410,15 +1410,15 @@ async fn deploy_work_logs_inside_the_deployment_and_service_spans() {
 
 /// Secrets, `PORT` and a volume on a real rootless podman: the app writes its environment and a
 /// run counter kept in its volume to files it serves over HTTP. Run with
-/// `HOSTER_PODMAN_TESTS=1 cargo test`.
+/// `TEST_HOSTER_PODMAN=1 cargo test`.
 #[tokio::test]
 async fn secrets_port_and_volumes_on_real_podman() {
     use crate::registry::Anonymous;
     use crate::runtime::{PodmanRuntime, PodmanSocket};
     use std::io::{Read as _, Write as _};
 
-    if !std::env::var("HOSTER_PODMAN_TESTS").is_ok_and(|v| v == "1") {
-        eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to deploy on rootless podman");
+    if !std::env::var("TEST_HOSTER_PODMAN").is_ok_and(|v| v == "1") {
+        eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to deploy on rootless podman");
         return;
     }
     const SERVE: &str = "mkdir -p /www && echo run >> /data/runs && cp /data/runs /www/runs \

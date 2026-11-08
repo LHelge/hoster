@@ -485,9 +485,9 @@ fn the_error_names_the_host_and_keeps_the_failure_as_source() {
 /// sed -i 's/"httpPort": [0-9]*/"httpPort": 18080/' /tmp/pebble.json
 /// podman run --rm -d --name pebble --network host -e PEBBLE_VA_NOSLEEP=1 \
 ///   -v /tmp/pebble.json:/pebble.json:ro,Z ghcr.io/letsencrypt/pebble -config /pebble.json
-/// HOSTER_TEST_PEBBLE_DIRECTORY=https://localhost:14000/dir \
-/// HOSTER_TEST_PEBBLE_ROOT=/tmp/pebble.minica.pem \
-/// HOSTER_TEST_PEBBLE_HTTP_PORT=18080 \
+/// TEST_HOSTER_PEBBLE_DIRECTORY=https://localhost:14000/dir \
+/// TEST_HOSTER_PEBBLE_ROOT=/tmp/pebble.minica.pem \
+/// TEST_HOSTER_PEBBLE_HTTP_PORT=18080 \
 ///   cargo test pebble -- --ignored --test-threads=1
 /// ```
 ///
@@ -511,11 +511,11 @@ async fn pebble_issues_over_http01_and_the_certificate_is_served() {
     const HOST: &str = "localhost";
     let env = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"));
     let config = AcmeConfig {
-        directory_url: env("HOSTER_TEST_PEBBLE_DIRECTORY"),
-        root_certificate: Some(PathBuf::from(env("HOSTER_TEST_PEBBLE_ROOT"))),
+        directory_url: env("TEST_HOSTER_PEBBLE_DIRECTORY"),
+        root_certificate: Some(PathBuf::from(env("TEST_HOSTER_PEBBLE_ROOT"))),
         ..AcmeConfig::default()
     };
-    let http_port: u16 = env("HOSTER_TEST_PEBBLE_HTTP_PORT").parse().unwrap();
+    let http_port: u16 = env("TEST_HOSTER_PEBBLE_HTTP_PORT").parse().unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let (certs, _) = CertMap::open(dir.path(), Some(config.directory_url.clone())).unwrap();
@@ -610,8 +610,8 @@ async fn pebble_validation_failure_carries_the_ca_detail() {
 
     let env = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"));
     let config = AcmeConfig {
-        directory_url: env("HOSTER_TEST_PEBBLE_DIRECTORY"),
-        root_certificate: Some(PathBuf::from(env("HOSTER_TEST_PEBBLE_ROOT"))),
+        directory_url: env("TEST_HOSTER_PEBBLE_DIRECTORY"),
+        root_certificate: Some(PathBuf::from(env("TEST_HOSTER_PEBBLE_ROOT"))),
         ..AcmeConfig::default()
     };
     let dir = tempfile::tempdir().unwrap();

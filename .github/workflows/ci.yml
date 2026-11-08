@@ -55,7 +55,7 @@ jobs:
       # deploying under continuous load (src/e2e_tests.rs).
       - name: End-to-end deploy under load
         env:
-          HOSTER_PODMAN_TESTS: "1"
+          TEST_HOSTER_PODMAN: "1"
         run: cargo test --locked e2e_tests -- --nocapture
 
   systemd:

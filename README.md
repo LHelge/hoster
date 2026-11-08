@@ -23,7 +23,7 @@ statically.
 
 ### Tests against real podman
 
-Tests that need rootless podman skip themselves unless `HOSTER_PODMAN_TESTS=1` is set
+Tests that need rootless podman skip themselves unless `TEST_HOSTER_PODMAN=1` is set
 (`HOSTER_PODMAN_SOCKET` overrides the socket path). The main one is the end-to-end zero-downtime
 test in `src/e2e_tests.rs` (ADR-0017): it runs hoster's orchestrator and proxy in-process,
 deploys a busybox-based app as v1, keeps keep-alive, HTTP/2, new-connection and one streaming
@@ -33,8 +33,8 @@ stream, or on v3 ever answering. CI runs it in the `podman` job; locally:
 
 ```sh
 systemctl --user start podman.socket
-HOSTER_PODMAN_TESTS=1 cargo test e2e_tests -- --nocapture   # just the end-to-end test
-HOSTER_PODMAN_TESTS=1 cargo test                             # every podman test (pulls from ghcr)
+TEST_HOSTER_PODMAN=1 cargo test e2e_tests -- --nocapture   # just the end-to-end test
+TEST_HOSTER_PODMAN=1 cargo test                             # every podman test (pulls from ghcr)
 ```
 
 ### State store queries (sqlx)

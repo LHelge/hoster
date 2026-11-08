@@ -317,8 +317,8 @@ mod tests {
     /// podman run --rm -d -p 14000:14000 -e PEBBLE_VA_ALWAYS_VALID=1 ghcr.io/letsencrypt/pebble
     /// curl -fsSo /tmp/pebble.minica.pem \
     ///   https://raw.githubusercontent.com/letsencrypt/pebble/main/test/certs/pebble.minica.pem
-    /// HOSTER_TEST_PEBBLE_DIRECTORY=https://localhost:14000/dir \
-    /// HOSTER_TEST_PEBBLE_ROOT=/tmp/pebble.minica.pem \
+    /// TEST_HOSTER_PEBBLE_DIRECTORY=https://localhost:14000/dir \
+    /// TEST_HOSTER_PEBBLE_ROOT=/tmp/pebble.minica.pem \
     ///   cargo test pebble -- --ignored
     /// ```
     #[tokio::test]
@@ -326,9 +326,9 @@ mod tests {
     async fn pebble_create_persist_restore() {
         let env = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"));
         let config = AcmeConfig {
-            directory_url: env("HOSTER_TEST_PEBBLE_DIRECTORY"),
+            directory_url: env("TEST_HOSTER_PEBBLE_DIRECTORY"),
             contact: Some("admin@example.com".to_owned()),
-            root_certificate: Some(PathBuf::from(env("HOSTER_TEST_PEBBLE_ROOT"))),
+            root_certificate: Some(PathBuf::from(env("TEST_HOSTER_PEBBLE_ROOT"))),
             ..AcmeConfig::default()
         };
         let dir = tempfile::tempdir().unwrap();

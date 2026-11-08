@@ -1043,13 +1043,13 @@ impl From<BollardError> for PullFailure {
     }
 }
 
-/// Against a real rootless podman; run with `HOSTER_PODMAN_TESTS=1 cargo test`.
+/// Against a real rootless podman; run with `TEST_HOSTER_PODMAN=1 cargo test`.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn enabled() -> bool {
-        std::env::var("HOSTER_PODMAN_TESTS").is_ok_and(|v| v == "1")
+        std::env::var("TEST_HOSTER_PODMAN").is_ok_and(|v| v == "1")
     }
 
     #[tokio::test]
@@ -1126,7 +1126,7 @@ mod tests {
     #[tokio::test]
     async fn connects_and_pings_real_podman() {
         if !enabled() {
-            eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to run against rootless podman");
+            eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to run against rootless podman");
             return;
         }
         let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(PathBuf::from);
@@ -1233,8 +1233,9 @@ mod tests {
     }
 
     /// A small public multi-arch image on ghcr, pinned by digest; override with
-    /// `HOSTER_PULL_TEST_IMAGE`.
-    const PUBLIC_IMAGE: &str = "ghcr.io/containerd/busybox:1.36@sha256:7b3ccabffc97de872a30dfd234fd972a66d247c8cfc69b0550f276481852627c";
+    /// `TEST_HOSTER_PULL_IMAGE`. No other test uses this tag: the orchestrator tests run
+    /// containers from `busybox:1.36`, and an image in use cannot be removed.
+    const PUBLIC_IMAGE: &str = "ghcr.io/containerd/busybox:1.32@sha256:ae39a6f5c07297d7ab64dbd4f82c77c874cc6a94cea29fdec309d0992574b4f7";
 
     async fn real_runtime() -> PodmanRuntime {
         let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(PathBuf::from);
@@ -1247,13 +1248,13 @@ mod tests {
     #[tokio::test]
     async fn pulls_public_ghcr_image_by_digest() {
         if !enabled() {
-            eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to pull from ghcr through podman");
+            eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to pull from ghcr through podman");
             return;
         }
-        let image: PinnedImage = std::env::var("HOSTER_PULL_TEST_IMAGE")
+        let image: PinnedImage = std::env::var("TEST_HOSTER_PULL_IMAGE")
             .unwrap_or_else(|_| PUBLIC_IMAGE.to_owned())
             .parse()
-            .expect("HOSTER_PULL_TEST_IMAGE must be pinned by digest");
+            .expect("TEST_HOSTER_PULL_IMAGE must be pinned by digest");
         let runtime = real_runtime().await;
         let reference = image.to_string();
         // Start from a clean slate so the pull path really runs; absence is fine.
@@ -1272,7 +1273,7 @@ mod tests {
     #[tokio::test]
     async fn pulling_an_unknown_digest_is_not_found() {
         if !enabled() {
-            eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to pull from ghcr through podman");
+            eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to pull from ghcr through podman");
             return;
         }
         let image: PinnedImage = format!("ghcr.io/containerd/busybox@sha256:{}", "0".repeat(64))
@@ -1567,7 +1568,7 @@ mod tests {
 
     async fn real_podman() -> Option<PodmanRuntime> {
         if !enabled() {
-            eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to run against rootless podman");
+            eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to run against rootless podman");
             return None;
         }
         let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(PathBuf::from);

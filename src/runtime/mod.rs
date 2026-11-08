@@ -1,5 +1,5 @@
 //! The `ContainerRuntime` trait, its bollard-backed rootless podman implementation (ADR-0002) and a
-//! fake for tests. Integration tests against a real podman are gated by `HOSTER_PODMAN_TESTS=1`.
+//! fake for tests. Integration tests against a real podman are gated by `TEST_HOSTER_PODMAN=1`.
 //!
 //! The trait speaks hoster's own types ([`ContainerSpec`], [`ContainerInfo`], [`ContainerState`],
 //! …); bollard stays an implementation detail of [`PodmanRuntime`]. Object naming and labels

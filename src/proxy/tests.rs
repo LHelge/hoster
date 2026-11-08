@@ -1654,10 +1654,10 @@ async fn stream_through(bytes: usize) {
 
 const MEMORY_SLACK: usize = 128 * 1024 * 1024;
 
-/// 1 GiB up and 1 GiB down with bounded memory; `HOSTER_PROXY_STREAM_BYTES` overrides the size.
+/// 1 GiB up and 1 GiB down with bounded memory; `TEST_HOSTER_PROXY_STREAM_BYTES` overrides the size.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_gib_streams_with_bounded_memory() {
-    let bytes = std::env::var("HOSTER_PROXY_STREAM_BYTES")
+    let bytes = std::env::var("TEST_HOSTER_PROXY_STREAM_BYTES")
         .ok()
         .and_then(|b| b.parse().ok())
         .unwrap_or(1024 * 1024 * 1024);

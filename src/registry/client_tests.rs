@@ -657,18 +657,18 @@ async fn forgetting_a_registry_drops_its_cached_tokens() {
     client.resolve(&image).await.unwrap(); // a fresh token
 }
 
-/// Live checks against public images; run with `HOSTER_REGISTRY_LIVE_TESTS=1 cargo test`.
+/// Live checks against public images; run with `TEST_HOSTER_REGISTRY_LIVE=1 cargo test`.
 ///
-/// `HOSTER_REGISTRY_LIVE_IMAGE=ghcr.io/owner/private:tag` and
-/// `HOSTER_REGISTRY_LIVE_CREDENTIAL=username:token` additionally resolve a private image with
+/// `TEST_HOSTER_REGISTRY_LIVE_IMAGE=ghcr.io/owner/private:tag` and
+/// `TEST_HOSTER_REGISTRY_LIVE_CREDENTIAL=username:token` additionally resolve a private image with
 /// that credential: the manual check of which ghcr token kinds work for pulls (ADR-0025).
 mod live {
     use super::*;
 
     fn enabled() -> bool {
-        let on = std::env::var("HOSTER_REGISTRY_LIVE_TESTS").is_ok_and(|v| v == "1");
+        let on = std::env::var("TEST_HOSTER_REGISTRY_LIVE").is_ok_and(|v| v == "1");
         if !on {
-            eprintln!("skipped: set HOSTER_REGISTRY_LIVE_TESTS=1 to run against live registries");
+            eprintln!("skipped: set TEST_HOSTER_REGISTRY_LIVE=1 to run against live registries");
         }
         on
     }
@@ -700,8 +700,8 @@ mod live {
     #[tokio::test]
     async fn private_image_with_credential() {
         let (Ok(reference), Ok(credential)) = (
-            std::env::var("HOSTER_REGISTRY_LIVE_IMAGE"),
-            std::env::var("HOSTER_REGISTRY_LIVE_CREDENTIAL"),
+            std::env::var("TEST_HOSTER_REGISTRY_LIVE_IMAGE"),
+            std::env::var("TEST_HOSTER_REGISTRY_LIVE_CREDENTIAL"),
         ) else {
             return;
         };

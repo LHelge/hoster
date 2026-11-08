@@ -442,7 +442,7 @@ fn a_change_that_does_not_build_is_dropped_and_later_ones_still_publish() {
 
 /// Deploys a worked-example-shaped stack on real rootless podman and sends requests through
 /// the real proxy, by `Host` header: `/` to web, `/api` to api, the s3 host to storage. Run with
-/// `HOSTER_PODMAN_TESTS=1 cargo test`.
+/// `TEST_HOSTER_PODMAN=1 cargo test`.
 #[tokio::test(flavor = "multi_thread")]
 async fn routes_the_worked_example_through_the_proxy_on_real_podman() {
     use std::num::NonZeroUsize;
@@ -460,8 +460,8 @@ async fn routes_the_worked_example_through_the_proxy_on_real_podman() {
     use crate::registry::Anonymous;
     use crate::runtime::{PodmanRuntime, PodmanSocket};
 
-    if !std::env::var("HOSTER_PODMAN_TESTS").is_ok_and(|v| v == "1") {
-        eprintln!("skipped: set HOSTER_PODMAN_TESTS=1 to deploy on rootless podman");
+    if !std::env::var("TEST_HOSTER_PODMAN").is_ok_and(|v| v == "1") {
+        eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to deploy on rootless podman");
         return;
     }
     const EXAMPLE: &str = r#"
