@@ -1,0 +1,18 @@
+# The documentation site, https://docs.hoster.lhelge.se, as a hoster stack. Apply it in the admin
+# UI (Stacks → New stack); .github/workflows/release.yml deploys every release to it.
+version = 1
+name = "docs"
+
+[services.web]
+image = "ghcr.io/lhelge/hoster-docs"   # pushed by release.yml, no tag
+track = "latest"                       # poller fallback if the release's webhook never arrives
+
+[[services.web.routes]]
+host = "docs.hoster.lhelge.se"
+port = 8080                            # nginx-unprivileged; site/default.conf answers /healthz
+
+# Only this repository's release tags, from jobs in the `production` environment, may deploy.
+[deploy]
+repository_id = 1450109946             # gh api repos/LHelge/hoster --jq .id
+refs = ["refs/tags/v*"]
+environment = "production"

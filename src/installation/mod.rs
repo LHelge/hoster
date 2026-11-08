@@ -57,7 +57,7 @@ pub enum InstallationError {
     #[allow(dead_code, reason = "used by hoster rollback (ADR-0052)")]
     #[error(
         "cannot ask {} for its version (`hoster version --json`): {reason}; \
-         an older binary may not support it, see the manual rollback in docs/install.md",
+         an older binary may not support it, see the manual rollback at https://docs.hoster.lhelge.se/wiki/install/#manual-recovery",
         binary.display()
     )]
     Probe { binary: PathBuf, reason: String },

@@ -431,7 +431,11 @@ async fn rollback_stops_before_the_service_when_the_previous_binary_cannot_answe
         ),
         "{err}"
     );
-    assert!(err.to_string().contains("docs/install.md"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("https://docs.hoster.lhelge.se/wiki/install/"),
+        "{err}"
+    );
     assert!(host.service.calls().is_empty());
     assert_eq!(host.current(), Some(v("0.2.0")));
     assert_eq!(host.schema().await, Store::expected_schema_version());

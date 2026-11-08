@@ -1,4 +1,4 @@
-# hoster as a systemd *user* service (ADR-0001, ADR-0023). See docs/install.md.
+# hoster as a systemd *user* service (ADR-0001, ADR-0023). See https://docs.hoster.lhelge.se/wiki/install/.
 #
 # Install as ~hoster/.config/systemd/user/hoster.service, then as the hoster user:
 #   systemctl --user daemon-reload
@@ -12,7 +12,7 @@
 
 [Unit]
 Description=hoster deployment orchestrator
-Documentation=https://github.com/LHelge/hoster/blob/main/docs/install.md
+Documentation=https://docs.hoster.lhelge.se/wiki/install/
 # The rootless podman API socket of this same user (ADR-0002). Requires= stops hoster when the
 # socket goes away; After= makes the socket listen before hoster connects to it.
 Requires=podman.socket
@@ -60,7 +60,7 @@ KillMode=mixed
 # ---- Hardening (best-effort, ADR-0023) ----
 # A user manager has no privileges, so only directives it can apply as the hoster user work
 # here. Filesystem and kernel protections are set up in a user namespace (systemd implies
-# PrivateUsers= for them in user units). docs/install.md lists what is not available.
+# PrivateUsers= for them in user units). https://docs.hoster.lhelge.se/wiki/install/#hardening lists what is not available.
 #
 # No directive here may drop capabilities (CapabilityBoundingSet=, PrivateDevices=,
 # ProtectKernelModules=, ProtectKernelLogs=, ProtectClock=): with

@@ -1,10 +1,10 @@
 use super::*;
 
-/// The worked example from `docs/stack-format.md` §3, taken from the document itself so the
+/// The worked example from `site/content/wiki/stack-format.md` §3, taken from the document itself so the
 /// two cannot drift apart.
 fn worked_example() -> &'static str {
-    let doc = include_str!("../../docs/stack-format.md");
-    let section = &doc[doc.find("## 3. Worked example").expect("§3 exists")..];
+    let doc = include_str!("../../site/content/wiki/stack-format.md");
+    let section = &doc[doc.find("\n# 3. Worked example").expect("§3 exists")..];
     let start = section.find("```toml\n").expect("§3 has a TOML block") + "```toml\n".len();
     let len = section[start..].find("```").expect("TOML block is closed");
     &section[start..start + len]
@@ -46,6 +46,21 @@ fn assert_error(source: &str, needle: &str) {
 
 fn app(stack: &Stack) -> &Service {
     &stack.services[&"app".parse::<Name>().unwrap()]
+}
+
+/// The documentation site's own stack, which the owner applies by pasting it into the UI.
+#[test]
+fn docs_site_stack_validates_cleanly() {
+    let parsed = parse(include_str!("../../site/docs.stack.toml")).expect("docs stack is valid");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let stack = parsed.stack;
+    assert_eq!(stack.name.as_ref(), "docs");
+    let web = &stack.services[&"web".parse().unwrap()];
+    assert!(web.image.is_ci_built());
+    assert_eq!(web.track.as_deref(), Some("latest"));
+    let deploy = stack.deploy.as_ref().unwrap();
+    assert_eq!(deploy.refs, ["refs/tags/v*"]);
+    assert_eq!(deploy.environment.as_deref(), Some("production"));
 }
 
 #[test]

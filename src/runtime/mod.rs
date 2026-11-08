@@ -395,7 +395,7 @@ impl VolumeSpec {
     /// labelled for another stack may not: `hoster-<stack>-<volume>` is ambiguous when names
     /// contain `-` (stack `a-b`, volume `c` and stack `a`, volume `b-c`), and one stack must
     /// never mount another's data. An unlabelled volume is used as it is, with a warning, since
-    /// it may hold data restored by hand (ADR-0030, docs/backup.md).
+    /// it may hold data restored by hand (ADR-0030, site/content/wiki/backup.md).
     pub fn check_existing<'a>(
         &self,
         labels: impl IntoIterator<Item = (&'a String, &'a String)>,

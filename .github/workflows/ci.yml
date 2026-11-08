@@ -35,6 +35,20 @@ jobs:
       - name: Test
         run: cargo test --all-targets --locked
 
+  # The documentation site (site/, published by release.yml). aphid fails the build on a broken
+  # [[wiki-link]], so a moved or renamed page breaks the PR rather than the site.
+  site:
+    name: docs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: LHelge/aphid@v0.3.0
+        with:
+          version: v0.3.0
+          config: site/aphid.toml
+          output: site/dist
+
   podman:
     name: zero-downtime deploy on rootless podman
     runs-on: ubuntu-latest

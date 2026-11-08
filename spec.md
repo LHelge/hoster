@@ -69,7 +69,7 @@ In scope:
 
 | Term | Meaning |
 |---|---|
-| **Stack** | A named unit of deployment: one or more services, one podman network, a set of routes. Defined in a stack file (see [docs/stack-format.md](docs/stack-format.md)). |
+| **Stack** | A named unit of deployment: one or more services, one podman network, a set of routes. Defined in a stack file (see [site/content/wiki/stack-format.md](site/content/wiki/stack-format.md)). |
 | **Service** | One container within a stack: image, env, volumes, routes, health check. |
 | **Route** | `(host, prefix) → service:port`, with `strip_prefix` and timeouts. A (host, prefix) pair is owned by exactly one stack. |
 | **Digest** | The immutable `sha256:` content address of an image (manifest or index). hoster deploys digests, never bare tags. |
@@ -87,7 +87,7 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
    It creates a `hoster` user and enables linger for it, enables its user-level `podman.socket`,
    sets `net.ipv4.ip_unprivileged_port_start=80`, and installs the binary under
    `~hoster/.local/lib/hoster` plus the user unit `hoster.service` (ADR-0023, ADR-0052). It
-   never starts the service; see [docs/install.md](docs/install.md).
+   never starts the service; see [site/content/wiki/install.md](site/content/wiki/install.md).
 2. Edit `~/.config/hoster/hoster.toml`, which the script created from the example: ACME contact
    email and directory, admin hostname (e.g. `hoster.example.com`) and upstream port range.
    Secrets go in separate files (ADR-0024).
@@ -142,7 +142,7 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
    hoster verifies the token (GitHub's signature, issuer, audience, expiry, single-use `jti`) and
    checks its claims against the stack's `[deploy]` rule. Several services may be listed in
    `images` to deploy them together (ADR-0042, ADR-0047). The full guide, with a complete
-   workflow to copy, is [docs/deploying-from-ci.md](docs/deploying-from-ci.md).
+   workflow to copy, is [site/content/wiki/deploying-from-ci.md](site/content/wiki/deploying-from-ci.md).
 
 ### 5.3 Every release
 
@@ -213,6 +213,6 @@ There is no break-glass login: if GitHub login is unavailable, use SSH until it 
 ## 7. Related documents
 
 - [docs/architecture.md](docs/architecture.md): components, threads, channels, state machine.
-- [docs/stack-format.md](docs/stack-format.md): the stack definition format.
+- [site/content/wiki/stack-format.md](site/content/wiki/stack-format.md): the stack definition format.
 - [docs/adr/](docs/adr/): one record per architectural decision.
 - [docs/open-questions.md](docs/open-questions.md): undecided items, each with a recommendation.

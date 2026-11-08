@@ -1,4 +1,4 @@
-//! Stack file model, parsing and validation (ADR-0006, `docs/stack-format.md`).
+//! Stack file model, parsing and validation (ADR-0006, `site/content/wiki/stack-format.md`).
 //!
 //! Pure: no I/O beyond the input text, so it carries most of the unit tests.
 //!

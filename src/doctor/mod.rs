@@ -414,7 +414,7 @@ impl Doctor {
                  sandboxing (ProtectSystem, ProtectHome, ReadWritePaths, PrivateTmp, \
                  ProtectKernelTunables, ProtectControlGroups) is not applied; seccomp filters \
                  and NoNewPrivileges still are",
-                "see Hardening in docs/install.md (OQ-36)",
+                "see https://docs.hoster.lhelge.se/wiki/install/#hardening (OQ-36)",
             ),
             Ok(value) => Outcome::Pass(format!(
                 "kernel.apparmor_restrict_unprivileged_userns = {value}; the unit's sandboxing \
@@ -426,7 +426,7 @@ impl Doctor {
             }
             Err(e) => Outcome::fail(
                 format!("cannot read kernel.apparmor_restrict_unprivileged_userns: {e}"),
-                "see Hardening in docs/install.md (OQ-36)",
+                "see https://docs.hoster.lhelge.se/wiki/install/#hardening (OQ-36)",
             ),
         }
     }
@@ -492,7 +492,7 @@ impl Doctor {
             return Outcome::fail(
                 format!("{} is not inside {root}/versions", exe.display()),
                 "fine for a manual install, but self-update and rollback need the versioned \
-                 layout; install with install.sh (docs/install.md)",
+                 layout; install with install.sh (https://docs.hoster.lhelge.se/wiki/install/)",
             );
         };
         match installation.current() {
