@@ -109,7 +109,7 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
    compares each host's records with hoster's own addresses and flags mismatches in the UI as the
    likely cause of a failing issuance (ADR-0051).
 3. If images are private, enter a classic PAT with `read:packages` under **Settings → Registries**
-   (ADR-0025). Enter the stack's secrets under **Stack → Secrets** (ADR-0029). Values are
+   (ADR-0025). Enter the stack's secrets on its **environment** tab (ADR-0029). Values are
    encrypted at rest and write-only in the UI.
 4. Allow the app's repository to deploy the stack by adding a `[deploy]` section to the stack
    file with the repository's numeric id, plus optional ref/environment restrictions. If you don't

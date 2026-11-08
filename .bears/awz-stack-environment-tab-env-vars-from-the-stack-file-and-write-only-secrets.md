@@ -1,10 +1,10 @@
 ---
 id: awz
 title: "Stack environment tab: env vars from the stack file and write-only secrets"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:20:40.506086332Z"
-updated: "2026-11-08T18:20:40.506086332Z"
+updated: "2026-11-08T21:48:51.193514900Z"
 tags:
   - web
   - ui
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - "7wg"
 parent: "8bf"
+attempts: 1
 ---
 
 Restyle the stack secrets page as the **environment** tab, after the "Environment & secrets" section of `docs/design/StackDetail.dc.html`.

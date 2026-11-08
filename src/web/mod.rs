@@ -251,8 +251,17 @@ impl WebApp {
             .route("/stacks/{name}/deploy", post(Stacks::deploy))
             .route("/stacks/{name}/remove", post(Stacks::remove))
             .route(
+                "/stacks/{name}/environment",
+                get(Stacks::environment).post(Stacks::save_secret),
+            )
+            .route(
+                "/stacks/{name}/environment/delete",
+                post(Stacks::delete_secret),
+            )
+            // The environment tab's earlier home: the page redirects, its forms still post.
+            .route(
                 "/stacks/{name}/secrets",
-                get(Stacks::secrets_page).post(Stacks::save_secret),
+                get(Stacks::secrets_moved).post(Stacks::save_secret),
             )
             .route("/stacks/{name}/secrets/delete", post(Stacks::delete_secret))
             .route(

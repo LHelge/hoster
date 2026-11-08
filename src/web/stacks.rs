@@ -16,11 +16,12 @@
 //!
 //! "Re-resolve tags" (ADR-0025) works the same way for the active revision: the preview shows
 //! the digests every third-party tag resolves to now and the services that would move, and the
-//! confirmation applies them as a new revision and redeploys (ADR-0049). The stack's secrets
-//! (ADR-0029) have their own page; see `secrets.rs`. The list at `/stacks`, as cards with a
-//! status filter, is in `list.rs`; a stack's overview tab is in `overview.rs`, under the header
-//! and tab bar every stack page shares (`frame.rs`), and its logs tab in `logs.rs`. The
-//! deployment history, live progress and "redeploy this one" are in `deployments.rs`.
+//! confirmation applies them as a new revision and redeploys (ADR-0049). The environment tab,
+//! with the stack's variables and its write-only secrets (ADR-0029), is in `environment.rs`.
+//! The list at `/stacks`, as cards with a status filter, is in `list.rs`; a stack's overview tab
+//! is in `overview.rs`, under the header and tab bar every stack page shares (`frame.rs`), and
+//! its logs tab in `logs.rs`. The deployment history, live progress and "redeploy this one" are
+//! in `deployments.rs`.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -1160,11 +1161,11 @@ pub struct ErrorPage {
 }
 
 mod deployments;
+mod environment;
 mod frame;
 mod list;
 mod logs;
 mod overview;
-mod secrets;
 
 pub(super) use overview::StackView;
 

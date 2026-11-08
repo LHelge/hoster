@@ -1019,6 +1019,12 @@ async fn ui_preview() {
     *app.stacks.deployments.lock().unwrap() = Fixtures::deployments();
     // A volume of shop's that an earlier revision declared and the active one dropped.
     *app.stacks.earlier_volumes.lock().unwrap() = vec!["hoster-shop-redis".into()];
+    // notes' secrets: set some days ago, so their rows say when.
+    for secret in app.stacks.secrets.lock().unwrap().iter_mut() {
+        if secret.updated_at.is_some() {
+            secret.updated_at = Some(ago(3 * DAY));
+        }
+    }
     *app.certificates.overview.lock().unwrap() = Some(Fixtures::certificates());
     app.certificates
         .dns
@@ -1058,7 +1064,7 @@ async fn ui_preview() {
             "/stacks/docs",
             "Stack: docs (not deployed, stripped prefix with timeouts)",
         ),
-        ("/stacks/notes/secrets", "Secrets of notes"),
+        ("/stacks/notes/environment", "Environment of notes"),
         ("/stacks/notes/deployments", "Deployments of notes"),
         ("/stacks/notes/deployments/3", "Deployment: live"),
         (
@@ -1175,6 +1181,39 @@ async fn ui_preview() {
         &html,
     );
     app.runtime.clear_failures();
+    let environment = session
+        .get("/stacks/notes/environment", StatusCode::OK)
+        .await;
+    let review = session
+        .post(
+            "/stacks/notes/environment",
+            &[("name", "db"), ("value", "not shown")],
+        )
+        .await;
+    preview.write(
+        "states/environment-save-review.html",
+        "Environment: reviewing a secret save",
+        &Session::inject(&environment, "secret-result", &review),
+    );
+    let delete = session
+        .post("/stacks/notes/environment/delete", &[("name", "db")])
+        .await;
+    preview.write(
+        "states/environment-delete-confirm.html",
+        "Environment: deleting a referenced secret",
+        &Session::inject(&environment, "delete-result", &delete),
+    );
+    let refused = session
+        .post(
+            "/stacks/notes/environment/delete",
+            &[("name", "db"), ("confirm", "dbx")],
+        )
+        .await;
+    preview.write(
+        "states/environment-delete-refused.html",
+        "Environment: deleting with the wrong name typed",
+        &Session::inject(&environment, "delete-result", &refused),
+    );
     let system = session.get("/system", StatusCode::OK).await;
     let check = session.post("/system/check", &[]).await;
     preview.write(
@@ -1247,7 +1286,7 @@ async fn ui_preview() {
     for (url, label) in [
         ("/stacks/notes", "Empty: a stack never deployed"),
         ("/stacks/notes/deployments", "Empty: no deployments"),
-        ("/stacks/notes/secrets", "Empty: no secrets"),
+        ("/stacks/notes/environment", "Empty: no stored secrets"),
     ] {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("empty", url), label, &html);
