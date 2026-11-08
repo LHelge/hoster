@@ -32,7 +32,7 @@ pub(super) fn digest(n: u8) -> String {
     format!("sha256:{}", format!("{n:02x}").repeat(32))
 }
 
-fn revision(stack: &str, number: u32, toml: &str) -> StackRevision {
+pub(super) fn revision(stack: &str, number: u32, toml: &str) -> StackRevision {
     StackRevision {
         id: RevisionId::from(i64::from(number)),
         stack: stack.into(),
@@ -62,7 +62,7 @@ pub(super) fn deployment(id: i64, state: DeploymentState) -> Deployment {
 }
 
 /// The `notes` stack, at revision 1 of [`NOTES`], api running generation 2.
-fn notes_status() -> StackStatus {
+pub(super) fn notes_status() -> StackStatus {
     StackStatus {
         name: "notes".into(),
         revision: revision("notes", 1, NOTES),
@@ -561,7 +561,7 @@ fn multipart(pasted: &str, file: &str) -> (String, String) {
 }
 
 #[tokio::test]
-async fn stacks_list_shows_services_digests_revision_and_last_deploy() {
+async fn stacks_list_shows_cards_with_services_revision_and_last_deploy() {
     let app = TestApp::new().await;
     let browser = app.sign_in().await;
     let response = app.get("/stacks", Some(&browser.cookie)).await;
@@ -575,28 +575,45 @@ async fn stacks_list_shows_services_digests_revision_and_last_deploy() {
         "{html}"
     );
     assert!(
-        html.contains(r#"<a class="button primary" href="/apply">"#),
+        html.contains(&format!(
+            r#"<a class="button primary" href="/apply">{}New stack</a>"#,
+            crate::web::Icon::New
+        )),
         "the header's action: {html}"
     );
     assert!(
-        html.contains(r#"<a href="/stacks/notes">notes</a>"#),
+        html.contains(r#"<h2><a href="/stacks/notes">notes</a></h2>"#),
         "{html}"
     );
     let hash = ContentHash::of(NOTES).to_string();
-    assert!(html.contains(&format!(r#"1 <code title="{hash}">{}</code>"#, &hash[..12])));
     assert!(html.contains(&format!(
-        "<code>sha256:{}</code>, generation 2",
-        "01".repeat(6)
+        r#"rev 1 <code title="{hash}">{}</code>"#,
+        &hash[..12]
     )));
+    // The services as chips: a state other than ok in words, the digest in the tooltip and for
+    // screen readers.
     assert!(
-        html.contains("<strong>storage</strong>: not deployed"),
+        html.contains(&format!(
+            r#"<li class="chip" title="generation 2, sha256:{}, health unknown"><span class="dot dot-ok" aria-hidden="true"></span>api<span class="visually-hidden">: ok, generation 2, sha256:{}, health unknown</span></li>"#,
+            "01".repeat(6),
+            "01".repeat(6)
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<li class="chip" title="not deployed"><span class="dot dot-neutral" aria-hidden="true"></span>storage <span class="chip-state chip-state-neutral">stopped</span><span class="visually-hidden">: not deployed</span></li>"#),
         "{html}"
     );
     assert!(
         html.contains(&format!(
-            r##"<a href="/stacks/notes/deployments/3">#3</a> <span class="pill pill-ok">{}Live</span>"##,
+            r##"<a href="/stacks/notes/deployments/3">#3</a> <span class="pill pill-ok">{}Live</span> <span class="muted">apply</span>"##,
             crate::web::Icon::Ok
         )),
+        "{html}"
+    );
+    assert!(html.contains("notes.example.com</li>"), "{html}");
+    assert!(
+        html.contains(r#"<a class="add-stack" href="/apply">"#),
         "{html}"
     );
     // The failed-deploy flag (ADR-0049), escaped.

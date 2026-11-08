@@ -100,6 +100,18 @@ host = "wiki.example.com"
 port = 8080
 "#;
 
+const DOCS: &str = r#"version = 1
+name = "docs"
+
+[services.site]
+image = "ghcr.io/acme/docs"
+
+[[services.site.routes]]
+host = "acme.example.com"
+prefix = "/docs"
+port = 8080
+"#;
+
 fn digest(n: u8) -> String {
     format!("sha256:{}", format!("{n:02x}").repeat(32))
 }
@@ -188,6 +200,18 @@ impl Fixtures {
         }
     }
 
+    /// The OIDC claims of a webhook deploy of `notes` (ADR-0047).
+    fn provenance() -> Provenance {
+        Provenance {
+            repository: "acme/notes".into(),
+            sha: "4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39".into(),
+            git_ref: "refs/tags/v1.4.2".into(),
+            run_id: "11223300".into(),
+            actor: "octocat".into(),
+            tag: Some("v1.4.2".into()),
+        }
+    }
+
     fn rejection() -> WebhookRejection {
         WebhookRejection {
             stack: "notes".into(),
@@ -205,7 +229,8 @@ impl Fixtures {
     }
 
     /// `notes` healthy and live (with a refused webhook), `blog` with a crash-looping worker,
-    /// `shop` mid-deployment with one queued, `wiki` whose latest deploy failed.
+    /// `shop` mid-deployment with one queued, `wiki` whose latest deploy failed, `docs` waiting
+    /// for its first digest (with a route under a prefix).
     fn stacks() -> Vec<StackStatus> {
         let mut notes_api =
             Self::service("api", Self::running(2, 1), HealthStatus::Healthy, 0, false);
@@ -226,6 +251,9 @@ impl Fixtures {
             40 * 60 * Duration::from_secs(1),
         );
         wiki_last.error = Some("health check of <app> timed out after 60 s".into());
+        let mut notes_last = Self::deployment("notes", 3, DeploymentState::Live, 2 * DAY);
+        notes_last.source = DeploymentSource::Webhook;
+        notes_last.provenance = Some(Self::provenance());
         vec![
             StackStatus {
                 name: "notes".into(),
@@ -233,7 +261,7 @@ impl Fixtures {
                 services: vec![notes_api, storage],
                 active: None,
                 queued: None,
-                last: Some(Self::deployment("notes", 3, DeploymentState::Live, 2 * DAY)),
+                last: Some(notes_last),
                 flag: None,
                 rejections: vec![Self::rejection()],
             },
@@ -302,6 +330,22 @@ impl Fixtures {
                 flag: Some(
                     "revision 1: deploy failed: health check of <app> timed out after 60 s".into(),
                 ),
+                rejections: Vec::new(),
+            },
+            StackStatus {
+                name: "docs".into(),
+                revision: Self::revision("docs", 1, DOCS),
+                services: vec![Self::service(
+                    "site",
+                    ServiceState::AwaitingFirstDigest,
+                    HealthStatus::Unknown,
+                    0,
+                    false,
+                )],
+                active: None,
+                queued: None,
+                last: None,
+                flag: None,
                 rejections: Vec::new(),
             },
         ]
@@ -374,14 +418,7 @@ impl Fixtures {
         failed.source = DeploymentSource::Webhook;
         failed.error = Some("health check of <api> timed out".into());
         failed.target = DigestSet::from([("api".into(), digest(5))]);
-        failed.provenance = Some(Provenance {
-            repository: "acme/notes".into(),
-            sha: "4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39".into(),
-            git_ref: "refs/tags/v1.4.2".into(),
-            run_id: "11223300".into(),
-            actor: "octocat".into(),
-            tag: Some("v1.4.2".into()),
-        });
+        failed.provenance = Some(Self::provenance());
         let f = failed.created_at;
         let failed_events = vec![
             event(None, DeploymentState::Received, None, f),
@@ -914,6 +951,14 @@ async fn ui_preview() {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("", url), label, &html);
     }
+
+    // The stacks list filtered to one status.
+    let html = session.get("/stacks?status=degraded", StatusCode::OK).await;
+    preview.write(
+        "states/stacks-degraded.html",
+        "Stacks: degraded only",
+        &html,
+    );
 
     // Live parts, with their first content in place.
     let page = session.get(&logs, StatusCode::OK).await;

@@ -31,6 +31,8 @@ pub enum Icon {
     Failed,
     Pending,
     // Actions.
+    /// Create something: "New stack", "Add a stack".
+    New,
     Apply,
     Deploy,
     Redeploy,
@@ -42,7 +44,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every icon, in sprite order.
-    pub const ALL: [Icon; 18] = [
+    pub const ALL: [Icon; 19] = [
         Icon::Brand,
         Icon::Dashboard,
         Icon::Stacks,
@@ -54,6 +56,7 @@ impl Icon {
         Icon::Warning,
         Icon::Failed,
         Icon::Pending,
+        Icon::New,
         Icon::Apply,
         Icon::Deploy,
         Icon::Redeploy,
@@ -82,6 +85,7 @@ impl Icon {
             Icon::Warning => icondata::LuTriangleAlert,
             Icon::Failed => icondata::LuCircleX,
             Icon::Pending => icondata::LuClock,
+            Icon::New => icondata::LuPlus,
             Icon::Apply => icondata::LuCheck,
             Icon::Deploy => icondata::LuRocket,
             Icon::Redeploy => icondata::LuRotateCcw,
@@ -106,6 +110,7 @@ impl Icon {
             Icon::Warning => "warning",
             Icon::Failed => "failed",
             Icon::Pending => "pending",
+            Icon::New => "new",
             Icon::Apply => "apply",
             Icon::Deploy => "deploy",
             Icon::Redeploy => "redeploy",

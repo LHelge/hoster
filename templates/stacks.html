@@ -1,37 +1,72 @@
 {% extends "base.html" %}
 {% block title %}Stacks{% endblock %}
 {% block heading %}Stacks{% endblock %}
-{% block actions %}<a class="button ghost" href="/containers">{{ crate::web::Icon::Containers }}Containers</a> <a class="button primary" href="/apply">Apply a stack file</a>{% endblock %}
+{% block actions %}<a class="button ghost" href="/containers">{{ crate::web::Icon::Containers }}Containers</a> <a class="button primary" href="/apply">{{ crate::web::Icon::New }}New stack</a>{% endblock %}
 {% block content %}
-{%- if stacks.is_empty() %}
-<p>No stacks yet. Apply a stack file to create one.</p>
+{%- if filters.is_empty() %}
+<p class="stacks-empty">No stacks yet. Apply a stack file to create one.</p>
 {%- else %}
-<div class="table-scroll"><table class="list stacks">
-  <thead>
-    <tr><th scope="col">Stack</th><th scope="col">Revision</th><th scope="col">Services</th><th scope="col">Last deployment</th></tr>
-  </thead>
-  <tbody>
-    {%- for stack in stacks %}
-    <tr>
-      <td><a href="{{ stack.url }}">{{ stack.name }}</a>
-        {%- if let Some(flag) = stack.flag %}<br>{{ crate::web::Tone::Fail.pill(flag) }}{% endif %}</td>
-      <td>{{ stack.revision }} <code title="{{ stack.full_hash }}">{{ stack.hash }}</code></td>
-      <td>
-        <ul class="plain">
-          {%- for service in stack.services %}
-          <li><strong>{{ service.name }}</strong>: {% if let Some(digest) = service.short_digest %}<code>{{ digest }}</code>, {% endif %}{{ service.state }}</li>
-          {%- endfor %}
-        </ul>
-      </td>
-      <td>
-        {%- if let Some((id, state, url)) = stack.active %}<a href="{{ url }}">#{{ id }}</a> running: {{ state }}
-        {%- else if let Some(last) = stack.last %}<a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} <span class="muted">({{ last.source }}, {{ last.at }})</span>
-        {%- else %}<span class="muted">none</span>{% endif %}
-        {%- if let Some(queued) = stack.queued %}<br><span class="muted">#{{ queued }} queued</span>{% endif %}
-      </td>
-    </tr>
-    {%- endfor %}
-  </tbody>
-</table></div>
+<nav class="filters" aria-label="Status filter">
+  {%- for link in filters %}
+  <a class="filter" href="{{ link.href }}"{% if link.current %} aria-current="page"{% endif %}>{{ link.label }} <span class="filter-count">{{ link.count }}</span></a>
+  {%- endfor %}
+</nav>
+{%- if cards.is_empty() %}
+{%- if let Some(condition) = filter %}
+<p class="muted">No stack has the status “{{ condition }}” right now. <a href="/stacks">Show all stacks</a></p>
 {%- endif %}
+{%- endif %}
+{%- endif %}
+<div class="stack-grid">
+  {%- for card in cards %}
+  <article class="card stack-card">
+    <header class="stack-card-head">
+      <h2><a href="{{ card.url }}">{{ card.name }}</a></h2>
+      {{ card.condition.pill() }}
+    </header>
+    {%- if let Some(flag) = card.flag %}
+    <p class="stack-card-flag">{{ crate::web::Tone::Fail.pill(flag) }}</p>
+    {%- endif %}
+    <div class="stack-card-source">
+      <p>rev {{ card.revision }} <code title="{{ card.full_hash }}">{{ card.hash }}</code></p>
+      <p>
+        {%- if let Some((id, state, url)) = card.active %}<a href="{{ url }}">#{{ id }}</a> running: {{ state }}
+        {%- else if let Some(last) = card.last %}<a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} <span class="muted">{{ last.source }}</span>
+          {%- if let Some((short, sha, repository)) = last.commit %} <code title="{{ sha }}">{{ short }}</code> <span class="stack-card-repo">{{ repository }}</span>{% endif %}
+          <time class="muted" datetime="{{ last.at }}" title="{{ last.at }}">{{ last.ago }}</time>
+        {%- else %}<span class="muted">no deployments yet</span>{% endif %}
+        {%- if let Some(queued) = card.queued %} <span class="muted">· #{{ queued }} queued</span>{% endif %}
+      </p>
+    </div>
+    {%- if !card.services.is_empty() %}
+    <ul class="chips" aria-label="Services">
+      {%- for service in card.services %}
+      <li class="chip" title="{{ service.detail }}"><span class="dot dot-{{ service.tone }}" aria-hidden="true"></span>{{ service.name }}{% if let Some(word) = service.shown_word() %} <span class="chip-state chip-state-{{ service.tone }}">{{ word }}</span>{% endif %}<span class="visually-hidden">: {{ service.spoken() }}</span></li>
+      {%- endfor %}
+    </ul>
+    {%- endif %}
+    {%- if !card.routes.is_empty() %}
+    <ul class="routes" aria-label="Routes">
+      {%- for route in card.routes %}
+      <li><span aria-hidden="true">↗ </span>{{ route }}</li>
+      {%- endfor %}
+    </ul>
+    {%- endif %}
+    {%- if let Some(traffic) = card.traffic %}
+    <dl class="stack-stats">
+      <div title="Finished requests since hoster started"><dt>requests</dt><dd>{{ traffic.requests }}</dd></div>
+      <div title="{{ traffic.p95_title() }}"><dt>p95</dt><dd class="stat-{{ traffic.p95_tone }}">{{ traffic.p95 }}</dd></div>
+      <div title="Share of 5xx responses since hoster started"><dt>5xx</dt><dd class="stat-{{ traffic.errors_tone }}">{{ traffic.errors }}</dd></div>
+    </dl>
+    {%- else %}
+    <p class="stack-stats muted">no routes, no traffic</p>
+    {%- endif %}
+  </article>
+  {%- endfor %}
+  <a class="add-stack" href="/apply">
+    <span class="add-stack-mark" aria-hidden="true">{{ crate::web::Icon::New }}</span>
+    <span class="add-stack-title">Add a stack</span>
+    <span class="add-stack-hint">apply a stack file</span>
+  </a>
+</div>
 {% endblock %}
