@@ -23,7 +23,9 @@ After=podman.socket
 # (docs/architecture.md section 4). Only the main process may notify.
 Type=notify
 NotifyAccess=main
-ExecStart=/usr/local/bin/hoster run
+# The versioned binary layout (ADR-0052): `current` links to versions/vX.Y.Z, which install.sh,
+# `hoster update` and `hoster rollback` switch atomically.
+ExecStart=%h/.local/lib/hoster/current/hoster run
 
 # The admin's GitHub handle (ADR-0021). It is read from the environment only. Override it in a
 # drop-in (`systemctl --user edit hoster`) so an upgraded unit file does not reset it:
@@ -72,10 +74,11 @@ PrivateIPC=yes
 KeyringMode=private
 ProtectSystem=strict
 ProtectHome=read-only
-# The state directory (state_dir, default $XDG_DATA_HOME/hoster), and the configuration
-# directory, where hoster generates the secret-store key file on first start (ADR-0029). Both
-# must exist before the first start; change this line too if state_dir is moved.
-ReadWritePaths=%h/.local/share/hoster %h/.config/hoster
+# The state directory (state_dir, default $XDG_DATA_HOME/hoster), the configuration directory,
+# where hoster generates the secret-store key file on first start (ADR-0029), and the binary
+# layout, which self-update writes (ADR-0052). All must exist before the first start; change
+# this line too if state_dir is moved.
+ReadWritePaths=%h/.local/share/hoster %h/.config/hoster %h/.local/lib/hoster
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

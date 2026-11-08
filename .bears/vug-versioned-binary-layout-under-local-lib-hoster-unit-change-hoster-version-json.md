@@ -1,14 +1,15 @@
 ---
 id: vug
 title: Versioned binary layout under ~/.local/lib/hoster, unit change, `hoster version --json`
-status: open
+status: done
 priority: P1
 created: "2026-11-08T08:25:15.972675075Z"
-updated: "2026-11-08T08:25:15.972675075Z"
+updated: "2026-11-08T09:28:52.351992371Z"
 tags:
   - core
   - ops
 parent: tbf
+attempts: 1
 ---
 
 ## Summary

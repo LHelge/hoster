@@ -659,15 +659,17 @@ impl fmt::Display for Problems {
     }
 }
 
-/// The XDG base directories hoster derives its default paths from (ADR-0023, ADR-0024).
+/// The XDG base directories hoster derives its default paths from (ADR-0023, ADR-0024), and the
+/// root of the binary layout (ADR-0052).
 #[derive(Debug, Clone, Default)]
-struct XdgDirs {
+pub(crate) struct XdgDirs {
     config_home: Option<PathBuf>,
     data_home: Option<PathBuf>,
+    home: Option<PathBuf>,
 }
 
 impl XdgDirs {
-    fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let var = |name| {
             std::env::var_os(name)
                 .filter(|v| !v.is_empty())
@@ -677,8 +679,18 @@ impl XdgDirs {
         Self {
             config_home: var("XDG_CONFIG_HOME")
                 .or_else(|| home.as_ref().map(|h| h.join(".config"))),
-            data_home: var("XDG_DATA_HOME").or_else(|| home.map(|h| h.join(".local/share"))),
+            data_home: var("XDG_DATA_HOME")
+                .or_else(|| home.as_ref().map(|h| h.join(".local/share"))),
+            home,
         }
+    }
+
+    /// `$HOME/.local/lib/hoster`, the root of the versioned binary layout (ADR-0052). XDG has no
+    /// variable for it; the unit's `%h/.local/lib/hoster` is relative to the home directory too.
+    pub(crate) fn binary_root(&self) -> Option<PathBuf> {
+        self.home
+            .as_ref()
+            .map(|home| home.join(".local/lib/hoster"))
     }
 
     fn config_file(&self) -> Option<PathBuf> {
