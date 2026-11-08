@@ -26,11 +26,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use super::auth::Session;
-use super::pages::{Layout, Page, Section};
+use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::Outcome;
 use super::ui::{CertState, Pill, Tone};
-use crate::acme::{Backoff, BackoffStore, CertMap, DnsCheck, DnsMismatch, DnsVerdict, Validity};
+use crate::acme::{
+    Backoff, BackoffStore, Backoffs, CertMap, DnsCheck, DnsMismatch, DnsVerdict, Validity,
+};
 use crate::orchestrator::{CertStatus, Orchestrator};
 use crate::runtime::ContainerRuntime;
 
@@ -47,6 +48,17 @@ pub struct CertRow {
     pub backoff: Option<Backoff>,
 }
 
+impl CertRow {
+    /// Whether the host needs attention at `now`: its last attempt failed, it has no certificate
+    /// yet (the page's "TLS pending"), or the certificate it serves has expired (which survives
+    /// a restart, when the recorded error does not). The navigation counts these.
+    pub fn is_failing(&self, now: SystemTime) -> bool {
+        self.status.error.is_some()
+            || (self.validity.is_none() && self.status.not_after.is_none())
+            || self.validity.is_some_and(|v| v.is_expired_at(now))
+    }
+}
+
 /// Everything the page shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertOverview {
@@ -56,6 +68,13 @@ pub struct CertOverview {
     pub public: BTreeSet<IpAddr>,
     /// Every managed host, sorted.
     pub hosts: Vec<CertRow>,
+}
+
+impl CertOverview {
+    /// How many hosts are failing at `now` (see [`CertRow::is_failing`]).
+    pub fn failing(&self, now: SystemTime) -> usize {
+        self.hosts.iter().filter(|row| row.is_failing(now)).count()
+    }
 }
 
 /// Why an action was refused.
@@ -81,6 +100,11 @@ pub trait CertificateControl: Send + Sync + 'static {
     /// The public addresses and every managed host.
     async fn overview(&self) -> CertOverview;
 
+    /// How many hosts are failing, for the navigation; see [`CertOverview::failing`].
+    async fn failing(&self) -> usize {
+        self.overview().await.failing(SystemTime::now())
+    }
+
     /// Compares `host`'s DNS with the public addresses now, and records the outcome.
     async fn check_dns(&self, host: &str) -> Result<DnsVerdict, CertActionError>;
 
@@ -100,6 +124,25 @@ pub struct CertificateAccess<R: ContainerRuntime> {
 }
 
 impl<R: ContainerRuntime> CertificateAccess<R> {
+    /// Every managed host (the admin host always), with the backoff `backoffs` holds for it.
+    fn rows(&self, mut backoffs: Backoffs) -> Vec<CertRow> {
+        let mut status = self.orchestrator.certificates();
+        status.entry(self.admin_host.clone()).or_default();
+        status
+            .into_iter()
+            .map(|(host, status)| {
+                let entry = self.certs.entry(&host);
+                CertRow {
+                    issuer: entry.as_ref().map(|e| e.issuer.clone()),
+                    validity: entry.map(|e| e.validity),
+                    backoff: backoffs.remove(&host),
+                    status,
+                    host,
+                }
+            })
+            .collect()
+    }
+
     /// The host in canonical form, if hoster manages a certificate for it.
     fn managed(&self, host: &str) -> Result<String, CertActionError> {
         let host = host.trim().to_ascii_lowercase();
@@ -114,9 +157,7 @@ impl<R: ContainerRuntime> CertificateAccess<R> {
 #[async_trait::async_trait]
 impl<R: ContainerRuntime> CertificateControl for CertificateAccess<R> {
     async fn overview(&self) -> CertOverview {
-        let mut status = self.orchestrator.certificates();
-        status.entry(self.admin_host.clone()).or_default();
-        let mut backoffs = match self.backoffs.load().await {
+        let backoffs = match self.backoffs.load().await {
             Ok(backoffs) => backoffs,
             Err(error) => {
                 tracing::warn!(
@@ -126,24 +167,20 @@ impl<R: ContainerRuntime> CertificateControl for CertificateAccess<R> {
                 Default::default()
             }
         };
-        let hosts = status
-            .into_iter()
-            .map(|(host, status)| {
-                let entry = self.certs.entry(&host);
-                CertRow {
-                    issuer: entry.as_ref().map(|e| e.issuer.clone()),
-                    validity: entry.map(|e| e.validity),
-                    backoff: backoffs.remove(&host),
-                    status,
-                    host,
-                }
-            })
-            .collect();
         CertOverview {
             source: self.dns.source().to_string(),
             public: self.dns.expected(),
-            hosts,
+            hosts: self.rows(backoffs),
         }
+    }
+
+    /// The rows without their backoffs, which only the page shows: no store query.
+    async fn failing(&self) -> usize {
+        let now = SystemTime::now();
+        self.rows(Backoffs::new())
+            .iter()
+            .filter(|row| row.is_failing(now))
+            .count()
     }
 
     async fn check_dns(&self, host: &str) -> Result<DnsVerdict, CertActionError> {
@@ -193,13 +230,10 @@ pub struct HostForm {
 
 impl Certificates {
     /// `GET /certificates`.
-    pub async fn page(
-        Extension(certificates): Extension<Certificates>,
-        Extension(session): Extension<Session>,
-    ) -> Response {
+    pub async fn page(Extension(certificates): Extension<Certificates>, shell: Shell) -> Response {
         let overview = certificates.0.overview().await;
         Page(CertificatesPage::new(
-            Layout::new(Section::Certificates, &session),
+            shell.layout(Section::Certificates),
             &overview,
             SystemTime::now(),
         ))

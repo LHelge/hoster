@@ -29,7 +29,7 @@ use futures_util::stream::{self, BoxStream, Stream, StreamExt};
 use serde::Deserialize;
 
 use super::auth::{Auth, Session};
-use super::pages::{Flash, FlashKind, Layout, Page, Section};
+use super::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 use crate::runtime::{
     ContainerId, ContainerInfo, ContainerRuntime, LogLine, LogOptions, LogStream, RuntimeError,
     label,
@@ -113,9 +113,9 @@ impl Containers {
     /// `GET /containers`: every managed container, with a link to its log.
     pub async fn list(
         Extension(containers): Extension<Containers>,
-        Extension(session): Extension<Session>,
+        shell: Shell,
     ) -> Page<ContainerList> {
-        let layout = Layout::new(Section::Containers, &session);
+        let layout = shell.layout(Section::Containers);
         match containers.0.managed().await {
             Ok(list) => Page(ContainerList {
                 layout,
@@ -138,7 +138,7 @@ impl Containers {
     /// `…/logs/stream` with the same query.
     pub async fn log_page(
         Extension(containers): Extension<Containers>,
-        Extension(session): Extension<Session>,
+        shell: Shell,
         Path(name): Path<String>,
         Query(query): Query<LogQuery>,
         RawQuery(raw): RawQuery,
@@ -147,7 +147,7 @@ impl Containers {
             Ok(container) => container,
             Err(err) => return err.into_response(),
         };
-        let mut layout = Layout::new(Section::Containers, &session);
+        let mut layout = shell.layout(Section::Containers);
         let stream_url = match LogOptions::try_from(&query) {
             Ok(_) => Some(format!(
                 "/containers/{}/logs/stream?{}",

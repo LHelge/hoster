@@ -31,7 +31,7 @@ use crate::orchestrator::UiEvent;
 use crate::stats::Elapsed;
 use crate::store::{Deployment, DeploymentId, DeploymentState};
 use crate::web::auth::{Auth, Session};
-use crate::web::pages::{Layout, Page, Section};
+use crate::web::pages::{Layout, Page, Section, Shell};
 use crate::web::ui::Pill;
 
 impl Stacks {
@@ -41,10 +41,10 @@ impl Stacks {
     /// `GET /stacks/{name}/deployments`: the stack's newest deployments.
     pub async fn history(
         Extension(stacks): Extension<Stacks>,
-        Extension(session): Extension<Session>,
+        shell: Shell,
         Path(name): Path<String>,
     ) -> Response {
-        let layout = Layout::new(Section::Stacks, &session);
+        let layout = shell.layout(Section::Stacks);
         match stacks.0.history(&name, Self::HISTORY).await {
             Ok(deployments) => Page(HistoryPage {
                 layout,

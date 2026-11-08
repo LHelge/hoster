@@ -885,6 +885,7 @@ async fn ui_preview() {
         host.updater(releases, env!("CARGO_PKG_VERSION")),
         ShutdownRequest::default(),
     );
+    app.app.shell = app.app.shell.clone().with_host("srv-01");
     let browser = app.sign_in().await;
     let session = Session { app: &app, browser };
 
@@ -986,6 +987,11 @@ async fn ui_preview() {
     let response = app.get("/auth/login", None).await;
     let html = Session::text(response).await;
     preview.write("auth/login/index.html", "Login", &html);
+    let response = app
+        .get("/auth/github/callback?error=access_denied", None)
+        .await;
+    let html = Session::text(response).await;
+    preview.write("states/login-denied.html", "Login: denied by GitHub", &html);
 
     // An app with nothing in it.
     let empty = TestApp::new().await;

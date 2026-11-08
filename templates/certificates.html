@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Certificates{% endblock %}
+{% block heading %}Certificates{% endblock %}
 {% block content %}
-<h1>Certificates</h1>
 <p class="public-addresses">hoster's public addresses:
   {%- if public.is_empty() %} <strong>unknown</strong>
   {%- else %} <code>{{ public }}</code>

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Registries{% endblock %}
+{% block heading %}Registries{% endblock %}
 {% block content %}
-<h1>Registries</h1>
 <p class="muted">Pull credentials, one per registry host, used for podman pulls and for resolving tags to digests. Tokens are encrypted at rest and write-only. For ghcr.io use a classic personal access token with only <code>read:packages</code>, ideally of a dedicated machine account. Changing a credential redeploys nothing.</p>
 
 {%- if entries.is_empty() %}

@@ -13,8 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use super::auth::Session;
-use super::pages::{Layout, Page, Section};
+use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::{Outcome, When};
 use crate::registry::{
     CredentialError, RegistryCheck, RegistryClient, RegistryCredential, RegistryEntry,
@@ -115,11 +114,8 @@ impl Registries {
     const URL: &str = "/settings/registries";
 
     /// `GET /settings/registries`.
-    pub async fn page(
-        Extension(registries): Extension<Registries>,
-        Extension(session): Extension<Session>,
-    ) -> Response {
-        let layout = Layout::new(Section::Settings, &session);
+    pub async fn page(Extension(registries): Extension<Registries>, shell: Shell) -> Response {
+        let layout = shell.layout(Section::Settings);
         match registries.0.list().await {
             Ok(entries) => Page(RegistriesPage {
                 layout,

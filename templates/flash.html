@@ -1,0 +1,3 @@
+<div id="flash" aria-live="polite">
+  {%- if let Some(flash) = layout.flash %}<p class="flash flash-{{ flash.kind }}" role="status">{{ flash.message }}</p>{% endif -%}
+</div>

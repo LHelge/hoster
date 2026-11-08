@@ -44,12 +44,18 @@ pub struct Session {
     token_hash: String,
     csrf_token: String,
     login: String,
+    expires_at: Timestamp,
 }
 
 impl Session {
     /// The GitHub handle that logged in.
     pub fn login(&self) -> &str {
         &self.login
+    }
+
+    /// The session's absolute expiry (it may end earlier when idle).
+    pub fn expires_at(&self) -> Timestamp {
+        self.expires_at
     }
 
     /// The token state-changing requests must echo in `X-CSRF-Token`.
@@ -65,6 +71,7 @@ impl Session {
             token_hash: String::new(),
             csrf_token: csrf_token.to_owned(),
             login: login.to_owned(),
+            expires_at: Timestamp::now() + WebConfig::SESSION_LIFETIME,
         }
     }
 }
@@ -75,6 +82,7 @@ impl From<SessionRecord> for Session {
             token_hash: record.token_hash,
             csrf_token: record.csrf_token,
             login: record.github_login,
+            expires_at: record.expires_at,
         }
     }
 }

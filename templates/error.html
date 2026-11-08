@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Not available{% endblock %}
+{% block heading %}Not available{% endblock %}
 {% block content %}
-<p><a href="/stacks">All stacks</a></p>
+<p class="actions"><a class="button" href="/stacks">{{ crate::web::Icon::Stacks }}All stacks</a> <a class="button ghost" href="/">{{ crate::web::Icon::Dashboard }}Dashboard</a></p>
 {% endblock %}

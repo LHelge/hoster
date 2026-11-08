@@ -16,6 +16,8 @@ use super::assets::Assets;
 /// An icon the UI uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
+    /// hoster's mark, in the sidebar and on the login page.
+    Brand,
     // Main navigation.
     Dashboard,
     Stacks,
@@ -40,7 +42,8 @@ pub enum Icon {
 
 impl Icon {
     /// Every icon, in sprite order.
-    pub const ALL: [Icon; 17] = [
+    pub const ALL: [Icon; 18] = [
+        Icon::Brand,
         Icon::Dashboard,
         Icon::Stacks,
         Icon::Containers,
@@ -68,11 +71,12 @@ impl Icon {
     /// The Lucide glyph drawn for this icon.
     fn glyph(self) -> Glyph {
         match self {
-            Icon::Dashboard => icondata::LuLayoutDashboard,
+            Icon::Brand => icondata::LuLayers,
+            Icon::Dashboard => icondata::LuLayoutGrid,
             Icon::Stacks => icondata::LuLayers,
             Icon::Containers => icondata::LuContainer,
-            Icon::Certificates => icondata::LuShieldCheck,
-            Icon::Settings => icondata::LuSettings,
+            Icon::Certificates => icondata::LuLock,
+            Icon::Settings => icondata::LuSlidersVertical,
             Icon::System => icondata::LuServer,
             Icon::Ok => icondata::LuCircleCheck,
             Icon::Warning => icondata::LuTriangleAlert,
@@ -91,6 +95,7 @@ impl Icon {
     /// The symbol's id in the sprite, the URL fragment templates reference.
     fn id(self) -> &'static str {
         match self {
+            Icon::Brand => "brand",
             Icon::Dashboard => "dashboard",
             Icon::Stacks => "stacks",
             Icon::Containers => "containers",

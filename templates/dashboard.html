@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
+{% block heading %}Dashboard{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
 <div id="overview" hx-sse:connect="{{ self.events_url() }}" hx-swap="innerHTML" hx-sse:close="end">
 {{ overview|safe }}
 </div>

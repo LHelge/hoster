@@ -569,10 +569,14 @@ async fn stacks_list_shows_services_digests_revision_and_last_deploy() {
     let html = body(response).await;
     assert!(
         html.contains(&format!(
-            r#"<a href="/stacks" aria-current="page">{}Stacks</a>"#,
+            r#"<a href="/stacks" aria-current="page">{}Stacks <span class="nav-count">1</span></a>"#,
             crate::web::Icon::Stacks
         )),
         "{html}"
+    );
+    assert!(
+        html.contains(r#"<a class="button primary" href="/apply">"#),
+        "the header's action: {html}"
     );
     assert!(
         html.contains(r#"<a href="/stacks/notes">notes</a>"#),

@@ -1256,6 +1256,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         Ok(())
     }
 
+    /// How many stacks there are: one query, for the navigation's count.
+    pub async fn stack_count(&self) -> Result<usize> {
+        Ok(self.store.stacks().await?.len())
+    }
+
     /// Every stack with its active revision, services and deployments.
     pub async fn status(&self) -> Result<Vec<StackStatus>> {
         let mut out = Vec::new();

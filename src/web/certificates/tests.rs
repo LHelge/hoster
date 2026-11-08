@@ -131,11 +131,39 @@ fn overview(now: SystemTime) -> CertOverview {
     }
 }
 
+#[test]
+fn failing_hosts_are_the_erroring_the_pending_and_the_expired_ones() {
+    let now = SystemTime::now();
+    let mut overview = overview(now);
+    // Expired, with no error recorded since startup.
+    overview.hosts.push(CertRow {
+        host: "old.example.com".into(),
+        issuer: Some("Let's Encrypt R11".into()),
+        validity: Some(Validity {
+            not_before: now - 100 * 24 * HOUR,
+            not_after: now - 10 * 24 * HOUR,
+        }),
+        status: CertStatus::default(),
+        backoff: None,
+    });
+    let failing: Vec<_> = overview
+        .hosts
+        .iter()
+        .filter(|row| row.is_failing(now))
+        .map(|row| row.host.as_str())
+        .collect();
+    assert_eq!(
+        failing,
+        ["notes.example.com", "new.example.com", "old.example.com"]
+    );
+    assert_eq!(overview.failing(now), 3);
+}
+
 fn page(now: SystemTime) -> String {
     CertificatesPage::new(
         Layout::new(
             Section::Certificates,
-            &Session::for_tests("octocat", "c0ffee"),
+            &crate::web::auth::Session::for_tests("octocat", "c0ffee"),
         ),
         &overview(now),
         now,
@@ -238,7 +266,7 @@ fn an_attempt_without_known_public_addresses_is_not_shown_as_ok() {
     let html = CertificatesPage::new(
         Layout::new(
             Section::Certificates,
-            &Session::for_tests("octocat", "c0ffee"),
+            &crate::web::auth::Session::for_tests("octocat", "c0ffee"),
         ),
         &overview,
         now,
@@ -284,14 +312,17 @@ fn unknown_hosts_and_unknown_public_addresses_are_said_so() {
 #[tokio::test]
 async fn the_page_is_in_the_navigation() {
     let app = TestApp::new().await;
-    *app.certificates.overview.lock().unwrap() = Some(overview(SystemTime::now()));
+    let overview = overview(SystemTime::now());
+    let failing = overview.failing(SystemTime::now());
+    assert!(failing > 0, "the fixture has failing hosts");
+    *app.certificates.overview.lock().unwrap() = Some(overview);
     let browser = app.sign_in().await;
     let response = app.get("/certificates", Some(&browser.cookie)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
     assert!(
         html.contains(&format!(
-            r#"<a href="/certificates" aria-current="page">{}Certificates</a>"#,
+            r#"<a href="/certificates" aria-current="page">{}Certificates <span class="nav-count nav-count-alert" role="img" aria-label="{failing} failing">{failing}</span></a>"#,
             crate::web::Icon::Certificates
         )),
         "{html}"
@@ -458,6 +489,9 @@ async fn the_admin_host_is_always_listed_with_the_configured_addresses() {
             backoff: None,
         }]
     );
+    // Without a certificate yet, the admin host counts as failing in the navigation.
+    assert_eq!(p.access.failing().await, 1);
+    assert_eq!(overview.failing(SystemTime::now()), 1);
 
     // Checking DNS records the outcome in the orchestrator's status.
     let verdict = p.access.check_dns("Admin.example.com").await.unwrap();

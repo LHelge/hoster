@@ -489,6 +489,11 @@ async fn the_login_page_sends_signed_in_admins_home() {
         !html.contains("hx-headers"),
         "no CSRF token without a session"
     );
+    assert!(html.contains(r#"<section class="auth-card""#), "{html}");
+    assert!(
+        !html.contains("sidebar"),
+        "no shell without a session: {html}"
+    );
 
     let browser = app.sign_in().await;
     let response = app.get("/auth/login", Some(&browser.cookie)).await;

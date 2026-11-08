@@ -1,9 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Sign in{% endblock %}
-{% block content %}
-<section class="login-box">
-  <h1>Sign in</h1>
+{% block public %}
+<section class="auth-card" aria-labelledby="sign-in">
+  <div class="brand">
+    <span class="brand-mark">{{ crate::web::Icon::Brand }}</span>
+    <span class="brand-text"><span class="brand-name">hoster</span></span>
+  </div>
+  <h1 id="sign-in">Sign in</h1>
+  {% include "flash.html" %}
   <p>This hoster's admin interface is restricted to its administrator's GitHub account.</p>
-  <p><a class="button primary" href="/auth/github/login">Sign in with GitHub</a></p>
+  <a class="button primary" href="/auth/github/login">Sign in with GitHub</a>
 </section>
 {% endblock %}

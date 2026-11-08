@@ -442,13 +442,12 @@ mod containers {
         let response = app.get("/containers", Some(&browser.cookie)).await;
         assert_eq!(response.status(), StatusCode::OK);
         let html = body(response).await;
+        // Containers is not in the navigation; its pages belong to Stacks (ADR-0054).
         assert!(
-            html.contains(&format!(
-                r#"<a href="/containers" aria-current="page">{}Containers</a>"#,
-                crate::web::Icon::Containers
-            )),
+            html.contains(r#"<li><a href="/stacks" aria-current="page">"#),
             "{html}"
         );
+        assert!(!html.contains(r#"<li><a href="/containers""#), "{html}");
         assert!(html.contains("<code>hoster-notes-web-g3</code>"), "{html}");
         assert!(
             html.contains(r#"<a href="/containers/hoster-notes-web-g3/logs">Logs</a>"#),

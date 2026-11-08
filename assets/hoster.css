@@ -143,40 +143,214 @@ code { font-size: 0.92em; overflow-wrap: anywhere; }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* ---- Page frame (until the sidebar shell replaces it) -------------------------------------- */
+/* ---- Shell (ADR-0054): a 232 px sidebar beside the page, stacked above it when narrow ------- */
 
-header {
+.shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem 1.5rem;
-  padding: 0.6rem 1rem;
-  border-bottom: 1px solid var(--border);
+  flex-direction: column;
+  gap: 22px;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 20px 12px;
+  border-right: 1px solid var(--border);
   background: var(--surface);
 }
 
-header .brand { font-family: var(--mono); font-weight: 600; color: var(--text); }
-
-nav ul { display: flex; flex-wrap: wrap; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
-nav a {
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  color: var(--text);
+}
+a.brand:hover { text-decoration: none; }
+.brand-mark {
   display: inline-flex;
   align-items: center;
-  padding: 0.35rem 0.6rem;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: var(--radius-control);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.brand-mark .icon { width: 18px; height: 18px; margin: 0; }
+.brand-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.brand-name { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.brand-meta {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.nav a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 8px 10px;
   border-radius: 7px;
   color: var(--text-2);
   font-weight: 500;
 }
-nav a:hover { background: var(--hover); color: var(--text); text-decoration: none; }
-nav a[aria-current="page"] { background: var(--accent-tint); color: var(--accent); }
+.nav a .icon { width: 18px; height: 18px; margin: 0; }
+.nav a:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.nav a[aria-current="page"] { background: var(--hover); color: var(--text); }
+.nav a[aria-current="page"] .icon { color: var(--accent); }
+.nav-count {
+  margin-left: auto;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.nav-count-alert {
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: var(--fail);
+  color: var(--on-accent);
+  font-weight: 600;
+}
 
-header .account { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
-header .account .login { font-family: var(--mono); color: var(--text-2); }
+/* The signed-in admin, at the bottom of the sidebar. */
+.account {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: auto;
+  padding: 14px 0 0;
+  border-top: 1px solid var(--border);
+}
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+}
+.account-who { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.account-login { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.account-session {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.icon-button {
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border-color: var(--border);
+  color: var(--text-2);
+}
+.icon-button .icon { width: 18px; height: 18px; margin: 0; }
+.account-everywhere {
+  grid-column: 1 / -1;
+  justify-self: start;
+  min-height: 28px;
+  padding: 0 6px;
+  font-size: 12px;
+}
 
-main { max-width: 72rem; margin: 0 auto; padding: 1.75rem 1rem 3rem; }
+.content { min-width: 0; padding: 28px 32px 48px; }
 
-footer { padding: 1rem; color: var(--muted); font-family: var(--mono); font-size: 12px; text-align: center; }
+/* ---- Page header: a ~/path breadcrumb, the h1 and the page's actions ----------------------- */
 
-.login-box { max-width: 28rem; margin: 3rem auto; text-align: center; }
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 22px;
+}
+.page-title { min-width: 0; }
+.crumb {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.crumb a {
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: var(--input-border);
+  text-underline-offset: 2px;
+}
+.crumb a:hover { color: var(--link); }
+.page-head h1 { margin: 4px 0 0; overflow-wrap: anywhere; }
+.page-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.page-actions:empty { display: none; }
+
+@media (max-width: 760px) {
+  /* The content row takes any spare height, so the sidebar keeps its natural one. */
+  .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .sidebar {
+    position: static;
+    height: auto;
+    gap: 14px;
+    padding: 14px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .nav { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+  .nav a { min-height: 36px; padding: 6px 10px; }
+  .nav-count { margin-left: 2px; }
+  /* One row: who, then both log-out actions. */
+  .account { grid-template-columns: auto minmax(0, 1fr) auto auto; margin-top: 0; padding-top: 12px; }
+  .account-everywhere { grid-column: 3; grid-row: 1; }
+  .account .icon-button { grid-column: 4; grid-row: 1; }
+  .content { padding: 20px 16px 40px; }
+}
+
+/* ---- Public pages (sign in): one centred card, no shell ------------------------------------ */
+
+.public {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px 16px;
+}
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+  max-width: 400px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.auth-card .brand { padding: 0; margin: 0 0 18px; }
+.auth-card h1 { margin: 0 0 12px; font-size: 22px; }
+.auth-card p { color: var(--text-2); }
+.auth-card .button { margin-top: 8px; }
 
 /* ---- Cards ---------------------------------------------------------------------------------- */
 
@@ -504,4 +678,3 @@ pre.release-notes {
   vertical-align: -0.2em;
   flex-shrink: 0;
 }
-nav a .icon { margin-inline-end: 0.45em; }
