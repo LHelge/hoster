@@ -301,6 +301,16 @@ pub struct RouteTraffic {
     pub counts: Counts,
 }
 
+impl RouteTraffic {
+    /// The stack the route belonged to, unless it is hoster's own.
+    pub fn stack(&self) -> Option<&str> {
+        match &self.owner {
+            Some(Owner::Route(owner)) => Some(owner.stack.as_ref()),
+            Some(Owner::Reserved(_)) | None => None,
+        }
+    }
+}
+
 /// The request statistics at one moment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrafficSnapshot {

@@ -28,7 +28,7 @@ use crate::runtime::ContainerRuntime;
 use crate::store::{DeploymentOutcome, DeploymentState, Store, Timestamp};
 
 pub use self::traffic::{
-    Counts, RequestOutcome, StatusClass, TrackedRequest, Traffic, TrafficSnapshot,
+    Counts, RequestOutcome, RouteTraffic, StatusClass, TrackedRequest, Traffic, TrafficSnapshot,
 };
 
 /// Where the statistics not kept by [`Traffic`] come from.
@@ -74,6 +74,12 @@ impl Stats {
         let mut certificates = self.source.certificates();
         certificates.sort_by_key(|cert| cert.not_after);
         certificates
+    }
+
+    /// The request statistics alone, as of now: no store queries, for pages that show only
+    /// traffic (the stacks list).
+    pub fn traffic(&self) -> TrafficSnapshot {
+        self.traffic.snapshot()
     }
 
     /// Everything, as of now. A source that fails leaves its part empty and names the problem

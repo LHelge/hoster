@@ -644,6 +644,112 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .diff-add { background: var(--ok-tint); }
 .diff-remove { background: var(--fail-tint); }
 
+/* Stacks list (src/web/stacks/list.rs): a status filter of links, then a grid of cards that is
+   one column at narrow widths. */
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 18px; font-family: var(--mono); }
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 17px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.filter:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.filter[aria-current="page"] { border-color: var(--accent); background: var(--accent-tint); color: var(--text); font-weight: 600; }
+.filter-count { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.filter[aria-current="page"] .filter-count { color: var(--text); }
+.stacks-empty { margin: 0 0 18px; }
+.stack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr));
+  gap: 14px;
+}
+.stack-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 16px 18px;
+  border-radius: 12px;
+}
+.stack-card p { margin: 0; }
+.stack-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 10px; }
+.stack-card-head h2 { min-width: 0; margin: 0; font: 600 16px/1.3 var(--mono); overflow-wrap: anywhere; }
+.stack-card-head h2 a { color: var(--text); }
+.stack-card-source { display: flex; flex-direction: column; gap: 4px; color: var(--text-2); font: 12px/1.6 var(--mono); }
+.stack-card-source code { color: var(--p95); font-size: inherit; }
+.stack-card-source .pill { font-size: 11px; }
+.stack-card-repo { overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-2);
+  font: 11px/1.4 var(--mono);
+}
+.dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.dot-ok { background: var(--ok); }
+.dot-progress { background: var(--progress); }
+.dot-warn { background: var(--warn); }
+.dot-fail { background: var(--fail); }
+.chip-state { color: var(--muted); }
+.chip-state-progress { color: var(--progress); }
+.chip-state-warn { color: var(--warn); }
+.chip-state-fail { color: var(--fail); }
+.routes { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; padding: 0; list-style: none; color: var(--link); font: 12px/1.5 var(--mono); overflow-wrap: anywhere; }
+.stack-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin: auto 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider);
+  font-family: var(--mono);
+}
+p.stack-stats { font-size: 12px; }
+.stack-stats div { display: flex; flex-direction: column; gap: 2px; }
+.stack-stats dt { color: var(--muted); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+.stack-stats dd { margin: 0; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-warn { color: var(--warn); }
+.stat-fail { color: var(--fail); }
+.add-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 200px;
+  padding: 20px;
+  border: 1px dashed var(--input-border);
+  border-radius: 12px;
+  color: var(--text-2);
+  text-align: center;
+}
+.add-stack:hover { background: var(--surface); text-decoration: none; }
+.add-stack-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--hover);
+  color: var(--accent);
+}
+.add-stack-mark .icon { width: 20px; height: 20px; margin: 0; }
+.add-stack-title { color: var(--text); font-weight: 600; }
+.add-stack-hint { font: 12px/1.4 var(--mono); }
+
 /* Deployment history */
 .deployments .digest { white-space: nowrap; }
 

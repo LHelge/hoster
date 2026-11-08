@@ -17,7 +17,8 @@
 //! "Re-resolve tags" (ADR-0025) works the same way for the active revision: the preview shows
 //! the digests every third-party tag resolves to now and the services that would move, and the
 //! confirmation applies them as a new revision and redeploys (ADR-0049). The stack's secrets
-//! (ADR-0029) have their own page; see `secrets.rs`. The deployment history, live progress and
+//! (ADR-0029) have their own page; see `secrets.rs`. The list at `/stacks`, as cards with a
+//! status filter, is in `list.rs`. The deployment history, live progress and
 //! "redeploy this one" are in `deployments.rs`.
 
 use std::fmt;
@@ -279,27 +280,6 @@ impl Stacks {
                     format!("There is no stack called {name}."),
                 )
             })
-    }
-
-    /// `GET /stacks`: every stack.
-    pub async fn list(Extension(stacks): Extension<Stacks>, shell: Shell) -> Response {
-        let layout = shell.layout(Section::Stacks);
-        match stacks.0.status().await {
-            Ok(list) => Page(StackList {
-                layout,
-                stacks: list.iter().map(StackView::from).collect(),
-            })
-            .into_response(),
-            Err(err) => {
-                let outcome = Outcome::from(err);
-                let status = outcome.status;
-                let page = Page(StackList {
-                    layout: layout.with_flash(outcome.into()),
-                    stacks: Vec::new(),
-                });
-                (status, page).into_response()
-            }
-        }
     }
 
     /// `GET /stacks/{name}`: one stack, with the deploy and remove forms.
@@ -1323,14 +1303,6 @@ impl FileDiff {
     }
 }
 
-/// `GET /stacks`.
-#[derive(Template)]
-#[template(path = "stacks.html")]
-pub struct StackList {
-    layout: Layout,
-    stacks: Vec<StackView>,
-}
-
 /// `GET /stacks/{name}`.
 #[derive(Template)]
 #[template(path = "stack.html")]
@@ -1369,6 +1341,7 @@ pub struct ErrorPage {
 }
 
 mod deployments;
+mod list;
 mod secrets;
 
 #[cfg(test)]

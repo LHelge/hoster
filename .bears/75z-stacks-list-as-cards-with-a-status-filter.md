@@ -1,16 +1,17 @@
 ---
 id: "75z"
 title: Stacks list as cards with a status filter
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:19:43.636437729Z"
-updated: "2026-11-08T18:19:43.636437729Z"
+updated: "2026-11-08T19:52:13.150177389Z"
 tags:
   - web
   - ui
 depends_on:
   - xhh
 parent: "8bf"
+attempts: 1
 ---
 
 Redesign `/stacks` after `docs/design/Stacks.dc.html`.
