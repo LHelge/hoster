@@ -750,6 +750,96 @@ p.stack-stats { font-size: 12px; }
 .add-stack-title { color: var(--text); font-weight: 600; }
 .add-stack-hint { font: 12px/1.4 var(--mono); }
 
+/* Stack header (src/web/stacks/frame.rs): breadcrumb, name and pill, a mono meta line and the
+   actions, then the tab bar across the full width. */
+.stack-head { align-items: flex-start; gap: 14px 16px; margin-bottom: 20px; }
+.stack-head .page-title { display: flex; flex: 1 1 420px; flex-direction: column; gap: 8px; }
+.stack-head .page-actions { padding-top: 22px; }
+.stack-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.stack-title h1 { margin: 0; font: 600 26px/1.2 var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.stack-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  margin: 0;
+  color: var(--text-2);
+  font: 12px/1.6 var(--mono);
+}
+.stack-meta code { color: var(--p95); font-size: inherit; }
+.stack-meta .pill { font-size: 11px; }
+.stack-meta-repo { overflow-wrap: anywhere; }
+.stack-flag { margin: 0; }
+/* min-width: 0 lets the bar shrink to the header, so the tablist scrolls instead of the page.
+   The underline is an inset shadow, so nothing sticks out of the scroll box. */
+.tabs { flex: 1 0 100%; min-width: 0; }
+.tabs [role="tablist"] {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  box-shadow: inset 0 -1px var(--border);
+  font: 13px/1.2 var(--mono);
+}
+.tabs a { padding: 10px 14px 12px; color: var(--text-2); white-space: nowrap; }
+.tabs a:hover { color: var(--text); text-decoration: none; }
+.tabs a:focus-visible { outline-offset: -2px; }
+.tabs a[aria-selected="true"] { box-shadow: inset 0 -2px var(--accent); color: var(--text); font-weight: 600; }
+#stack-action-result:empty, #reresolve-result:empty { display: none; }
+#reresolve-result .preview { margin: 0 0 1.25rem; }
+
+/* Stack overview (src/web/stacks/overview.rs) */
+.card-count, .card-note { color: var(--muted); font-family: var(--mono); font-size: 12px; font-weight: 400; }
+.card > p.card-body { margin: 0; border-bottom: 1px solid var(--divider); font-size: 13px; }
+.card-result:not(:empty) { padding: 0 18px 4px; }
+.tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--accent-tint);
+  color: var(--accent);
+  font: 11px/1.5 var(--mono);
+  white-space: nowrap;
+}
+.deploy-form { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.deploy-form p { margin: 0; font-size: 13px; }
+.deploy-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px 16px; width: 100%; }
+.deploy-fields label { display: flex; flex-direction: column; gap: 4px; font: 12px/1.4 var(--mono); }
+.deploy-fields input { width: 100%; font: 13px/1.4 var(--mono); }
+.apply-link { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 0 0 1.25rem; font-size: 13px; }
+table.rejections { min-width: 1000px; }
+table.services { min-width: 640px; }
+
+/* The danger zone: the last card of the overview, its border and head tinted red. */
+.danger-zone {
+  border-color: color-mix(in srgb, var(--fail) 45%, var(--border));
+  background: color-mix(in srgb, var(--fail) 4%, var(--surface));
+}
+.danger-zone .card-head { border-bottom-color: color-mix(in srgb, var(--fail) 25%, var(--border)); }
+.danger-zone .card-head h2 { color: var(--fail); }
+.danger-body { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px 32px; padding: 18px; }
+.danger-what { display: flex; flex: 1 1 360px; flex-direction: column; gap: 8px; min-width: 0; }
+.danger-what h3 { margin: 0; font-size: 14px; }
+.danger-what p { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.danger-what .muted { color: var(--muted); }
+.volumes { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; font: 12px/1.6 var(--mono); overflow-wrap: anywhere; }
+.danger-check { display: flex; align-items: center; gap: 10px; color: var(--text); font: 12px/1.4 var(--mono); }
+.danger-check input { width: 16px; height: 16px; accent-color: var(--fail); }
+.danger-confirm { display: flex; flex: 1 1 320px; flex-direction: column; gap: 8px; min-width: 0; }
+.danger-confirm label { font: 12px/1.4 var(--mono); }
+.danger-confirm strong { color: var(--text); }
+.danger-row { display: flex; gap: 8px; }
+.danger-row input { flex: 1; min-width: 0; min-height: 44px; font: 13px/1.4 var(--mono); }
+.danger-row button.danger { min-height: 44px; }
+
+@media (max-width: 760px) {
+  .stack-head .page-actions { padding-top: 0; }
+  .tabs a { padding: 10px 9px; }
+  .danger-row { flex-wrap: wrap; }
+  .danger-row input { flex-basis: 100%; }
+}
+
 /* Deployment history */
 .deployments .digest { white-space: nowrap; }
 

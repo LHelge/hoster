@@ -18,9 +18,11 @@
 //! the digests every third-party tag resolves to now and the services that would move, and the
 //! confirmation applies them as a new revision and redeploys (ADR-0049). The stack's secrets
 //! (ADR-0029) have their own page; see `secrets.rs`. The list at `/stacks`, as cards with a
-//! status filter, is in `list.rs`. The deployment history, live progress and
+//! status filter, is in `list.rs`; a stack's overview tab is in `overview.rs`, under the header
+//! and tab bar every stack page shares (`frame.rs`). The deployment history, live progress and
 //! "redeploy this one" are in `deployments.rs`.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -38,8 +40,7 @@ use super::pages::{FlashKind, Layout, Page, Section, Shell};
 use super::ui::Pill;
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, PinChange,
-    RemoveOutcome, RemoveStack, SecretChange, ServiceState, StackSecret, StackStatus, UiEvent,
-    WebhookDeploy,
+    RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent, WebhookDeploy,
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
@@ -100,6 +101,12 @@ pub trait StackControl: Send + Sync + 'static {
 
     /// See [`Orchestrator::history`].
     async fn history(&self, stack: &str, limit: u32) -> Result<Vec<Deployment>, OrchestratorError>;
+
+    /// See [`Orchestrator::latest_live`].
+    async fn latest_live(&self, stack: &str) -> Result<Option<Deployment>, OrchestratorError>;
+
+    /// See [`Orchestrator::volumes`].
+    async fn volumes(&self, stack: &str) -> Result<BTreeSet<String>, OrchestratorError>;
 
     /// See [`Orchestrator::rollback`].
     async fn rollback(
@@ -200,6 +207,14 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         Orchestrator::history(self, stack, limit).await
     }
 
+    async fn latest_live(&self, stack: &str) -> Result<Option<Deployment>, OrchestratorError> {
+        Orchestrator::latest_live(self, stack).await
+    }
+
+    async fn volumes(&self, stack: &str) -> Result<BTreeSet<String>, OrchestratorError> {
+        Orchestrator::volumes(self, stack).await
+    }
+
     async fn rollback(
         &self,
         stack: &str,
@@ -280,23 +295,6 @@ impl Stacks {
                     format!("There is no stack called {name}."),
                 )
             })
-    }
-
-    /// `GET /stacks/{name}`: one stack, with the deploy and remove forms.
-    pub async fn show(
-        Extension(stacks): Extension<Stacks>,
-        shell: Shell,
-        Path(name): Path<String>,
-    ) -> Response {
-        let layout = shell.layout(Section::Stacks);
-        match stacks.find(&name).await {
-            Ok(status) => Page(StackPage {
-                layout,
-                stack: StackView::from(&status),
-            })
-            .into_response(),
-            Err(outcome) => outcome.page(layout),
-        }
     }
 
     /// `GET /apply`: the form to paste or upload a stack file.
@@ -863,177 +861,6 @@ impl fmt::Display for When {
     }
 }
 
-/// A stack as the pages show it.
-#[derive(Debug)]
-pub struct StackView {
-    name: String,
-    url: String,
-    revision: u32,
-    /// The active revision's content hash, shortened, and in full.
-    hash: String,
-    full_hash: String,
-    applied_at: String,
-    services: Vec<ServiceView>,
-    /// Whether any service takes its digest from deploys, so the deploy form has fields.
-    deployable: bool,
-    /// Whether any service uses a third-party image, so "re-resolve tags" has work to do.
-    third_party: bool,
-    last: Option<DeploymentSummary>,
-    /// The deployment running now, as (id, state, url).
-    active: Option<(String, String, String)>,
-    queued: Option<String>,
-    flag: Option<String>,
-    /// Refused webhook attempts, newest first (ADR-0047).
-    rejections: Vec<RejectionView>,
-}
-
-impl StackView {
-    pub(super) fn url(stack: &str) -> String {
-        format!("/stacks/{stack}")
-    }
-
-    pub fn secrets_url(&self) -> String {
-        format!("{}/secrets", self.url)
-    }
-
-    pub fn reresolve_url(&self) -> String {
-        format!("{}/reresolve/preview", self.url)
-    }
-
-    pub fn deploy_url(&self) -> String {
-        format!("{}/deploy", self.url)
-    }
-
-    pub fn remove_url(&self) -> String {
-        format!("{}/remove", self.url)
-    }
-
-    pub fn history_url(&self) -> String {
-        format!("{}/deployments", self.url)
-    }
-}
-
-impl From<&StackStatus> for StackView {
-    fn from(status: &StackStatus) -> Self {
-        let hash = status.revision.hash.to_string();
-        let services: Vec<ServiceView> = status.services.iter().map(ServiceView::from).collect();
-        Self {
-            url: Self::url(&status.name),
-            name: status.name.clone(),
-            revision: status.revision.revision,
-            hash: hash.get(..12).unwrap_or(&hash).to_owned(),
-            full_hash: hash.clone(),
-            applied_at: When(status.revision.created_at).to_string(),
-            deployable: services.iter().any(|s| s.ci_built),
-            third_party: services.iter().any(|s| !s.ci_built),
-            services,
-            last: status.last.as_ref().map(DeploymentSummary::from),
-            active: status.active.map(|(id, state)| {
-                (
-                    id.to_string(),
-                    state.to_string(),
-                    DeploymentView::url(&status.name, id),
-                )
-            }),
-            queued: status.queued.map(|id| id.to_string()),
-            flag: status.flag.clone(),
-            rejections: status.rejections.iter().map(RejectionView::from).collect(),
-        }
-    }
-}
-
-/// A refused webhook attempt, with the claims that help write the `[deploy]` rule.
-#[derive(Debug)]
-struct RejectionView {
-    at: String,
-    reason: String,
-    repository: String,
-    repository_id: String,
-    git_ref: String,
-    environment: String,
-    /// The `workflow_ref` claim (ADR-0047).
-    workflow_ref: String,
-    /// The `job_workflow_ref` claim, the value a `[deploy]` rule names, when it differs from
-    /// `workflow_ref` (a reusable workflow).
-    job_workflow_ref: Option<String>,
-    actor: String,
-    run_id: String,
-}
-
-impl From<&WebhookRejection> for RejectionView {
-    fn from(rejection: &WebhookRejection) -> Self {
-        Self {
-            at: When(rejection.at).to_string(),
-            reason: rejection.reason.clone(),
-            repository: rejection.repository.clone(),
-            repository_id: rejection.repository_id.clone(),
-            git_ref: rejection.git_ref.clone(),
-            environment: rejection.environment.clone().unwrap_or_default(),
-            workflow_ref: rejection.workflow_ref.clone().unwrap_or_default(),
-            job_workflow_ref: rejection
-                .job_workflow_ref
-                .clone()
-                .filter(|job| Some(job) != rejection.workflow_ref.as_ref()),
-            actor: rejection.actor.clone(),
-            run_id: rejection.run_id.clone(),
-        }
-    }
-}
-
-/// A service as the stack pages show it.
-#[derive(Debug)]
-struct ServiceView {
-    name: String,
-    image: String,
-    ci_built: bool,
-    /// What it runs, in words.
-    state: String,
-    digest: Option<String>,
-    short_digest: Option<String>,
-}
-
-impl From<&crate::orchestrator::ServiceStatus> for ServiceView {
-    fn from(service: &crate::orchestrator::ServiceStatus) -> Self {
-        let (state, digest) = match &service.state {
-            ServiceState::Running { generation, digest } => {
-                (format!("generation {generation}"), Some(digest.clone()))
-            }
-            ServiceState::AwaitingFirstDigest => ("awaiting its first digest".to_owned(), None),
-            ServiceState::NotDeployed => ("not deployed".to_owned(), None),
-        };
-        Self {
-            name: service.name.clone(),
-            image: service.image.clone(),
-            ci_built: service.ci_built,
-            state,
-            short_digest: digest.as_deref().map(|d| ShortDigest(d).to_string()),
-            digest,
-        }
-    }
-}
-
-/// A deployment in one line.
-#[derive(Debug)]
-struct DeploymentSummary {
-    id: String,
-    url: String,
-    state: Pill,
-    source: String,
-    at: String,
-}
-
-impl From<&Deployment> for DeploymentSummary {
-    fn from(deployment: &Deployment) -> Self {
-        Self {
-            id: deployment.id.to_string(),
-            url: DeploymentView::url(&deployment.stack, deployment.id),
-            state: Pill::from(deployment.state),
-            source: deployment.source.to_string(),
-            at: When(deployment.updated_at).to_string(),
-        }
-    }
-}
-
 /// A deployment with its transitions, as its page shows it.
 #[derive(Debug)]
 pub struct DeploymentView {
@@ -1303,14 +1130,6 @@ impl FileDiff {
     }
 }
 
-/// `GET /stacks/{name}`.
-#[derive(Template)]
-#[template(path = "stack.html")]
-pub struct StackPage {
-    layout: Layout,
-    stack: StackView,
-}
-
 /// `GET /apply`.
 #[derive(Template)]
 #[template(path = "apply.html")]
@@ -1341,8 +1160,12 @@ pub struct ErrorPage {
 }
 
 mod deployments;
+mod frame;
 mod list;
+mod overview;
 mod secrets;
+
+pub(super) use overview::StackView;
 
 #[cfg(test)]
 pub(super) mod tests;

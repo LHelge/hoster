@@ -347,6 +347,30 @@ async fn unfinished_and_listed_deployments() {
         .collect();
     assert_eq!(listed, [b.id, a.id]);
     assert_eq!(store.deployments("blog", 1).await.unwrap().len(), 1);
+
+    // The newest that went live, however many did not since.
+    let live = |store: &Store| {
+        let store = store.clone();
+        async move {
+            store
+                .latest_live_deployment("blog")
+                .await
+                .unwrap()
+                .map(|d| d.id)
+        }
+    };
+    assert_eq!(live(&store).await, Some(a.id));
+    let c = deployment(&store, "blog").await;
+    store
+        .transition(c.id, DeploymentState::LiveWithWarnings, None)
+        .await
+        .unwrap();
+    store
+        .transition(b.id, DeploymentState::Failed, None)
+        .await
+        .unwrap();
+    assert_eq!(live(&store).await, Some(c.id));
+    assert_eq!(store.latest_live_deployment("shop").await.unwrap(), None);
 }
 
 #[tokio::test]

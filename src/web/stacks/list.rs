@@ -250,7 +250,7 @@ impl From<&StackStatus> for Condition {
 
 /// One stack's card.
 #[derive(Debug)]
-struct StackCard {
+pub(super) struct StackCard {
     name: String,
     url: String,
     condition: Condition,
@@ -334,7 +334,7 @@ impl StackCard {
 
     /// The routes of the active revision. Empty when the revision does not parse (it did when
     /// it was applied, so only a newer hoster could refuse it).
-    fn routes(status: &StackStatus) -> Vec<String> {
+    pub(super) fn routes(status: &StackStatus) -> Vec<String> {
         let Ok(stack) = status.revision.toml.parse::<Stack>() else {
             return Vec::new();
         };
@@ -356,21 +356,21 @@ impl StackCard {
 
 /// A stack's latest deployment, when none runs.
 #[derive(Debug)]
-struct LastDeploy {
-    id: String,
-    url: String,
-    state: Pill,
+pub(super) struct LastDeploy {
+    pub(super) id: String,
+    pub(super) url: String,
+    pub(super) state: Pill,
     /// `manual`, `webhook`, `poller`, `apply`, `rollback`.
-    source: String,
+    pub(super) source: String,
     /// How long ago it last changed, and the time itself.
-    ago: String,
-    at: String,
+    pub(super) ago: String,
+    pub(super) at: String,
     /// A webhook deploy's commit (shortened, and in full) and repository (ADR-0047).
-    commit: Option<(String, String, String)>,
+    pub(super) commit: Option<(String, String, String)>,
 }
 
 impl LastDeploy {
-    fn new(deployment: &Deployment, now: SystemTime) -> Self {
+    pub(super) fn new(deployment: &Deployment, now: SystemTime) -> Self {
         LastDeploy {
             id: deployment.id.to_string(),
             url: DeploymentView::url(&deployment.stack, deployment.id),
@@ -412,7 +412,7 @@ pub struct Ago(pub Duration);
 
 impl Ago {
     /// The time from `then` to `now`; zero when the clock went backwards.
-    fn since(then: Timestamp, now: SystemTime) -> Self {
+    pub(super) fn since(then: Timestamp, now: SystemTime) -> Self {
         Ago(now
             .duration_since(SystemTime::from(then))
             .unwrap_or_default())
@@ -433,7 +433,7 @@ impl fmt::Display for Ago {
 
 /// A service on a card: its name with a health dot.
 #[derive(Debug)]
-struct ServiceChip {
+pub(super) struct ServiceChip {
     name: String,
     /// The dot's colour: ok, fail (failing), progress (deploying), neutral (stopped).
     tone: Tone,
@@ -492,7 +492,7 @@ impl ServiceChip {
     }
 
     /// A running service whose probe fails, or that keeps crashing (ADR-0028, ADR-0038).
-    fn failing(service: &ServiceStatus) -> bool {
+    pub(super) fn failing(service: &ServiceStatus) -> bool {
         matches!(service.state, ServiceState::Running { .. })
             && (service.restarts.crash_looping
                 || matches!(

@@ -1,0 +1,49 @@
+<header class="page-head stack-head">
+  <div class="page-title">
+    <nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/{% if header.crumb_tail().is_empty() %}{{ header.name }}{% else %}<a href="{{ header.url }}">{{ header.name }}</a>{{ header.crumb_tail() }}{% endif %}</nav>
+    <div class="stack-title">
+      <h1>{{ header.name }}</h1>
+      {{ header.pill }}
+    </div>
+    <p class="stack-meta">
+      <span>rev {{ header.revision }} <code title="{{ header.full_hash }}">{{ header.hash }}</code> · applied <time datetime="{{ header.applied_at }}" title="{{ header.applied_at }}">{{ header.applied_ago }}</time></span>
+      {%- if let Some((id, state, url)) = header.active %}
+      <span><a href="{{ url }}">#{{ id }}</a> running: {{ state }}</span>
+      {%- endif %}
+      {%- if let Some(last) = header.last %}
+      <span>{% if header.active.is_some() %}last {% endif %}<a href="{{ last.url }}">#{{ last.id }}</a> {{ last.state }} · {{ last.source }}
+        {%- if let Some((short, sha, repository)) = last.commit %} <code title="{{ sha }}">{{ short }}</code> <span class="stack-meta-repo">{{ repository }}</span>{% endif %}
+        · <time datetime="{{ last.at }}" title="{{ last.at }}">{{ last.ago }}</time></span>
+      {%- else if header.active.is_none() %}
+      <span>no deployments yet</span>
+      {%- endif %}
+      {%- if let Some(queued) = header.queued %}
+      <span>#{{ queued }} queued</span>
+      {%- endif %}
+    </p>
+    {%- if let Some(flag) = header.flag %}
+    <p class="stack-flag">{{ flag }}</p>
+    {%- endif %}
+  </div>
+  <div class="page-actions">
+    {%- if let Some(redeploy) = header.redeploy %}
+    <form class="inline-form" hx-post="{{ redeploy.url }}" hx-target="#stack-action-result" hx-confirm="{{ redeploy.confirm }}">
+      <button type="submit" class="primary" title="{{ redeploy.title }}">{{ crate::web::Icon::Redeploy }}{{ redeploy.label }}</button>
+    </form>
+    {%- endif %}
+    {%- if header.third_party %}
+    <form class="inline-form" hx-post="{{ header.reresolve_url() }}" hx-target="#reresolve-result">
+      <button type="submit" title="Looks up the third-party tags again and shows what would change before anything is applied">{{ crate::web::Icon::CheckUpdates }}Re-resolve tags</button>
+    </form>
+    {%- endif %}
+  </div>
+  <nav class="tabs" aria-label="Stack sections">
+    <div role="tablist">
+      {%- for tab in header.tabs() %}
+      <a role="tab" href="{{ tab.href }}" aria-selected="{{ tab.current }}"{% if tab.current %} aria-current="page"{% endif %}>{{ tab.label }}</a>
+      {%- endfor %}
+    </div>
+  </nav>
+</header>
+<div id="stack-action-result" aria-live="polite"></div>
+<div id="reresolve-result" aria-live="polite"></div>

@@ -39,6 +39,7 @@
     </div>
   </nav>
   <main class="content">
+    {%- block head %}
     <header class="page-head">
       <div class="page-title">
         <nav class="crumb" aria-label="Breadcrumb">{% block crumb %}~/{{ layout.path() }}{% endblock %}</nav>
@@ -46,6 +47,7 @@
       </div>
       <div class="page-actions">{% block actions %}{% endblock %}</div>
     </header>
+    {%- endblock %}
     {% include "flash.html" %}
     {% block content %}{% endblock %}
   </main>

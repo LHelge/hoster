@@ -21,7 +21,7 @@ use futures_util::stream::BoxStream;
 
 use crate::registry::CredentialError;
 use crate::secrets::SecretValue;
-use crate::stack::{DEFAULT_STOP_TIMEOUT, Name, PinnedImage};
+use crate::stack::{DEFAULT_STOP_TIMEOUT, Name, PinnedImage, Stack};
 use crate::store::DeploymentId;
 
 #[allow(
@@ -471,6 +471,25 @@ impl VolumeMount {
     /// The absolute mount path inside the container.
     pub fn target(&self) -> &str {
         &self.target
+    }
+
+    /// Every named volume mount of `stack`'s services, with the service that mounts it, in
+    /// service order. A mount that does not validate is left out (parsing the stack checked
+    /// them, so only a stack from a newer hoster could have one).
+    pub fn of(stack: &Stack) -> impl Iterator<Item = (&Name, VolumeMount)> + '_ {
+        stack
+            .services
+            .iter()
+            .flat_map(move |(service, definition)| {
+                definition
+                    .volumes
+                    .iter()
+                    .filter_map(move |(volume, target)| {
+                        VolumeMount::named(&stack.name, volume, target)
+                            .ok()
+                            .map(|mount| (service, mount))
+                    })
+            })
     }
 }
 
