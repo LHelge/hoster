@@ -285,3 +285,52 @@ fn version_of_recognises_binaries_inside_the_layout() {
         None
     );
 }
+
+#[test]
+fn uninstall_removes_a_version_but_never_the_current_one() {
+    let fx = Fixture::with(&["0.1.0", "0.2.0"], "0.1.0");
+    fx.layout.uninstall(&v("0.2.0")).unwrap();
+    assert_eq!(fx.layout.versions().unwrap(), [v("0.1.0")]);
+    // Uninstalling what is not installed is a no-op.
+    fx.layout.uninstall(&v("0.3.0")).unwrap();
+    let err = fx.layout.uninstall(&v("0.1.0")).unwrap_err();
+    assert!(
+        matches!(err, InstallationError::RemovingCurrent { .. }),
+        "{err}"
+    );
+    assert_eq!(fx.layout.current().unwrap(), Some(v("0.1.0")));
+}
+
+#[tokio::test]
+async fn probe_reads_another_binarys_version_json() {
+    let fx = Fixture::new();
+    let source = fx.dir.path().join("probe");
+    fs::write(
+        &source,
+        "#!/bin/sh\n[ \"$1 $2\" = 'version --json' ] || exit 3\n\
+         echo '{\"version\":\"0.1.0\",\"target\":\"x86_64-unknown-linux-musl\",\"schema\":5}'\n",
+    )
+    .unwrap();
+    let binary = fx.layout.install(&v("0.1.0"), &source).unwrap();
+    let info = BuildInfo::probe(&binary).await.unwrap();
+    assert_eq!(
+        info,
+        BuildInfo {
+            version: "0.1.0".parse().unwrap(),
+            target: "x86_64-unknown-linux-musl".into(),
+            schema: 5,
+        }
+    );
+
+    // A binary that does not know the subcommand, or prints something else.
+    for script in ["#!/bin/sh\nexit 2\n", "#!/bin/sh\necho hoster 0.0.1\n"] {
+        fs::write(&source, script).unwrap();
+        let binary = fx.layout.install(&v("0.0.1"), &source).unwrap();
+        let err = BuildInfo::probe(&binary).await.unwrap_err();
+        assert!(matches!(err, InstallationError::Probe { .. }), "{err}");
+    }
+    let err = BuildInfo::probe(&fx.dir.path().join("missing"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, InstallationError::Probe { .. }), "{err}");
+}

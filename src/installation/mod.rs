@@ -24,6 +24,7 @@ use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -50,6 +51,16 @@ pub enum InstallationError {
         versions: PathBuf,
         target: PathBuf,
     },
+    #[error("{version} is the current version and cannot be removed")]
+    #[allow(dead_code, reason = "used by hoster update (ADR-0052)")]
+    RemovingCurrent { version: Version },
+    #[allow(dead_code, reason = "used by hoster rollback (ADR-0052)")]
+    #[error(
+        "cannot ask {} for its version (`hoster version --json`): {reason}; \
+         an older binary may not support it, see the manual rollback in docs/install.md",
+        binary.display()
+    )]
+    Probe { binary: PathBuf, reason: String },
 }
 
 type Result<T, E = InstallationError> = std::result::Result<T, E>;
@@ -133,6 +144,49 @@ impl BuildInfo {
             target: env!("BUILD_TARGET_TRIPLE").to_owned(),
             schema: Store::expected_schema_version().into(),
         }
+    }
+}
+
+#[allow(dead_code, reason = "used by hoster rollback (ADR-0052)")]
+impl BuildInfo {
+    /// How long a binary may take to answer `hoster version --json`.
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Attempts at starting a binary that is still busy being written (`ETXTBSY`).
+    const PROBE_ATTEMPTS: u32 = 5;
+
+    /// Asks the binary at `binary` what it is by running `<binary> version --json` (ADR-0052:
+    /// `hoster rollback` reads the previous binary's schema this way).
+    pub async fn probe(binary: &Path) -> Result<Self> {
+        let fail = |reason: String| InstallationError::Probe {
+            binary: binary.to_owned(),
+            reason,
+        };
+        let mut attempt = 1;
+        let output = loop {
+            let run = tokio::process::Command::new(binary)
+                .args(["version", "--json"])
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output();
+            match tokio::time::timeout(Self::PROBE_TIMEOUT, run).await {
+                Err(_) => return Err(fail(format!("no answer in {:?}", Self::PROBE_TIMEOUT))),
+                // A file just written may still be open in a child forked meanwhile.
+                Ok(Err(e))
+                    if e.kind() == io::ErrorKind::ExecutableFileBusy
+                        && attempt < Self::PROBE_ATTEMPTS =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Ok(Err(e)) => return Err(fail(e.to_string())),
+                Ok(Ok(output)) => break output,
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(fail(format!("{}: {}", output.status, stderr.trim())));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| fail(format!("unexpected output: {e}")))
     }
 }
 
@@ -345,6 +399,23 @@ impl Installation {
             Self::sync_dir(&self.versions_dir())?;
         }
         Ok(removed)
+    }
+
+    /// Deletes `version`'s directory; nothing happens when it is not installed. Refuses to
+    /// delete the current version. Undoes an install that is not switched to.
+    #[allow(dead_code, reason = "used by hoster update (ADR-0052)")]
+    pub fn uninstall(&self, version: &Version) -> Result<()> {
+        if self.current()?.as_ref() == Some(version) {
+            return Err(InstallationError::RemovingCurrent {
+                version: version.clone(),
+            });
+        }
+        let dir = self.version_dir(version);
+        match fs::remove_dir_all(&dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            other => other.at(&dir)?,
+        }
+        Self::sync_dir(&self.versions_dir())
     }
 
     /// The installed version `exe` belongs to, when it is a binary inside this layout (through

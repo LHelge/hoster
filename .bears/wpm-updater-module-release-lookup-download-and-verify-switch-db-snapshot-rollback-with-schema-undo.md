@@ -1,10 +1,10 @@
 ---
 id: wpm
 title: "Updater module: release lookup, download and verify, switch, DB snapshot, rollback with schema undo"
-status: open
+status: done
 priority: P1
 created: "2026-11-08T08:25:49.982318440Z"
-updated: "2026-11-08T08:25:49.982318440Z"
+updated: "2026-11-08T09:50:36.709411546Z"
 tags:
   - core
   - ops
@@ -12,6 +12,7 @@ depends_on:
   - y4b
   - vug
 parent: tbf
+attempts: 1
 ---
 
 ## Summary

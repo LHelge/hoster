@@ -22,6 +22,7 @@ mod stack;
 mod stats;
 mod store;
 mod supervisor;
+mod update;
 mod web;
 
 #[cfg(test)]

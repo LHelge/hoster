@@ -44,7 +44,7 @@ similar = "3.2.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["parsing"] }
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "process", "io-util"] }
 tokio-util = "0.7.20"
 toml = "1.2.1"
 tracing = "0.1.44"

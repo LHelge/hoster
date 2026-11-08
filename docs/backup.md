@@ -41,6 +41,11 @@ snapshot is one read transaction and does not block hoster's writes for long. Th
 The snapshot is a single self-contained SQLite file (no `-wal`/`-shm`). It contains the secrets
 encrypted, so it is useless without the key, and the key is useless without it.
 
+Self-update and rollback (ADR-0052) take the same kind of snapshot automatically, into the state
+directory: `hoster-pre-update-<from>-to-<to>-<unix time>.db` before switching to a new version
+and `hoster-pre-rollback-<from>-to-<to>-<unix time>.db` before undoing the schema. hoster does
+not delete them; remove old ones by hand once the new version runs well.
+
 ### Secret-store key
 
 The key that encrypts secrets lives outside the state directory on purpose (ADR-0029): either a
