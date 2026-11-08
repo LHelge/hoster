@@ -1,0 +1,12 @@
+{#- The log panel of a LogView `log`: the streamed lines and a footer that counts them. -#}
+<div class="log-panel">
+    {%- if let Some(url) = log.stream_url %}
+    <pre id="log" class="log" tabindex="0" aria-label="Log of {{ log.container.as_deref().unwrap_or_default() }}" hx-sse:connect="{{ url }}" hx-swap="beforeend" hx-sse:close="end"></pre>
+    <p class="log-foot"><span><span class="log-count"></span> lines</span><span><code>{{ log.container.as_deref().unwrap_or_default() }}</code>{% if let Some(detail) = log.detail %} <span class="log-detail">{{ detail }}</span>{% endif %}</span>
+      <span class="log-key"><span class="log-key-swatch" aria-hidden="true"></span>stderr</span>
+      {%- if log.form.follow %}<span class="log-live log-following"><span class="dot dot-ok" aria-hidden="true"></span>following</span>
+      {%- else %}<span class="log-live">not following</span>{% endif %}<span class="log-ended">stream closed</span></p>
+    {%- else %}
+    <p class="log-empty">Fix the options above to see the log.</p>
+    {%- endif %}
+  </div>

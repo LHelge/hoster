@@ -82,27 +82,94 @@ impl StackContainers {
         self.0.iter().filter(move |c| c.service == service)
     }
 
-    /// The container whose log the logs tab shows: `container` when it is one of the stack's,
-    /// else the one running `service` (the first service when none is named), else that
-    /// service's newest container.
-    pub fn log_of(
+    /// The service and container whose log the logs tab shows, and the choices around them.
+    /// `container`, when it is one of the stack's, wins and picks its service; otherwise
+    /// `service` (the first service when it names none the tab offers) and the container that
+    /// runs it, else that service's newest.
+    pub fn pick_log(
         &self,
         status: &StackStatus,
         service: Option<&str>,
         container: Option<&str>,
-    ) -> Option<&str> {
-        if let Some(found) = container.and_then(|name| self.0.iter().find(|c| c.info.name == name))
-        {
-            return Some(&found.info.name);
+    ) -> LogPick {
+        let mut services: Vec<String> = status.services.iter().map(|s| s.name.clone()).collect();
+        for placed in &self.0 {
+            // A container without a service label gets no chip of its own (it is still
+            // streamed when it is the one asked for).
+            if !placed.service.is_empty() && !services.contains(&placed.service) {
+                services.push(placed.service.clone());
+            }
         }
-        let service = match service {
-            Some(name) => status.services.iter().find(|s| s.name == name),
-            None => status.services.first(),
-        }?;
-        self.current(service)
-            .or_else(|| self.of(&service.name).next())
-            .map(|c| c.info.name.as_str())
+        let named = container.and_then(|name| self.0.iter().find(|c| c.info.name == name));
+        let chosen = match named {
+            Some(placed) => Some(placed.service.clone()),
+            None => service
+                .filter(|name| services.iter().any(|s| s == name))
+                .map(str::to_owned)
+                .or_else(|| services.first().cloned()),
+        };
+        let Some(chosen) = chosen else {
+            return LogPick::default();
+        };
+        let status_of = status.services.iter().find(|s| s.name == chosen);
+        let current = status_of.and_then(|s| self.current(s));
+        let running = match status_of.map(|s| &s.state) {
+            Some(ServiceState::Running { generation, .. }) => Some(*generation),
+            _ => None,
+        };
+        let streamed = named
+            .or(current)
+            .or_else(|| self.of(&chosen).next())
+            .map(|c| c.info.name.clone());
+        let containers = self
+            .of(&chosen)
+            .map(|c| LogCandidate {
+                name: c.info.name.clone(),
+                generation: c.generation,
+                role: match (c.generation, running) {
+                    _ if current.is_some_and(|current| current.info.id == c.info.id) => None,
+                    _ if status_of.is_none() => Some(Role::Orphan),
+                    (Some(theirs), Some(running)) if theirs > running => Some(Role::Next),
+                    (Some(theirs), Some(running)) if theirs < running => Some(Role::Previous),
+                    _ => Some(Role::Other),
+                },
+                state: c.info.state.to_string(),
+            })
+            .collect();
+        LogPick {
+            services,
+            service: Some(chosen),
+            containers,
+            container: streamed,
+            named: named.is_some(),
+        }
     }
+}
+
+/// What the logs tab shows; see [`StackContainers::pick_log`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LogPick {
+    /// The services to choose from: the active revision's, then those only containers have.
+    pub services: Vec<String>,
+    /// The chosen service; `None` when there is none to choose.
+    pub service: Option<String>,
+    /// The chosen service's containers, newest generation first.
+    pub containers: Vec<LogCandidate>,
+    /// The container whose log is shown.
+    pub container: Option<String>,
+    /// Whether the query named that container, rather than it running the service.
+    pub named: bool,
+}
+
+/// A container the logs tab can show the log of.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LogCandidate {
+    pub name: String,
+    pub generation: Option<u32>,
+    /// How it relates to its service; `None` for the one that runs it.
+    pub role: Option<Role>,
+    /// Its state, as podman names it.
+    pub state: String,
 }
 
 /// The services card.
@@ -534,21 +601,46 @@ mod tests {
         let containers = StackContainers::from(vec![
             container("api", 1, ContainerState::Running),
             container("api", 2, ContainerState::Running),
+            container("cache", 1, ContainerState::Exited(Some(0))),
         ]);
+        let pick = containers.pick_log(&status, None, None);
+        assert_eq!(pick.services, ["api", "storage", "cache"]);
+        assert_eq!(pick.service.as_deref(), Some("api"));
+        assert_eq!(pick.container.as_deref(), Some("hoster-notes-api-g2"));
+        assert!(!pick.named);
+        let roles: Vec<_> = pick
+            .containers
+            .iter()
+            .map(|c| (c.name.as_str(), c.role))
+            .collect();
         assert_eq!(
-            containers.log_of(&status, None, None),
-            Some("hoster-notes-api-g2")
+            roles,
+            [
+                ("hoster-notes-api-g2", None),
+                ("hoster-notes-api-g1", Some(Role::Previous))
+            ]
         );
+        let pick = containers.pick_log(&status, Some("api"), Some("hoster-notes-api-g1"));
+        assert_eq!(pick.container.as_deref(), Some("hoster-notes-api-g1"));
+        assert!(pick.named);
+        let pick = containers.pick_log(&status, Some("api"), Some("hoster-other-api-g1"));
         assert_eq!(
-            containers.log_of(&status, Some("api"), Some("hoster-notes-api-g1")),
-            Some("hoster-notes-api-g1")
-        );
-        assert_eq!(
-            containers.log_of(&status, Some("api"), Some("hoster-other-api-g1")),
+            pick.container.as_deref(),
             Some("hoster-notes-api-g2"),
             "a container of another stack is not looked up"
         );
-        assert_eq!(containers.log_of(&status, Some("storage"), None), None);
+        // A named container picks its service; an unknown service falls back to the first.
+        let pick = containers.pick_log(&status, Some("api"), Some("hoster-notes-cache-g1"));
+        assert_eq!(pick.service.as_deref(), Some("cache"));
+        assert_eq!(pick.containers[0].role, Some(Role::Orphan));
+        let pick = containers.pick_log(&status, Some("cache"), None);
+        assert_eq!(pick.container.as_deref(), Some("hoster-notes-cache-g1"));
+        let pick = containers.pick_log(&status, Some("nope"), None);
+        assert_eq!(pick.service.as_deref(), Some("api"));
+        let pick = containers.pick_log(&status, Some("storage"), None);
+        assert_eq!(pick.service.as_deref(), Some("storage"));
+        assert_eq!(pick.container, None);
+        assert!(pick.containers.is_empty());
 
         // Without the containers, the services are still listed.
         status.services[0].state = ServiceState::Running {

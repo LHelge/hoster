@@ -1,10 +1,10 @@
 ---
 id: gn6
 title: "Stack logs tab: service chips, since presets, follow switch"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:20:27.413788209Z"
-updated: "2026-11-08T18:20:27.413788209Z"
+updated: "2026-11-08T21:29:20.839087665Z"
 tags:
   - web
   - ui
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - yz5
 parent: "8bf"
+attempts: 1
 ---
 
 Move container logs (ADR-0044) to `/stacks/{name}/logs`, after `docs/design/StackLogs.dc.html`, keeping today's one-container-at-a-time stream.

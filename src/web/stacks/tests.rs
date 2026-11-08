@@ -731,10 +731,13 @@ async fn the_stack_header_has_the_status_deployments_actions_and_tabs() {
         "{html}"
     );
 
-    // Without containers, the logs tab leads back to the services; an unknown stack is a 404.
+    // Without containers, the logs tab says there is no log yet; an unknown stack is a 404.
     let logs = app.get("/stacks/notes/logs", Some(&browser.cookie)).await;
-    assert_eq!(logs.status(), StatusCode::SEE_OTHER);
-    assert_eq!(logs.headers()[header::LOCATION], "/stacks/notes#services");
+    assert_eq!(logs.status(), StatusCode::OK);
+    let html = body(logs).await;
+    assert!(html.contains("api has no container yet"), "{html}");
+    assert!(!html.contains("hx-sse:connect"), "{html}");
+    assert!(!html.contains(r#"class="log-options""#), "{html}");
     let missing = app.get("/stacks/nope/logs", Some(&browser.cookie)).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
@@ -837,30 +840,67 @@ async fn the_services_table_lists_the_containers_with_ports_and_uptime() {
     assert!(!html.contains("hoster-blog-web-g1"), "{html}");
     assert!(!html.contains("style="), "{html}");
 
-    // The logs tab leads to the running container's log, or to the one asked for.
-    for (url, location) in [
-        ("/stacks/notes/logs", "/containers/hoster-notes-api-g2/logs"),
+    // The logs tab streams the running container's log, or the one asked for, and offers the
+    // draining generation beside it.
+    for (url, streamed) in [
+        ("/stacks/notes/logs", Some("hoster-notes-api-g2")),
         (
             "/stacks/notes/logs?service=api",
-            "/containers/hoster-notes-api-g2/logs",
+            Some("hoster-notes-api-g2"),
         ),
         (
             "/stacks/notes/logs?service=api&container=hoster-notes-api-g1",
-            "/containers/hoster-notes-api-g1/logs",
+            Some("hoster-notes-api-g1"),
         ),
         (
             "/stacks/notes/logs?service=api&container=hoster-blog-web-g1",
-            "/containers/hoster-notes-api-g2/logs",
+            Some("hoster-notes-api-g2"),
         ),
-        (
-            "/stacks/notes/logs?service=storage",
-            "/stacks/notes#services",
-        ),
+        ("/stacks/notes/logs?service=storage", None),
     ] {
         let response = app.get(url, Some(&browser.cookie)).await;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{url}");
-        assert_eq!(response.headers()[header::LOCATION], location, "{url}");
+        assert_eq!(response.status(), StatusCode::OK, "{url}");
+        let html = body(response).await;
+        match streamed {
+            Some(name) => assert!(
+                html.contains(&format!(
+                    r#"hx-sse:connect="/containers/{name}/logs/stream?"#
+                )),
+                "{url}: {html}"
+            ),
+            None => assert!(
+                html.contains("storage has no container yet"),
+                "{url}: {html}"
+            ),
+        }
     }
+    let html = body(
+        app.get(
+            "/stacks/notes/logs?container=hoster-notes-api-g1",
+            Some(&browser.cookie),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        html.contains(r#"<nav class="log-choices log-containers" aria-label="Containers of api">"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"href="/stacks/notes/logs?service=api&#38;container=hoster-notes-api-g1&#38;tail=200&#38;since=&#38;follow=on" aria-current="true">hoster-notes-api-g1 <span class="log-chip-detail">g1 · previous generation · running</span></a>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<a class="log-chip" href="/stacks/notes/logs?service=api&#38;tail=200&#38;since=&#38;follow=on" aria-current="page"><span class="dot dot-s0" aria-hidden="true"></span>api</a>"#),
+        "{html}"
+    );
+    // The footer says what the streamed container is, and keys the stderr tint.
+    assert!(
+        html.contains(r#"<code>hoster-notes-api-g1</code> <span class="log-detail">g1 · previous generation · running</span>"#),
+        "{html}"
+    );
+    assert!(html.contains(r#"<span class="log-key">"#), "{html}");
+    assert!(!html.contains("hoster-blog-web-g1"), "{html}");
 
     // When podman cannot be reached, the services are still shown, and the card says why.
     app.runtime.fail_always(
@@ -881,6 +921,18 @@ async fn the_services_table_lists_the_containers_with_ports_and_uptime() {
         html.contains(r#"<span class="mono service-name">api</span>"#),
         "{html}"
     );
+    // The logs tab still has its service chips, and says why there is no log.
+    let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
+    assert!(html.contains("flash-error"), "{html}");
+    assert!(
+        html.contains("Cannot list the stack&#39;s containers")
+            || html.contains("Cannot list the stack&#x27;s containers")
+            || html.contains("Cannot list the stack's containers"),
+        "{html}"
+    );
+    assert!(html.contains(r#"class="log-chip""#), "{html}");
+    assert!(html.contains("could not be listed"), "{html}");
+    assert!(!html.contains("has no container yet"), "{html}");
 }
 
 #[tokio::test]

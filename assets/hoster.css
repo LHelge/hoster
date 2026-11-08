@@ -596,31 +596,142 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .flash-success { border-left-color: var(--ok); background: var(--ok-tint); }
 .flash-error { border-left-color: var(--fail); background: var(--fail-tint); }
 
-/* ---- Container logs (ADR-0044): one block per line, stderr set apart ------------------------ */
+/* ---- Container logs (ADR-0044): the stack's logs tab and a leftover's log page --------------
+   One bordered box: a mono toolbar of chips and GET options, the log one block per line with
+   stderr set apart, and a footer whose line count is a CSS counter over the streamed lines. */
 
-.log-options { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin: 1rem 0; }
-.log-options input[type="number"] { width: 6rem; }
-.log-options input[type="text"] { width: 16rem; max-width: 100%; }
-.log-legend { margin: 0 0 0.5rem; font-size: 12px; }
-.log-legend span { padding: 0 0.4rem; border-left: 3px solid transparent; }
-.log {
-  min-height: 10rem;
-  max-height: 70vh;
-  overflow: auto;
-  margin: 0;
-  padding: 0.5rem 0;
+.log-view {
+  counter-reset: log-line;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--inset);
-  font: 12.5px/1.55 var(--mono);
+  overflow: hidden;
+}
+.log-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font: 12px/1.4 var(--mono);
+}
+.log-choices, .log-options, .log-since { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.log-options { gap: 8px 16px; }
+.log-label { color: var(--muted); }
+.log-chip, .log-preset {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-2);
+}
+.log-preset { min-height: 28px; padding: 0 8px; }
+.log-chip:hover, .log-preset:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.log-chip[aria-current], .log-preset[aria-current] {
+  border-color: var(--accent);
+  background: var(--hover);
+  box-shadow: inset 0 -2px 0 var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+.log-chip-detail { color: var(--text-2); white-space: nowrap; }
+.log-containers .log-chip { flex-wrap: wrap; gap: 0 6px; min-height: 28px; padding-block: 3px; overflow-wrap: anywhere; }
+.dot.dot-s0 { background: var(--accent); }
+.dot.dot-s1 { background: var(--progress); }
+.dot.dot-s2 { background: var(--p50); }
+.dot.dot-s3 { background: var(--p95); }
+.log-toolbar input { min-height: 30px; padding: 4px 8px; font: 12px/1.4 var(--mono); }
+.log-since input[type="text"] { width: 15rem; max-width: 100%; }
+.log-tail input { width: 5.5rem; }
+.log-options button { min-height: 30px; padding: 0 12px; font: 500 12px/1.2 var(--mono); }
+
+/* The follow switch: a checkbox drawn as a track with a knob, green while on. */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 10px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.switch input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
+.switch-track {
+  position: relative;
+  flex: none;
+  width: 26px;
+  height: 14px;
+  border-radius: 7px;
+  background: var(--input-border);
+  box-shadow: inset 0 0 0 1px var(--muted);
+}
+.switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-2);
+}
+.switch:has(input:checked) { border-color: var(--ok); background: var(--ok-tint); color: var(--ok); }
+.switch input:checked + .switch-track { background: var(--ok); box-shadow: none; }
+.switch input:checked + .switch-track::after { left: 14px; background: var(--inset); }
+.switch:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.log {
+  min-height: 12rem;
+  max-height: 70vh;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 0;
+  font: 12.5px/1.6 var(--mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.log-line { display: block; padding: 0 0.75rem; border-left: 3px solid transparent; }
-.log-line time { color: var(--muted); }
+.log:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.log-line { display: block; padding: 0 12px 0 9px; border-left: 3px solid transparent; counter-increment: log-line; }
+.log-line time { margin-inline-end: 0.6em; color: var(--muted); }
 .log-stderr { border-left-color: var(--fail); background: var(--fail-tint); }
-.log-legend .log-stdout { border-left-color: var(--input-border); }
-.log-notice { display: block; padding: 0.25rem 0.75rem; color: var(--muted); font-style: italic; }
+.log-notice { display: block; padding: 4px 12px; color: var(--muted); font-style: italic; }
+.log-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font: 11px/1.4 var(--mono);
+}
+.log-foot code { color: var(--text-2); font-size: inherit; overflow-wrap: anywhere; }
+.log-detail { white-space: nowrap; }
+.log-key { display: inline-flex; align-items: center; gap: 6px; }
+.log-key-swatch {
+  width: 12px;
+  height: 10px;
+  border-left: 3px solid var(--fail);
+  background: var(--fail-tint);
+}
+.log-count::before { content: counter(log-line); color: var(--text-2); }
+.log-live { display: inline-flex; align-items: center; gap: 6px; }
+.log-following { color: var(--ok); }
+.log-ended { display: none; }
+/* The stream's closing notice is the last thing it sends: it no longer follows. */
+.log-panel:has(.log-notice) .log-live { display: none; }
+.log-panel:has(.log-notice) .log-ended { display: inline; }
+.log-empty { margin: 0; padding: 24px 12px; color: var(--muted); }
+/* At phone width the toolbar's controls are touch targets. */
+@media (max-width: 760px) {
+  .log-chip, .log-preset, .log-containers .log-chip, .switch, .log-toolbar input, .log-options button { min-height: 44px; }
+}
 
 /* ---- Stack pages: forms, problems, the apply preview and its diff --------------------------- */
 

@@ -1,7 +1,8 @@
 {#- One SSE message of a container log, appended to the page's log element. No line breaks:
     every line is its own block-level span. -#}
 {%- for line in lines -%}
-<span class="log-line log-{{ line.stream }}">
+<span class="log-line log-{{ line.stream }}"{% if line.stream == crate::runtime::LogStream::Stderr %} title="stderr"{% endif %}>
+  {%- if line.stream == crate::runtime::LogStream::Stderr %}<span class="visually-hidden">stderr: </span>{% endif -%}
   {%- if let Some(time) = line.time -%}<time datetime="{{ time }}">{{ time }}</time> {% endif -%}
   {{- line.text -}}
 </span>

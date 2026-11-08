@@ -1046,7 +1046,7 @@ async fn ui_preview() {
     let browser = app.sign_in().await;
     let session = Session { app: &app, browser };
 
-    let logs = format!("/containers/{container}/logs?tail=100");
+    let logs = "/stacks/notes/logs?service=api&tail=100&since=&follow=on";
     for (url, label) in [
         ("/", "Dashboard"),
         ("/stacks", "Stacks"),
@@ -1074,6 +1074,7 @@ async fn ui_preview() {
             "/containers/hoster-legacy-web-g3/logs",
             "Container logs: leftover of a removed stack",
         ),
+        ("/stacks/docs/logs", "Logs of docs: no container yet"),
     ] {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("", url), label, &html);
@@ -1088,13 +1089,30 @@ async fn ui_preview() {
     );
 
     // Live parts, with their first content in place.
-    let page = session.get(&logs, StatusCode::OK).await;
+    let page = session.get(logs, StatusCode::OK).await;
     let lines = session
         .stream(&format!("/containers/{container}/logs/stream?tail=100"))
         .await;
     preview.write(
-        &Preview::file_of("", &logs),
-        "Container logs",
+        &Preview::file_of("", logs),
+        "Logs of notes: following, with a draining generation",
+        // Still following: the closing notice has not arrived.
+        &Session::inject(
+            &page,
+            "log",
+            lines.split("<span class=\"log-notice\">").next().unwrap(),
+        ),
+    );
+    // The draining container chosen, the log not followed, from a preset.
+    let page = session
+        .get(
+            "/stacks/notes/logs?service=api&container=hoster-notes-api-g1&tail=100&since=24h",
+            StatusCode::OK,
+        )
+        .await;
+    preview.write(
+        "states/stack-logs-draining.html",
+        "Logs of notes: draining container, not following",
         &Session::inject(&page, "log", &lines),
     );
 

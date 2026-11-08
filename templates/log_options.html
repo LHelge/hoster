@@ -1,0 +1,16 @@
+{#- The log options of a LogView `log`: GET fields, rendered with what was submitted. -#}
+<form class="log-options" method="get" action="{{ log.action }}">
+      {%- for (name, value) in log.keep %}
+      <input type="hidden" name="{{ name }}" value="{{ value }}">
+      {%- endfor %}
+      <span class="log-since" role="group" aria-label="Since">
+        <span class="log-label">since</span>
+        {%- for preset in log.presets %}
+        <a class="log-preset" href="{{ preset.href }}"{% if preset.current %} aria-current="true"{% endif %}>{{ preset.label }}</a>
+        {%- endfor %}
+        <input type="text" name="since" value="{{ log.form.since }}" placeholder="2h or 2026-11-08T12:00:00Z" aria-label="Since: a duration such as 15m, or a UTC time">
+      </span>
+      <label class="log-tail"><span class="log-label">tail</span> <input type="number" name="tail" min="0" value="{{ log.form.tail }}" placeholder="all" aria-describedby="log-tail-hint"> <span id="log-tail-hint" class="visually-hidden">lines; empty for the whole log</span></label>
+      <label class="switch"><input type="checkbox" role="switch" name="follow"{% if log.form.follow %} checked{% endif %}><span class="switch-track" aria-hidden="true"></span>follow</label>
+      <button type="submit">Show</button>
+    </form>

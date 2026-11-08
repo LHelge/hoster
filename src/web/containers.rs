@@ -1,11 +1,17 @@
-//! The container pages (ADR-0044): each managed container's log with *tail N*, *since* and
-//! *follow*, streamed into the page over SSE with HTMX's SSE extension. The containers
-//! themselves are listed on their stack's overview (ADR-0054), which reads them through
+//! The container logs (ADR-0044): each managed container's log with *tail N*, *since* and
+//! *follow*, streamed into the page over SSE with HTMX's SSE extension. The log is shown on its
+//! stack's logs tab (`/stacks/{name}/logs`, epic 8bf, ADR-0054), which picks the container and
+//! renders the toolbar and log panel this module provides as [`LogView`]. The containers
+//! themselves are listed on their stack's overview, which reads them through
 //! [`Containers::of_stack`]; `GET /containers`, the list they had before, redirects to
 //! `/stacks`, which lists the containers of stacks no longer in the store.
 //!
-//! `GET /containers/{name}/logs` renders the page; its log element connects to
-//! `GET /containers/{name}/logs/stream` with the same query. The stream sends the log in batches
+//! `GET /containers/{name}/logs` redirects to the logs tab of the container's stack, with the
+//! same options. A container whose stack hoster no longer has (or that has no stack label) has
+//! no tab, so its log is shown on that URL itself, linked from the leftovers on `/stacks`.
+//!
+//! A log panel connects to `GET /containers/{name}/logs/stream` with the options of the page.
+//! The stream sends the log in batches
 //! of rendered lines (unnamed SSE messages, appended to the element), then a closing notice and
 //! a named `end` event that tells the extension not to reconnect. Each batch carries the time of
 //! its last line as the event ID, so a reconnect (the extension reconnects after a dropped
@@ -24,7 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use askama::Template;
 use axum::Extension;
-use axum::extract::{Path, Query, RawQuery, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -157,43 +163,47 @@ impl Containers {
         Redirect::to("/stacks")
     }
 
-    /// `GET /containers/{name}/logs`: the log page, whose log element streams from
-    /// `…/logs/stream` with the same query.
+    /// `GET /containers/{name}/logs`: the logs tab of the container's stack, showing it with
+    /// the same options; for a leftover of a removed stack, its log page.
     pub async fn log_page(
         Extension(containers): Extension<Containers>,
         Extension(stacks): Extension<Stacks>,
         shell: Shell,
         Path(name): Path<String>,
         Query(query): Query<LogQuery>,
-        RawQuery(raw): RawQuery,
     ) -> Response {
         let container = match containers.find(&name).await {
             Ok(container) => container,
             Err(err) => return err.into_response(),
         };
-        let mut layout = shell.layout(Section::Stacks);
-        let stream_url = match LogOptions::try_from(&query) {
-            Ok(_) => Some(format!(
-                "/containers/{}/logs/stream?{}",
-                container.name,
-                raw.unwrap_or_default()
-            )),
-            Err(message) => {
-                layout = layout.with_flash(Flash {
-                    kind: FlashKind::Error,
-                    message,
-                });
-                None
-            }
-        };
         let container = ContainerRow::from(&container);
-        let stack_url = container.stack_url(&stacks).await;
+        if let Some(url) = container.stack_url(&stacks).await {
+            let mut pairs = Vec::new();
+            if !container.service.is_empty() {
+                pairs.push(("service", container.service.as_str()));
+            }
+            pairs.push(("container", container.name.as_str()));
+            pairs.extend(query.pairs());
+            return Redirect::to(&format!("{url}/logs?{}", LogQuery::encode(&pairs)))
+                .into_response();
+        }
+        let log = LogView::new(
+            Some(&container.name),
+            format!("/containers/{}/logs", container.name),
+            Vec::new(),
+            &query,
+        );
+        let mut layout = shell.layout(Section::Stacks);
+        if let Some(message) = log.error.clone() {
+            layout = layout.with_flash(Flash {
+                kind: FlashKind::Error,
+                message,
+            });
+        }
         Page(LogPage {
             layout,
             container,
-            stack_url,
-            form: LogForm::from(&query),
-            stream_url,
+            log,
         })
         .into_response()
     }
@@ -241,7 +251,8 @@ impl Containers {
     }
 }
 
-/// The log query of both log routes. Every field is text, as an HTML form sends it.
+/// The log options of the log routes and the logs tab. Every field is text, as an HTML form
+/// sends it.
 #[derive(Debug, Default, Deserialize)]
 pub struct LogQuery {
     /// How many lines to start with: a number, or empty for the whole log.
@@ -264,6 +275,25 @@ impl LogQuery {
 
     fn follow(&self) -> bool {
         self.is_first_visit() || self.follow.is_some()
+    }
+
+    /// The options that were given, as query pairs.
+    fn pairs(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("tail", self.tail.as_deref()),
+            ("since", self.since.as_deref()),
+            ("follow", self.follow.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| Some((key, value?)))
+        .collect()
+    }
+
+    /// `pairs` as a query string.
+    fn encode(pairs: &[(&str, &str)]) -> String {
+        form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(pairs)
+            .finish()
     }
 }
 
@@ -574,10 +604,10 @@ impl ContainerRow {
 
 /// The log form, filled in with the query it was submitted with.
 #[derive(Debug)]
-struct LogForm {
-    tail: String,
-    since: String,
-    follow: bool,
+pub struct LogForm {
+    pub tail: String,
+    pub since: String,
+    pub follow: bool,
 }
 
 impl From<&LogQuery> for LogForm {
@@ -593,17 +623,116 @@ impl From<&LogQuery> for LogForm {
     }
 }
 
-/// `GET /containers/{name}/logs`.
+impl LogForm {
+    /// `keep` and the form's options with `since`, as a query string.
+    fn query(&self, keep: &[(&str, &str)], since: &str) -> String {
+        let mut pairs = keep.to_vec();
+        pairs.extend([("tail", self.tail.as_str()), ("since", since)]);
+        if self.follow {
+            pairs.push(("follow", "on"));
+        }
+        LogQuery::encode(&pairs)
+    }
+}
+
+/// A *since* preset of the log toolbar.
+#[derive(Debug)]
+pub struct SinceLink {
+    pub label: &'static str,
+    pub href: String,
+    pub current: bool,
+}
+
+/// The log toolbar's options form and the log panel of one container: what `log_options.html`
+/// and `log_panel.html` render.
+#[derive(Debug)]
+pub struct LogView {
+    /// The container whose log it is; `None` when there is none to show.
+    pub container: Option<String>,
+    /// The page the form submits to.
+    pub action: String,
+    /// The query pairs of that page besides the options, kept as hidden fields.
+    pub keep: Vec<(&'static str, String)>,
+    pub form: LogForm,
+    pub presets: Vec<SinceLink>,
+    /// The stream to connect to; `None` when the options are invalid.
+    pub stream_url: Option<String>,
+    /// Why the options are invalid.
+    pub error: Option<String>,
+    /// What the container is beyond its name (generation, role, state), for the log's footer;
+    /// `None` when the page says it elsewhere.
+    pub detail: Option<String>,
+}
+
+impl LogView {
+    /// The *since* presets, as (label, value); "all" is no start.
+    const PRESETS: [(&str, &str); 5] = [
+        ("15m", "15m"),
+        ("1h", "1h"),
+        ("6h", "6h"),
+        ("24h", "24h"),
+        ("all", ""),
+    ];
+
+    /// The log of `container` on the page at `action`, whose own query is `keep`, with the
+    /// options of `query`.
+    pub fn new(
+        container: Option<&str>,
+        action: String,
+        keep: Vec<(&'static str, String)>,
+        query: &LogQuery,
+    ) -> Self {
+        let form = LogForm::from(query);
+        let (stream_url, error) = match LogOptions::try_from(query) {
+            Ok(_) => (
+                container.map(|container| {
+                    format!(
+                        "/containers/{container}/logs/stream?{}",
+                        form.query(&[], &form.since)
+                    )
+                }),
+                None,
+            ),
+            Err(message) => (None, Some(message)),
+        };
+        let pairs: Vec<(&str, &str)> = keep.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let presets = Self::PRESETS
+            .into_iter()
+            .map(|(label, value)| SinceLink {
+                label,
+                href: format!("{action}?{}", form.query(&pairs, value)),
+                current: form.since.trim() == value,
+            })
+            .collect();
+        Self {
+            container: container.map(str::to_owned),
+            action,
+            keep,
+            form,
+            presets,
+            stream_url,
+            error,
+            detail: None,
+        }
+    }
+
+    /// The page at `action` with `keep` instead of this page's own query, and the same options.
+    pub fn link(&self, keep: &[(&str, &str)]) -> String {
+        format!(
+            "{}?{}",
+            self.action,
+            self.form.query(keep, &self.form.since)
+        )
+    }
+}
+
+/// `GET /containers/{name}/logs` of a container whose stack is gone.
 #[derive(Template)]
 #[template(path = "container_logs.html")]
 struct LogPage {
     layout: Layout,
     container: ContainerRow,
-    /// The page of the container's stack; `None` for a leftover of a removed stack.
-    stack_url: Option<String>,
-    form: LogForm,
-    /// The stream to connect to; `None` when the query is invalid.
-    stream_url: Option<String>,
+    log: LogView,
 }
 
 #[cfg(test)]
