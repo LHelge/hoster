@@ -533,7 +533,6 @@ impl CertMap {
     }
 
     /// The hosts that currently have a certificate, sorted.
-    #[allow(dead_code, reason = "for the certificates page of the web UI")]
     pub fn hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = self.snapshot.load().keys().cloned().collect();
         hosts.sort();

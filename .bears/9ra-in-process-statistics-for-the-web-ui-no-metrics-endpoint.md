@@ -1,10 +1,10 @@
 ---
 id: "9ra"
 title: In-process statistics for the web UI (no metrics endpoint)
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-07T14:45:17.364354719Z"
-updated: "2026-11-08T02:14:55.544022465Z"
+updated: "2026-11-08T02:32:57.232678280Z"
 tags:
   - observability
 depends_on:

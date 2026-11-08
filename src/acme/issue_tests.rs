@@ -537,6 +537,7 @@ async fn pebble_issues_over_http01_and_the_certificate_is_served() {
         routes: Arc::new(ArcSwap::from_pointee(RouteTable::default())),
         certs: certs.clone(),
         challenges: challenges.clone(),
+        traffic: Default::default(),
     };
     let (shutdown, rx) = watch::channel(None);
     let mut running = Proxy::new(&proxy_config, state).spawn(rx).unwrap();

@@ -18,6 +18,7 @@ mod routing;
 mod runtime;
 mod secrets;
 mod stack;
+mod stats;
 mod store;
 mod supervisor;
 mod web;

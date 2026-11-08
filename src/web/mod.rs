@@ -1,4 +1,5 @@
-//! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), container logs
+//! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), the dashboard
+//! with hoster's in-process statistics (ADR-0045, read through [`Stats`]), container logs
 //! (ADR-0044, see `containers.rs`), the stack pages with their secrets (ADR-0027, ADR-0029,
 //! ADR-0049, see `stacks.rs`), Settings → Registries (ADR-0025, see `settings.rs`), and the
 //! deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`).
@@ -39,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Config;
 use crate::orchestrator::Orchestrator;
 use crate::runtime::ContainerRuntime;
+use crate::stats::Stats;
 use crate::store::Store;
 
 use self::assets::Assets;
@@ -116,20 +118,22 @@ pub struct WebApp {
     stacks: Stacks,
     registries: Registries,
     webhook: Webhook,
+    stats: Stats,
 }
 
 impl WebApp {
     /// The app for `config`, with sessions in `store`, containers from `runtime`, stacks managed
     /// through `orchestrator`, registry credentials in `registry`, and the GitHub OAuth App's
-    /// credentials read from their files or systemd credentials. Fails when they are missing.
-    /// Deploy webhook tokens are verified against GitHub's key set for the configured audience
-    /// (ADR-0047).
+    /// credentials read from their files or systemd credentials, and the dashboard's `stats`.
+    /// Fails when the credentials are missing. Deploy webhook tokens are verified against
+    /// GitHub's key set for the configured audience (ADR-0047).
     pub fn from_config<R: ContainerRuntime>(
         config: &Config,
         store: Store,
         runtime: Arc<R>,
         orchestrator: Arc<Orchestrator<R>>,
         registry: RegistryAccess,
+        stats: Stats,
     ) -> anyhow::Result<Self> {
         let verifier = OidcVerifier::github(config.webhook_audience())
             .context("setting up the deploy webhook")?;
@@ -142,6 +146,7 @@ impl WebApp {
             Arc::new(registry),
             verifier,
             store,
+            stats,
         ))
     }
 
@@ -152,8 +157,10 @@ impl WebApp {
         registries: Arc<dyn RegistryControl>,
         verifier: OidcVerifier,
         store: Store,
+        stats: Stats,
     ) -> Self {
         WebApp {
+            stats,
             auth: Arc::new(auth),
             containers: Containers::from(containers),
             webhook: Webhook::new(verifier, store, Arc::clone(&stacks)),
@@ -166,6 +173,7 @@ impl WebApp {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/", get(Dashboard::show))
+            .layer(Extension(self.stats.clone()))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))
             .route(

@@ -11,7 +11,8 @@
 //! the upstream [`PeerOptions`].
 //!
 //! Every request, answered or failed, ends in the `logging` hook, which writes one
-//! [`AccessRecord`] line to the access log (target [`ACCESS_TARGET`]).
+//! [`AccessRecord`] line to the access log (target [`ACCESS_TARGET`]) and counts the request in
+//! the [`Traffic`] statistics of the web UI (ADR-0045).
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -32,6 +33,7 @@ use crate::config::Timeouts;
 use crate::logging::ACCESS_TARGET;
 use crate::routing::{InflightGuard, Owner, RouteEntry, RouteTable, Target};
 use crate::stack::RouteTimeouts;
+use crate::stats::{RequestOutcome, TrackedRequest, Traffic};
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
 const X_FORWARDED_HOST: &str = "x-forwarded-host";
@@ -43,12 +45,19 @@ pub struct RoutingProxy {
     routes: Arc<ArcSwap<RouteTable>>,
     /// Upstream timeouts for routes that set none of their own.
     defaults: Timeouts,
+    /// The per-route request statistics the web UI shows.
+    traffic: Traffic,
 }
 
 impl RoutingProxy {
-    /// A proxy reading `routes`, which the orchestrator replaces as deploys happen.
-    pub fn new(routes: Arc<ArcSwap<RouteTable>>, defaults: Timeouts) -> Self {
-        Self { routes, defaults }
+    /// A proxy reading `routes`, which the orchestrator replaces as deploys happen, and counting
+    /// requests in `traffic`.
+    pub fn new(routes: Arc<ArcSwap<RouteTable>>, defaults: Timeouts, traffic: Traffic) -> Self {
+        Self {
+            routes,
+            defaults,
+            traffic,
+        }
     }
 }
 
@@ -63,6 +72,8 @@ pub struct RequestCtx {
     route: Option<RouteEntry>,
     /// Counts the request against its loopback upstream until it is done, for draining.
     inflight: Option<InflightGuard>,
+    /// Counts the request in its route's statistics; set once the route is known.
+    stats: Option<TrackedRequest>,
 }
 
 impl Default for RequestCtx {
@@ -72,6 +83,7 @@ impl Default for RequestCtx {
             host: String::new(),
             route: None,
             inflight: None,
+            stats: None,
         }
     }
 }
@@ -94,12 +106,17 @@ impl ProxyHttp for RoutingProxy {
             Err(()) => false,
         };
         if !sni_allows {
+            ctx.stats = Some(self.traffic.unrouted());
             ErrorPage::from(StatusCode::MISDIRECTED_REQUEST)
                 .send(session)
                 .await;
             return Ok(true);
         }
         ctx.route = table.lookup(&ctx.host, req.uri.path()).cloned();
+        ctx.stats = Some(match (&ctx.route, table.known_host(&ctx.host)) {
+            (Some(route), Some(host)) => self.traffic.route(host, route),
+            _ => self.traffic.unrouted(),
+        });
         let page = match ctx.route.as_ref().map(|route| &route.target) {
             None => ErrorPage::from(StatusCode::NOT_FOUND),
             Some(Target::Unavailable { retry_after }) => ErrorPage::unavailable(*retry_after),
@@ -206,9 +223,16 @@ impl ProxyHttp for RoutingProxy {
         }
     }
 
-    /// One access log line per request, whether it was proxied, answered by hoster or failed.
+    /// One access log line per request, whether it was proxied, answered by hoster or failed,
+    /// and the request counted in its route's statistics (requests that failed before routing
+    /// count as unrouted).
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
-        AccessRecord::new(session, &ctx.host, ctx.route.as_ref(), ctx.started, e).emit();
+        let record = AccessRecord::new(session, &ctx.host, ctx.route.as_ref(), ctx.started, e);
+        record.emit();
+        let outcome = RequestOutcome::from(&record);
+        ctx.stats
+            .get_or_insert_with(|| self.traffic.unrouted())
+            .finish(outcome);
     }
 }
 
@@ -296,6 +320,20 @@ impl<'a> AccessRecord<'a> {
             error,
             "request"
         );
+    }
+}
+
+impl From<&AccessRecord<'_>> for RequestOutcome {
+    /// The outcome the statistics count: an error counts against the upstream when the
+    /// upstream caused it (connect, read or write failures, timeouts).
+    fn from(record: &AccessRecord<'_>) -> Self {
+        RequestOutcome {
+            status: record.status,
+            latency: record.duration,
+            upstream_error: record
+                .error
+                .is_some_and(|e| e.esource() == &ErrorSource::Upstream),
+        }
     }
 }
 

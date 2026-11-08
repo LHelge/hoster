@@ -46,6 +46,7 @@ use self::router::RoutingProxy;
 use crate::acme::{CertMap, ChallengeMap};
 use crate::config::ProxyConfig;
 use crate::routing::RouteTable;
+use crate::stats::Traffic;
 
 /// Why the proxy did not come up.
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +102,8 @@ pub struct ProxyState {
     pub certs: CertMap,
     /// The HTTP-01 challenges the `:80` listener answers.
     pub challenges: ChallengeMap,
+    /// The per-route request statistics the `:443` service counts (ADR-0045).
+    pub traffic: Traffic,
 }
 
 /// A configured, not yet running Pingora server.
@@ -126,11 +129,12 @@ impl Proxy {
             routes,
             certs,
             challenges,
+            traffic,
         } = state;
 
         let mut https = http_proxy_service_with_name(
             &server.configuration,
-            RoutingProxy::new(Arc::clone(&routes), config.timeouts),
+            RoutingProxy::new(Arc::clone(&routes), config.timeouts, traffic),
             "hoster https",
         );
         let mut tls = TlsSettings::with_callbacks(Box::new(SniCapture))
@@ -326,6 +330,7 @@ mod thread_tests {
             routes: Arc::default(),
             certs,
             challenges: ChallengeMap::default(),
+            traffic: Traffic::default(),
         };
         (state, dir)
     }

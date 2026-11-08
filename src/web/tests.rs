@@ -74,6 +74,107 @@ async fn dashboard_renders_the_layout() {
     )));
 }
 
+/// The in-process statistics of ADR-0045 on the dashboard, read through the `Stats` handle.
+#[tokio::test]
+async fn dashboard_shows_the_statistics() {
+    use std::time::{Duration, SystemTime};
+
+    use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
+    use crate::stack::RouteTimeouts;
+    use crate::stats::{CertExpiry, RequestOutcome, ServiceRestarts};
+    use crate::store::{DeploymentOutcome, DeploymentState};
+
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let html = body(app.get("/", Some(&browser.cookie)).await).await;
+    assert!(html.contains("No requests yet."), "{html}");
+    assert!(html.contains("No deployments yet."), "{html}");
+
+    let route = RouteEntry {
+        owner: Owner::Route(RouteOwner {
+            stack: "blog".parse().unwrap(),
+            service: "web".parse().unwrap(),
+        }),
+        prefix: "/".parse().unwrap(),
+        prefix_str: "/".into(),
+        strip_prefix: false,
+        target: Target::Unavailable {
+            retry_after: Duration::from_secs(1),
+        },
+        timeouts: RouteTimeouts::default(),
+    };
+    for status in [200, 200, 502] {
+        app.traffic
+            .route("blog.example.com", &route)
+            .finish(RequestOutcome {
+                status: Some(status),
+                latency: Duration::from_millis(20),
+                upstream_error: status == 502,
+            });
+    }
+    let _in_flight = app.traffic.route("blog.example.com", &route);
+    app.stats.deployments.lock().unwrap().extend([
+        DeploymentOutcome {
+            stack: "blog".into(),
+            state: DeploymentState::Failed,
+            count: 2,
+            mean: Duration::from_secs(5),
+            max: Duration::from_secs(9),
+        },
+        DeploymentOutcome {
+            stack: "blog".into(),
+            state: DeploymentState::Live,
+            count: 7,
+            mean: Duration::from_secs(12),
+            max: Duration::from_secs(40),
+        },
+    ]);
+    app.stats.services.lock().unwrap().push(ServiceRestarts {
+        stack: "blog".into(),
+        service: "worker".into(),
+        generation: 4,
+        restarts: 6,
+        crash_looping: true,
+    });
+    app.stats.certificates.lock().unwrap().push(CertExpiry {
+        host: "blog.example.com".into(),
+        not_after: SystemTime::now() + Duration::from_secs(3 * 86_400 + 60),
+    });
+
+    let html = body(app.get("/", Some(&browser.cookie)).await).await;
+    let compact: String = html.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        compact.contains(
+            "<td>blog.example.com/</td> <td>web (blog)</td><td>0</td><td>0</td><td>2</td>\
+             <td>0</td><td>0</td><td>1</td> <td><span class=\"badge badge-error\">1</span></td> \
+             <td>1</td>"
+        ),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("<td>7</td> <td><span class=\"badge badge-error\">2</span></td>"),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("<td>12.0 s</td> <td>40.0 s</td>"),
+        "{compact}"
+    );
+    assert!(compact.contains("worker <span class=\"muted\">(blog)</span> <span class=\"badge badge-error\">crash looping</span>"), "{compact}");
+    assert!(
+        compact.contains("<span class=\"badge badge-error\">3 d</span>"),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("latency over the last 5 min."),
+        "{compact}"
+    );
+    assert!(
+        compact.contains("Finished deployments of the last 30 d;"),
+        "{compact}"
+    );
+    assert!(!compact.contains("Cannot show"), "{compact}");
+}
+
 #[tokio::test]
 async fn htmx_is_served_with_a_long_cache_and_javascript_type() {
     let url = Assets::get().htmx.url();

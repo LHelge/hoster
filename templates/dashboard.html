@@ -2,5 +2,99 @@
 {% block title %}Dashboard{% endblock %}
 {% block content %}
 <h1>Dashboard</h1>
-<p>No stacks yet. Stacks, deployments, certificates and logs will appear here.</p>
+{%- for problem in stats.problems %}
+<p class="flash flash-error">Cannot show {{ problem }}</p>
+{%- endfor %}
+
+<h2>Traffic</h2>
+<p class="muted">Requests since hoster started; latency over the last {{ stats.latency_window() }}.</p>
+{%- if stats.routes.is_empty() && stats.unrouted.requests == 0 %}
+<p>No requests yet.</p>
+{%- else %}
+<table class="list traffic">
+  <thead>
+    <tr><th scope="col">Route</th><th scope="col">Service</th>
+      {%- for class in stats.classes() %}<th scope="col">{{ class }}</th>{% endfor %}
+      <th scope="col">Upstream errors</th><th scope="col">In flight</th><th scope="col">p50</th><th scope="col">p95</th></tr>
+  </thead>
+  <tbody>
+    {%- for row in stats.traffic() %}
+    <tr>
+      <td>{% if row.owner.is_empty() %}<span class="muted">{{ row.route }}</span>{% else %}{{ row.route }}{% endif %}</td>
+      <td>{{ row.owner }}</td>
+      {%- for (_, count) in row.statuses %}<td>{{ count }}</td>{% endfor %}
+      <td>{% if row.upstream_errors > 0 %}<span class="badge badge-error">{{ row.upstream_errors }}</span>{% else %}0{% endif %}</td>
+      <td>{{ row.inflight }}</td>
+      <td>{{ row.p50 }}</td>
+      <td>{{ row.p95 }}</td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+
+<h2>Deployments</h2>
+<p class="muted">Finished deployments of the last {{ stats.deploy_history() }}; durations of those that went live.</p>
+{%- if stats.deployments.is_empty() %}
+<p>No deployments yet.</p>
+{%- else %}
+<table class="list deployments">
+  <thead>
+    <tr><th scope="col">Stack</th><th scope="col">Live</th><th scope="col">Failed</th><th scope="col">Skipped</th><th scope="col">Mean</th><th scope="col">Longest</th></tr>
+  </thead>
+  <tbody>
+    {%- for row in stats.deployments %}
+    <tr>
+      <td><a href="/stacks/{{ row.stack }}">{{ row.stack }}</a></td>
+      <td>{{ row.succeeded }}</td>
+      <td>{% if row.failed > 0 %}<span class="badge badge-error">{{ row.failed }}</span>{% else %}0{% endif %}</td>
+      <td>{{ row.skipped }}</td>
+      <td>{{ row.mean }}</td>
+      <td>{{ row.max }}</td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+
+<h2>Restarts</h2>
+{%- if stats.services.is_empty() %}
+<p>No services running.</p>
+{%- else %}
+<table class="list restarts">
+  <thead>
+    <tr><th scope="col">Service</th><th scope="col">Generation</th><th scope="col">Restarts</th></tr>
+  </thead>
+  <tbody>
+    {%- for service in stats.services %}
+    <tr>
+      <td>{{ service.service }} <span class="muted">({{ service.stack }})</span>
+        {%- if service.crash_looping %} <span class="badge badge-error">crash looping</span>{% endif %}</td>
+      <td>{{ service.generation }}</td>
+      <td>{{ service.restarts }}</td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
+
+<h2>Certificates</h2>
+{%- if stats.certificates.is_empty() %}
+<p>No certificates yet.</p>
+{%- else %}
+<table class="list certificates">
+  <thead>
+    <tr><th scope="col">Host</th><th scope="col">Expires</th><th scope="col">Left</th></tr>
+  </thead>
+  <tbody>
+    {%- for cert in stats.certificates %}
+    <tr>
+      <td>{{ cert.host }}</td>
+      <td>{{ cert.not_after }}</td>
+      <td>{% if cert.expiring %}<span class="badge badge-error">{{ cert.left }}</span>{% else %}{{ cert.left }}{% endif %}</td>
+    </tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endif %}
 {% endblock %}

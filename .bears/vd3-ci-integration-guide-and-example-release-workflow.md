@@ -1,16 +1,17 @@
 ---
 id: vd3
 title: CI integration guide and example release workflow
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-07T14:45:17.349199545Z"
-updated: "2026-11-07T19:44:25.692078591Z"
+updated: "2026-11-08T02:31:21.857737539Z"
 tags:
   - docs
 depends_on:
   - xhn
   - j7u
 parent: hxh
+attempts: 1
 ---
 
 ## Summary

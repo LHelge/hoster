@@ -41,6 +41,7 @@ use crate::stack::{
     DEFAULT_DRAIN_TIMEOUT, DEFAULT_STOP_TIMEOUT, Name, Route, RouteTimeouts, Service, Stack,
     UpdateStrategy,
 };
+use crate::stats::{StatusClass, Traffic};
 use crate::web::{Listen, TestApp, WebServer};
 
 const CHUNK: usize = 64 * 1024;
@@ -200,6 +201,8 @@ struct Harness {
     web: Arc<Upstream>,
     web_port: u16,
     routes: Arc<ArcSwap<RouteTable>>,
+    /// The request statistics the proxy counts.
+    traffic: Traffic,
     desired: DesiredState,
     reserved: Reserved,
     state: AppState,
@@ -439,10 +442,12 @@ impl Harness {
 
         let challenges = ChallengeMap::default();
         let routes = Arc::new(ArcSwap::from_pointee(table));
+        let traffic = Traffic::default();
         let proxy_state = ProxyState {
             routes: Arc::clone(&routes),
             certs: certs.clone(),
             challenges: challenges.clone(),
+            traffic: traffic.clone(),
         };
         let (shutdown, rx) = watch::channel(None);
         // A port free a moment ago can be taken by another test's outgoing connection before
@@ -481,6 +486,7 @@ impl Harness {
             web,
             web_port,
             routes,
+            traffic,
             desired,
             reserved,
             state,
@@ -978,6 +984,52 @@ async fn connect_failure_is_a_502_page() {
     let reply = h.get("down.example.com", "/").await;
     assert_eq!(reply.status, 502);
     assert_eq!(reply.text(), "502 Bad Gateway\n");
+}
+
+/// The statistics of the web UI (ADR-0045): each request counted against its route by status
+/// class, upstream failures counted as such, and unmatched requests as unrouted.
+#[tokio::test]
+async fn requests_are_counted_in_the_route_statistics() {
+    let h = Harness::start().await;
+    assert_eq!(h.get("app.example.com", "/hello").await.status, 200);
+    assert_eq!(h.get("APP.example.com", "/again").await.status, 200);
+    assert_eq!(h.get("app.example.com", "/api/x").await.status, 200);
+    assert_eq!(h.get("down.example.com", "/").await.status, 502);
+    assert_eq!(h.get("api.example.com", "/other").await.status, 404);
+
+    // The `logging` hook runs after the response went out.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let snapshot = loop {
+        let snapshot = h.traffic.snapshot();
+        let finished: u64 = snapshot
+            .routes
+            .iter()
+            .map(|r| r.counts.statuses.total())
+            .sum::<u64>()
+            + snapshot.unrouted.statuses.total();
+        if finished >= 5 || Instant::now() > deadline {
+            break snapshot;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let route = |host: &str, prefix: &str| {
+        snapshot
+            .routes
+            .iter()
+            .find(|r| r.host == host && r.prefix == prefix)
+            .unwrap_or_else(|| panic!("{host}{prefix} in {snapshot:?}"))
+            .counts
+    };
+    let root = route("app.example.com", "/");
+    assert_eq!(root.statuses.get(StatusClass::Success), 2);
+    assert_eq!(root.latency.samples, 2);
+    assert!(root.latency.p95.is_some());
+    assert_eq!(root.inflight, 0);
+    assert_eq!(route("app.example.com", "/api").statuses.total(), 1);
+    let down = route("down.example.com", "/");
+    assert_eq!(down.statuses.get(StatusClass::ServerError), 1);
+    assert_eq!(down.upstream_errors, 1);
+    assert_eq!(snapshot.unrouted.statuses.get(StatusClass::ClientError), 1);
 }
 
 #[tokio::test]

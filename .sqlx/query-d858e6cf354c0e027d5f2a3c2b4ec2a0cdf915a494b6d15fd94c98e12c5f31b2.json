@@ -1,0 +1,59 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT d.stack AS \"stack!\", d.state AS \"state!: DeploymentState\",\n                      COUNT(*) AS \"count!: i64\",\n                      AVG(d.finished_at - d.created_at) AS \"mean_ms!: f64\",\n                      MAX(d.finished_at - d.created_at) AS \"max_ms!: i64\"\n               FROM deployments d JOIN stacks s ON s.name = d.stack\n               WHERE d.finished_at IS NOT NULL AND d.finished_at >= ? AND s.removed_at IS NULL\n               GROUP BY d.stack, d.state\n               ORDER BY d.stack, d.state",
+  "describe": {
+    "columns": [
+      {
+        "name": "stack!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "state!: DeploymentState",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deployments",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "count!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "mean_ms!: f64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "max_ms!: i64",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "d858e6cf354c0e027d5f2a3c2b4ec2a0cdf915a494b6d15fd94c98e12c5f31b2"
+}

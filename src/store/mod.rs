@@ -39,10 +39,10 @@ use thiserror::Error;
     reason = "part of the Store API for its future callers"
 )]
 pub use types::{
-    ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState,
-    DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, Provenance, RevisionId,
-    SealedSecret, SecretEntry, ServicePointer, SessionRecord, Stack, StackRevision, Timestamp,
-    WebhookRejection,
+    ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentOutcome, DeploymentSource,
+    DeploymentState, DigestSet, NewDeployment, PortAllocation, PortMap, PortRequest, Provenance,
+    RevisionId, SealedSecret, SecretEntry, ServicePointer, SessionRecord, Stack, StackRevision,
+    Timestamp, WebhookRejection,
 };
 
 /// The embedded migrations from `migrations/`.
@@ -876,6 +876,35 @@ impl Store {
         .fetch_all(&mut *conn)
         .await?;
         Self::load_deployments(&mut conn, ids).await
+    }
+
+    /// How the deployments of every stack (not removed) that finished at or after `since` went:
+    /// one entry per stack and terminal state, sorted by stack.
+    pub async fn deployment_outcomes(&self, since: Timestamp) -> Result<Vec<DeploymentOutcome>> {
+        let rows = sqlx::query!(
+            r#"SELECT d.stack AS "stack!", d.state AS "state!: DeploymentState",
+                      COUNT(*) AS "count!: i64",
+                      AVG(d.finished_at - d.created_at) AS "mean_ms!: f64",
+                      MAX(d.finished_at - d.created_at) AS "max_ms!: i64"
+               FROM deployments d JOIN stacks s ON s.name = d.stack
+               WHERE d.finished_at IS NOT NULL AND d.finished_at >= ? AND s.removed_at IS NULL
+               GROUP BY d.stack, d.state
+               ORDER BY d.stack, d.state"#,
+            since,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let millis = |ms: f64| Duration::from_secs_f64(ms.max(0.0) / 1000.0);
+        Ok(rows
+            .into_iter()
+            .map(|row| DeploymentOutcome {
+                stack: row.stack,
+                state: row.state,
+                count: u32::try_from(row.count).unwrap_or(u32::MAX),
+                mean: millis(row.mean_ms),
+                max: millis(row.max_ms as f64),
+            })
+            .collect())
     }
 
     /// Deployments that have not reached a terminal state, oldest first: what crash recovery

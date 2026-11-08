@@ -30,6 +30,7 @@ use crate::registry::{RegistryClient, StoredCredentials};
 use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
+use crate::stats::{HostStats, Stats, Traffic};
 use crate::store::Store;
 use crate::web::{Listen, RegistryAccess, WebApp, WebServer};
 
@@ -404,6 +405,8 @@ pub struct Supervisor {
     /// The route table the proxy reads (architecture §3.2); empty until the orchestrator
     /// publishes one.
     routes: Arc<ArcSwap<RouteTable>>,
+    /// The per-route request statistics: counted by the proxy, shown by the web UI (ADR-0045).
+    traffic: Traffic,
     teardown: Teardown,
 }
 
@@ -420,6 +423,7 @@ impl Supervisor {
             orchestrator: None,
             acme_commands: None,
             routes: Arc::default(),
+            traffic: Traffic::default(),
             teardown: Teardown::default(),
         }
     }
@@ -584,6 +588,7 @@ impl Startup for Supervisor {
                         .clone()
                         .context("certificates load before the proxy starts")?,
                     challenges: self.challenges.clone(),
+                    traffic: self.traffic.clone(),
                 };
                 self.teardown.proxy.start(&self.config.proxy, state).await
             }
@@ -703,14 +708,28 @@ impl Startup for Supervisor {
                     .context("the orchestrator is connected to the ACME task in step 5")?;
                 let (events_tx, events_rx) = mpsc::channel(ACME_EVENTS_CAPACITY);
                 tokio::spawn(Arc::clone(&orchestrator).run_acme_events(events_rx));
+                let stats = Stats::new(
+                    self.traffic.clone(),
+                    Arc::new(HostStats {
+                        orchestrator: Arc::clone(&orchestrator),
+                        store: store.clone(),
+                        certs: certs.clone(),
+                    }),
+                );
                 let acme =
                     AcmeService::new(&self.config, self.challenges.clone(), certs, store.clone());
                 tokio::spawn(acme.run(commands, events_tx, self.teardown.token.child_token()));
 
-                let web =
-                    WebApp::from_config(&self.config, store, runtime, orchestrator, registry)?
-                        .start(listen, self.teardown.token.child_token())
-                        .await?;
+                let web = WebApp::from_config(
+                    &self.config,
+                    store,
+                    runtime,
+                    orchestrator,
+                    registry,
+                    stats,
+                )?
+                .start(listen, self.teardown.token.child_token())
+                .await?;
                 self.teardown.web = Some(web);
                 Ok(())
             }

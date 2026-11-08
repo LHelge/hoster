@@ -329,6 +329,57 @@ async fn unfinished_and_listed_deployments() {
 }
 
 #[tokio::test]
+async fn deployment_outcomes_are_counted_and_timed_per_stack_and_state() {
+    let (_dir, store) = open().await;
+    store.add_revision("blog", "x").await.unwrap();
+    store.add_revision("shop", "x").await.unwrap();
+    store.add_revision("gone", "x").await.unwrap();
+    let now = Timestamp::now();
+    // Finish `id` in `state`, `took` after it was received, `ago` before now.
+    let finish = async |stack: &str, state: DeploymentState, took: u64, ago: u64| {
+        let d = deployment(&store, stack).await;
+        store.transition(d.id, state, Some("why")).await.unwrap();
+        let finished = now - Duration::from_secs(ago);
+        let created = finished - Duration::from_secs(took);
+        sqlx::query("UPDATE deployments SET created_at = ?, finished_at = ? WHERE id = ?")
+            .bind(created)
+            .bind(finished)
+            .bind(d.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    };
+    finish("blog", DeploymentState::Live, 10, 60).await;
+    finish("blog", DeploymentState::Live, 20, 60).await;
+    finish("blog", DeploymentState::Failed, 3, 60).await;
+    // Finished before `since`: not counted.
+    finish("blog", DeploymentState::Live, 500, 7200).await;
+    finish("shop", DeploymentState::Rejected, 0, 60).await;
+    finish("gone", DeploymentState::Live, 1, 60).await;
+    // Unfinished: not counted.
+    deployment(&store, "blog").await;
+    store.remove_stack("gone").await.unwrap();
+
+    let outcomes = store
+        .deployment_outcomes(now - Duration::from_secs(3600))
+        .await
+        .unwrap();
+    let summary: Vec<_> = outcomes
+        .iter()
+        .map(|o| (o.stack.as_str(), o.state, o.count, o.mean, o.max))
+        .collect();
+    let secs = Duration::from_secs;
+    assert_eq!(
+        summary,
+        [
+            ("blog", DeploymentState::Failed, 1, secs(3), secs(3)),
+            ("blog", DeploymentState::Live, 2, secs(15), secs(20)),
+            ("shop", DeploymentState::Rejected, 1, secs(0), secs(0)),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn commit_writes_all_pointers_at_once() {
     let (_dir, store) = open().await;
     store.add_revision("blog", "x").await.unwrap();

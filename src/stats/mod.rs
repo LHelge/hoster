@@ -1,0 +1,317 @@
+//! In-process statistics for the web UI (ADR-0045). There is no metrics endpoint: the only
+//! reader is the authenticated admin app, through the [`Stats`] handle.
+//!
+//! - **Traffic** ([`Traffic`]): per-route request counts by status class, upstream errors, the
+//!   in-flight gauge and p50/p95 latency over a rolling window of a few minutes. The proxy
+//!   updates the atomic counters from its `logging` hook; they reset when hoster restarts.
+//! - **Deployments**: outcome counts and durations per stack, read from SQLite on demand, so
+//!   they survive restarts.
+//! - **Services**: the reconciler's restart count and crash-loop state of every running
+//!   service (ADR-0028).
+//! - **Certificates**: the `not_after` of every certificate the proxy serves.
+//!
+//! [`Stats::snapshot`] gathers all of it for one page render. Everything but the traffic comes
+//! from a [`StatsSource`]; [`HostStats`] is the real one.
+
+mod latency;
+mod traffic;
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use async_trait::async_trait;
+
+use crate::acme::CertMap;
+use crate::orchestrator::{Orchestrator, ServiceState};
+use crate::runtime::ContainerRuntime;
+use crate::store::{DeploymentOutcome, DeploymentState, Store, Timestamp};
+
+pub use self::traffic::{
+    Counts, RequestOutcome, StatusClass, TrackedRequest, Traffic, TrafficSnapshot,
+};
+
+/// Where the statistics not kept by [`Traffic`] come from.
+#[async_trait]
+pub trait StatsSource: Send + Sync + 'static {
+    /// Deployment outcomes per stack and terminal state, over the last
+    /// [`Stats::DEPLOY_HISTORY`].
+    async fn deployments(&self) -> anyhow::Result<Vec<DeploymentOutcome>>;
+
+    /// The restart statistics of every running service.
+    async fn services(&self) -> anyhow::Result<Vec<ServiceRestarts>>;
+
+    /// The certificates served now.
+    fn certificates(&self) -> Vec<CertExpiry>;
+}
+
+/// The statistics the admin app shows. A cheap handle: clones share everything.
+#[derive(Clone)]
+pub struct Stats {
+    traffic: Traffic,
+    source: Arc<dyn StatsSource>,
+}
+
+impl fmt::Debug for Stats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stats").finish_non_exhaustive()
+    }
+}
+
+impl Stats {
+    /// How far back the latency percentiles look.
+    pub const LATENCY_WINDOW: Duration = latency::LatencyWindow::WINDOW;
+    /// How far back the deployment statistics look.
+    pub const DEPLOY_HISTORY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+    /// Statistics over `traffic` (the proxy's counters) and `source`.
+    pub fn new(traffic: Traffic, source: Arc<dyn StatsSource>) -> Self {
+        Self { traffic, source }
+    }
+
+    /// Everything, as of now. A source that fails leaves its part empty and names the problem
+    /// in [`Snapshot::problems`], so the rest still shows.
+    pub async fn snapshot(&self) -> Snapshot {
+        let mut problems = Vec::new();
+        let deployments = match self.source.deployments().await {
+            Ok(outcomes) => DeployStats::group(outcomes),
+            Err(err) => {
+                tracing::warn!(
+                    error = format!("{err:#}"),
+                    "cannot read deployment statistics"
+                );
+                problems.push(format!("deployment statistics: {err:#}"));
+                Vec::new()
+            }
+        };
+        let services = match self.source.services().await {
+            Ok(services) => services,
+            Err(err) => {
+                tracing::warn!(error = format!("{err:#}"), "cannot read service statistics");
+                problems.push(format!("service statistics: {err:#}"));
+                Vec::new()
+            }
+        };
+        let mut certificates = self.source.certificates();
+        certificates.sort_by_key(|cert| cert.not_after);
+        Snapshot {
+            traffic: self.traffic.snapshot(),
+            deployments,
+            services,
+            certificates,
+            problems,
+            taken_at: SystemTime::now(),
+        }
+    }
+}
+
+/// All statistics at one moment.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub traffic: TrafficSnapshot,
+    /// Per stack, sorted by name.
+    pub deployments: Vec<DeployStats>,
+    pub services: Vec<ServiceRestarts>,
+    /// Soonest expiry first.
+    pub certificates: Vec<CertExpiry>,
+    /// The parts that could not be read.
+    pub problems: Vec<String>,
+    pub taken_at: SystemTime,
+}
+
+/// How the finished deployments of one stack went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployStats {
+    pub stack: String,
+    /// One entry per terminal state reached, in the store's order.
+    pub outcomes: Vec<DeploymentOutcome>,
+}
+
+impl DeployStats {
+    /// Groups the store's per-(stack, state) rows, sorted by stack, into one entry per stack.
+    fn group(outcomes: Vec<DeploymentOutcome>) -> Vec<DeployStats> {
+        let mut stacks: Vec<DeployStats> = Vec::new();
+        for outcome in outcomes {
+            match stacks.last_mut() {
+                Some(last) if last.stack == outcome.stack => last.outcomes.push(outcome),
+                _ => stacks.push(DeployStats {
+                    stack: outcome.stack.clone(),
+                    outcomes: vec![outcome],
+                }),
+            }
+        }
+        stacks
+    }
+
+    /// Deployments that went live, with or without warnings.
+    pub fn succeeded(&self) -> u32 {
+        self.count(|state| {
+            matches!(
+                state,
+                DeploymentState::Live | DeploymentState::LiveWithWarnings
+            )
+        })
+    }
+
+    /// Deployments that failed or were rejected.
+    pub fn failed(&self) -> u32 {
+        self.count(|state| matches!(state, DeploymentState::Failed | DeploymentState::Rejected))
+    }
+
+    /// Deployments with nothing to do, or replaced while queued.
+    pub fn skipped(&self) -> u32 {
+        self.count(|state| matches!(state, DeploymentState::Noop | DeploymentState::Superseded))
+    }
+
+    /// The mean duration of the deployments that went live.
+    pub fn mean_live_duration(&self) -> Option<Duration> {
+        let live = self.live();
+        let count: u32 = live.clone().map(|o| o.count).sum();
+        let total: Duration = live.map(|o| o.mean * o.count).sum();
+        (count > 0).then(|| total / count)
+    }
+
+    /// The longest deployment that went live.
+    pub fn max_live_duration(&self) -> Option<Duration> {
+        self.live().map(|o| o.max).max()
+    }
+
+    fn live(&self) -> impl Iterator<Item = &DeploymentOutcome> + Clone {
+        self.outcomes.iter().filter(|o| {
+            matches!(
+                o.state,
+                DeploymentState::Live | DeploymentState::LiveWithWarnings
+            )
+        })
+    }
+
+    fn count(&self, matches: impl Fn(DeploymentState) -> bool) -> u32 {
+        self.outcomes
+            .iter()
+            .filter(|o| matches(o.state))
+            .map(|o| o.count)
+            .sum()
+    }
+}
+
+/// The reconciler's view of one running service (ADR-0028).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceRestarts {
+    pub stack: String,
+    pub service: String,
+    pub generation: u32,
+    /// Restarts of this generation since hoster started.
+    pub restarts: u32,
+    pub crash_looping: bool,
+}
+
+/// When one served certificate expires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertExpiry {
+    pub host: String,
+    pub not_after: SystemTime,
+}
+
+impl CertExpiry {
+    /// How long the certificate is still valid at `now`; zero once it has expired.
+    pub fn remaining(&self, now: SystemTime) -> Duration {
+        self.not_after.duration_since(now).unwrap_or_default()
+    }
+}
+
+/// The statistics of the running hoster: deployments from the store, restarts from the
+/// orchestrator's reconciler and certificates from the proxy's [`CertMap`].
+pub struct HostStats<R> {
+    pub orchestrator: Arc<Orchestrator<R>>,
+    pub store: Store,
+    pub certs: CertMap,
+}
+
+#[async_trait]
+impl<R: ContainerRuntime> StatsSource for HostStats<R> {
+    async fn deployments(&self) -> anyhow::Result<Vec<DeploymentOutcome>> {
+        let since = Timestamp::now() - Stats::DEPLOY_HISTORY;
+        Ok(self.store.deployment_outcomes(since).await?)
+    }
+
+    async fn services(&self) -> anyhow::Result<Vec<ServiceRestarts>> {
+        let mut out = Vec::new();
+        for stack in self.orchestrator.status().await? {
+            for service in stack.services {
+                if let ServiceState::Running { generation, .. } = service.state {
+                    out.push(ServiceRestarts {
+                        stack: stack.name.clone(),
+                        service: service.name,
+                        generation,
+                        restarts: service.restarts.restarts,
+                        crash_looping: service.restarts.crash_looping,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn certificates(&self) -> Vec<CertExpiry> {
+        self.certs
+            .hosts()
+            .into_iter()
+            .filter_map(|host| {
+                let validity = self.certs.validity(&host)?;
+                Some(CertExpiry {
+                    host,
+                    not_after: validity.not_after,
+                })
+            })
+            .collect()
+    }
+}
+
+/// A duration as the UI shows it: `0.8 ms`, `12 ms`, `1.4 s`, `3 min 5 s`, `5 min`, `2 d 4 h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Elapsed(pub Duration);
+
+impl Elapsed {
+    /// An optional duration for a table cell: `-` when there is none.
+    pub fn cell(duration: Option<Duration>) -> String {
+        duration.map_or_else(|| "-".to_owned(), |d| Elapsed(d).to_string())
+    }
+}
+
+impl fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let d = self.0;
+        let secs = d.as_secs();
+        if d < Duration::from_millis(10) {
+            write!(f, "{:.1} ms", d.as_secs_f64() * 1000.0)
+        } else if d < Duration::from_secs(1) {
+            write!(f, "{} ms", d.as_millis())
+        } else if d < Duration::from_secs(60) {
+            write!(f, "{:.1} s", d.as_secs_f64())
+        } else if secs < 60 * 60 {
+            Self::two_units(f, (secs / 60, "min"), (secs % 60, "s"))
+        } else if secs < 24 * 60 * 60 {
+            Self::two_units(f, (secs / 3600, "h"), (secs % 3600 / 60, "min"))
+        } else {
+            Self::two_units(f, (secs / 86_400, "d"), (secs % 86_400 / 3600, "h"))
+        }
+    }
+}
+
+impl Elapsed {
+    /// `3 min 5 s`, or `5 min` when the smaller unit is zero.
+    fn two_units(
+        f: &mut fmt::Formatter<'_>,
+        (big, big_unit): (u64, &str),
+        (small, small_unit): (u64, &str),
+    ) -> fmt::Result {
+        write!(f, "{big} {big_unit}")?;
+        if small > 0 {
+            write!(f, " {small} {small_unit}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests;

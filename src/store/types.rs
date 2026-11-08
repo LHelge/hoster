@@ -331,6 +331,20 @@ pub struct WebhookRejection {
     pub at: Timestamp,
 }
 
+/// How the finished deployments of one stack that ended in one state went, for the statistics
+/// of the web UI (ADR-0045).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeploymentOutcome {
+    pub stack: String,
+    /// The terminal state they reached.
+    pub state: DeploymentState,
+    pub count: u32,
+    /// The mean time from receiving a deployment to finishing it, queueing included.
+    pub mean: Duration,
+    /// The longest of those times.
+    pub max: Duration,
+}
+
 /// One entry of a deployment's transition log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentEvent {

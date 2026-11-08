@@ -11,6 +11,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::runtime::FakeRuntime;
+use crate::stats::tests::FakeStats;
+use crate::stats::{Stats, Traffic};
 use crate::web::WebApp;
 use crate::web::settings::tests::FakeRegistries;
 use crate::web::stacks::tests::FakeStacks;
@@ -32,6 +34,10 @@ pub struct TestApp {
     pub stacks: Arc<FakeStacks>,
     /// The registry credentials Settings → Registries manages.
     pub registries: Arc<FakeRegistries>,
+    /// The request counters the dashboard shows.
+    pub traffic: Traffic,
+    /// The rest of the dashboard's statistics.
+    pub stats: Arc<FakeStats>,
     pub app: WebApp,
     _dir: TempDir,
 }
@@ -75,6 +81,8 @@ impl TestApp {
         let stacks = Arc::new(FakeStacks::default());
         let registries = Arc::new(FakeRegistries::default());
         let verifier = OidcVerifier::new(ORIGIN, base.join(JWKS_PATH).unwrap()).unwrap();
+        let traffic = Traffic::default();
+        let stats = Arc::new(FakeStats::default());
         let app = WebApp::new(
             Auth::new(settings, store.clone(), client),
             runtime.clone(),
@@ -82,6 +90,7 @@ impl TestApp {
             registries.clone(),
             verifier,
             store.clone(),
+            Stats::new(traffic.clone(), stats.clone()),
         );
         TestApp {
             github,
@@ -89,6 +98,8 @@ impl TestApp {
             runtime,
             stacks,
             registries,
+            traffic,
+            stats,
             app,
             _dir: dir,
         }
