@@ -1,16 +1,17 @@
 ---
 id: "29h"
 title: Dependencies and health checks in the UI and docs
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:23:50.060462255Z"
-updated: "2026-11-09T17:23:50.060462255Z"
+updated: "2026-11-09T22:27:24.607712944Z"
 tags:
   - web
   - docs
 depends_on:
   - kbh
 parent: qq9
+attempts: 1
 ---
 
 ## Summary

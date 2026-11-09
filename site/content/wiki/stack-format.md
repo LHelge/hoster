@@ -21,8 +21,8 @@ app's repository and is applied through the web UI ([ADR-0027](https://github.co
   so there is one format to learn.
 - **Comments.** Unlike JSON, TOML has them.
 - **Not compose-shaped on purpose.** A YAML file that looks like `docker-compose.yml` would invite
-  people to paste compose files and expect compose semantics (`build:`, `depends_on`, `ports:`,
-  `privileged:`). hoster's model is different: routes instead of ports, and a deliberately narrow
+  people to paste compose files and expect compose semantics (`build:`, `depends_on` conditions,
+  `ports:`, `privileged:`). hoster's model is different: routes instead of ports, and a deliberately narrow
   security surface ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)). A different format makes that obvious.
 
 **Alternatives considered:**
@@ -69,7 +69,7 @@ name = "notes"       # required; stack name
 | `secrets` | table string → string | no | Env var name → secret name `<stack>/<name>` in hoster's encrypted secret store ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). The value never appears in the stack file. Values are injected as environment variables at container create; a deployment that references a secret which is not set is rejected, naming the secret (never its value). Replacing a secret changes its version, which is part of the service's config hash. |
 | `volumes` | table string → string | no | Volume name → mount path. Named podman volumes `hoster-<stack>-<volume>` only, kept on stack removal ([ADR-0030](https://github.com/LHelge/hoster/blob/main/docs/adr/0030-named-volumes-and-documented-backups.md)). Host bind mounts are not expressible ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)). hoster creates each volume on first use, labelled `hoster.managed=true` and `hoster.stack=<stack>`, and refuses to mount an existing one labelled for another stack. Validation warns when a service with volumes uses `update = "start-first"`, since old and new containers would mount the volume at the same time during a deploy ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
 | `health` | table | no | See §2.4 ([ADR-0038](https://github.com/LHelge/hoster/blob/main/docs/adr/0038-host-driven-health-probes-no-limits-v1.md), [ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md), [ADR-0056](https://github.com/LHelge/hoster/blob/main/docs/adr/0056-service-dependencies-and-exec-health-checks.md)). Defaults: HTTP `GET /healthz` on the first route's container port for routed services, "running for 5 s" for others. Services whose health endpoint is elsewhere (including prefix-mounted ones) declare it; a service without routes may only declare an `exec` check. |
-| `depends_on` | array of string | no | Services of this stack that must pass their health check before this one starts, e.g. `["db", "cache"]` ([ADR-0056](https://github.com/LHelge/hoster/blob/main/docs/adr/0056-service-dependencies-and-exec-health-checks.md)). Each must name another service of the stack, at most once; cycles are rejected and named in order (`app → worker → app`). There are no compose-style `condition` variants. Each service starts as soon as its own dependencies pass, during deploys and after a reboot or crash. Outside a deploy, a running dependency that has not passed within min(`start_period`, 5 min) no longer holds its dependents, and a dependency that has never run is ignored. A dependency going down never stops its dependents. Not part of the config hash: changing it reorders starts but never recreates a container. |
+| `depends_on` | array of string | no | Services of this stack that must pass their health check before this one starts, e.g. `["db", "cache"]` ([ADR-0056](https://github.com/LHelge/hoster/blob/main/docs/adr/0056-service-dependencies-and-exec-health-checks.md)). Each must name another service of the stack, at most once; cycles are rejected and named in order (`app → worker → app`). There are no compose-style `condition` variants. Each service starts as soon as its own dependencies pass, during deploys and after a reboot or crash. Outside a deploy, a running dependency that has not passed within min(`start_period`, 5 min) no longer holds its dependents, and a dependency that has never run is ignored. A dependency going down never stops its dependents. Not part of the config hash: changing it reorders starts but never recreates a container. The apply preview lists the start order, and the stack overview shows each service's dependencies and "waiting for db" while the reconciler holds it back. A worked example is in §3.2. |
 | `update` | string | no | `"start-first"` (default; zero-downtime) or `"stop-first"` (for services that cannot run twice; short outage with 503 + `Retry-After`) ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
 | `stop_timeout` | duration | no | Default `10s`. SIGTERM → SIGKILL grace period. |
 | `user` | string | no | `uid[:gid]` inside the container. |
@@ -109,6 +109,18 @@ healthy_after = 2     # consecutive successes required
 start_period = "30s"  # give up and abort the deploy after this
 ```
 
+**Which check a service gets** (ADR-0056), in this order:
+
+1. The probe its `health` table declares: `http`, `tcp` or `exec`. `http` and `tcp` need a route;
+   `exec` works on any service and is the only probe a service without routes may declare. A
+   timings-only table on a routed service tunes the default `GET /healthz` probe.
+2. Without a `health` table, a routed service gets `GET /healthz` on its first route's container
+   port, expecting 2xx–3xx.
+3. Without a `health` table or routes, "running and not restarted for 5 s".
+
+The image's own `HEALTHCHECK` is never used, and podman never runs it either: hoster creates every
+container with health checks off.
+
 hoster runs `http` and `tcp` probes from the host against the container's allocated `127.0.0.1`
 port. Without a `health` table, a routed service is probed with `GET /healthz` on its first
 route's container port, expecting 2xx–3xx ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md));
@@ -141,7 +153,10 @@ why (e.g. "checking db with exec: pg_isready -U app, declared in health.exec"), 
 results (each change, and the verdict). After a deploy, the health monitor probes live services
 with the same check every 10–30 s; for `exec` it records the exit code only, never the output, and
 a program podman cannot execute makes the service unhealthy. The stack overview shows the check
-in effect next to its last result.
+in effect under each service's state, with its command or path and whether it is declared or the
+default, and its last result in the state's tooltip. On a deployment's page the start waves, the
+check each service gets and the probe results are tagged `wave`, `check` and `probe`, with an
+exec's output collapsed under its result.
 
 ## 2.5 Deploy authorization (ADR-0047)
 
@@ -290,6 +305,104 @@ timeouts = { read = "10m", write = "10m", idle = "10m" }   # large objects, stre
 - Applying a revision whose `storage` tag resolves to a new digest (or pressing "re-resolve
   tags") redeploys `storage` stop-first, which causes a short storage outage. The file says so
   explicitly ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)).
+
+## 3.2 Worked example: an app with postgres and redis
+
+A generic web app built in CI, a background worker from the same repository, and two third-party
+images it needs before it can start. `shop.stack.toml`:
+
+```toml
+version = 1
+name = "shop"
+
+# ─── The app: CI-built, routed, zero-downtime ────────────────────────────────
+[services.app]
+image = "ghcr.io/acme/shop"
+depends_on = ["db", "cache"]              # started once both pass their checks
+env = { REDIS_URL = "redis://cache:6379" }
+secrets = { DATABASE_URL = "shop/database-url" }
+
+[[services.app.routes]]
+host = "shop.example.com"
+port = 8080
+
+# The app's readiness endpoint is not /healthz, so it is declared.
+[services.app.health]
+http = { path = "/ready" }
+start_period = "60s"                      # migrations run at start-up
+
+# ─── A worker: no routes, no health table ────────────────────────────────────
+# Its check is the default for an unrouted service: running for 5 s.
+[services.worker]
+image = "ghcr.io/acme/shop-worker"
+depends_on = ["db", "cache"]
+env = { REDIS_URL = "redis://cache:6379" }
+secrets = { DATABASE_URL = "shop/database-url" }
+
+# ─── PostgreSQL ──────────────────────────────────────────────────────────────
+# Two postgres processes must never share a data directory, so stop-first.
+[services.db]
+image = "docker.io/library/postgres:17"
+update = "stop-first"
+stop_timeout = "30s"                      # time for a clean shutdown checkpoint
+env = { POSTGRES_USER = "shop", POSTGRES_DB = "shop" }
+secrets = { POSTGRES_PASSWORD = "shop/db-password" }
+volumes = { pgdata = "/var/lib/postgresql/data" }
+
+# Not routed, so only exec can look inside. -h 127.0.0.1 skips the socket-only
+# server the image runs while it initialises a new database.
+[services.db.health]
+exec = ["pg_isready", "-h", "127.0.0.1", "-U", "shop", "-d", "shop"]
+start_period = "2m"                       # the first start initialises the database
+
+# ─── Redis ───────────────────────────────────────────────────────────────────
+# One writer per append-only file, so stop-first as well.
+[services.cache]
+image = "docker.io/library/redis:7"
+update = "stop-first"
+command = ["redis-server", "--appendonly", "yes"]
+volumes = { redis = "/data" }
+
+# Redis answers PING with LOADING while it replays the file: wait for PONG.
+[services.cache.health]
+exec = ["sh", "-c", "redis-cli ping | grep -q PONG"]
+```
+
+Set the secrets `shop/database-url` (`postgres://shop:…@db:5432/shop`) and `shop/db-password`
+before the first deploy.
+
+**Which checks run:** `app` gets its declared `GET /ready` on port 8080, `db` and `cache` their
+declared `exec` commands, run inside the container as its user with its environment, and `worker`
+the default "running for 5 s". The stack overview shows each one under the service's state.
+
+**First apply.** Nothing runs yet. `app` and `worker` are CI-built and have no digest until CI
+sends one, so the first apply deploys only `cache` and `db`. Neither has a previous generation, so
+stop-first opens no gap: they start together, next to nothing. The apply preview's start order
+reads `1 start cache, db`. The deployment's page logs the wave (`starting cache, db`), the check
+each service gets (`checking db with exec: pg_isready …`) and the `exec` output of each failing
+probe, collapsed. A slow first database initialisation is fine up to `db`'s `start_period`.
+
+**The first webhooks.** `app` and `worker` each start on their own first webhook (or poller)
+digest. That deploy changes only that service. `db` and `cache` are unchanged, so it first checks
+that both run (`db (unchanged) is running; its monitor status is healthy`), and fails at once with
+`db (unchanged) is not running` otherwise, instead of probing an app that cannot reach its
+database. Every later webhook for `app` works the same way: only `app` changes, and it starts
+first, as before.
+
+**A new postgres tag** (applied, or "Re-resolve tags"). `db` is stop-first with a previous
+generation, so it is replaced: stopped, started, probed. `app` and `worker` are unchanged and keep
+running; if one exits while the database is down, hoster starts it again once the new `db` has
+passed, and probes it before the deployment goes live.
+
+**`app` and `db` change together** (an apply that edits both). `db` is replaced first. `app` is
+held back until the new `db` has passed, so it is never probed against the old database; the
+preview reads `1 replace db`, `2 start app held back until db is replaced and passes`. Its old generation keeps serving
+until the switch, but its start and probe add to `db`'s downtime.
+
+**After a reboot or a crash.** The reconciler starts `db` and `cache`, then each of `app` and
+`worker` once both of its dependencies run and have passed their checks. Until then the overview
+shows them as "waiting for cache, db". A dependency that runs but has not passed within
+min(`start_period`, 5 min) stops holding them back.
 
 # 4. Versioning
 

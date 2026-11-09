@@ -271,6 +271,7 @@ impl Fixtures {
         vec![
             StackStatus {
                 name: "notes".into(),
+                committed: None,
                 revision: Self::revision("notes", 1, NOTES),
                 services: vec![notes_api, storage],
                 active: None,
@@ -281,6 +282,7 @@ impl Fixtures {
             },
             StackStatus {
                 name: "blog".into(),
+                committed: None,
                 revision: Self::revision("blog", 4, BLOG),
                 services: vec![
                     Self::service("web", Self::running(4, 2), HealthStatus::Healthy, 0, false),
@@ -305,6 +307,7 @@ impl Fixtures {
             },
             StackStatus {
                 name: "shop".into(),
+                committed: None,
                 revision: Self::revision("shop", 2, SHOP),
                 services: vec![
                     Self::service(
@@ -335,6 +338,7 @@ impl Fixtures {
             },
             StackStatus {
                 name: "wiki".into(),
+                committed: None,
                 revision: Self::revision("wiki", 1, WIKI),
                 services: vec![Self::service(
                     "app",
@@ -353,6 +357,7 @@ impl Fixtures {
             },
             StackStatus {
                 name: "docs".into(),
+                committed: None,
                 revision: Self::revision("docs", 1, DOCS),
                 services: vec![Self::service(
                     "site",
@@ -498,9 +503,35 @@ impl Fixtures {
             ),
             event(
                 Some(DeploymentState::Starting),
+                DeploymentState::Starting,
+                Some("starting storage"),
+                r + s(8),
+            ),
+            event(
+                Some(DeploymentState::Starting),
                 DeploymentState::HealthChecking,
                 None,
                 r + s(9),
+            ),
+            event(
+                Some(DeploymentState::HealthChecking),
+                DeploymentState::HealthChecking,
+                Some("checking storage with exec: rustfs health, declared in health.exec"),
+                r + s(9),
+            ),
+            event(
+                Some(DeploymentState::HealthChecking),
+                DeploymentState::HealthChecking,
+                Some(
+                    r#"health probe exec: rustfs health: exit 1, output "error: connecting to 127.0.0.1:9000\nconnection refused""#,
+                ),
+                r + s(10),
+            ),
+            event(
+                Some(DeploymentState::HealthChecking),
+                DeploymentState::HealthChecking,
+                Some("storage healthy after 4s 112ms; starting api"),
+                r + s(13),
             ),
         ];
         let superseded = Self::deployment("notes", 6, DeploymentState::Superseded, 3 * HOUR);

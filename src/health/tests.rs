@@ -579,6 +579,121 @@ fn checks_follow_the_precedence_of_adr_0056() {
     assert!(matches!(err, HealthError::NoLoopbackPort(8080)), "{err:?}");
 }
 
+/// The check the stack file decides, as the overview names it: the same precedence and words
+/// as [`Check`], plain and alternate, without the loopback ports.
+#[test]
+fn check_spec_names_the_check_without_ports() {
+    let exec = "[services.app.health]\nexec = [\"pg_isready\", \"-U\", \"postgres\"]";
+    let table = [
+        (
+            service(""),
+            "GET /healthz on container port 8080, the default for a routed service without \
+             health",
+            true,
+        ),
+        // A timings-only table tunes the default probe (ADR-0051).
+        (
+            service("[services.app.health]\nstart_period = \"60s\""),
+            "GET /healthz on container port 8080, the default for a routed service, with the \
+             timings of its health table",
+            true,
+        ),
+        (
+            service("[services.app.health]\nhttp = { path = \"/up\", port = 9090 }"),
+            "GET /up on container port 9090, declared in health.http",
+            false,
+        ),
+        (
+            service("[services.app.health]\ntcp = { port = 9090 }"),
+            "TCP connect to container port 9090, declared in health.tcp",
+            false,
+        ),
+        (
+            service(exec),
+            "exec: pg_isready -U postgres and TCP connect to container port 8080, declared in \
+             health.exec; a routed service's exec check also connects to its first route's port",
+            false,
+        ),
+        (
+            unrouted(exec),
+            "exec: pg_isready -U postgres, declared in health.exec",
+            false,
+        ),
+        (
+            unrouted(""),
+            "running for 5s, the default for a service without routes or health",
+            true,
+        ),
+    ];
+    let ports = ports(8080, 20001);
+    let without_ports = |text: String| {
+        text.replace(" (127.0.0.1:20001)", "")
+            .replace(" (127.0.0.1:1)", "")
+    };
+    for (service, explained, default) in table {
+        let spec = CheckSpec::from(&service);
+        assert_eq!(format!("{spec:#}"), explained);
+        assert_eq!(spec.is_default(), default, "{spec}");
+        assert_eq!(format!("{spec}, {}", spec.why()), explained);
+        // The same check as the deploy resolves and words, ports left out.
+        let check = Check::for_service(&service, &ports).unwrap();
+        assert_eq!(spec.to_string(), without_ports(check.to_string()));
+        assert_eq!(explained, without_ports(format!("{check:#}")));
+    }
+}
+
+/// Every event a check writes reads back as a probe event; the engine's notes do not.
+#[test]
+fn probe_events_are_told_apart() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let id = ContainerId::from("c1".to_owned());
+    let probe = [
+        super::exec::ProbeLine {
+            check: &check,
+            result: "exit 2",
+            tail: Some("\"no response\""),
+        }
+        .to_string(),
+        format!(
+            "{}{check} passed 1 time(s) in a row after 1s",
+            Check::VERDICT
+        ),
+        HealthError::Unhealthy {
+            check: check.to_string(),
+            within: Duration::from_secs(30),
+            last: "exit 2".into(),
+            default_path: false,
+        }
+        .to_string(),
+        HealthError::CannotRun("`pg_isready`: executable file not found in $PATH".into())
+            .to_string(),
+        HealthError::Stopping(id.clone()).to_string(),
+        HealthError::Exited {
+            name: "hoster-demo-app-g1".into(),
+            state: ContainerState::Exited(Some(1)),
+        }
+        .to_string(),
+        HealthError::Inspect {
+            id,
+            source: RuntimeError::Unreachable {
+                socket: "/run/podman.sock".into(),
+                message: "refused".into(),
+            },
+        }
+        .to_string(),
+    ];
+    for message in &probe {
+        assert!(ProbeOutput::from(message.as_str()).is_probe(), "{message}");
+    }
+    for message in [
+        "starting db, cache",
+        "checking db with exec: pg_isready, declared in health.exec",
+        "replacing db (stop-first)",
+    ] {
+        assert!(!ProbeOutput::from(message).is_probe(), "{message}");
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_exec_check_passes_once_the_command_exits_0() {
     let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();

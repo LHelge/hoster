@@ -57,6 +57,7 @@ mod event_log;
 mod gc;
 pub mod machine;
 mod monitor;
+mod notes;
 mod plan;
 mod reconcile;
 mod routes;
@@ -94,8 +95,9 @@ use event_log::OperatorEvents;
 pub use event_log::{EventLog, HosterEvents, Operator, RegistryEvents};
 pub use gc::GcSettings;
 use machine::Event;
-pub use plan::PlanError;
+pub use notes::NoteKind;
 use plan::{Plan, SecretVersions};
+pub use plan::{PlanError, Wave};
 use reconcile::Reconciler;
 pub use reconcile::{RestartPolicy, RestartStats};
 use routes::Routes;
@@ -277,6 +279,8 @@ pub struct ApplyPreview {
     /// Services the apply would redeploy: their (digest, config hash) changes, or they leave
     /// the stack.
     pub changed: Vec<String>,
+    /// The order the redeploy starts them in (ADR-0056 Decision 2).
+    pub start_order: Vec<Wave>,
 }
 
 /// A third-party service's pinned digest (ADR-0025), before and after an apply.
@@ -294,6 +298,8 @@ struct Prepared {
     images: DigestSet,
     warnings: Vec<Diagnostic>,
     changed: Vec<String>,
+    /// The plan, for the preview's start order.
+    plan: Plan,
     noop: bool,
 }
 
@@ -439,6 +445,11 @@ pub struct StackStatus {
     pub name: String,
     /// The active revision.
     pub revision: StackRevision,
+    /// The revision of the last committed deployment when it is not the active one (after a
+    /// failed or rejected deploy, or while one runs): outside a deployment the reconciler and
+    /// the monitor take dependencies and checks from it (ADR-0056 Decision 3). `None` when the
+    /// active revision is the one, or nothing was committed yet.
+    pub committed: Option<StackRevision>,
     pub services: Vec<ServiceStatus>,
     /// The deployment running now, with its state.
     pub active: Option<(DeploymentId, DeploymentState)>,
@@ -753,6 +764,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             warnings: prepared.warnings,
             pins,
             changed: prepared.changed,
+            start_order: prepared.plan.start_order(),
         })
     }
 
@@ -924,6 +936,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             warnings,
             changed,
             noop,
+            ..
         } = prepared;
         let name = definition.name.to_string();
         let (revision, event) = self
@@ -974,6 +987,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             images,
             warnings: parsed.warnings,
             changed,
+            plan,
             noop,
         })
     }
@@ -1499,9 +1513,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .store
                 .rejections(&stack.name, Self::SHOWN_REJECTIONS)
                 .await?;
+            let committed = self
+                .committed_revision(&stack.name)
+                .await?
+                .filter(|committed| committed.id != revision.id);
             out.push(StackStatus {
                 rejections,
                 name: stack.name,
+                committed,
                 revision,
                 services,
                 active,

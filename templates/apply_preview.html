@@ -7,6 +7,16 @@
     {%- include "pins.html" %}
   </ol>
 </section>
+{%- if !order.is_empty() %}
+<section class="card plan-card" aria-labelledby="order-title">
+  <div class="card-head"><h2 id="order-title">Start order</h2><span class="card-note">each service starts once its own dependencies pass</span></div>
+  <ol class="plan start-order">
+    {%- for line in order %}
+    <li><span class="plan-mark" aria-hidden="true">{{ loop.index }}</span><span class="plan-text">{{ line.verb }} {% for service in line.services %}<strong>{{ service }}</strong>{% if !loop.last %}, {% endif %}{% endfor %}{% if let Some(note) = line.note %} <span class="plan-note">{{ note }}</span>{% endif %}</span></li>
+    {%- endfor %}
+  </ol>
+</section>
+{%- endif %}
 <section class="card plan-card" aria-labelledby="preflight-title">
   <div class="card-head"><h2 id="preflight-title">Pre-flight</h2><span class="card-note">{% if warnings.is_empty() %}passed{% else %}{{ warnings.len() }} warning{% if warnings.len() != 1 %}s{% endif %}{% endif %}</span></div>
   <ul class="checks">

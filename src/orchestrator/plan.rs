@@ -351,6 +351,57 @@ impl Plan {
     pub fn is_awaiting(&self, service: &Name) -> bool {
         self.awaiting.contains(service)
     }
+
+    /// The order the deployment starts its changed services in, for the apply preview: the
+    /// start phase as levels of its start waves (every service of a level waits only for
+    /// services of earlier levels), then `Replacing`'s services one at a time.
+    pub fn start_order(&self) -> Vec<Wave> {
+        let mut waves = self.start_waves();
+        // Each service's start-phase dependencies, before `passed` empties them.
+        let mut after = waves.waiting.clone();
+        let mut order = Vec::new();
+        loop {
+            let ready = waves.ready();
+            if ready.is_empty() {
+                break;
+            }
+            for service in &ready {
+                waves.passed(service);
+            }
+            order.push(Wave::Start(
+                ready
+                    .into_iter()
+                    .map(|service| {
+                        let deps = after.remove(&service).unwrap_or_default();
+                        (service, deps.into_iter().collect())
+                    })
+                    .collect(),
+            ));
+        }
+        order.extend(self.replacing().map(|change| match change.phase {
+            Phase::Replace => Wave::Replace(change.service.clone()),
+            _ => Wave::HeldBack {
+                service: change.service.clone(),
+                behind: self.held_back_for(&change.service).cloned().collect(),
+            },
+        }));
+        order
+    }
+}
+
+/// One step of the order a deployment starts its changed services in (ADR-0056 Decision 2),
+/// as [`Plan::start_order`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wave {
+    /// Start-phase services started next to what runs, each with the start-phase services it
+    /// waits for (all in earlier waves). A service starts as soon as its own dependencies have
+    /// passed, never waiting for the rest of the wave before it.
+    Start(BTreeMap<Name, Vec<Name>>),
+    /// A stop-first service replaced in `Replacing`, behind a 503 gap.
+    Replace(Name),
+    /// A start-phase service held back until the replaced services it depends on, even
+    /// transitively (`behind`), have passed.
+    HeldBack { service: Name, behind: Vec<Name> },
 }
 
 /// The start phase as start waves (ADR-0056 Decision 2.1): a service is ready once every
@@ -704,6 +755,100 @@ depends_on = ["search"]
         assert_eq!(replacing, ["db", "app"]);
         assert!(plan.start_waves().ready().is_empty());
         assert!(plan.unchanged_pointer(&"cache".parse().unwrap()).is_some());
+    }
+
+    /// The apply preview's start order: start waves by level, then `Replacing` one at a time.
+    #[test]
+    fn start_order_lists_waves_then_replacements() {
+        const ORDER: &str = r#"
+version = 1
+name = "shop"
+
+[services.app]
+image = "docker.io/acme/app:1"
+depends_on = ["cache", "db"]
+
+[services.cache]
+image = "docker.io/library/redis:7"
+
+[services.db]
+image = "docker.io/library/postgres:17"
+update = "stop-first"
+
+[services.worker]
+image = "docker.io/acme/worker:1"
+depends_on = ["app"]
+"#;
+        let name = |n: &str| n.parse::<Name>().unwrap();
+        let s = stack(ORDER);
+        let pins: DigestSet = ["app", "cache", "db", "worker"]
+            .into_iter()
+            .map(|n| (n.to_owned(), digest(1)))
+            .collect();
+        let none = SecretVersions::new();
+        // First deploy: db has no previous generation, so it starts in the start phase.
+        let plan = Plan::new(&s, &pins, &DigestSet::new(), &[], &none).unwrap();
+        assert_eq!(
+            plan.start_order(),
+            [
+                Wave::Start(BTreeMap::from([
+                    (name("cache"), Vec::new()),
+                    (name("db"), Vec::new()),
+                ])),
+                Wave::Start(BTreeMap::from([(
+                    name("app"),
+                    vec![name("cache"), name("db")]
+                )])),
+                Wave::Start(BTreeMap::from([(name("worker"), vec![name("app")])])),
+            ]
+        );
+
+        // Everything changes again: db is replaced, app and worker wait behind it.
+        let running: Vec<ServicePointer> = ["app", "cache", "db", "worker"]
+            .into_iter()
+            .map(|n| pointer(&s, n, 2, 1))
+            .collect();
+        let plan = Plan::new(&s, &pins, &DigestSet::new(), &running, &none).unwrap();
+        assert_eq!(
+            plan.start_order(),
+            [
+                Wave::Start(BTreeMap::from([(name("cache"), Vec::new())])),
+                Wave::Replace(name("db")),
+                Wave::HeldBack {
+                    service: name("app"),
+                    behind: vec![name("db")],
+                },
+                Wave::HeldBack {
+                    service: name("worker"),
+                    behind: vec![name("db")],
+                },
+            ]
+        );
+        // Nothing changes: no order.
+        let running: Vec<ServicePointer> = ["app", "cache", "db", "worker"]
+            .into_iter()
+            .map(|n| pointer(&s, n, 1, 1))
+            .collect();
+        let plan = Plan::new(&s, &pins, &DigestSet::new(), &running, &none).unwrap();
+        assert!(plan.start_order().is_empty());
+
+        // Only app changes: its dependencies run unchanged, so it waits for nothing in the
+        // start phase. A removed service is not started at all.
+        let mut running: Vec<ServicePointer> = ["cache", "db", "worker"]
+            .into_iter()
+            .map(|n| pointer(&s, n, 1, 1))
+            .chain([pointer(&s, "app", 2, 1)])
+            .collect();
+        running.push(ServicePointer {
+            service: "gone".into(),
+            ..pointer(&s, "cache", 1, 1)
+        });
+        let plan = Plan::new(&s, &pins, &DigestSet::new(), &running, &none).unwrap();
+        assert_eq!(plan.removed.len(), 1);
+        assert_eq!(
+            plan.start_order(),
+            [Wave::Start(BTreeMap::from([(name("app"), Vec::new())]))]
+        );
     }
 
     /// Hashes recorded before `health.exec` and `depends_on` existed (ADR-0056): adding them

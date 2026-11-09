@@ -10,6 +10,48 @@ fn worked_example() -> &'static str {
     &section[start..start + len]
 }
 
+/// The second worked example (§3.2): an app and a worker depending on postgres and redis.
+fn dependency_example() -> &'static str {
+    let doc = include_str!("../../site/content/wiki/stack-format.md");
+    let section = &doc[doc.find("\n## 3.2 Worked example").expect("§3.2 exists")..];
+    let start = section.find("```toml\n").expect("§3.2 has a TOML block") + "```toml\n".len();
+    let len = section[start..].find("```").expect("TOML block is closed");
+    &section[start..start + len]
+}
+
+#[test]
+fn dependency_example_validates_with_its_dependencies_and_checks() {
+    let parsed = parse(dependency_example()).expect("§3.2 is valid");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let stack = parsed.stack;
+    let name = |n: &str| n.parse::<Name>().unwrap();
+    let order: Vec<&str> = stack
+        .dependency_order()
+        .into_iter()
+        .map(AsRef::as_ref)
+        .collect();
+    assert_eq!(order, ["cache", "db", "app", "worker"]);
+    for dependent in ["app", "worker"] {
+        let deps: Vec<&str> = stack
+            .dependencies(&name(dependent))
+            .map(AsRef::as_ref)
+            .collect();
+        assert_eq!(deps, ["cache", "db"], "{dependent}");
+    }
+    for stop_first in ["db", "cache"] {
+        let service = &stack.services[&name(stop_first)];
+        assert_eq!(service.update, UpdateStrategy::StopFirst, "{stop_first}");
+        assert!(
+            matches!(
+                service.health.as_ref().map(|h| &h.probe),
+                Some(Probe::Exec { .. })
+            ),
+            "{stop_first}"
+        );
+    }
+    assert!(stack.services[&name("worker")].health.is_none());
+}
+
 /// A minimal valid stack; tests append to or substitute into it.
 const MINIMAL: &str = r#"
 version = 1

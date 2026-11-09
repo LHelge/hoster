@@ -88,6 +88,7 @@ fn service(name: &str, health: HealthStatus, restarts: u32, crash_looping: bool)
 fn blog() -> StackStatus {
     StackStatus {
         name: "blog".into(),
+        committed: None,
         revision: StackRevision {
             id: RevisionId::from(1),
             stack: "blog".into(),
