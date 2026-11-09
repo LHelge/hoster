@@ -87,6 +87,9 @@ enum Kind {
 pub enum HealthError {
     #[error("health probe port {0} has no allocated loopback port")]
     NoLoopbackPort(u16),
+    /// `health.exec` parses (ADR-0056) but this build cannot run it yet.
+    #[error("`health.exec` checks are not supported by this version of hoster yet")]
+    ExecUnsupported,
     #[error("cannot inspect container {id}: {source}")]
     Inspect {
         id: ContainerId,
@@ -152,6 +155,7 @@ impl Check {
                 addr: loopback(*port)?,
                 container_port: *port,
             },
+            Probe::Exec { .. } => return Err(HealthError::ExecUnsupported),
         };
         let mut check = Self::probe(kind);
         check.interval = health.interval.unwrap_or(check.interval);

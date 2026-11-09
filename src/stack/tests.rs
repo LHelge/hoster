@@ -593,7 +593,7 @@ const APPENDED_ERRORS: &[(&str, &str, &str)] = &[
     (
         "health both",
         "[services.app.health]\nhttp = { port = 8080 }\ntcp = { port = 8080 }",
-        "not both",
+        "set at most one of `http`, `tcp` or `exec`",
     ),
     (
         "health port not routed",
@@ -642,8 +642,8 @@ const APPENDED_ERRORS: &[(&str, &str, &str)] = &[
     ),
     (
         "health unknown",
-        "[services.app.health]\nexec = [\"true\"]",
-        "unknown field `exec`",
+        "[services.app.health]\nscript = \"true\"",
+        "unknown field `script`",
     ),
     (
         "health bad duration",
@@ -708,22 +708,320 @@ fn appended_errors() {
     }
 }
 
+/// `health` on a service without routes: only `exec` (ADR-0056 Decision 4).
 #[test]
-fn health_is_not_allowed_on_non_routed_services() {
-    let source = r#"
-version = 1
+fn non_routed_services_only_declare_exec_checks() {
+    let worker = |health: &str| {
+        format!(
+            "version = 1\nname = \"demo\"\n\n[services.worker]\nimage = \"ghcr.io/acme/worker\"\n\n[services.worker.health]\n{health}\n"
+        )
+    };
+    let stack = parse(&worker(
+        "exec = [\"pg_isready\", \"-U\", \"app\"]\ntimeout = \"3s\"",
+    ))
+    .unwrap()
+    .stack;
+    let health = stack.services[&"worker".parse().unwrap()]
+        .health
+        .clone()
+        .unwrap();
+    assert_eq!(
+        health.probe,
+        Probe::Exec {
+            command: vec!["pg_isready".into(), "-U".into(), "app".into()]
+        }
+    );
+    assert_eq!(health.timeout, Some(Duration::from_secs(3)));
+
+    assert_error(
+        &worker("tcp = { port = 9000 }"),
+        "services.worker.health.tcp: `tcp` probes need a route",
+    );
+    assert_error(
+        &worker("http = { path = \"/up\" }"),
+        "services.worker.health.http: `http` probes need a route",
+    );
+    assert_error(
+        &worker("start_period = \"1m\""),
+        "services.worker.health: a service without routes needs `exec`",
+    );
+}
+
+#[test]
+fn exec_checks_on_routed_services() {
+    let source = format!("{MINIMAL}\n[services.app.health]\nexec = [\"/bin/check\"]\n");
+    let stack = parse(&source).unwrap().stack;
+    assert_eq!(
+        app(&stack).health.as_ref().unwrap().probe,
+        Probe::Exec {
+            command: vec!["/bin/check".into()]
+        }
+    );
+
+    let with = |health: &str| format!("{MINIMAL}\n[services.app.health]\n{health}\n");
+    assert_error(
+        &with("exec = []"),
+        "services.app.health.exec: must name the command and its arguments",
+    );
+    assert_error(
+        &with("exec = [\" \", \"x\"]"),
+        "services.app.health.exec[0]: the command must not be empty",
+    );
+    assert_error(
+        &with("http = { path = \"/up\" }\nexec = [\"true\"]"),
+        "set at most one of `http`, `tcp` or `exec`",
+    );
+    assert_error(
+        &with("tcp = { port = 8080 }\nexec = [\"true\"]"),
+        "services.app.health.exec: set at most one",
+    );
+}
+
+/// The health rules of ADR-0056 Decision 4, all in one file.
+#[test]
+fn health_errors_snapshot() {
+    let source = r#"version = 1
 name = "demo"
+
+[services.db]
+image = "docker.io/library/postgres:17"
+health = { tcp = { port = 5432 } }
+
+[services.cache]
+image = "docker.io/library/redis:7"
+health = { interval = "5s" }
+
+[services.queue]
+image = "docker.io/library/rabbitmq:4"
+health = { exec = [] }
+
+[services.app]
+image = "ghcr.io/acme/app"
+health = { http = { path = "/up" }, tcp = { port = 8080 }, exec = ["true"] }
+
+[[services.app.routes]]
+host = "demo.example.com"
+port = 8080
+
+[services.web]
+image = "ghcr.io/acme/web"
+health = { exec = ["", "-c", "true"] }
 
 [services.worker]
 image = "ghcr.io/acme/worker"
+health = { exec = [" pg_isready", "-U"] }
 
-[services.worker.health]
-tcp = { port = 9000 }
+[services.jobs]
+image = "ghcr.io/acme/jobs"
+health = { exec = ["check", "a\u0000b"] }
+
+[[services.web.routes]]
+host = "web.example.com"
+port = 8080
 "#;
-    assert_error(
-        source,
-        "`health` is not allowed on a service without routes",
+    insta::assert_snapshot!(parse(source).unwrap_err().to_string());
+}
+
+fn names<'a>(names: impl IntoIterator<Item = &'a Name>) -> Vec<&'a str> {
+    names.into_iter().map(AsRef::as_ref).collect()
+}
+
+fn name(name: &str) -> Name {
+    name.parse().unwrap()
+}
+
+const DEPENDENCIES: &str = r#"
+version = 1
+name = "demo"
+
+[services.web]
+image = "ghcr.io/acme/web"
+depends_on = ["api"]
+
+[services.api]
+image = "ghcr.io/acme/api"
+depends_on = ["db", "cache"]
+
+[services.cache]
+image = "docker.io/library/redis:7"
+depends_on = ["db"]
+
+[services.db]
+image = "docker.io/library/postgres:17"
+update = "stop-first"
+health = { exec = ["pg_isready", "-U", "app"] }
+
+[services.admin]
+image = "ghcr.io/acme/admin"
+"#;
+
+#[test]
+fn dependency_chains_and_diamonds() {
+    let stack = parse(DEPENDENCIES).unwrap().stack;
+    assert_eq!(names(stack.dependencies(&name("api"))), ["cache", "db"]);
+    assert_eq!(names(stack.dependencies(&name("db"))), Vec::<&str>::new());
+    assert_eq!(names(stack.dependencies(&name("nope"))), Vec::<&str>::new());
+    assert_eq!(
+        stack.services[&name("web")].depends_on,
+        BTreeSet::from([name("api")])
     );
+
+    // The diamond api → {cache, db}, cache → db reaches db once.
+    assert_eq!(
+        names(stack.transitive_dependencies(&name("web"))),
+        ["api", "cache", "db"]
+    );
+    assert_eq!(names(stack.transitive_dependencies(&name("cache"))), ["db"]);
+    assert!(stack.transitive_dependencies(&name("admin")).is_empty());
+
+    // Each service after its dependencies; name breaks ties (admin before db, both ready).
+    assert_eq!(
+        names(stack.dependency_order()),
+        ["admin", "db", "cache", "api", "web"]
+    );
+}
+
+#[test]
+fn dependency_order_is_deterministic() {
+    let stack = parse(DEPENDENCIES).unwrap().stack;
+    // The same graph with its service tables declared in reverse gives the same order.
+    let mut blocks: Vec<&str> = DEPENDENCIES.split("\n[services.").collect();
+    let header = blocks.remove(0);
+    assert!(blocks.len() > 2 && blocks[0].starts_with("web]"));
+    blocks.reverse();
+    let reordered = format!("{header}\n[services.{}", blocks.join("\n[services."));
+    assert!(reordered.find("[services.db]") < reordered.find("[services.web]"));
+    let other = parse(&reordered).unwrap().stack;
+    assert_eq!(stack.dependency_order(), other.dependency_order());
+
+    // Without dependencies it is name order.
+    let flat = parse(MINIMAL).unwrap().stack;
+    assert_eq!(names(flat.dependency_order()), ["app"]);
+    let empty = DEPENDENCIES.replace("depends_on = [\"db\"]", "depends_on = []");
+    let stack = parse(&empty).unwrap().stack;
+    assert_eq!(
+        names(stack.dependency_order()),
+        ["admin", "cache", "db", "api", "web"]
+    );
+}
+
+#[test]
+fn dependency_graph_cycles_and_closures() {
+    use super::dependency::Graph;
+
+    let graph = Graph::new([
+        ("a", vec!["b"]),
+        ("b", vec!["c", "missing"]),
+        ("c", vec!["a"]),
+        ("d", vec!["d"]),
+        ("e", vec!["f"]),
+        ("f", vec!["e", "a"]),
+        ("g", vec![]),
+    ]);
+    // Each strongly connected component once, from its smallest node; edges to unknown nodes
+    // are dropped.
+    assert_eq!(
+        graph.cycles(),
+        vec![vec!["a", "b", "c"], vec!["d"], vec!["e", "f"]]
+    );
+    assert_eq!(
+        graph.transitive("e").into_iter().collect::<Vec<_>>(),
+        ["a", "b", "c", "e", "f"]
+    );
+    assert!(graph.transitive("g").is_empty());
+    // Nodes on a cycle come last, in name order.
+    assert_eq!(graph.order(), ["g", "a", "b", "c", "d", "e", "f"]);
+
+    // The shortest way back, not the first one found.
+    let graph = Graph::new([("a", vec!["b", "c"]), ("b", vec!["c"]), ("c", vec!["a"])]);
+    assert_eq!(graph.cycles(), vec![vec!["a", "c"]]);
+}
+
+#[test]
+fn dependency_errors() {
+    let with = |deps: &str| {
+        DEPENDENCIES.replace(
+            "image = \"ghcr.io/acme/admin\"",
+            &format!("image = \"ghcr.io/acme/admin\"\ndepends_on = {deps}"),
+        )
+    };
+    assert!(parse(&with("[\"web\"]")).is_ok());
+    assert_error(
+        &with("[\"nope\"]"),
+        "services.admin.depends_on[0]: unknown service `nope`",
+    );
+    assert_error(
+        &with("[\"db\", \"admin\"]"),
+        "services.admin.depends_on[1]: a service cannot depend on itself",
+    );
+    assert_error(
+        &with("[\"db\", \"db\"]"),
+        "services.admin.depends_on[1]: `db` is listed more than once",
+    );
+    // A repeated unknown or self entry: the problem once, then the duplicate.
+    for (deps, first) in [
+        (
+            "[\"nope\", \"nope\"]",
+            "depends_on[0]: unknown service `nope`",
+        ),
+        (
+            "[\"admin\", \"admin\"]",
+            "depends_on[0]: a service cannot depend on itself",
+        ),
+    ] {
+        let error = parse(&with(deps)).unwrap_err().to_string();
+        assert!(error.contains(first), "{error}");
+        assert!(error.contains("depends_on[1]: `"), "{error}");
+        assert!(error.contains("is listed more than once"), "{error}");
+        assert_eq!(
+            error.matches(first.split_once(": ").unwrap().1).count(),
+            1,
+            "{error}"
+        );
+    }
+    assert_error(&with("\"db\""), "invalid type");
+
+    // A 2-cycle, reported once at the smallest member.
+    let two = DEPENDENCIES.replace("depends_on = [\"db\"]", "depends_on = [\"db\", \"api\"]");
+    assert_error(
+        &two,
+        "services.api.depends_on[1]: dependency cycle: api → cache → api",
+    );
+    // A 3-cycle.
+    let three = DEPENDENCIES.replace("health = { exec", "depends_on = [\"web\"]\nhealth = { exec");
+    assert_error(
+        &three,
+        "services.api.depends_on[0]: dependency cycle: api → db → web → api",
+    );
+}
+
+/// Every kind of dependency error in one file, each with its path and location.
+#[test]
+fn dependency_errors_snapshot() {
+    let source = r#"version = 1
+name = "demo"
+
+[services.app]
+image = "ghcr.io/acme/app"
+depends_on = ["worker", "ghost", "worker"]
+
+[services.worker]
+image = "ghcr.io/acme/worker"
+depends_on = ["app", "worker"]
+
+[services.a]
+image = "ghcr.io/acme/a"
+depends_on = ["b"]
+
+[services.b]
+image = "ghcr.io/acme/b"
+depends_on = ["c"]
+
+[services.c]
+image = "ghcr.io/acme/c"
+depends_on = ["a"]
+"#;
+    insta::assert_snapshot!(parse(source).unwrap_err().to_string());
 }
 
 #[test]

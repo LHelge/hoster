@@ -68,7 +68,8 @@ name = "notes"       # required; stack name
 | `env` | table string → string | no | Plain, non-secret environment variables. For a routed service with exactly one distinct container port, hoster adds `PORT=<that port>` unless `env` (or `secrets`) sets `PORT` itself ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). A service whose routes use two or more different container ports, or that has no routes, gets no `PORT`; set what it needs in `env`. The injected value is part of the service's config hash, so changing the route's `port` redeploys the service. |
 | `secrets` | table string → string | no | Env var name → secret name `<stack>/<name>` in hoster's encrypted secret store ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). The value never appears in the stack file. Values are injected as environment variables at container create; a deployment that references a secret which is not set is rejected, naming the secret (never its value). Replacing a secret changes its version, which is part of the service's config hash. |
 | `volumes` | table string → string | no | Volume name → mount path. Named podman volumes `hoster-<stack>-<volume>` only, kept on stack removal ([ADR-0030](https://github.com/LHelge/hoster/blob/main/docs/adr/0030-named-volumes-and-documented-backups.md)). Host bind mounts are not expressible ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)). hoster creates each volume on first use, labelled `hoster.managed=true` and `hoster.stack=<stack>`, and refuses to mount an existing one labelled for another stack. Validation warns when a service with volumes uses `update = "start-first"`, since old and new containers would mount the volume at the same time during a deploy ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
-| `health` | table | no | See §2.4 ([ADR-0038](https://github.com/LHelge/hoster/blob/main/docs/adr/0038-host-driven-health-probes-no-limits-v1.md), [ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). Defaults: HTTP `GET /healthz` on the first route's container port for routed services, "running for 5 s" for others. Services whose health endpoint is elsewhere (including prefix-mounted ones) declare it. |
+| `health` | table | no | See §2.4 ([ADR-0038](https://github.com/LHelge/hoster/blob/main/docs/adr/0038-host-driven-health-probes-no-limits-v1.md), [ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md), [ADR-0056](https://github.com/LHelge/hoster/blob/main/docs/adr/0056-service-dependencies-and-exec-health-checks.md)). Defaults: HTTP `GET /healthz` on the first route's container port for routed services, "running for 5 s" for others. Services whose health endpoint is elsewhere (including prefix-mounted ones) declare it; a service without routes may only declare an `exec` check. |
+| `depends_on` | array of string | no | Services of this stack that must pass their health check before this one starts, e.g. `["db", "cache"]` ([ADR-0056](https://github.com/LHelge/hoster/blob/main/docs/adr/0056-service-dependencies-and-exec-health-checks.md)). Each must name another service of the stack, at most once; cycles are rejected and named in order (`app → worker → app`). There are no compose-style `condition` variants. Each service starts as soon as its own dependencies pass, during deploys and after a reboot or crash. Outside a deploy, a running dependency that has not passed within min(`start_period`, 5 min) no longer holds its dependents, and a dependency that has never run is ignored. A dependency going down never stops its dependents. Not part of the config hash: changing it reorders starts but never recreates a container. |
 | `update` | string | no | `"start-first"` (default; zero-downtime) or `"stop-first"` (for services that cannot run twice; short outage with 503 + `Retry-After`) ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
 | `stop_timeout` | duration | no | Default `10s`. SIGTERM → SIGKILL grace period. |
 | `user` | string | no | `uid[:gid]` inside the container. |
@@ -95,29 +96,43 @@ There are intentionally **no** fields for `ports`, `privileged`, `network_mode`,
 - More than one service of the same stack on the same (host, prefix) → error, same as a duplicate.
 - Durations parse as humantime strings: `"500ms"`, `"30s"`, `"5m"`.
 
-## 2.4 Health check (ADR-0038)
+## 2.4 Health check (ADR-0038, ADR-0056)
 
 ```toml
 [services.api.health]
-http = { path = "/healthz", port = 8080, expect_status = "2xx" }  # or: tcp = { port = 8080 }
+http = { path = "/healthz", port = 8080, expect_status = "2xx" }
+# or: tcp = { port = 8080 }
+# or: exec = ["pg_isready", "-U", "app"]
 interval = "1s"
 timeout = "2s"
 healthy_after = 2     # consecutive successes required
 start_period = "30s"  # give up and abort the deploy after this
 ```
 
-hoster runs the probe from the host against the container's allocated `127.0.0.1` port. Without a
-`health` table, a routed service is probed with `GET /healthz` on its first route's container port,
-expecting 2xx–3xx ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)); set `health.http.path` when the endpoint differs, e.g. `/api/healthz`
-for a service mounted under a preserved prefix. Services without routes have no loopback port. For
-them v1 uses "running and not restarted for 5 s", and `health` is not allowed on non-routed
-services.
+hoster runs `http` and `tcp` probes from the host against the container's allocated `127.0.0.1`
+port. Without a `health` table, a routed service is probed with `GET /healthz` on its first
+route's container port, expecting 2xx–3xx ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md));
+set `health.http.path` when the endpoint differs, e.g. `/api/healthz` for a service mounted under
+a preserved prefix. Services without routes have no loopback port. Without a `health` table they
+count as healthy once "running and not restarted for 5 s"; a `health` table on such a service must
+use `exec`, since `http` and `tcp` need a route.
 
-Unset timings default to `interval = "1s"`, `timeout = "2s"`, `healthy_after = 1` and
-`start_period = "30s"`. `path` is sent as written, so spaces, control and non-ASCII characters
-must be percent-encoded. HTTP probes do not follow redirects, so a 3xx answer is the result. A
-deploy aborts as soon as the container exits during the check. Probe results (each change, and the
-verdict) are recorded as deployment events.
+Set at most one of `http`, `tcp` and `exec`. `exec` runs a command inside the container
+([ADR-0056](https://github.com/LHelge/hoster/blob/main/docs/adr/0056-service-dependencies-and-exec-health-checks.md)): a non-empty array whose first element names the program, run through podman's
+exec API without a shell, as the container's user and with its environment. Exit 0 passes; any
+other exit (a shell's 126 or 127 included) is an ordinary failure. If podman cannot execute the
+program at all, a deploy aborts at once with podman's error. Use `exec = ["sh", "-c", "…"]` when
+the check needs a shell. On a routed service an `exec` check also requires a TCP connect to the
+first route's port. Its output tail, secrets redacted, is recorded in the deployment's events.
+
+Unset timings default to `interval = "1s"`, `timeout = "2s"` (`"5s"` for `exec`),
+`healthy_after = 1` and `start_period = "30s"`. A timings-only `health` table, without a probe,
+is allowed only on a routed service, where it tunes the default HTTP probe.
+
+`path` is sent as written, so spaces, control and non-ASCII characters must be percent-encoded.
+HTTP probes do not follow redirects, so a 3xx answer is the result. A deploy aborts as soon as the
+container exits during the check. Probe results (each change, and the verdict) are recorded as
+deployment events.
 
 ## 2.5 Deploy authorization (ADR-0047)
 

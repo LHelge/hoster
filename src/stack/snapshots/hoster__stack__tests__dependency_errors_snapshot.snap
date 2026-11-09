@@ -1,0 +1,10 @@
+---
+source: src/stack/tests.rs
+expression: parse(source).unwrap_err().to_string()
+---
+invalid stack file (5 errors):
+  line 6, column 15: services.app.depends_on[0]: dependency cycle: app → worker → app
+  line 6, column 25: services.app.depends_on[1]: unknown service `ghost`: `depends_on` names services of this stack
+  line 6, column 34: services.app.depends_on[2]: `worker` is listed more than once
+  line 10, column 22: services.worker.depends_on[1]: a service cannot depend on itself
+  line 14, column 15: services.a.depends_on[0]: dependency cycle: a → b → c → a
