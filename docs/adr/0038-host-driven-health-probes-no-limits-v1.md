@@ -1,6 +1,6 @@
 # ADR-0038: hoster-driven health probes; no resource limits in v1
 
-- Status: Accepted (resolves OQ-07); default probe path is `/healthz` since ADR-0051
+- Status: Accepted (resolves OQ-07); default probe path is `/healthz` since ADR-0051; `exec` checks (also on non-routed services), podman's own healthcheck turned off at create, and a monitor status reset to `Unknown` on (re)start with a grace of min(`start_period`, 5 min) since ADR-0056
 - Date: 2026-11-07
 
 ## Decision

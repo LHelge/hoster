@@ -19,9 +19,9 @@ Make multi-container stacks of images we didn't write (an app plus its database,
 
 - `depends_on = ["db", "cache"]` per service: a service is started only after the services it depends on are healthy. Deploys and the reconciler's restarts follow dependency order.
 - `health.exec = ["pg_isready", "-U", "postgres"]`: a command run inside the container through the podman exec API. Exit code 0 means healthy. Allowed on routed and non-routed services.
-- When no `health` table is given, the image's own `HEALTHCHECK` is used if it declares one. Otherwise the current defaults apply (`GET /healthz` for routed services, "running for 5 s" for the rest).
+- Every container is created with `Healthcheck {Test: ["NONE"]}`, so podman never runs image checks on its own timers. The defaults stay as they are (`GET /healthz` for routed services, "running for 5 s" for the rest).
 
-Owner decisions (2026-11-09): exec checks **and** image HEALTHCHECK. Compose support is deferred.
+Owner decisions (2026-11-09): exec checks only. The image HEALTHCHECK default was dropped after the ADR spike: podman drops HEALTHCHECK from OCI images, so it would need a registry config fetch per digest (see ADR-0056, Alternatives). A start-phase dependent of a changing stop-first service is held back until that service passes. The reconciler's wait is bounded by the dependency's `start_period`. Compose support is deferred.
 
 ## Acceptance Criteria
 
