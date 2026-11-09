@@ -1,10 +1,10 @@
 ---
 id: "4ww"
 title: "Docs site: admin UI theme and one blog post per release"
-status: review
+status: done
 priority: P2
 created: "2026-11-09T07:32:06.413946682Z"
-updated: "2026-11-09T07:42:16.341976516Z"
+updated: "2026-11-09T08:49:55.421239127Z"
 tags:
   - docs
 attempts: 1

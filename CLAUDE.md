@@ -33,6 +33,9 @@ Use [Bears](https://github.com/LHelge/bea-rs) (MCP tools) for all planning and p
 
 - Pick work with `list_ready`, mark it with `start_task`, and finish with `review_task` or
   `complete_task`.
+- Mark a task done in the same PR that integrates it: run `complete_task` before committing, and
+  include its `.bears/` file in the task's commit. A task's status should never need a separate
+  follow-up commit or PR after the merge.
 - If you get stuck, use `release_task`.
 - File uncertain work with `propose_task` instead of adding it to the backlog.
 - A high `attempts` count means earlier tries failed. Change approach or escalate rather than
