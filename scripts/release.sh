@@ -5,8 +5,9 @@
 #   scripts/release.sh prepare X.Y.Z [--trailer 'Key: value']...
 #       From a clean main that matches origin/main: create release/vX.Y.Z, bump the version in
 #       Cargo.toml and Cargo.lock, commit `chore(release): vX.Y.Z`, push the branch and open a PR
-#       whose body is the git-cliff preview of the release notes. `--trailer` adds a trailer to
-#       the commit message (repeatable), e.g. the Co-Authored-By line an agent's commits carry.
+#       for it. `--trailer` adds a trailer to the commit message (repeatable), e.g. the
+#       Co-Authored-By line an agent's commits carry. The release notes are rendered by the
+#       release workflow from cliff.toml when the tag is pushed, so nothing here needs git-cliff.
 #
 #   scripts/release.sh tag X.Y.Z [--yes]
 #       After that PR is rebase-merged and local main is pulled: create the annotated tag vX.Y.Z on
@@ -19,7 +20,7 @@
 # than the version in Cargo.toml, except that the version already in Cargo.toml may be released
 # once if it was never tagged (the first release, v0.1.0); its release commit is then empty.
 #
-# Needs git, cargo, gh (authenticated) and git-cliff (https://git-cliff.org).
+# Needs git, cargo and gh (authenticated).
 set -euo pipefail
 
 readonly remote=origin
@@ -176,7 +177,7 @@ cmd_prepare() {
     [[ -n $version ]] || usage
     local tag="v$version" rel_branch="release/v$version"
 
-    require_tools git cargo gh git-cliff
+    require_tools git cargo gh
     gh auth status >/dev/null 2>&1 || die "gh is not logged in; run 'gh auth login' first"
     [[ $(git symbolic-ref --quiet --short HEAD || true) == "$branch" ]] || die "not on $branch"
     [[ -z $(git status --porcelain --untracked-files=no) ]] || die "the working tree has uncommitted changes"
@@ -225,11 +226,8 @@ cmd_prepare() {
         echo "Release $tag."
         echo
         echo "Rebase-merge this PR, then on an up-to-date \`$branch\` run \`scripts/release.sh tag $version\`"
-        echo "to tag the merged commit and publish the release."
-        echo
-        echo "## Release notes preview"
-        echo
-        git cliff --config cliff.toml --unreleased --tag "$tag" --strip all
+        echo "to tag the merged commit and publish the release. The release workflow renders the"
+        echo "release notes from cliff.toml when the tag is pushed."
     } >"$release_body"
 
     # From the push on, a failure leaves the branch on the remote; on_exit says what to do.
@@ -289,7 +287,7 @@ main() {
     (($#)) || usage
     local cmd=$1
     shift
-    # Run from the repository root so Cargo.toml and cliff.toml resolve.
+    # Run from the repository root so Cargo.toml resolves.
     cd "$(git rev-parse --show-toplevel)"
     case $cmd in
         prepare) cmd_prepare "$@" ;;

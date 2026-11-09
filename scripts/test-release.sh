@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests scripts/release.sh in a throwaway repository with a bare local remote. `gh` and
-# `git-cliff` are stubbed, so nothing reaches GitHub and the test runs offline.
+# Tests scripts/release.sh in a throwaway repository with a bare local remote. `gh` is stubbed,
+# so nothing reaches GitHub and the test runs offline.
 #
 # Usage: scripts/test-release.sh
 #
@@ -39,8 +39,9 @@ cat >"$GIT_CONFIG_GLOBAL" <<'EOF'
     detachedHead = false
 EOF
 
-# Stubs: gh records its arguments and the PR body; git-cliff prints fixed notes. STUB_FAIL makes
-# `gh auth`, `gh pr` or git-cliff fail, for the failure paths.
+# Stubs: gh records its arguments and the PR body. STUB_FAIL makes `gh auth` or `gh pr` fail,
+# or (STUB_FAIL=commit, through the work clone's pre-commit hook) the release commit, for the
+# failure paths.
 mkdir "$tmp/bin"
 cat >"$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -53,13 +54,7 @@ while (($#)); do
 done
 echo "https://github.invalid/pr/1"
 EOF
-cat >"$tmp/bin/git-cliff" <<'EOF'
-#!/usr/bin/env bash
-[[ ${STUB_FAIL:-} != git-cliff ]] || { echo "git-cliff: stubbed failure" >&2; exit 1; }
-printf '%s\n' "$*" >>"$STUB_DIR/cliff.args"
-printf '### Features\n\n- Stubbed release notes\n'
-EOF
-chmod +x "$tmp/bin/gh" "$tmp/bin/git-cliff"
+chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH" STUB_DIR="$tmp"
 
 # The remote, seeded with a minimal hoster crate at 0.1.0 that was never released.
@@ -76,7 +71,6 @@ publish = false
 EOF
 echo 'fn main() {}' >"$tmp/seed/src/main.rs"
 echo '/target/' >"$tmp/seed/.gitignore"
-touch "$tmp/seed/cliff.toml"
 cp "$script" "$tmp/seed/scripts/release.sh"
 (
     cd "$tmp/seed"
@@ -91,6 +85,11 @@ cp "$script" "$tmp/seed/scripts/release.sh"
 git clone --quiet "$tmp/remote.git" "$tmp/work"
 git clone --quiet "$tmp/remote.git" "$tmp/github"
 cd "$tmp/work"
+cat >.git/hooks/pre-commit <<'EOF'
+#!/usr/bin/env bash
+[[ ${STUB_FAIL:-} != commit ]] || { echo "commit: stubbed failure" >&2; exit 1; }
+EOF
+chmod +x .git/hooks/pre-commit
 
 release() { scripts/release.sh "$@" </dev/null; }
 
@@ -150,8 +149,8 @@ STUB_FAIL="gh auth" expect_refusal "prepare refuses when gh is not logged in" "g
 
 # ---- prepare: failure paths -----------------------------------------------------------------
 
-# Fails after the bump is committed but before the push: everything local is undone.
-STUB_FAIL=git-cliff expect_refusal "prepare reports a git-cliff failure" "rolled back" prepare 0.2.0
+# Fails after the bump but before the push: everything local is undone.
+STUB_FAIL=commit expect_refusal "prepare rolls back a failed release commit" "rolled back" prepare 0.2.0
 check "rollback returns to main" "$(git symbolic-ref --short HEAD)" main
 check "rollback leaves main clean" "$(git status --porcelain --untracked-files=no)" ""
 check "rollback leaves main at origin/main" "$(git rev-parse main)" "$(git rev-parse origin/main)"
@@ -166,7 +165,7 @@ check "a failed PR leaves the branch pushed" "$(remote_sha refs/heads/release/v0
 git switch --quiet main
 git branch --quiet -D release/v0.2.0
 git push --quiet origin --delete release/v0.2.0
-rm -f "$tmp/gh.args" "$tmp/pr-body.md" "$tmp/cliff.args"
+rm -f "$tmp/gh.args" "$tmp/pr-body.md"
 
 # ---- prepare: the first release keeps the version already in Cargo.toml ---------------------
 
@@ -180,7 +179,7 @@ fi
 # Drop that release again; the rest of the test releases 0.2.0.
 git branch --quiet -D release/v0.1.0
 git push --quiet origin --delete release/v0.1.0
-rm -f "$tmp/gh.args" "$tmp/pr-body.md" "$tmp/cliff.args"
+rm -f "$tmp/gh.args" "$tmp/pr-body.md"
 
 # ---- prepare: success -----------------------------------------------------------------------
 
@@ -209,8 +208,7 @@ else
 fi
 check_grep "gh pr create called" \
     "pr create --base main --head release/v0.2.0 --title chore(release): v0.2.0" "$tmp/gh.args"
-check_grep "PR body is the git-cliff preview" "Stubbed release notes" "$tmp/pr-body.md"
-check_grep "git-cliff previews the unreleased commits" "--unreleased --tag v0.2.0" "$tmp/cliff.args"
+check_grep "PR body says how to tag" "scripts/release.sh tag 0.2.0" "$tmp/pr-body.md"
 
 expect_refusal "prepare refuses an existing release branch" "already exists" prepare 0.2.0
 
