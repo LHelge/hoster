@@ -196,6 +196,7 @@ impl Fixtures {
                     .then(|| format!("GET /healthz of {name}: {}", Self::probe(health))),
                 ..HealthStats::default()
             },
+            waiting_for: Vec::new(),
         }
     }
 

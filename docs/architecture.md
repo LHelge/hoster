@@ -635,14 +635,18 @@ After the first pass, or once the grace ends without one, it probes at its caden
 10–30 s) and records changes as before. Because `Unknown` → `Healthy` is no change in
 `health_changed`, the first pass after a restart that followed an "is unhealthy" event records
 "is healthy again" explicitly. A container's first pass after a (re)start wakes the reconciler,
-which may start dependents waiting on it (§4 step 5, ADR-0056).
+which may start dependents waiting on it (§4 step 5, ADR-0056). A crash-looping generation is
+still probed at the deploy interval while it runs, until it passes since its (re)start, so that
+pass can end its dependents' hold; while it is down it is looked at at its usual interval. Its
+status stays crash looping until the reconciler ends that.
 
 **Reconciler gate.** Dependencies and checks come from the last committed deployment's revision
 (§5.1). A stopped current container starts once each dependency's current container is running
 and has passed its check since hoster (re)started it or first saw it running; that time lives in
 memory, so after a hoster restart (a self-update, say) a dependency that has run for days starts a
 fresh hold rather than counting from podman's older `StartedAt`. For the settle check a pass means
-running for 5 s, as in deploys, not the monitor's "running" (`Check::live`). The gate does not use
+running for 5 s, as in deploys, not the monitor's "running" (`Check::live`); the gate counts it as
+passed once that time is up, without waiting for a monitor probe. The gate does not use
 the monitor's current status, so a later flap or a stuck check does not hold dependents.
 
 - A dependency that is **not running** holds its dependents without a bound and at no crash-loop
@@ -653,7 +657,8 @@ the monitor's current status, so a later flap or a stuck check does not hold dep
   startup start. Either way one ADR-0055 event, of the existing reconciler-restart kind, records
   it ("started app although db has not passed its check"), once per hold: further backoff
   restarts of a crash-looping dependent during the same hold write only their usual events. The
-  hold ends when the dependency passes or is (re)started.
+  hold ends when the dependency passes or is (re)started. The reconcile loop runs a pass when
+  the earliest such hold ends, not only at its next tick.
 
 Containers are created with `Healthcheck {Test: ["NONE"]}`, so podman never runs a check of its
 own.

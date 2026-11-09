@@ -48,6 +48,8 @@ struct State {
     exec_scripts: Vec<(String, VecDeque<ExecResult>)>,
     /// Every exec that reached a running container: its name and argv.
     execs: Vec<(String, Vec<String>)>,
+    /// The names of the containers started, in order.
+    starts: Vec<String>,
 }
 
 /// One scripted exec result.
@@ -260,6 +262,11 @@ impl FakeRuntime {
         self.lock().images.iter().cloned().collect()
     }
 
+    /// The names of the containers started so far, in order, forgetting them.
+    pub fn take_starts(&self) -> Vec<String> {
+        std::mem::take(&mut self.lock().starts)
+    }
+
     /// Every container, managed or not.
     pub fn containers(&self) -> Vec<ContainerInfo> {
         let state = self.lock();
@@ -469,7 +476,10 @@ impl ContainerRuntime for FakeRuntime {
     async fn start(&self, id: &ContainerId) -> Result<(), RuntimeError> {
         let mut state = self.lock();
         state.enter(Operation::Start)?;
-        state.container(id)?.set_state(ContainerState::Running);
+        let container = state.container(id)?;
+        container.set_state(ContainerState::Running);
+        let name = container.spec.name.clone();
+        state.starts.push(name);
         Ok(())
     }
 

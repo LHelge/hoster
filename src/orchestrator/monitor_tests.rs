@@ -175,7 +175,8 @@ async fn the_reconcilers_crash_loop_verdict_is_a_status() {
         .monitor_at(start + Duration::from_secs(16))
         .await
         .unwrap();
-    assert_eq!(changes(&looping), [("api", H::Healthy, H::CrashLooping)]);
+    // Each restart reset the status to `Unknown` (ADR-0056).
+    assert_eq!(changes(&looping), [("api", H::Unknown, H::CrashLooping)]);
     assert!(matches!(
         events.try_recv().unwrap(),
         UiEvent::Health {
@@ -204,7 +205,7 @@ async fn leaving_a_crash_loop_is_one_event_from_the_reconciler() {
         orchestrator.reconcile_at(at(t)).await.unwrap();
     }
     let looping = orchestrator.monitor_at(at(16.0)).await.unwrap();
-    assert_eq!(changes(&looping), [("api", H::Healthy, H::CrashLooping)]);
+    assert_eq!(changes(&looping), [("api", H::Unknown, H::CrashLooping)]);
 
     // Up for a whole window: the reconciler resets the history and writes the recovery; the
     // monitor's next passing probe only changes the status.
@@ -603,4 +604,150 @@ async fn the_monitor_runs_exec_checks_in_the_live_container() {
     drop(guards);
     orchestrator.monitor_at(at(105)).await.unwrap();
     assert_eq!(health(orchestrator, "db").await.status, H::Healthy);
+}
+
+/// A (re)start resets the status to `Unknown`; failures within min(`start_period`, 5 min)
+/// write no event, the first pass wakes the reconciler, and a pass after a restart that
+/// interrupted an unhealthy spell is recorded as "healthy again" (ADR-0056 Decision 3).
+#[tokio::test]
+async fn failures_within_the_grace_after_a_restart_write_no_event() {
+    let h = harness().await;
+    let live = h
+        .finish(
+            h.apply(super::tests::DEPS)
+                .await
+                .deployment
+                .as_ref()
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(live.state, DeploymentState::Live, "{live:?}");
+    let orchestrator = &h.orchestrator;
+    h.runtime.script_exec(
+        "-db-",
+        [
+            Ok(ExecOutcome::finished(2, "no\n".into())),
+            Ok(ExecOutcome::finished(2, "no\n".into())),
+            Ok(ExecOutcome::finished(0, "ok\n".into())),
+        ],
+    );
+    let start = Instant::now();
+    let at = |millis: u64| start + Duration::from_millis(millis);
+
+    // First seen: probed at the deploy interval (10 ms), failures keep it `Unknown`.
+    let first = orchestrator.monitor_at(at(0)).await.unwrap();
+    assert_eq!(changes(&first), [("app", H::Unknown, H::Healthy)]);
+    // app's first pass woke the reconciler.
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        orchestrator.reconcile_wake.notified(),
+    )
+    .await
+    .unwrap();
+    assert!(orchestrator.monitor_at(at(20)).await.unwrap().is_empty());
+    let db = health(orchestrator, "db").await;
+    assert_eq!(db.status, H::Unknown);
+    assert_eq!((db.probes, db.failures), (2, 2));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            orchestrator.reconcile_wake.notified()
+        )
+        .await
+        .is_err(),
+        "nothing passed"
+    );
+    // The first pass: healthy, and the reconciler is woken.
+    let passed = orchestrator.monitor_at(at(40)).await.unwrap();
+    assert_eq!(changes(&passed), [("db", H::Unknown, H::Healthy)]);
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        orchestrator.reconcile_wake.notified(),
+    )
+    .await
+    .unwrap();
+    assert!(health_events(&h).await.is_empty());
+
+    // Past the grace a failure is a change, written as before.
+    h.runtime
+        .script_exec("-db-", [Ok(ExecOutcome::finished(2, "no\n".into()))]);
+    let failing = orchestrator.monitor_at(at(60_000)).await.unwrap();
+    assert_eq!(changes(&failing), [("db", H::Healthy, H::Unhealthy)]);
+
+    // The reconciler restarts it: `Unknown` again, and its failures are quiet for a while.
+    let id = h.container("hoster-notes-db-g1").id;
+    h.runtime.set_state(&id, ContainerState::Exited(Some(1)));
+    let mut events = orchestrator.subscribe();
+    orchestrator.reconcile_at(at(61_000)).await.unwrap();
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        UiEvent::Health { ref service, from: H::Unhealthy, to: H::Unknown, .. } if service == "db"
+    ));
+    assert_eq!(health(orchestrator, "db").await.status, H::Unknown);
+    assert!(
+        orchestrator
+            .monitor_at(at(61_010))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    h.runtime
+        .script_exec("-db-", [Ok(ExecOutcome::finished(0, "ok\n".into()))]);
+    let recovered = orchestrator.monitor_at(at(61_020)).await.unwrap();
+    assert_eq!(changes(&recovered), [("db", H::Unknown, H::Healthy)]);
+    let written: Vec<String> = health_events(&h)
+        .await
+        .into_iter()
+        .map(|(_, message, _)| message)
+        .collect();
+    assert_eq!(
+        written,
+        ["notes/db is unhealthy", "notes/db is healthy again"]
+    );
+
+    // A restart the monitor sees itself (a new `StartedAt`) resets the status too.
+    h.runtime
+        .set_started_at(&id, std::time::SystemTime::now() + Duration::from_secs(1));
+    let reset = orchestrator.monitor_at(at(61_030)).await.unwrap();
+    assert!(
+        changes(&reset).contains(&("db", H::Healthy, H::Unknown)),
+        "{reset:?}"
+    );
+}
+
+/// The monitor checks with the revision that runs: a later revision whose deployment was
+/// refused changes nothing (ADR-0056).
+#[tokio::test]
+async fn the_monitor_checks_with_the_last_committed_revision() {
+    let h = harness().await;
+    let live = h
+        .finish(
+            h.apply(super::tests::DEPS)
+                .await
+                .deployment
+                .as_ref()
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(live.state, DeploymentState::Live, "{live:?}");
+    // The next revision changes db's check but needs a secret that is not set.
+    let refused = super::tests::DEPS
+        .replace("exec = [\"pg_isready\"]", "exec = [\"other\"]")
+        .replace(
+            "update = \"stop-first\"",
+            "update = \"stop-first\"\nsecrets = { P = \"notes/password\" }",
+        );
+    let rejected = h
+        .finish(h.apply(&refused).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(rejected.state, DeploymentState::Rejected, "{rejected:?}");
+    let before = h.runtime.execs().len();
+    h.orchestrator.monitor_at(Instant::now()).await.unwrap();
+    assert_eq!(
+        h.runtime.execs()[before..],
+        [(
+            "hoster-notes-db-g1".to_owned(),
+            vec!["pg_isready".to_owned()]
+        )]
+    );
 }

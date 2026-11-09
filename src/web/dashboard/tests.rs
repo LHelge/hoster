@@ -80,6 +80,7 @@ fn service(name: &str, health: HealthStatus, restarts: u32, crash_looping: bool)
             last: Some(format!("GET /healthz of <{name}>: 503")),
             ..HealthStats::default()
         },
+        waiting_for: Vec::new(),
     }
 }
 

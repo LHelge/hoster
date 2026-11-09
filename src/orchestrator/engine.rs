@@ -1,27 +1,31 @@
 //! The deploy task: drives one deployment through the pure machine and carries out its effects
 //! against the [`ContainerRuntime`], the port allocator, the store and the published routes.
 //!
-//! The start-first path of ADR-0017 as ordered by ADR-0048: new start-first containers start next
-//! to the old ones on fresh loopback ports (`Starting`) and are probed with their resolved
-//! [`Check`]s (`HealthChecking`); stop-first services are replaced one at a time behind a 503 gap
+//! The start-first path of ADR-0017 as ordered by ADR-0048 and ADR-0056: the start phase's new
+//! containers start next to the old ones on fresh loopback ports (`Starting`), each as soon as
+//! its start-phase dependencies have passed, and are probed in parallel with their resolved
+//! [`Check`]s (`HealthChecking`); stop-first services are replaced one at a time in dependency
+//! order behind a 503 gap, and services held back for them start once they have passed
 //! (`Replacing`); one `RouteTable` publish and one pointer transaction commit the whole stack
 //! (`Switching`); the old upstreams drain on their in-flight counters, bounded by the stack's
 //! `drain_timeout` (`Draining`); then the old generation is removed (`CleaningUp`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 
-use futures_util::future::{join_all, try_join_all};
+use futures_util::future::join_all;
+use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::event_log::DeployEvents;
 use super::machine::{Effect, Event};
-use super::plan::{Change, Plan, SecretVersions};
+use super::plan::{Change, Phase, Plan, SecretVersions, StartWaves};
 use super::routes::Routes;
 use super::{Interruption, Orchestrator, Result};
-use crate::health::{Check, DeploymentLog, ProbeLog, Probes};
+use crate::health::{Check, DeploymentLog, Elapsed, ProbeLog, Probes};
 use crate::logging::LogSpan;
 use crate::routing::{DesiredStack, DrainOutcome, RouteClaims, ServiceState, Upstream};
 use crate::runtime::{
@@ -29,7 +33,7 @@ use crate::runtime::{
     ServiceGeneration, VolumeMount, label,
 };
 use crate::secrets::SecretValue;
-use crate::stack::{Name, Stack, UpdateStrategy};
+use crate::stack::{Name, Stack};
 use crate::store::{
     Deployment, DeploymentId, DeploymentState, DigestSet, NewEvent, PortMap, RevisionId,
     ServicePointer, StackRevision, Timestamp,
@@ -115,13 +119,21 @@ pub(super) struct Run {
     created: Vec<(Name, ContainerId)>,
     /// The secret values given to the new containers, redacted from exec check output.
     secrets: Vec<SecretValue>,
-    /// Old stop-first containers `Replacing` stopped (kept until clean-up).
-    stopped: Vec<ContainerId>,
+    /// Old stop-first containers `Replacing` stopped (kept until clean-up), by service.
+    stopped: Vec<(Name, ContainerId)>,
+    /// The start-phase services `HealthChecking` has yet to start.
+    waves: StartWaves,
+    /// The unchanged services whose container ran when `Starting` began: restarted should one
+    /// exit while a replaced dependency is down (ADR-0056 Decision 2.4).
+    running_at_start: BTreeSet<Name>,
     /// What the stack's routes served before `Switching` published this deployment's: put
     /// back should the pointers fail to commit, and the old upstreams `Draining` waits for.
     served_before: Option<DesiredStack>,
     /// What the deployment writes to the event log (ADR-0055).
     events: DeployEvents,
+    /// Held while a note is written, so notes of probes running in parallel and the deploy
+    /// task's own are stored in the order of their timestamps.
+    notes: Arc<tokio::sync::Mutex<()>>,
 }
 
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -141,8 +153,11 @@ impl Run {
             created: Vec::new(),
             secrets: Vec::new(),
             stopped: Vec::new(),
+            waves: StartWaves::default(),
+            running_at_start: BTreeSet::new(),
             served_before: None,
             events,
+            notes: Arc::default(),
         }
     }
 
@@ -181,6 +196,30 @@ impl Run {
         self.plan
             .as_ref()
             .expect("validated deployments have a plan")
+    }
+
+    /// The failure of `service` because of `reason`, naming the changed services depending on
+    /// it, even transitively, that were never started (ADR-0055, ADR-0056).
+    fn failed(&self, service: &Name, reason: String) -> Event {
+        let started: BTreeSet<&Name> = self.created.iter().map(|(s, _)| s).collect();
+        let definition = &self.target.definition;
+        let never: Vec<&str> = self
+            .plan()
+            .changes
+            .iter()
+            .filter(|c| {
+                !started.contains(&c.service)
+                    && definition
+                        .transitive_dependencies(&c.service)
+                        .contains(service)
+            })
+            .map(|c| c.service.as_ref())
+            .collect();
+        if never.is_empty() {
+            Event::Failed(reason)
+        } else {
+            Event::Failed(format!("{reason}; never started: {}", never.join(", ")))
+        }
     }
 }
 
@@ -334,6 +373,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         match effect {
             Effect::Persist { to, message } => {
                 let event = run.event_on(to, message.as_deref());
+                let _writing = Arc::clone(&run.notes).lock_owned().await;
                 if let Err(err) = self
                     .persist(&run.stack_name(), run.id, to, message.as_deref(), event)
                     .await
@@ -350,16 +390,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     .unwrap_or_else(|interruption| Event::Failed(interruption.to_string())),
             ),
             Effect::StartContainers => Some(self.start_new(run).await),
-            Effect::Probe => Some(
-                match self
-                    .unless_interrupted(run, self.probe(run, &run.created))
-                    .await
-                {
-                    Ok(Ok(())) => Event::Healthy,
-                    Ok(Err(reason)) => Event::Failed(reason),
-                    Err(interruption) => Event::Failed(interruption.to_string()),
-                },
-            ),
+            Effect::Probe => Some(self.start_waves(run).await),
             Effect::ReplaceStopFirst => Some(self.replace_stop_first(run).await),
             // Published by `transition`, under the lock; never returned from it.
             Effect::PublishRoutes => None,
@@ -523,71 +554,400 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         Event::Pulled
     }
 
-    /// `Starting`: the stack network, then every new start-first container.
+    /// `Starting`: the stack network, then the start phase's first wave: every start-phase
+    /// service with no start-phase dependency (ADR-0056 Decision 2). Records which unchanged
+    /// services run, and fails when an unchanged dependency of a changed service does not.
     async fn start_new(&self, run: &mut Run) -> Event {
         let network = NetworkSpec::for_stack(run.target.stack());
         if let Err(err) = self.runtime.ensure_network(&network).await {
             return Event::Failed(format!("cannot create network {}: {err}", network.name));
         }
-        let changes: Vec<Change> = run
-            .plan()
-            .changes_with(UpdateStrategy::StartFirst)
-            .cloned()
-            .collect();
-        for change in &changes {
-            if let Err(reason) = self.create_and_start(run, change).await {
-                return Event::Failed(reason);
-            }
-        }
-        Event::Started
-    }
-
-    /// `Replacing`: each stop-first service in turn (ADR-0048): stop the old container (keep
-    /// it), start the new one, check it.
-    async fn replace_stop_first(&self, run: &mut Run) -> Event {
-        let changes: Vec<Change> = run
-            .plan()
-            .changes_with(UpdateStrategy::StopFirst)
-            .cloned()
-            .collect();
-        if changes.is_empty() {
-            return Event::Replaced;
-        }
         let containers = match self.runtime.list_managed().await {
             Ok(containers) => containers,
             Err(err) => return Event::Failed(err.to_string()),
         };
+        let stack = run.target.stack().clone();
+        run.running_at_start = run
+            .plan()
+            .unchanged
+            .iter()
+            .filter(|p| is_running(&containers, &stack, p))
+            .filter_map(|p| p.service.parse().ok())
+            .collect();
+        let mut notes = Vec::new();
+        let mut unchanged = BTreeMap::new();
+        for change in &run.plan().changes {
+            for dependency in change
+                .depends_on
+                .iter()
+                .filter(|d| run.plan().is_awaiting(d))
+            {
+                notes.push(format!(
+                    "{dependency} has never run; starting {} without it",
+                    change.service
+                ));
+            }
+            for pointer in run.plan().unchanged_dependencies(change) {
+                if let Ok(dependency) = pointer.service.parse::<Name>() {
+                    unchanged.insert(dependency, pointer.generation);
+                }
+            }
+        }
+        for (dependency, generation) in &unchanged {
+            if !run.running_at_start.contains(dependency) {
+                return run.failed(
+                    dependency,
+                    format!("{dependency} (unchanged) is not running"),
+                );
+            }
+            let status = self
+                .health_stats(stack.as_ref(), dependency.as_ref(), *generation)
+                .status;
+            notes.push(format!(
+                "{dependency} (unchanged) is running; its monitor status is {status}"
+            ));
+        }
+        for note in notes {
+            self.note_run(run, &note).await;
+        }
+        run.waves = run.plan().start_waves();
+        let ready = run.waves.ready();
+        if let Err(event) = self.start_wave(run, &ready, None).await {
+            return event;
+        }
+        Event::Started
+    }
+
+    /// Creates and starts the start-phase services `ready` (once `after` passed, if given),
+    /// one at a time, each after an interruption check. Returns the containers started.
+    async fn start_wave(
+        &self,
+        run: &mut Run,
+        ready: &[Name],
+        after: Option<(&Name, std::time::Duration)>,
+    ) -> std::result::Result<Vec<(Name, ContainerId)>, Event> {
+        let names: Vec<&str> = ready.iter().map(AsRef::as_ref).collect();
+        let note = match (after, names.is_empty()) {
+            (None, true) => None,
+            (None, false) => Some(format!("starting {}", names.join(", "))),
+            (Some((passed, took)), true) => {
+                Some(format!("{passed} healthy after {}", Elapsed(took)))
+            }
+            (Some((passed, took)), false) => Some(format!(
+                "{passed} healthy after {}; starting {}",
+                Elapsed(took),
+                names.join(", ")
+            )),
+        };
+        if let Some(note) = note {
+            self.note_run(run, &note).await;
+        }
+        let mut started = Vec::new();
+        for service in ready {
+            if let Some(interruption) = self.interruption(run.target.stack().as_ref(), run.id) {
+                return Err(Event::Failed(interruption.to_string()));
+            }
+            let change = run
+                .plan()
+                .changes
+                .iter()
+                .find(|c| c.service == *service)
+                .cloned()
+                .expect("a start wave holds changed services");
+            match self.create_and_start(run, &change).await {
+                Ok(id) => started.push((service.clone(), id)),
+                Err(reason) => return Err(run.failed(service, reason)),
+            }
+        }
+        Ok(started)
+    }
+
+    /// `HealthChecking`: probes the started start-phase containers in parallel, and starts
+    /// each further start-phase service as soon as its start-phase dependencies have passed,
+    /// probing it too (ADR-0056 Decision 2.1). Held-back services are left to `Replacing`.
+    /// The probes run as their own tasks, so they go on while a dependent is created; only the
+    /// probe waits end on an interruption (dropping the set aborts them), and a create in
+    /// progress finishes first.
+    async fn start_waves(self: &Arc<Self>, run: &mut Run) -> Event {
+        let mut pending = JoinSet::new();
+        // Which service each probe task checks, so a probe task that panicked still names it.
+        let mut probing = BTreeMap::new();
+        let mut started = run.created.clone();
+        loop {
+            for (service, id) in started.drain(..) {
+                let check = match self.check(run, &service) {
+                    Ok(check) => check,
+                    Err(reason) => return run.failed(&service, reason),
+                };
+                let log = self.probe_log(run);
+                log.record(&format!("checking {service} with {check:#}"))
+                    .await;
+                let orchestrator = Arc::clone(self);
+                let probed = service.clone();
+                let task = pending.spawn(
+                    async move {
+                        let probes = Probes::new(
+                            &*orchestrator.runtime,
+                            &*orchestrator.prober,
+                            &orchestrator.execs,
+                        );
+                        let at = Instant::now();
+                        let result = check.run(&probes, &id, &log).await;
+                        (service, result.map_err(|err| err.to_string()), at.elapsed())
+                    }
+                    .in_current_span(),
+                );
+                probing.insert(task.id(), probed);
+            }
+            let (service, result, took) =
+                match self.unless_interrupted(run, pending.join_next()).await {
+                    Ok(Some(Ok(next))) => next,
+                    Ok(Some(Err(err))) => {
+                        let reason = format!("a probe failed: {err}");
+                        return match probing.get(&err.id()) {
+                            Some(service) => run.failed(service, reason),
+                            None => Event::Failed(reason),
+                        };
+                    }
+                    Ok(None) => return Event::Healthy,
+                    Err(interruption) => return Event::Failed(interruption.to_string()),
+                };
+            if let Err(err) = result {
+                return run.failed(&service, format!("{service}: {err}"));
+            }
+            run.waves.passed(&service);
+            let ready = run.waves.ready();
+            match self.start_wave(run, &ready, Some((&service, took))).await {
+                Ok(new) => started = new,
+                Err(event) => return event,
+            }
+        }
+    }
+
+    /// `Replacing` (ADR-0048, ADR-0056): one at a time in dependency order, each replace-phase
+    /// service is replaced (stop the old container and keep it, start the new one, check it)
+    /// and each held-back service started and checked, after re-checking that its unchanged
+    /// dependencies run. After a replacement passes, the unchanged services depending on it
+    /// that ran when the deployment began and have exited since are started again and checked.
+    async fn replace_stop_first(&self, run: &mut Run) -> Event {
+        let changes: Vec<Change> = run.plan().replacing().cloned().collect();
         let definition = Arc::clone(&run.target.definition);
         let stop_timeout = |service: &Name| definition.services[service].stop_timeout;
         for change in &changes {
-            if let Some(previous) = &change.previous {
-                // The service's routes answer 503 + Retry-After until the commit or the abort.
-                self.lock()
-                    .routes
-                    .open_gap(run.target.stack(), &change.service);
-                let old = generation_of(&containers, run.target.stack(), previous);
-                for container in old.into_iter().filter(|c| c.state.is_running()) {
-                    if let Err(err) = self
-                        .runtime
-                        .stop(&container.id, stop_timeout(&change.service))
-                        .await
-                    {
-                        return Event::Failed(format!("cannot stop {}: {err}", container.name));
+            let containers = match self.runtime.list_managed().await {
+                Ok(containers) => containers,
+                Err(err) => return run.failed(&change.service, err.to_string()),
+            };
+            if let Some(dependency) = self.stopped_unchanged_dependency(run, change, &containers) {
+                return run.failed(
+                    &dependency,
+                    format!("{dependency} (unchanged) is not running"),
+                );
+            }
+            match (&change.phase, &change.previous) {
+                (Phase::Replace, Some(previous)) => {
+                    self.note_run(run, &format!("replacing {} (stop-first)", change.service))
+                        .await;
+                    // The service's routes answer 503 + Retry-After until the commit or the
+                    // abort.
+                    self.lock()
+                        .routes
+                        .open_gap(run.target.stack(), &change.service);
+                    let old = generation_of(&containers, run.target.stack(), previous);
+                    for container in old.into_iter().filter(|c| c.state.is_running()) {
+                        if let Err(err) = self
+                            .runtime
+                            .stop(&container.id, stop_timeout(&change.service))
+                            .await
+                        {
+                            let reason = format!("cannot stop {}: {err}", container.name);
+                            return run.failed(&change.service, reason);
+                        }
+                        run.stopped
+                            .push((change.service.clone(), container.id.clone()));
                     }
-                    run.stopped.push(container.id.clone());
+                }
+                _ => {
+                    let replaced: Vec<&str> = run
+                        .plan()
+                        .held_back_for(&change.service)
+                        .map(AsRef::as_ref)
+                        .collect();
+                    self.note_run(
+                        run,
+                        &format!(
+                            "starting {} (held back for {})",
+                            change.service,
+                            replaced.join(", ")
+                        ),
+                    )
+                    .await;
                 }
             }
-            if let Err(reason) = self.create_and_start(run, change).await {
-                return Event::Failed(reason);
+            let id = match self.create_and_start(run, change).await {
+                Ok(id) => id,
+                Err(reason) => return run.failed(&change.service, reason),
+            };
+            let check = match self.check(run, &change.service) {
+                Ok(check) => check,
+                Err(reason) => return run.failed(&change.service, reason),
+            };
+            let label = change.service.as_ref();
+            if let Err(reason) = self
+                .probe_one(run, &change.service, label, &id, check)
+                .await
+            {
+                return run.failed(&change.service, reason);
             }
-            let new = run.created.last().cloned().into_iter().collect::<Vec<_>>();
-            match self.unless_interrupted(run, self.probe(run, &new)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(reason)) => return Event::Failed(reason),
-                Err(interruption) => return Event::Failed(interruption.to_string()),
+            if change.phase == Phase::Replace
+                && let Err((service, reason)) = self
+                    .restart_unchanged_dependents(run, &change.service)
+                    .await
+            {
+                return run.failed(&service, reason);
             }
         }
         Event::Replaced
+    }
+
+    /// An unchanged service `change` depends on that does not run, if one does not.
+    fn stopped_unchanged_dependency(
+        &self,
+        run: &Run,
+        change: &Change,
+        containers: &[ContainerInfo],
+    ) -> Option<Name> {
+        let stack = run.target.stack();
+        run.plan()
+            .unchanged_dependencies(change)
+            .find(|p| !is_running(containers, stack, p))
+            .and_then(|p| p.service.parse().ok())
+    }
+
+    /// After `replaced` passed: starts again, in dependency order, every unchanged service
+    /// depending on it (even transitively) that ran when the deployment began and has exited
+    /// since, without a restart record, and checks each within its `start_period` before the
+    /// next (ADR-0056 Decision 2.4). The secret values it references are redacted from its
+    /// check's output like those of the new containers. `Err` names the service that did not
+    /// pass, and why.
+    async fn restart_unchanged_dependents(
+        &self,
+        run: &mut Run,
+        replaced: &Name,
+    ) -> std::result::Result<(), (Name, String)> {
+        let definition = Arc::clone(&run.target.definition);
+        let mut dependents: Vec<(Name, ServicePointer)> = run
+            .running_at_start
+            .iter()
+            .filter(|s| definition.transitive_dependencies(s).contains(replaced))
+            .map(|s| {
+                let pointer = run
+                    .plan()
+                    .unchanged_pointer(s)
+                    .expect("running_at_start holds unchanged services");
+                (s.clone(), pointer.clone())
+            })
+            .collect();
+        if dependents.is_empty() {
+            return Ok(());
+        }
+        definition.sort_in_dependency_order(&mut dependents, |(s, _)| s);
+        let containers = self
+            .runtime
+            .list_managed()
+            .await
+            .map_err(|err| (replaced.clone(), err.to_string()))?;
+        let stack = run.target.stack().clone();
+        for (service, pointer) in &dependents {
+            let Some(container) = generation_of(&containers, &stack, pointer)
+                .into_iter()
+                .find(|c| !c.state.is_running())
+            else {
+                continue;
+            };
+            self.note_run(
+                run,
+                &format!(
+                    "starting {service} (unchanged) again: it exited while {replaced} was replaced"
+                ),
+            )
+            .await;
+            self.runtime.start(&container.id).await.map_err(|err| {
+                (
+                    service.clone(),
+                    format!("cannot start {}: {err}", container.name),
+                )
+            })?;
+            if let Ok(key) = ServiceGeneration::try_from(container) {
+                self.restarted(&key, Instant::now());
+            }
+            for (env, secret) in &definition.services[service].secrets {
+                match self.secrets.reveal(secret).await {
+                    Ok(Some((value, _))) => run.secrets.push(value),
+                    Ok(None) => {}
+                    Err(err) => {
+                        return Err((
+                            service.clone(),
+                            format!(
+                                "{service} (unchanged): cannot read secret `{secret}` (for {env}): {err}"
+                            ),
+                        ));
+                    }
+                }
+            }
+            let check = self
+                .check_for(&definition.services[service], &pointer.ports)
+                .map_err(|err| (service.clone(), format!("service {service}: {err}")))?;
+            let label = format!("{service} (unchanged)");
+            self.probe_one(run, service, &label, &container.id, check)
+                .await
+                .map_err(|reason| (service.clone(), reason))?;
+        }
+        Ok(())
+    }
+
+    /// Probes `service`'s container `id` with `check` until it passes or fails, recording it
+    /// as events of the deployment; ends early on an interruption. A failure is reported as
+    /// `<label>: <why>`.
+    async fn probe_one(
+        &self,
+        run: &Run,
+        service: &Name,
+        label: &str,
+        id: &ContainerId,
+        check: Check,
+    ) -> std::result::Result<(), String> {
+        let log = self.probe_log(run);
+        log.record(&format!("checking {service} with {check:#}"))
+            .await;
+        let probes = Probes::new(&*self.runtime, &*self.prober, &self.execs);
+        match self
+            .unless_interrupted(run, check.run(&probes, id, &log))
+            .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(format!("{label}: {err}")),
+            Err(interruption) => Err(interruption.to_string()),
+        }
+    }
+
+    /// Where probe results go: events of the deployment in its state, with the secret values
+    /// of its containers redacted from exec output.
+    fn probe_log(&self, run: &Run) -> DeploymentLog {
+        DeploymentLog::new(self.store.clone(), run.id, run.state)
+            .redacting(&run.secrets)
+            .serialized(&run.notes)
+    }
+
+    /// Records `message` as an event of the deployment in its state.
+    async fn note_run(&self, run: &Run, message: &str) {
+        let _writing = run.notes.lock().await;
+        if let Err(err) = self
+            .note(&run.stack_name(), run.id, run.state, message)
+            .await
+        {
+            tracing::warn!(deployment = %run.id, %err, "cannot record a deployment note");
+        }
     }
 
     /// `Switching`: the commit point, one transaction writing every changed service's pointer
@@ -679,15 +1039,34 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
     }
 
-    /// `Aborting`: back to exactly how the stack was (ADR-0048).
+    /// `Aborting`: back to exactly how the stack was (ADR-0048). The new containers go in
+    /// reverse creation order; the stopped stop-first containers start again in the dependency
+    /// order of the last committed deployment's revision, order only: nothing waits for a
+    /// container to run or pass, and what does not come up is left to the reconciler
+    /// (ADR-0056 Decision 2.6).
     async fn abort(&self, run: &mut Run, reason: String) -> Event {
         let mut problems = Vec::new();
-        for (_, id) in std::mem::take(&mut run.created) {
+        for (_, id) in std::mem::take(&mut run.created).into_iter().rev() {
             if let Err(err) = self.runtime.remove(&id).await {
                 problems.push(format!("cannot remove new container {id}: {err}"));
             }
         }
-        for id in std::mem::take(&mut run.stopped) {
+        let mut stopped = std::mem::take(&mut run.stopped);
+        if stopped.len() > 1 {
+            let committed = match self.committed_definition(&run.stack_name()).await {
+                Ok(Some(definition)) => definition,
+                Ok(None) => Arc::clone(&run.target.definition),
+                Err(err) => {
+                    tracing::warn!(
+                        deployment = %run.id, %err,
+                        "cannot read the committed revision; restarting in the target's order"
+                    );
+                    Arc::clone(&run.target.definition)
+                }
+            };
+            committed.sort_in_dependency_order(&mut stopped, |(service, _)| service);
+        }
+        for (_, id) in stopped {
             if let Err(err) = self.runtime.start(&id).await {
                 problems.push(format!("cannot restart old container {id}: {err}"));
             }
@@ -718,7 +1097,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     ///
     /// Secrets are read from the store here, at create time, and go into the spec's redacted
     /// `secrets` map only. Volumes are created first if they do not exist yet (ADR-0030).
-    async fn create_and_start(&self, run: &mut Run, change: &Change) -> Result<(), String> {
+    async fn create_and_start(
+        &self,
+        run: &mut Run,
+        change: &Change,
+    ) -> Result<ContainerId, String> {
         let span = LogSpan::service(
             run.target.stack().as_ref(),
             change.service.as_ref(),
@@ -759,37 +1142,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .await
                 .map_err(|err| format!("cannot start {}: {err}", spec.name))?;
             tracing::info!(container = %spec.name, image = %change.image, "container started");
-            Ok(())
+            Ok(id)
         }
         .instrument(span)
         .await
-    }
-
-    /// `HealthChecking` and `Replacing`: probes the new containers `created` concurrently, each
-    /// with its service's resolved health check (ADR-0038, ADR-0051, ADR-0056) through the
-    /// orchestrator's [`Prober`](crate::health::Prober), or, for an exec check, in the
-    /// container. Which check each service gets and why, and the probe results, are recorded
-    /// as events of the deployment (exec output with the deployment's secrets redacted); the
-    /// first failure is the reason the deployment aborts.
-    async fn probe(&self, run: &Run, created: &[(Name, ContainerId)]) -> Result<(), String> {
-        let checks = created
-            .iter()
-            .map(|(service, id)| Ok((service, self.check(run, service)?, id)))
-            .collect::<Result<Vec<_>, String>>()?;
-        let log = DeploymentLog::new(self.store.clone(), run.id, run.state).redacting(&run.secrets);
-        for (service, check, _) in &checks {
-            log.record(&format!("checking {service} with {check:#}"))
-                .await;
-        }
-        let probes = Probes::new(&*self.runtime, &*self.prober, &self.execs);
-        try_join_all(
-            checks
-                .iter()
-                .map(|(_, check, id)| check.run(&probes, id, &log)),
-        )
-        .await
-        .map(drop)
-        .map_err(|err| err.to_string())
     }
 
     /// The health check of `service`'s new container on the ports this deployment reserved.
@@ -798,13 +1154,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     fn check(&self, run: &Run, service: &Name) -> Result<Check, String> {
         let definition = &run.target.definition.services[service];
         let ports = run.ports.get(service).cloned().unwrap_or_default();
-        let check = Check::for_service(definition, &ports)
-            .map_err(|err| format!("service {service}: {err}"))?;
-        Ok(if check.is_settle() {
-            Check::settle(self.settings.settle, self.settings.settle_poll)
-        } else {
-            check
-        })
+        self.check_for(definition, &ports)
+            .map_err(|err| format!("service {service}: {err}"))
     }
 
     /// `Draining` (§5.3): waits for every upstream the swap took out of the table (the old
@@ -852,7 +1203,9 @@ impl Run {
             return Vec::new();
         };
         let retired: Vec<&str> = plan
-            .changes_with(UpdateStrategy::StartFirst)
+            .changes
+            .iter()
+            .filter(|c| c.phase != Phase::Replace)
             .map(|c| c.service.as_ref())
             .chain(plan.removed.iter().map(|p| p.service.as_str()))
             .collect();
@@ -899,6 +1252,13 @@ impl Run {
             .collect::<Result<_, _>>()?;
         Ok(spec)
     }
+}
+
+/// Whether a container of `pointer`'s generation of its service in `stack` runs.
+fn is_running(containers: &[ContainerInfo], stack: &Name, pointer: &ServicePointer) -> bool {
+    generation_of(containers, stack, pointer)
+        .iter()
+        .any(|c| c.state.is_running())
 }
 
 /// The containers of `pointer`'s generation of its service in `stack`.

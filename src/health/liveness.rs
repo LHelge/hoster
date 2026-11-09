@@ -148,6 +148,32 @@ impl Liveness {
         self.set(now, to, detail)
     }
 
+    /// The container was (re)started at `now` (ADR-0056 Decision 3): the status goes back to
+    /// `Unknown` until the next verdict, except while the reconciler says it is crash looping,
+    /// which only it ends.
+    pub fn reset(&mut self, now: Instant) -> Option<HealthChange> {
+        self.streak = 0;
+        if self.stats.status == HealthStatus::CrashLooping {
+            return None;
+        }
+        let detail = "the container (re)started".to_owned();
+        self.set(now, HealthStatus::Unknown, detail)
+    }
+
+    /// Records a probe `result` within the grace after a (re)start, or a settle check that
+    /// has not run long enough yet: counted, but the status stays as it is.
+    pub fn pending(&mut self, result: Result<String, String>) {
+        self.stats.probes += 1;
+        let detail = match result {
+            Ok(detail) => detail,
+            Err(detail) => {
+                self.stats.failures += 1;
+                detail
+            }
+        };
+        self.stats.last = Some(detail);
+    }
+
     /// The reconciler marked the service crash looping (ADR-0028).
     pub fn crash_looping(&mut self, now: Instant, detail: String) -> Option<HealthChange> {
         self.streak = 0;
