@@ -1,6 +1,6 @@
 [package]
 name = "hoster"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # MSRV: sqlx 0.9 (ADR-0022) needs 1.94; Pingora 0.9.1 needs 1.85. The development toolchain is
 # pinned in rust-toolchain.toml.
