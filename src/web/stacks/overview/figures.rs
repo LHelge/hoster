@@ -116,8 +116,10 @@ impl Figures {
         } else {
             format!("last {window}")
         };
-        let latency_title =
-            format!("Over the requests to all the stack's routes in the last {window}");
+        let latency_title = format!(
+            "Time to the response header, over the requests to all the stack's routes in the last \
+             {window}"
+        );
         let requests_sub = match (routed || traffic.routes > 0, traffic.inflight) {
             (false, _) => "no routes".to_owned(),
             (true, 0) => "since hoster started".to_owned(),
@@ -291,7 +293,7 @@ impl SlowRoute {
     /// The tooltip of the p50 and p95 figures.
     pub fn latency_title(&self) -> String {
         format!(
-            "Over {} requests of the last {}",
+            "Time to the response header, over {} requests of the last {}",
             Count(self.samples),
             Elapsed(Stats::LATENCY_WINDOW)
         )

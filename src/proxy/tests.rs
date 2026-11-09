@@ -1387,6 +1387,9 @@ async fn server_sent_events_are_not_buffered() {
     .expect("first event is forwarded before the stream ends");
     assert!(!seen.contains("second"));
 
+    // The stream stays open far longer than its header took to arrive.
+    const OPEN: Duration = Duration::from_millis(1000);
+    tokio::time::sleep(OPEN).await;
     h.state.sse_release.notify_one();
     let mut rest = Vec::new();
     client.0.read_to_end(&mut rest).await.unwrap();
@@ -1398,6 +1401,21 @@ async fn server_sent_events_are_not_buffered() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(h.web.inflight(), 0);
+
+    // Its latency in the statistics is the time to the response header, not its lifetime.
+    let latency = loop {
+        let snapshot = h.traffic.snapshot();
+        let api = snapshot
+            .routes
+            .iter()
+            .find(|r| r.host == "app.example.com" && r.prefix == "/api");
+        match api.map(|r| r.counts.latency) {
+            Some(latency) if latency.samples == 1 => break latency,
+            _ if Instant::now() > deadline => panic!("stream not counted: {snapshot:?}"),
+            _ => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    };
+    assert!(latency.p95.unwrap() < OPEN / 2, "{latency:?}");
 }
 
 // ---------------------------------------------------------------------------------------------

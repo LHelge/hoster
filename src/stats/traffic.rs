@@ -76,7 +76,9 @@ impl fmt::Display for StatusClass {
 pub struct RequestOutcome {
     /// The status sent to the client, if any.
     pub status: Option<u16>,
-    /// From reading the request header to the end of the request.
+    /// From reading the request header to the response header: how long the client waited for
+    /// an answer, not how long the body or stream then lasted. The whole request for one that
+    /// never got an upstream response header.
     pub latency: Duration,
     /// The request failed because of its upstream (connect, read or write).
     pub upstream_error: bool,
@@ -308,6 +310,11 @@ impl RouteTraffic {
             Some(Owner::Route(owner)) => Some(owner.stack.as_ref()),
             Some(Owner::Reserved(_)) | None => None,
         }
+    }
+
+    /// Whether the route is hoster's own (the admin UI), not a hosted service's.
+    pub fn is_reserved(&self) -> bool {
+        matches!(self.owner, Some(Owner::Reserved(_)))
     }
 }
 

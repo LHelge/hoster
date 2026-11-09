@@ -2,8 +2,9 @@
 //! reader is the authenticated admin app, through the [`Stats`] handle.
 //!
 //! - **Traffic** ([`Traffic`]): per-route request counts by status class, upstream errors, the
-//!   in-flight gauge and p50/p95 latency over a rolling window of a few minutes. The proxy
-//!   updates the atomic counters from its `logging` hook; they reset when hoster restarts.
+//!   in-flight gauge and p50/p95 latency (time to the response header) over a rolling window
+//!   of a few minutes. The proxy updates the atomic counters from its `logging` hook; they
+//!   reset when hoster restarts.
 //! - **Deployments**: outcome counts and durations per stack, read from SQLite on demand, so
 //!   they survive restarts.
 //! - **Certificates**: the `not_after` of every certificate the proxy serves.
