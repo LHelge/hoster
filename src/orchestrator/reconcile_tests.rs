@@ -686,3 +686,149 @@ async fn stacks_being_removed_are_skipped() {
     assert_eq!(report.skipped_stacks, ["notes"]);
     assert!(report.adopted.is_empty());
 }
+
+/// The container lifecycle events (ADR-0055) of the event log, oldest first: kind, severity,
+/// message and meta.
+async fn lifecycle_events(h: &Harness) -> Vec<(EventKind, Severity, String, String)> {
+    let mut events: Vec<_> = h
+        .store
+        .event_page(&EventQuery {
+            kinds: [
+                EventKind::ContainerRestarted,
+                EventKind::CrashLoopEntered,
+                EventKind::CrashLoopLeft,
+            ]
+            .into(),
+            limit: EventQuery::MAX,
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap()
+        .events
+        .into_iter()
+        .map(|e| {
+            assert_eq!(e.stack.as_deref(), Some("notes"));
+            assert_eq!(e.subject.as_deref(), Some("/stacks/notes"));
+            (e.kind, e.severity, e.message, e.meta.unwrap_or_default())
+        })
+        .collect();
+    events.reverse();
+    events
+}
+
+#[tokio::test]
+async fn startup_starts_the_current_generation_without_restart_events() {
+    let h = bootstrapped().await;
+    // A reboot: nothing runs.
+    for c in h.runtime.containers() {
+        h.runtime.set_state(&c.id, ContainerState::Exited(Some(0)));
+    }
+    let report = restarted(&h, RestartPolicy::default())
+        .recover()
+        .await
+        .unwrap();
+    assert_eq!(report.started.len(), 3);
+    assert!(lifecycle_events(&h).await.is_empty());
+}
+
+#[tokio::test]
+async fn each_restart_writes_one_event_with_the_exit_code_and_oom() {
+    let h = bootstrapped().await;
+    let orchestrator = restarted(&h, RestartPolicy::default());
+    orchestrator.recover().await.unwrap();
+    let api = h.container("hoster-notes-api-g2").id;
+    let start = Instant::now();
+
+    h.runtime.set_state(&api, ContainerState::Exited(Some(1)));
+    orchestrator.reconcile_at(start).await.unwrap();
+    // Still backing off: no restart, no event; and a pass that only adopts writes none.
+    h.runtime.set_state(&api, ContainerState::Exited(Some(1)));
+    let report = orchestrator
+        .reconcile_at(start + Duration::from_millis(500))
+        .await
+        .unwrap();
+    assert_eq!(report.backing_off, ["hoster-notes-api-g2"]);
+    h.runtime.oom_kill(&api);
+    orchestrator
+        .reconcile_at(start + Duration::from_secs(1))
+        .await
+        .unwrap();
+    orchestrator
+        .reconcile_at(start + Duration::from_secs(2))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        lifecycle_events(&h).await,
+        [
+            (
+                EventKind::ContainerRestarted,
+                Severity::Warning,
+                "Restarted notes/api (exit 1)".to_owned(),
+                "generation 2 · attempt 1".to_owned()
+            ),
+            (
+                EventKind::ContainerRestarted,
+                Severity::Warning,
+                "Restarted notes/api (exit 137, OOM killed)".to_owned(),
+                "generation 2 · attempt 2".to_owned()
+            ),
+        ]
+    );
+    // The OOM verdict comes from inspect: the listing, as podman's, never says so.
+    assert!(h.runtime.calls().contains(&Operation::Inspect));
+}
+
+#[tokio::test]
+async fn entering_and_leaving_crash_loop_are_events() {
+    let h = bootstrapped().await;
+    let orchestrator = restarted(&h, RestartPolicy::default());
+    orchestrator.recover().await.unwrap();
+    let api = h.container("hoster-notes-api-g2").id;
+    let start = Instant::now();
+    let at = |secs: f64| start + Duration::from_secs_f64(secs);
+
+    // Five restarts on the backoff (0, 1, 3, 7, 15 s): crash looping at the fifth.
+    for t in [0.0, 1.0, 3.0, 7.0, 15.0] {
+        h.runtime.set_state(&api, ContainerState::Exited(Some(1)));
+        let report = orchestrator.reconcile_at(at(t)).await.unwrap();
+        assert_eq!(report.started, ["hoster-notes-api-g2"], "at {t}");
+    }
+    // Up, but the last restart is still in the window: still crash looping.
+    orchestrator.reconcile_at(at(15.0 + 300.0)).await.unwrap();
+    // Up for a whole window since: the history resets and the crash loop is over, once.
+    orchestrator.reconcile_at(at(15.0 + 600.0)).await.unwrap();
+    orchestrator.reconcile_at(at(15.0 + 615.0)).await.unwrap();
+
+    let events = lifecycle_events(&h).await;
+    let kinds: Vec<_> = events.iter().map(|e| e.0).collect();
+    assert_eq!(
+        kinds,
+        [
+            EventKind::ContainerRestarted,
+            EventKind::ContainerRestarted,
+            EventKind::ContainerRestarted,
+            EventKind::ContainerRestarted,
+            EventKind::ContainerRestarted,
+            EventKind::CrashLoopEntered,
+            EventKind::CrashLoopLeft,
+        ]
+    );
+    assert_eq!(
+        events[5..],
+        [
+            (
+                EventKind::CrashLoopEntered,
+                Severity::Error,
+                "notes/api is crash looping".to_owned(),
+                "generation 2 · 5 restarts in 10m".to_owned()
+            ),
+            (
+                EventKind::CrashLoopLeft,
+                Severity::Success,
+                "notes/api stopped crash looping".to_owned(),
+                "generation 2".to_owned()
+            ),
+        ]
+    );
+}

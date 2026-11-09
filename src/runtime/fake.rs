@@ -82,6 +82,8 @@ struct FakeContainer {
     state: ContainerState,
     /// When it last started running.
     started_at: Option<SystemTime>,
+    /// Whether the OOM killer ended its last run; cleared when it starts again.
+    oom_killed: bool,
     logs: Vec<LogLine>,
     /// The streams following the log; each gets every line pushed from now on. They end when
     /// the container stops running, as podman's followed logs do.
@@ -93,6 +95,7 @@ impl FakeContainer {
     fn set_state(&mut self, state: ContainerState) {
         if state.is_running() && !self.state.is_running() {
             self.started_at = Some(SystemTime::now());
+            self.oom_killed = false;
         }
         self.state = state;
         if !state.is_running() {
@@ -108,6 +111,7 @@ impl FakeContainer {
             state: self.state,
             ports: self.spec.ports.iter().copied().map(Into::into).collect(),
             started_at: self.started_at,
+            oom_killed: self.oom_killed,
         }
     }
 }
@@ -244,6 +248,15 @@ impl FakeRuntime {
     pub fn set_state(&self, id: &ContainerId, state: ContainerState) {
         if let Some(container) = self.lock().containers.get_mut(id) {
             container.set_state(state);
+        }
+    }
+
+    /// Simulates the kernel's OOM killer ending a container: it exits with 137 and inspect
+    /// reports `OOMKilled` until it starts again.
+    pub fn oom_kill(&self, id: &ContainerId) {
+        if let Some(container) = self.lock().containers.get_mut(id) {
+            container.set_state(ContainerState::Exited(Some(137)));
+            container.oom_killed = true;
         }
     }
 
@@ -418,6 +431,7 @@ impl ContainerRuntime for FakeRuntime {
                 spec: spec.clone(),
                 state: ContainerState::Created,
                 started_at: None,
+                oom_killed: false,
                 logs: Vec::new(),
                 followers: Vec::new(),
             },
@@ -496,7 +510,11 @@ impl ContainerRuntime for FakeRuntime {
         Ok(state
             .containers
             .iter()
-            .map(|(id, c)| c.info(id))
+            // As podman's list endpoint, which never says whether the OOM killer ended it.
+            .map(|(id, c)| ContainerInfo {
+                oom_killed: false,
+                ..c.info(id)
+            })
             .filter(ContainerInfo::is_managed)
             .collect())
     }

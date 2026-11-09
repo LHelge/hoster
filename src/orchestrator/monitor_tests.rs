@@ -12,6 +12,7 @@ use super::tests::{FakeProber, Harness, harness};
 use super::*;
 use crate::config::PortRange;
 use crate::runtime::{ContainerState, FakeRuntime, Operation, RuntimeError};
+use crate::store::{EventKind, EventQuery, Severity};
 
 use HealthStatus as H;
 
@@ -103,6 +104,11 @@ async fn live_services_are_probed_periodically_and_changes_reach_ui_events() {
         UiEvent::Health { ref service, to: H::Unhealthy, ref detail, .. }
             if service == "api" && detail == "HTTP 503, expected 2xx-3xx"
     ));
+    // The event log (ADR-0055) keeps the change and tells the pages after it.
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        UiEvent::Event(ref event) if event.kind == EventKind::HealthChanged
+    ));
     assert_eq!(events.try_recv().unwrap_err(), TryRecvError::Empty);
 
     // A steady failure is not reported again; the statistics count it.
@@ -163,6 +169,8 @@ async fn the_reconcilers_crash_loop_verdict_is_a_status() {
             .unwrap();
         assert_eq!(report.started, ["hoster-notes-api-g2"], "at {t}");
     }
+    // The reconciler's restart and crash-loop events.
+    while events.try_recv().is_ok() {}
     let looping = orchestrator
         .monitor_at(start + Duration::from_secs(16))
         .await
@@ -178,6 +186,109 @@ async fn the_reconcilers_crash_loop_verdict_is_a_status() {
     let stats = health(&orchestrator, "api").await;
     assert_eq!(stats.status, H::CrashLooping);
     assert!(stats.last.unwrap().contains("restarted it 5 times"));
+    // The reconciler wrote the crash loop to the event log; the monitor does not repeat it.
+    assert_eq!(events.try_recv().unwrap_err(), TryRecvError::Empty);
+    assert!(health_events(&h).await.is_empty());
+}
+
+#[tokio::test]
+async fn leaving_a_crash_loop_is_one_event_from_the_reconciler() {
+    let (h, orchestrator, _prober) = monitored().await;
+    let start = Instant::now();
+    let at = |secs: f64| start + Duration::from_secs_f64(secs);
+    orchestrator.monitor_at(at(0.0)).await.unwrap();
+
+    let api = h.container("hoster-notes-api-g2").id;
+    for t in [0.0, 1.0, 3.0, 7.0, 15.0] {
+        h.runtime.set_state(&api, ContainerState::Exited(Some(1)));
+        orchestrator.reconcile_at(at(t)).await.unwrap();
+    }
+    let looping = orchestrator.monitor_at(at(16.0)).await.unwrap();
+    assert_eq!(changes(&looping), [("api", H::Healthy, H::CrashLooping)]);
+
+    // Up for a whole window: the reconciler resets the history and writes the recovery; the
+    // monitor's next passing probe only changes the status.
+    orchestrator.reconcile_at(at(15.0 + 600.0)).await.unwrap();
+    let recovered = orchestrator.monitor_at(at(16.0 + 600.0)).await.unwrap();
+    assert_eq!(changes(&recovered), [("api", H::CrashLooping, H::Healthy)]);
+    assert!(health_events(&h).await.is_empty());
+    let left = h
+        .store
+        .event_page(&EventQuery {
+            kinds: [EventKind::CrashLoopLeft].into(),
+            limit: EventQuery::MAX,
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap()
+        .events;
+    assert_eq!(left.len(), 1);
+}
+
+/// The health events of the event log (ADR-0055), oldest first: severity, message, meta.
+async fn health_events(h: &Harness) -> Vec<(Severity, String, String)> {
+    let mut events: Vec<_> = h
+        .store
+        .event_page(&EventQuery {
+            kinds: [EventKind::HealthChanged].into(),
+            limit: EventQuery::MAX,
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap()
+        .events
+        .into_iter()
+        .map(|e| {
+            assert_eq!(e.stack.as_deref(), Some("notes"));
+            (e.severity, e.message, e.meta.unwrap_or_default())
+        })
+        .collect();
+    events.reverse();
+    events
+}
+
+#[tokio::test]
+async fn only_real_health_transitions_reach_the_event_log() {
+    let (h, orchestrator, prober) = monitored().await;
+    let start = Instant::now();
+    let at = |secs: u64| start + Duration::from_secs(secs);
+
+    // The first verdict on a healthy service is no change.
+    orchestrator.monitor_at(at(0)).await.unwrap();
+    assert!(health_events(&h).await.is_empty());
+
+    // api flaps: down, down, up, up, down. Only the three transitions are written, with the
+    // probe detail; a steady state writes nothing however often it is probed.
+    for (t, answer) in [
+        (15, Err("HTTP 503, expected 2xx-3xx")),
+        (30, Err("HTTP 503, expected 2xx-3xx")),
+        (45, Ok("HTTP 200")),
+        (60, Ok("HTTP 200")),
+        (75, Err("cannot connect: connection refused")),
+    ] {
+        prober.answer(8080, answer);
+        orchestrator.monitor_at(at(t)).await.unwrap();
+    }
+    assert_eq!(
+        health_events(&h).await,
+        [
+            (
+                Severity::Warning,
+                "notes/api is unhealthy".to_owned(),
+                "generation 2 · HTTP 503, expected 2xx-3xx".to_owned()
+            ),
+            (
+                Severity::Success,
+                "notes/api is healthy again".to_owned(),
+                "generation 2 · HTTP 200".to_owned()
+            ),
+            (
+                Severity::Warning,
+                "notes/api is unhealthy".to_owned(),
+                "generation 2 · cannot connect: connection refused".to_owned()
+            ),
+        ]
+    );
 }
 
 #[tokio::test]

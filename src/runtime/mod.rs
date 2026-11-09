@@ -550,6 +550,9 @@ pub struct ContainerInfo {
     /// When the container was last started, as inspect reports it. The list endpoint does not
     /// say, so it is `None` there; so it is for a container that never started.
     pub started_at: Option<SystemTime>,
+    /// Whether the kernel's OOM killer ended the container's last run, as inspect reports it
+    /// (`State.OOMKilled`). The list endpoint does not say, so it is `false` there.
+    pub oom_killed: bool,
 }
 
 impl ContainerInfo {
@@ -808,6 +811,7 @@ mod tests {
             state: ContainerState::Created,
             ports: Vec::new(),
             started_at: None,
+            oom_killed: false,
         };
         assert!(!info.is_managed());
         info.labels.insert(label::MANAGED.into(), "false".into());

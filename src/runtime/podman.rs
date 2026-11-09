@@ -476,6 +476,7 @@ impl From<ContainerInspectResponse> for ContainerInfo {
                 .started_at
                 .as_deref()
                 .and_then(ContainerInfo::reported_time),
+            oom_killed: state.oom_killed.unwrap_or(false),
         })
     }
 }
@@ -515,6 +516,7 @@ impl From<ContainerSummary> for ContainerInfo {
             state: ContainerState::reported(&status, exit_code),
             ports,
             started_at: None,
+            oom_killed: false,
         })
     }
 }
@@ -1460,6 +1462,7 @@ mod tests {
             "State": {
                 "Status": "exited",
                 "ExitCode": 137,
+                "OOMKilled": true,
                 "StartedAt": "2026-11-08T13:00:00.5+01:00"
             },
             "Config": { "Labels": { "hoster.managed": "true" } },
@@ -1474,6 +1477,7 @@ mod tests {
         assert_eq!(info.id.as_ref(), "abc");
         assert_eq!(info.name, "hoster-notes-web-g1");
         assert_eq!(info.state, ContainerState::Exited(Some(137)));
+        assert!(info.oom_killed);
         assert_eq!(
             info.started_at,
             Some(humantime::parse_rfc3339("2026-11-08T12:00:00.5Z").unwrap())
