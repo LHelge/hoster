@@ -1,10 +1,10 @@
 ---
 id: ap5
 title: Docs site built with aphid, released as an nginx image and deployed to hoster.lhelge.se
-status: in_progress
+status: done
 priority: P2
 created: "2026-11-08T15:36:13.210125125Z"
-updated: "2026-11-08T15:36:20.016437599Z"
+updated: "2026-11-08T16:47:49.356005154Z"
 tags:
   - docs
   - ci
