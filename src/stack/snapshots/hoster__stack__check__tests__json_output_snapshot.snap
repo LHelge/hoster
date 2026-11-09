@@ -1,0 +1,88 @@
+---
+source: src/stack/check.rs
+expression: "serde_json::to_string_pretty(&check).unwrap()"
+---
+{
+  "ok": false,
+  "errors": 4,
+  "warnings": 1,
+  "files": [
+    {
+      "file": "ok.toml",
+      "stack": "demo",
+      "services": 1,
+      "diagnostics": []
+    },
+    {
+      "file": "bad.toml",
+      "diagnostics": [
+        {
+          "severity": "error",
+          "path": "name",
+          "location": {
+            "line": 3,
+            "column": 8
+          },
+          "message": "invalid name `Demo`: must start with a lowercase letter and contain only lowercase letters, digits and `-`, at most 31 characters"
+        },
+        {
+          "severity": "error",
+          "path": "services.app.routes[0].port",
+          "location": {
+            "line": 10,
+            "column": 8
+          },
+          "message": "invalid port 0: must be 1-65535"
+        }
+      ]
+    },
+    {
+      "file": "syntax.toml",
+      "diagnostics": [
+        {
+          "severity": "error",
+          "path": "",
+          "location": {
+            "line": 3,
+            "column": 13
+          },
+          "message": "invalid basic string, expected `\"`"
+        }
+      ]
+    },
+    {
+      "file": "dup.toml",
+      "diagnostics": [
+        {
+          "severity": "error",
+          "path": "services.web.routes",
+          "location": null,
+          "message": "route `demo.example.com/` of service `web` of stack `demo` duplicates the same route of service `app` of stack `demo`"
+        }
+      ]
+    },
+    {
+      "file": "warn.toml",
+      "stack": "demo",
+      "services": 1,
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "path": "services.app.volumes",
+          "location": {
+            "line": 13,
+            "column": 8
+          },
+          "message": "this service has volumes but uses `update = \"start-first\"`: during a deploy the old and the new container mount the same volume at once; set `update = \"stop-first\"` unless the app is safe with that"
+        }
+      ]
+    }
+  ],
+  "skipped": [
+    "routes taken by another stack",
+    "the reserved admin host",
+    "secrets being set in the secret store",
+    "third-party image tags resolving to a digest",
+    "cgroup controllers for resource limits"
+  ]
+}

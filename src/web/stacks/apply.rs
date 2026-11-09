@@ -22,7 +22,7 @@ use similar::{ChangeTag, TextDiff};
 
 use super::{Outcome, Problem, StackView};
 use crate::orchestrator::{ApplyPreview, PinChange, Wave};
-use crate::stack::Stack;
+use crate::stack::{Counted, Stack};
 use crate::web::pages::{Layout, Page};
 
 /// `GET /apply`.
@@ -234,16 +234,6 @@ impl FromStr for Shape {
     /// The shape of a stack file; an error when it does not parse.
     fn from_str(toml: &str) -> Result<Self, Self::Err> {
         toml.parse::<Stack>().map(|stack| Self::from(&stack))
-    }
-}
-
-/// `n` things, with the noun in the plural unless `n` is 1: "1 service", "2 services".
-struct Counted(usize, &'static str);
-
-impl fmt::Display for Counted {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self(n, noun) = self;
-        write!(f, "{n} {noun}{}", if *n == 1 { "" } else { "s" })
     }
 }
 
@@ -663,11 +653,5 @@ mod tests {
         for (wave, expected) in table {
             assert_eq!(OrderLine::from(&wave), expected, "{wave:?}");
         }
-    }
-
-    #[test]
-    fn counted_pluralises() {
-        assert_eq!(Counted(1, "service").to_string(), "1 service");
-        assert_eq!(Counted(3, "route").to_string(), "3 routes");
     }
 }

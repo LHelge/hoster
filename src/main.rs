@@ -32,13 +32,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::{Config, ConfigError};
 use crate::doctor::Doctor;
 use crate::installation::BuildInfo;
 use crate::logging::{LogFormat, Logging};
-use crate::stack::StackSchema;
+use crate::stack::{StackCheck, StackSchema};
 use crate::store::Store;
 use crate::supervisor::Supervisor;
 use crate::update::{CommandError, RollbackCommand, Terminal, Uid, UpdateCommand, Updater};
@@ -117,6 +117,31 @@ enum StackCommand {
     /// Print the JSON Schema of the stack file format, for editors with TOML schema support
     /// (published at https://docs.hoster.lhelge.se/stack.schema.json).
     Schema,
+    /// Parse and validate stack files offline, e.g. in an app repository's CI. Prints every
+    /// error and warning with file:line:column and field path, and exits non-zero on errors.
+    /// Checks that need the server (routes of other stacks, the admin host, secrets, registry
+    /// tags, cgroups) are skipped.
+    Check {
+        /// The stack files to check.
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t)]
+        format: CheckFormat,
+        /// Exit non-zero on warnings too.
+        #[arg(long)]
+        deny_warnings: bool,
+    },
+}
+
+/// How `hoster stack check` prints its result.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum CheckFormat {
+    /// `file:line:column: severity: path: message` lines and a summary per file.
+    #[default]
+    Text,
+    /// One JSON object on stdout: `{ok, errors, warnings, files, skipped}`.
+    Json,
 }
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
@@ -145,16 +170,18 @@ impl Command {
                 println!("{}", Self::version(json)?);
                 Ok(())
             }
-            Command::Stack(StackCommand::Schema) => {
-                // `print!` would panic when the reader goes away early (`… | head`).
-                let mut stdout = std::io::stdout().lock();
-                match stdout
-                    .write_all(StackSchema::get().as_ref().as_bytes())
-                    .and_then(|()| stdout.flush())
-                {
-                    Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
-                    _ => Ok(()),
-                }
+            Command::Stack(StackCommand::Schema) => Ok(Self::print(StackSchema::get().as_ref())?),
+            Command::Stack(StackCommand::Check {
+                files,
+                format,
+                deny_warnings,
+            }) => {
+                let check = StackCheck::files(&files).deny_warnings(deny_warnings);
+                Self::print(&match format {
+                    CheckFormat::Text => check.to_string(),
+                    CheckFormat::Json => serde_json::to_string_pretty(&check)? + "\n",
+                })?;
+                Ok(check.verdict()?)
             }
             Command::Run => Supervisor::new(config?).run().await,
             Command::Doctor { json } => {
@@ -192,6 +219,20 @@ impl Command {
                 let updater = Self::updater(config_path)?;
                 Ok(command.run(&updater, &mut Terminal).await?)
             }
+        }
+    }
+
+    /// Writes `text` to stdout. Unlike `print!`, it does not panic when the reader goes away
+    /// early (`… | head`): a closed pipe is not an error, so the caller's verdict still decides
+    /// the exit code.
+    fn print(text: &str) -> std::io::Result<()> {
+        let mut stdout = std::io::stdout().lock();
+        match stdout
+            .write_all(text.as_bytes())
+            .and_then(|()| stdout.flush())
+        {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
+            _ => Ok(()),
         }
     }
 
@@ -396,6 +437,60 @@ mod tests {
             Command::Stack(StackCommand::Schema)
         );
         assert!(Cli::try_parse_from(["hoster", "stack"]).is_err());
+    }
+
+    #[test]
+    fn parses_stack_check() {
+        assert_eq!(
+            parse(&["stack", "check", "a.toml", "b.toml"]),
+            Command::Stack(StackCommand::Check {
+                files: vec!["a.toml".into(), "b.toml".into()],
+                format: CheckFormat::Text,
+                deny_warnings: false,
+            })
+        );
+        assert_eq!(
+            parse(&[
+                "stack",
+                "check",
+                "--format",
+                "json",
+                "--deny-warnings",
+                "a.toml"
+            ]),
+            Command::Stack(StackCommand::Check {
+                files: vec!["a.toml".into()],
+                format: CheckFormat::Json,
+                deny_warnings: true,
+            })
+        );
+        for args in [
+            &["stack", "check"][..],
+            &["stack", "check", "--format", "yaml", "a.toml"],
+        ] {
+            let err = Cli::try_parse_from(std::iter::once("hoster").chain(args.iter().copied()))
+                .unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{args:?}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stack_check_needs_no_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("demo.stack.toml");
+        std::fs::write(
+            &file,
+            "version = 1\nname = \"demo\"\n[services.app]\nimage = \"ghcr.io/acme/app\"\n",
+        )
+        .unwrap();
+        Command::Stack(StackCommand::Check {
+            files: vec![file],
+            format: CheckFormat::Json,
+            deny_warnings: true,
+        })
+        .execute(Err(ConfigError::NoConfigDir), None)
+        .await
+        .expect("checks a valid file without a config");
     }
 
     #[tokio::test]
