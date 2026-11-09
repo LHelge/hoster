@@ -7,7 +7,8 @@
 //! private span-carrying types, then semantic validation that collects *every* problem instead
 //! of stopping at the first. Each [`Diagnostic`] names the TOML line/column and the field path.
 //!
-//! The same raw types generate the stack file's JSON Schema ([`StackSchema`]) for editors.
+//! The same raw types generate the stack file's JSON Schema ([`StackSchema`]) for editors, and
+//! [`StackCheck`] runs the parse over files on disk for `hoster stack check`.
 //!
 //! Checks that need other stacks or hoster's configuration (route collisions, ADR-0012; the
 //! reserved admin host) are not done here; they live with the routing table.
@@ -15,6 +16,7 @@
 // The orchestrator and web UI that consume the model land in later tasks.
 #![allow(dead_code)]
 
+mod check;
 mod dependency;
 mod deploy;
 mod diagnostic;
@@ -28,6 +30,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+pub use check::StackCheck;
 pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
 pub use image::{Digest, ImageRef, PinnedImage};
@@ -265,6 +268,18 @@ impl FromStr for ExpectStatus {
                 _ => Err(err()),
             },
         }
+    }
+}
+
+/// `n` things of a stack, with the noun in the plural unless `n` is 1: "1 service",
+/// "2 routes". Shared by the CLI's and the UI's summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counted(pub usize, pub &'static str);
+
+impl fmt::Display for Counted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self(n, noun) = self;
+        write!(f, "{n} {noun}{}", if *n == 1 { "" } else { "s" })
     }
 }
 

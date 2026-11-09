@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::upstream::UnixUpstream;
 use crate::config::Config;
-use crate::stack::{Host, Name, NormalizedPrefix, Stack};
+use crate::stack::{Counted, Host, Name, NormalizedPrefix, Stack};
 
 /// The service that declares a route.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -156,8 +156,7 @@ pub struct CollisionError {
 
 impl fmt::Display for CollisionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let n = self.collisions.len();
-        write!(f, "{n} route collision{}:", if n == 1 { "" } else { "s" })?;
+        write!(f, "{}:", Counted(self.collisions.len(), "route collision"))?;
         self.collisions
             .iter()
             .try_for_each(|collision| write!(f, "\n  - {collision}"))

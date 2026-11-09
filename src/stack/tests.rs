@@ -1388,3 +1388,10 @@ fn probe_and_timing_errors_are_both_reported() {
     assert!(errors[0].contains("invalid health path `x`"));
     assert!(errors[1].contains("healthy_after: must be a positive integer"));
 }
+
+#[test]
+fn counted_pluralises() {
+    assert_eq!(Counted(1, "service").to_string(), "1 service");
+    assert_eq!(Counted(3, "route").to_string(), "3 routes");
+    assert_eq!(Counted(0, "warning").to_string(), "0 warnings");
+}

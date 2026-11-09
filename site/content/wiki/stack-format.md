@@ -96,6 +96,11 @@ than one value stay with hoster, which checks them when the stack is applied:
 hoster also rejects durations that overflow or whose fraction is not a whole number of
 nanoseconds, such as `"0.001h"`. The apply preview stays the final word.
 
+`hoster stack check FILE...` runs hoster's own parse offline, so it checks all of the above
+except routes taken by another stack. It needs no running hoster; see
+[[deploying-from-ci#2-6-check-the-stack-file-on-every-push|Deploying from CI, §2.6]] for a CI
+step.
+
 # 2. Schema
 
 ## 2.1 Top level
