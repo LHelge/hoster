@@ -59,8 +59,13 @@ pub enum AcmeCommand {
 /// What the ACME task reports to the orchestrator (architecture §3.3 #2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcmeEvent {
-    /// A certificate was issued and is served from now on.
-    Issued { host: String, not_after: SystemTime },
+    /// A certificate was issued and is served from now on. `renewed` when it replaced one the
+    /// host already had (valid or expired), rather than being the host's first.
+    Issued {
+        host: String,
+        not_after: SystemTime,
+        renewed: bool,
+    },
     /// An issuance failed; the next attempt is not before `retry_at`.
     Failed {
         host: String,
@@ -427,6 +432,7 @@ impl Worker {
             );
             self.emit(AcmeEvent::DnsMismatch(mismatch)).await;
         }
+        let renewed = self.task.acme.validity(host).is_some();
         let issued = tokio::select! {
             biased;
             () = shutdown.cancelled() => return,
@@ -440,6 +446,7 @@ impl Worker {
                 AcmeEvent::Issued {
                     host: host.to_owned(),
                     not_after: validity.not_after,
+                    renewed,
                 }
             }
             Err(error) => {

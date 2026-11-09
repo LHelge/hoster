@@ -2,12 +2,14 @@
 //! open UI pages once the event is stored. The log never depends on a page keeping up.
 
 use std::fmt;
-use std::time::Duration;
+use std::net::IpAddr;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use super::{CANCELLED, STACK_REMOVED, UiEvent};
+use crate::acme::DnsMismatch;
 use crate::health::{HealthChange, HealthStatus};
 use crate::runtime::{ContainerInfo, ContainerState, ServiceGeneration};
 use crate::store::{
@@ -330,6 +332,101 @@ impl ServiceEvents<'_> {
 
     fn generation(&self) -> String {
         format!("generation {}", self.0.generation)
+    }
+}
+
+/// The certificate events of one host (ADR-0055 §2): issued (the host's first certificate),
+/// renewed, failed (with the reason and the next retry) and DNS mismatch. Each links to the
+/// certificates page and belongs to the stack that routes the host, if one does (the admin
+/// host belongs to none).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CertEvents<'a> {
+    host: &'a str,
+    stack: Option<&'a str>,
+}
+
+impl<'a> CertEvents<'a> {
+    /// The page the events link to.
+    const SUBJECT: &'static str = "/certificates";
+
+    /// The events of `host`, routed by `stack`.
+    pub(super) fn new(host: &'a str, stack: Option<&'a str>) -> Self {
+        Self { host, stack }
+    }
+
+    /// A certificate valid until `not_after` was installed; `renewed` when it replaced one.
+    pub(super) fn issued(&self, not_after: SystemTime, renewed: bool) -> NewEvent {
+        let (kind, message) = if renewed {
+            (
+                EventKind::CertificateRenewed,
+                format!("Renewed the certificate for {}", self.host),
+            )
+        } else {
+            (
+                EventKind::CertificateIssued,
+                format!("Issued a certificate for {}", self.host),
+            )
+        };
+        self.event(kind, Severity::Success, message).meta(format!(
+            "valid until {}",
+            humantime::format_rfc3339_seconds(not_after)
+        ))
+    }
+
+    /// An attempt failed with `error`; the next one is not before `retry_at`.
+    pub(super) fn failed(&self, error: &str, retry_at: SystemTime) -> NewEvent {
+        self.event(
+            EventKind::CertificateFailed,
+            Severity::Error,
+            format!("Certificate for {} failed: {error}", self.host),
+        )
+        .meta(format!(
+            "next retry {}",
+            humantime::format_rfc3339_seconds(retry_at)
+        ))
+    }
+
+    /// The host's A/AAAA records do not point at hoster; issuance goes ahead (ADR-0051 #2).
+    pub(super) fn dns_mismatch(&self, mismatch: &DnsMismatch) -> NewEvent {
+        let observed = match mismatch.observed.as_slice() {
+            [] => "no A/AAAA records".to_owned(),
+            observed => format!("resolves to {}", Addresses(observed)),
+        };
+        self.event(
+            EventKind::DnsMismatch,
+            Severity::Warning,
+            format!("DNS for {} does not point at this server", self.host),
+        )
+        .meta(format!(
+            "{observed} · expected {}",
+            Addresses(&mismatch.expected)
+        ))
+    }
+
+    fn event(&self, kind: EventKind, severity: Severity, message: String) -> NewEvent {
+        let event = NewEvent::new(kind, severity, message).subject(Self::SUBJECT);
+        match self.stack {
+            Some(stack) => event.stack(stack),
+            None => event,
+        }
+    }
+}
+
+/// Addresses as a comma-separated list, or "none".
+struct Addresses<'a>(&'a [IpAddr]);
+
+impl fmt::Display for Addresses<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str("none");
+        }
+        for (i, address) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            address.fmt(f)?;
+        }
+        Ok(())
     }
 }
 

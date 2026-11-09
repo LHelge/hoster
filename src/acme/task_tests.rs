@@ -326,13 +326,25 @@ async fn certificates_renew_once_a_third_of_their_lifetime_remains() {
         [Duration::ZERO, 20 * HOUR]
     );
     assert_eq!(h.acme.attempts(ADMIN), [Duration::ZERO, 20 * HOUR]);
-    let renewed: Vec<_> = h
+    // Each host's first certificate is issued; the second one renews it.
+    let issues: Vec<_> = h
         .sent()
-        .iter()
-        .filter_map(issued)
-        .map(String::from)
+        .into_iter()
+        .filter_map(|event| match event {
+            AcmeEvent::Issued { host, renewed, .. } => Some((host, renewed)),
+            _ => None,
+        })
         .collect();
-    assert_eq!(renewed.len(), 4, "{renewed:?}");
+    let of = |host: &str| -> Vec<bool> {
+        issues
+            .iter()
+            .filter(|(h, _)| h == host)
+            .map(|(_, renewed)| *renewed)
+            .collect()
+    };
+    assert_eq!(issues.len(), 4, "{issues:?}");
+    assert_eq!(of("notes.example.com"), [false, true], "{issues:?}");
+    assert_eq!(of(ADMIN), [false, true], "{issues:?}");
 }
 
 #[tokio::test(start_paused = true)]

@@ -1570,6 +1570,19 @@ async fn apply_ensures_certificates_before_deploying_and_remove_forgets_them() {
     events_tx.send(failed.clone()).await.unwrap();
     drop(events_tx);
     relay.await.unwrap();
+    // The event log's line is stored and announced before the certificate status is relayed.
+    let UiEvent::Event(line) = ui.try_recv().unwrap() else {
+        panic!("the failure is not in the event log");
+    };
+    assert_eq!(line.kind, crate::store::EventKind::CertificateFailed);
+    assert_eq!(line.stack.as_deref(), Some("notes"));
+    assert_eq!(line.subject.as_deref(), Some("/certificates"));
+    let stored = h
+        .store
+        .event_page(&crate::store::EventQuery::default())
+        .await
+        .unwrap();
+    assert!(stored.events.contains(&line), "{stored:?}");
     assert_eq!(ui.try_recv().unwrap(), UiEvent::Certificate(failed));
     assert_eq!(
         h.orchestrator.certificates()["notes.example.com"]

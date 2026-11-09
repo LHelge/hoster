@@ -9,18 +9,23 @@
 //! waits for an issuance in flight.
 //!
 //! The ACME task's [`AcmeEvent`]s come back through [`Orchestrator::run_acme_events`], which
-//! records them as each host's [`CertStatus`] and relays them on `ui_events`.
+//! records them as each host's [`CertStatus`], writes the certificate events of the event log
+//! (ADR-0055 §2) and relays them on `ui_events`. A DNS mismatch is written when it first
+//! appears for a host or its observed records change, not before every attempt.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use tokio::sync::mpsc;
 
+use super::event_log::CertEvents;
 use super::{Orchestrator, UiEvent};
 use crate::acme::{AcmeCommand, AcmeEvent, DnsMismatch, DnsVerdict};
 use crate::runtime::ContainerRuntime;
 use crate::stack::Stack;
+use crate::store::NewEvent;
 
 /// The certificate state of one host, from the ACME task's events.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,26 +46,33 @@ pub struct CertStatus {
     /// before each attempt it finds one for and nothing when DNS matches, so an outcome without
     /// one means DNS pointed here that time.
     mismatch_this_attempt: bool,
+    /// The observed records of the DNS mismatch last written to the event log, while DNS has
+    /// not been found pointing here since: a mismatch is written when it first appears or its
+    /// records change, not on every attempt.
+    logged_mismatch: Option<Vec<IpAddr>>,
 }
 
 impl CertStatus {
-    /// Takes `event` into account.
-    fn record(&mut self, event: &AcmeEvent) {
+    /// Takes `event` into account. Whether it goes into the event log: every outcome does, a
+    /// DNS mismatch only when it is new.
+    fn record(&mut self, event: &AcmeEvent) -> bool {
         match event {
             AcmeEvent::Issued { not_after, .. } => {
                 // A host behind a CDN is issued despite a mismatch (ADR-0051 #2); the mismatch
                 // reported for this attempt still describes its DNS.
-                let dns_mismatch = if self.mismatch_this_attempt {
-                    self.dns_mismatch.take()
+                let (dns_mismatch, logged_mismatch) = if self.mismatch_this_attempt {
+                    (self.dns_mismatch.take(), self.logged_mismatch.take())
                 } else {
-                    None
+                    (None, None)
                 };
                 *self = CertStatus {
                     not_after: Some(*not_after),
                     dns_mismatch,
                     dns_checked: true,
+                    logged_mismatch,
                     ..CertStatus::default()
                 };
+                true
             }
             AcmeEvent::Failed {
                 error, retry_at, ..
@@ -70,12 +82,17 @@ impl CertStatus {
                 self.dns_checked = true;
                 if !std::mem::take(&mut self.mismatch_this_attempt) {
                     self.dns_mismatch = None;
+                    self.logged_mismatch = None;
                 }
+                true
             }
             AcmeEvent::DnsMismatch(mismatch) => {
                 self.dns_mismatch = Some(mismatch.clone());
                 self.dns_checked = true;
                 self.mismatch_this_attempt = true;
+                let new = self.logged_mismatch.as_ref() != Some(&mismatch.observed);
+                self.logged_mismatch = Some(mismatch.observed.clone());
+                new
             }
         }
     }
@@ -84,7 +101,11 @@ impl CertStatus {
     /// "Check DNS now"). An attempt in flight still reports its own.
     fn dns_checked(&mut self, verdict: &DnsVerdict) {
         match verdict {
-            DnsVerdict::Matches => self.dns_mismatch = None,
+            DnsVerdict::Matches => {
+                // DNS points here now, so a mismatch found later is a new one.
+                self.dns_mismatch = None;
+                self.logged_mismatch = None;
+            }
             DnsVerdict::Mismatch(mismatch) => self.dns_mismatch = Some(mismatch.clone()),
             DnsVerdict::Unknown => return,
         }
@@ -155,15 +176,39 @@ impl CertHosts {
         }
     }
 
-    /// Records an event of the ACME task.
-    pub(super) fn record(&mut self, event: &AcmeEvent) {
-        if self.forgotten.contains(event.host()) {
-            return;
+    /// Records an event of the ACME task, and returns the line it writes to the event log, if
+    /// it writes one (ADR-0055 §2). Events about forgotten hosts write nothing.
+    pub(super) fn record(&mut self, event: &AcmeEvent) -> Option<NewEvent> {
+        let host = event.host();
+        if self.forgotten.contains(host) {
+            return None;
         }
-        self.status
-            .entry(event.host().to_owned())
+        let logged = self
+            .status
+            .entry(host.to_owned())
             .or_default()
             .record(event);
+        if !logged {
+            return None;
+        }
+        let events = CertEvents::new(host, self.owner(host));
+        Some(match event {
+            AcmeEvent::Issued {
+                not_after, renewed, ..
+            } => events.issued(*not_after, *renewed),
+            AcmeEvent::Failed {
+                error, retry_at, ..
+            } => events.failed(error, *retry_at),
+            AcmeEvent::DnsMismatch(mismatch) => events.dns_mismatch(mismatch),
+        })
+    }
+
+    /// The stack whose route owns `host`: the first by name if, briefly, several route it.
+    fn owner(&self, host: &str) -> Option<&str> {
+        self.by_stack
+            .iter()
+            .find(|(_, hosts)| hosts.contains(host))
+            .map(|(stack, _)| stack.as_str())
     }
 
     /// Records a DNS comparison for `host` made outside an attempt. Ignored for hosts that are
@@ -255,11 +300,15 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self.lock().certs.connect(acme);
     }
 
-    /// Records the ACME task's events and relays them to open UI pages as
-    /// [`UiEvent::Certificate`], until the task drops its sender.
+    /// Records the ACME task's events, writes their lines to the event log (ADR-0055) and
+    /// relays them to open UI pages as [`UiEvent::Certificate`], until the task drops its
+    /// sender.
     pub async fn run_acme_events(self: Arc<Self>, mut events: mpsc::Receiver<AcmeEvent>) {
         while let Some(event) = events.recv().await {
-            self.lock().certs.record(&event);
+            let line = self.lock().certs.record(&event);
+            if let Some(line) = line {
+                self.events.record(line).await;
+            }
             self.emit(UiEvent::Certificate(event));
         }
     }
@@ -296,6 +345,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{EventKind, Severity};
 
     fn stack(name: &str, hosts: &[&str]) -> Stack {
         let mut toml = format!("version = 1\nname = \"{name}\"\n");
@@ -418,10 +468,12 @@ mod tests {
         certs.record(&AcmeEvent::Issued {
             host: "notes.example.com".into(),
             not_after: at,
+            renewed: false,
         });
         certs.record(&AcmeEvent::Issued {
             host: "admin.example.com".into(),
             not_after: at,
+            renewed: false,
         });
         let issued = CertStatus {
             not_after: Some(at),
@@ -473,6 +525,7 @@ mod tests {
         let issued = AcmeEvent::Issued {
             host: "cdn.example.com".into(),
             not_after: at,
+            renewed: false,
         };
         certs.record(&AcmeEvent::DnsMismatch(mismatch.clone()));
         certs.record(&issued);
@@ -533,6 +586,157 @@ mod tests {
         );
     }
 
+    /// The kind, severity, stack and meta of the line `event` writes, if any, after checking that
+    /// it links to the certificates page.
+    fn line(
+        certs: &mut CertHosts,
+        event: AcmeEvent,
+    ) -> Option<(EventKind, Severity, Option<String>, Option<String>)> {
+        certs.record(&event).map(|line| {
+            assert_eq!(line.subject.as_deref(), Some("/certificates"));
+            (line.kind, line.severity, line.stack, line.meta)
+        })
+    }
+
+    #[test]
+    fn issues_renewals_and_failures_each_write_a_line_owned_by_the_routing_stack() {
+        let mut certs = CertHosts::default();
+        certs.apply(&stack("notes", &["notes.example.com"]));
+        let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let notes = Some("notes".to_owned());
+
+        let failed = AcmeEvent::Failed {
+            host: "notes.example.com".into(),
+            error: "the CA could not validate the HTTP-01 challenge".into(),
+            retry_at: at,
+        };
+        let first = certs.record(&failed).unwrap();
+        assert_eq!(
+            first.message,
+            "Certificate for notes.example.com failed: the CA could not validate the HTTP-01 challenge"
+        );
+        assert_eq!(
+            first.meta.as_deref(),
+            Some("next retry 2027-01-15T08:00:00Z")
+        );
+        // Every attempt under backoff writes its own line.
+        assert_eq!(
+            line(&mut certs, failed.clone()),
+            Some((
+                EventKind::CertificateFailed,
+                Severity::Error,
+                notes.clone(),
+                Some("next retry 2027-01-15T08:00:00Z".into())
+            ))
+        );
+
+        let issued = |renewed| AcmeEvent::Issued {
+            host: "notes.example.com".into(),
+            not_after: at,
+            renewed,
+        };
+        let valid_until = Some("valid until 2027-01-15T08:00:00Z".to_owned());
+        assert_eq!(
+            line(&mut certs, issued(false)),
+            Some((
+                EventKind::CertificateIssued,
+                Severity::Success,
+                notes.clone(),
+                valid_until.clone()
+            ))
+        );
+        let renewed = certs.record(&issued(true)).unwrap();
+        assert_eq!(renewed.kind, EventKind::CertificateRenewed);
+        assert_eq!(
+            renewed.message,
+            "Renewed the certificate for notes.example.com"
+        );
+        assert_eq!(renewed.meta, valid_until);
+
+        // The admin host is routed by no stack.
+        let admin = AcmeEvent::Issued {
+            host: "admin.example.com".into(),
+            not_after: at,
+            renewed: false,
+        };
+        assert_eq!(
+            line(&mut certs, admin),
+            Some((
+                EventKind::CertificateIssued,
+                Severity::Success,
+                None,
+                valid_until
+            ))
+        );
+
+        // A forgotten host writes nothing.
+        certs.remove("notes");
+        assert_eq!(certs.record(&issued(true)), None);
+    }
+
+    #[test]
+    fn a_dns_mismatch_is_written_when_it_appears_or_its_records_change() {
+        let mut certs = CertHosts::default();
+        certs.apply(&stack("cdn", &["cdn.example.com"]));
+        let mismatch = |observed: &[&str]| {
+            AcmeEvent::DnsMismatch(DnsMismatch {
+                host: "cdn.example.com".into(),
+                observed: observed.iter().map(|ip| ip.parse().unwrap()).collect(),
+                expected: vec!["192.0.2.1".parse().unwrap()],
+            })
+        };
+        let failed = AcmeEvent::Failed {
+            host: "cdn.example.com".into(),
+            error: "unauthorized".into(),
+            retry_at: SystemTime::UNIX_EPOCH,
+        };
+        let issued = AcmeEvent::Issued {
+            host: "cdn.example.com".into(),
+            not_after: SystemTime::UNIX_EPOCH,
+            renewed: false,
+        };
+        let cdn = Some("cdn".to_owned());
+        let written = |meta: &str| {
+            Some((
+                EventKind::DnsMismatch,
+                Severity::Warning,
+                cdn.clone(),
+                Some(meta.to_owned()),
+            ))
+        };
+
+        assert_eq!(
+            line(&mut certs, mismatch(&["203.0.113.9"])),
+            written("resolves to 203.0.113.9 · expected 192.0.2.1")
+        );
+        certs.record(&failed);
+        // The same records before the next attempts write nothing, even across an issuance.
+        assert_eq!(line(&mut certs, mismatch(&["203.0.113.9"])), None);
+        certs.record(&issued);
+        assert_eq!(line(&mut certs, mismatch(&["203.0.113.9"])), None);
+        certs.record(&failed);
+
+        // The records changed.
+        assert_eq!(
+            line(&mut certs, mismatch(&["203.0.113.9", "2001:db8::9"])),
+            written("resolves to 203.0.113.9, 2001:db8::9 · expected 192.0.2.1")
+        );
+        certs.record(&failed);
+
+        // An attempt found DNS pointing here; the mismatch coming back is new again.
+        certs.record(&failed);
+        assert_eq!(
+            line(&mut certs, mismatch(&[])),
+            written("no A/AAAA records · expected 192.0.2.1")
+        );
+        certs.record(&failed);
+        certs.dns_checked("cdn.example.com", None, &DnsVerdict::Matches);
+        assert_eq!(
+            line(&mut certs, mismatch(&[])),
+            written("no A/AAAA records · expected 192.0.2.1")
+        );
+    }
+
     #[test]
     fn events_sent_before_a_forget_do_not_bring_the_host_back() {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -543,6 +747,7 @@ mod tests {
         let issued = AcmeEvent::Issued {
             host: "notes.example.com".into(),
             not_after: SystemTime::UNIX_EPOCH,
+            renewed: false,
         };
         // Issued while the Forget was still in the channel.
         certs.record(&issued);
