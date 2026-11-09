@@ -348,13 +348,13 @@ async fn every_section_has_the_grouped_sub_nav_with_settings_current() {
             "{slug}"
         );
         assert!(!html.contains("style="), "{slug}: no inline styles");
-        let read_only = slug != "registries";
+        let configured = slug != "registries";
         assert_eq!(
             html.contains("restart hoster to apply"),
-            read_only,
-            "{slug}: the footer is on the read-only sections"
+            configured,
+            "{slug}: the footer is on the configuration sections"
         );
-        if read_only {
+        if configured && slug != "general" {
             assert!(!html.contains("<form"), "{slug}: read-only");
             assert!(!html.contains("<input"), "{slug}: read-only");
         }
@@ -439,7 +439,12 @@ async fn no_section_renders_a_secret_value() {
         config.web.github_client_secret_file = Some(secret_file.clone());
         config.credentials = crate::config::Credentials::in_dir(dir.path());
     });
-    app.app.settings = Settings::new(config, app.certificates.clone(), app.registries.clone());
+    app.app.settings = Settings::new(
+        config,
+        app.certificates.clone(),
+        app.registries.clone(),
+        app.instance.clone(),
+    );
     app.registries
         .stored
         .lock()
@@ -463,4 +468,167 @@ async fn no_section_renders_a_secret_value() {
             assert!(!html.contains(secret), "{slug} leaked {secret}: {html}");
         }
     }
+}
+
+#[tokio::test]
+async fn general_edits_the_instance_name_and_keeps_the_rest_read_only() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let html = body(app.get("/settings/general", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"<label class="field-name" for="instance-name">Instance name</label>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains("Shown in the sidebar and in notifications."),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"name="name" value="" placeholder="srv-01" maxlength="64""#),
+        "{html}"
+    );
+    assert!(
+        !html.contains("Reset to default"),
+        "nothing to reset: {html}"
+    );
+    // The only form and input on General are the instance name's.
+    assert_eq!(html.matches("<form").count(), 1, "{html}");
+    assert_eq!(html.matches("<input").count(), 1, "{html}");
+    // The footer no longer claims the editable field is set in hoster.toml.
+    assert!(
+        html.contains(
+            "The instance name is saved here and applies at once. Everything else here is set in <code>hoster.toml</code>"
+        ),
+        "{html}"
+    );
+    // The sidebar shows the default, the hostname.
+    assert!(html.contains(" · srv-01</span>"), "{html}");
+}
+
+#[tokio::test]
+async fn saving_the_instance_name_shows_it_in_the_sidebar_on_the_next_page() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let save = |name: &str| {
+        post(
+            "/settings/general/name",
+            &browser,
+            FORM,
+            encoded(&[("name", name)]),
+        )
+    };
+    let response = app.send(save("  prod <eu> & \"main\" ")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(html.contains("flash-success"), "{html}");
+    assert!(
+        html.contains("The instance name is now prod &#60;eu&#62; &#38; &#34;main&#34;."),
+        "{html}"
+    );
+    // The field is swapped out of band to show what is stored, now with "Reset".
+    assert!(
+        html.contains(
+            r#"<div id="name-inline" class="field-inline" hx-swap-oob="outerHTML"><input id="instance-name" type="text" name="name" value="prod &#60;eu&#62; &#38; &#34;main&#34;" placeholder="srv-01""#
+        ),
+        "{html}"
+    );
+    assert!(html.contains("Reset to default"), "{html}");
+    assert_eq!(
+        app.store
+            .instance_name()
+            .await
+            .unwrap()
+            .map(|n| n.to_string())
+            .as_deref(),
+        Some(r#"prod <eu> & "main""#)
+    );
+
+    // Every page's sidebar shows it, escaped.
+    for uri in ["/", "/stacks", "/settings/general"] {
+        let html = body(app.get(uri, Some(&browser.cookie)).await).await;
+        assert!(
+            html.contains(" · prod &#60;eu&#62; &#38; &#34;main&#34;</span>"),
+            "{uri}: {html}"
+        );
+        assert!(!html.contains("prod <eu>"), "{uri}: unescaped");
+    }
+    let html = body(app.get("/settings/general", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"value="prod &#60;eu&#62; &#38; &#34;main&#34;" placeholder="srv-01""#),
+        "{html}"
+    );
+    assert!(html.contains("Reset to default"), "{html}");
+
+    // Invalid names are refused and change nothing.
+    for bad in ["a\nb", &"x".repeat(65)] {
+        let response = app.send(save(bad)).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{bad:?}"
+        );
+        let html = body(response).await;
+        assert!(html.contains("flash-error"), "{html}");
+        assert!(html.contains("The instance name"), "{html}");
+    }
+    assert_eq!(app.instance.name().to_string(), r#"prod <eu> & "main""#);
+
+    // An empty name resets to the default rather than storing it.
+    let response = app.send(save("   ")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(
+        html.contains("The instance name is the default again: the hostname, srv-01."),
+        "{html}"
+    );
+    assert_eq!(app.store.instance_name().await.unwrap(), None);
+    let html = body(app.get("/", Some(&browser.cookie)).await).await;
+    assert!(html.contains(" · srv-01</span>"), "{html}");
+}
+
+#[tokio::test]
+async fn resetting_the_instance_name() {
+    let app = TestApp::new().await;
+    app.instance.set(&"prod".parse().unwrap()).await.unwrap();
+    let browser = app.sign_in().await;
+    let response = app
+        .send(post(
+            "/settings/general/name/reset",
+            &browser,
+            FORM,
+            String::new(),
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(html.contains("the hostname, srv-01"), "{html}");
+    // The field shows the default again, without "Reset".
+    assert!(
+        html.contains(r#"hx-swap-oob="outerHTML"><input id="instance-name" type="text" name="name" value="" placeholder="srv-01""#),
+        "{html}"
+    );
+    assert!(!html.contains("Reset to default"), "{html}");
+    assert_eq!(app.store.instance_name().await.unwrap(), None);
+    assert_eq!(app.instance.name().to_string(), "srv-01");
+}
+
+#[tokio::test]
+async fn instance_name_posts_need_the_csrf_token() {
+    let app = TestApp::new().await;
+    app.instance.set(&"prod".parse().unwrap()).await.unwrap();
+    let browser = app.sign_in().await;
+    for uri in ["/settings/general/name", "/settings/general/name/reset"] {
+        let request = Request::post(uri)
+            .header(header::COOKIE, &browser.cookie)
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::CONTENT_TYPE, FORM)
+            .body(Body::from(encoded(&[("name", "evil")])))
+            .unwrap();
+        assert_eq!(
+            app.send(request).await.status(),
+            StatusCode::FORBIDDEN,
+            "{uri}"
+        );
+    }
+    assert_eq!(app.instance.name().to_string(), "prod");
 }

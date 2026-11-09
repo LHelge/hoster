@@ -644,6 +644,40 @@ async fn kv_round_trip() {
     assert!(!store.kv_remove("cursor").await.unwrap());
 }
 
+#[tokio::test]
+async fn the_instance_name_is_set_replaced_and_cleared() {
+    let (_dir, store) = open().await;
+    assert_eq!(store.instance_name().await.unwrap(), None);
+    let name = |raw: &str| raw.parse::<crate::instance::InstanceName>().unwrap();
+    store
+        .set_instance_name(Some(&name("srv-01")))
+        .await
+        .unwrap();
+    store
+        .set_instance_name(Some(&name("prod <eu>")))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.instance_name().await.unwrap(),
+        Some(name("prod <eu>"))
+    );
+    store.set_instance_name(None).await.unwrap();
+    assert_eq!(store.instance_name().await.unwrap(), None);
+
+    // A stored name that does not validate falls back to the default.
+    sqlx::query("UPDATE instance_settings SET name = 'a' || char(10) || 'b'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(store.instance_name().await.unwrap(), None);
+    // The table holds one row only.
+    let second =
+        sqlx::query("INSERT INTO instance_settings (id, name, updated_at) VALUES (2, 'x', 1)")
+            .execute(&store.pool)
+            .await;
+    assert!(second.is_err());
+}
+
 /// Deploy tasks of different stacks persist their transitions in parallel (ADR-0050), next to
 /// other writers. A transaction that reads before it writes must not fail with
 /// `SQLITE_BUSY_SNAPSHOT` when another connection commits in between.
@@ -1320,6 +1354,7 @@ mod migrations {
         INSERT INTO images VALUES ('docker.io/library/postgres', 'sha256:cc', 1);
         INSERT INTO events (at, kind, severity, stack, subject, message, meta)
             VALUES (1, 'deploy_succeeded', 'success', 'gone', 'api', 'deployed', 'abc1234');
+        INSERT INTO instance_settings VALUES (1, 'srv-01', 1);
     ";
 
     #[tokio::test]

@@ -1,7 +1,11 @@
 //! Settings: a grouped sub-nav over sections that are each their own URL, `/settings/<part>`
-//! (epic 8bf). Only Registries is editable. The others are read-only views of the configuration
-//! hoster runs with ([`EffectiveConfig`], see `effective.rs`), because the configuration is
-//! `hoster.toml` plus `HOSTER_*` (ADR-0024) and editing it in the UI is not adopted.
+//! (epic 8bf). The sections show the configuration hoster runs with read-only
+//! ([`EffectiveConfig`], see `effective.rs`), because that is `hoster.toml` plus `HOSTER_*`
+//! (ADR-0024). What is editable are run-time settings kept in SQLite (ADR-0058 §1), which take
+//! effect without a restart, and Registries.
+//!
+//! Settings → General: the instance name (ADR-0058 §2) is editable above the read-only fields.
+//! Saving an empty name, or "Reset", returns to the default, the machine's hostname.
 //!
 //! Settings → Registries (ADR-0025): one pull credential per registry host, kept in the secret
 //! store (ADR-0029). The token is write-only: the page lists hosts, usernames and when each was
@@ -19,7 +23,7 @@ use askama::Template;
 use axum::Extension;
 use axum::extract::{Form, Path};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
 pub use self::effective::EffectiveConfig;
@@ -28,6 +32,7 @@ use super::auth::Session;
 use super::certificates::CertificateControl;
 use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::{Outcome, When};
+use crate::instance::{Instance, InstanceName};
 use crate::orchestrator::{EventLog, Operator};
 use crate::registry::{
     CredentialError, RegistryCheck, RegistryClient, RegistryCredential, RegistryEntry,
@@ -144,26 +149,31 @@ impl SettingsNav {
     }
 }
 
-/// The read-only sections' handlers: the effective configuration, the certificate overview
-/// (for the public addresses the DNS check resolved) and the registries (for the sub-nav's
-/// count), shared as a request extension.
+/// The sections' handlers: the effective configuration, the certificate overview (for the
+/// public addresses the DNS check resolved), the registries (for the sub-nav's count) and the
+/// instance name, shared as a request extension.
 #[derive(Clone)]
 pub struct Settings {
     config: Arc<EffectiveConfig>,
     certificates: Arc<dyn CertificateControl>,
     registries: Arc<dyn RegistryControl>,
+    instance: Instance,
 }
 
 impl Settings {
+    const GENERAL: &str = "/settings/general";
+
     pub fn new(
         config: EffectiveConfig,
         certificates: Arc<dyn CertificateControl>,
         registries: Arc<dyn RegistryControl>,
+        instance: Instance,
     ) -> Self {
         Self {
             config: Arc::new(config),
             certificates,
             registries,
+            instance,
         }
     }
 
@@ -172,7 +182,7 @@ impl Settings {
         Redirect::to(&SettingsPart::FIRST.href())
     }
 
-    /// `GET /settings/{part}`: a read-only section. Registries has its own route.
+    /// `GET /settings/{part}`: a section. Registries has its own route.
     pub async fn section(
         Extension(settings): Extension<Settings>,
         Path(slug): Path<String>,
@@ -202,19 +212,129 @@ impl Settings {
                 current,
                 registries,
             },
+            name: (current == SettingsPart::General).then(|| NameField::from(&settings.instance)),
             section,
             file: config.file(),
         })
         .into_response()
     }
+
+    /// `POST /settings/general/name`: stores the instance name; an empty one resets it to the
+    /// default. It is used from the next page load and the next mail on.
+    pub async fn save_name(
+        Extension(settings): Extension<Settings>,
+        Form(form): Form<NameForm>,
+    ) -> Response {
+        if form.name.trim().is_empty() {
+            return settings.reset().await;
+        }
+        let name = match form.name.parse::<InstanceName>() {
+            Ok(name) => name,
+            Err(err) => {
+                return Outcome::error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Outcome::sentence(&err.to_string()),
+                )
+                .into_response();
+            }
+        };
+        match settings.instance.set(&name).await {
+            Ok(()) => settings.stored(Outcome::success(format!(
+                "The instance name is now {name}. The sidebar and notifications use it from now on."
+            ))),
+            Err(err) => Self::store_failed(&err),
+        }
+    }
+
+    /// `POST /settings/general/name/reset`: back to the default name, the hostname.
+    pub async fn reset_name(Extension(settings): Extension<Settings>) -> Response {
+        settings.reset().await
+    }
+
+    async fn reset(&self) -> Response {
+        match self.instance.reset().await {
+            Ok(()) => self.stored(Outcome::success(format!(
+                "The instance name is the default again: the hostname, {}.",
+                self.instance.default_name()
+            ))),
+            Err(err) => Self::store_failed(&err),
+        }
+    }
+
+    /// The answer to a save or reset that was stored: `outcome` for the result area, and the
+    /// field's input and buttons swapped out of band, so the form shows what is stored now. The
+    /// sidebar picks the name up on the next page load.
+    fn stored(&self, outcome: Outcome) -> Response {
+        let field = NameField {
+            oob: true,
+            ..NameField::from(&self.instance)
+        };
+        let outcome = outcome.with_link(Self::GENERAL.to_owned(), "Reload the page");
+        match (outcome.render(), field.render()) {
+            (Ok(outcome), Ok(field)) => Html(outcome + &field).into_response(),
+            (Err(err), _) | (_, Err(err)) => {
+                tracing::error!(error = %err, "rendering a template failed");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
+
+    fn store_failed(err: &crate::store::StoreError) -> Response {
+        tracing::error!(error = %err, "storing the instance name failed");
+        Outcome::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The instance name could not be stored; see hoster's log.",
+        )
+        .into_response()
+    }
 }
 
-/// `GET /settings/{part}` for a read-only section.
+/// The form that sets the instance name.
+#[derive(Deserialize)]
+pub struct NameForm {
+    #[serde(default)]
+    name: String,
+}
+
+/// The editable instance name on Settings → General: its input and buttons.
+#[derive(Debug, Template)]
+#[template(path = "name_field.html")]
+pub struct NameField {
+    /// Rendered as an out-of-band swap, answering a save or reset.
+    oob: bool,
+    /// The stored name; empty when the default is in use.
+    value: String,
+    /// The default, the hostname, shown as the placeholder.
+    default: String,
+    /// Whether a name is stored, so "Reset" has something to undo.
+    custom: bool,
+}
+
+impl NameField {
+    /// The longest name, for the input's `maxlength`.
+    const MAX_CHARS: usize = InstanceName::MAX_CHARS;
+}
+
+impl From<&Instance> for NameField {
+    fn from(instance: &Instance) -> Self {
+        let stored = instance.stored();
+        Self {
+            oob: false,
+            custom: stored.is_some(),
+            value: stored.map(|name| name.to_string()).unwrap_or_default(),
+            default: instance.default_name().to_string(),
+        }
+    }
+}
+
+/// `GET /settings/{part}` for a configuration section.
 #[derive(Template)]
 #[template(path = "settings.html")]
 pub struct SettingsPage {
     layout: Layout,
     nav: SettingsNav,
+    /// The editable instance name, on General only.
+    name: Option<NameField>,
     section: ConfigSection,
     /// The `hoster.toml` hoster read, for the footer.
     file: String,

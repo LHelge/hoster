@@ -1,10 +1,10 @@
 ---
 id: mxq
 title: Instance name as a run-time setting, shown in the sidebar and Settings → General
-status: open
+status: done
 priority: P3
 created: "2026-11-09T23:28:49.821515863Z"
-updated: "2026-11-09T23:28:49.821515863Z"
+updated: "2026-11-09T23:42:17.398492995Z"
 tags:
   - store
   - web
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - rja
 parent: c5s
+attempts: 1
 ---
 
 ## Summary

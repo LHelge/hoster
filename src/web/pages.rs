@@ -1,7 +1,7 @@
 //! Server-rendered pages (ADR-0021). Templates live in `templates/` and are compiled into the
 //! binary by Askama; every page extends `base.html`, which reads the page's [`Layout`].
 //!
-//! Signed-in pages sit in the shell of ADR-0054: a sidebar with the version and hostname, the
+//! Signed-in pages sit in the shell of ADR-0054: a sidebar with the version and instance name, the
 //! navigation with its counts and the session, and a page header with a `~/path` breadcrumb, the
 //! h1 and an actions slot (the `crumb`, `heading` and `actions` blocks). Handlers take a
 //! [`Shell`] extractor, which gathers the counts per request, and call [`Shell::layout`].
@@ -21,6 +21,7 @@ use super::auth::Session;
 use super::certificates::CertificateControl;
 use super::icons::Icon;
 use super::stacks::StackControl;
+use crate::instance::{Instance, InstanceName};
 use crate::store::Timestamp;
 
 /// A section of the admin UI, each but [`Section::Events`] in the sidebar's navigation. The
@@ -151,28 +152,21 @@ impl NavCounts {
 pub struct ShellSource {
     stacks: Arc<dyn StackControl>,
     certificates: Arc<dyn CertificateControl>,
-    /// The machine's hostname, read once.
-    host: Option<String>,
+    /// The instance name (ADR-0058 §2), cached in memory: no store read per page.
+    instance: Instance,
 }
 
 impl ShellSource {
-    pub fn new(stacks: Arc<dyn StackControl>, certificates: Arc<dyn CertificateControl>) -> Self {
-        let host = nix::unistd::gethostname()
-            .ok()
-            .and_then(|name| name.into_string().ok())
-            .filter(|name| !name.is_empty());
+    pub fn new(
+        stacks: Arc<dyn StackControl>,
+        certificates: Arc<dyn CertificateControl>,
+        instance: Instance,
+    ) -> Self {
         Self {
             stacks,
             certificates,
-            host,
+            instance,
         }
-    }
-
-    /// The same source showing `host` as the machine's name.
-    #[cfg(test)]
-    pub fn with_host(mut self, host: &str) -> Self {
-        self.host = Some(host.to_owned());
-        self
     }
 
     /// The navigation's counts: one stack query and the in-memory certificate status. A count
@@ -189,11 +183,11 @@ impl ShellSource {
 }
 
 /// The shell of a signed-in page, extracted per request: the session, the navigation's counts
-/// and the hostname. A handler turns it into the page's [`Layout`] with [`Shell::layout`].
+/// and the instance name. A handler turns it into the page's [`Layout`] with [`Shell::layout`].
 pub struct Shell {
     session: Session,
     counts: NavCounts,
-    host: Option<String>,
+    instance: InstanceName,
 }
 
 impl Shell {
@@ -201,7 +195,7 @@ impl Shell {
     pub fn layout(self, section: Section) -> Layout {
         Layout {
             counts: self.counts,
-            host: self.host,
+            instance: Some(self.instance),
             ..Layout::new(section, &self.session)
         }
     }
@@ -229,7 +223,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Shell {
         Ok(Shell {
             session,
             counts: source.counts().await,
-            host: source.host,
+            instance: source.instance.name(),
         })
     }
 }
@@ -305,8 +299,8 @@ pub struct Layout {
     pub flash: Option<Flash>,
     pub user: Option<SignedIn>,
     counts: NavCounts,
-    /// The machine's hostname, next to the version in the sidebar.
-    pub host: Option<String>,
+    /// The instance name, next to the version in the sidebar.
+    pub instance: Option<InstanceName>,
 }
 
 impl Layout {
@@ -322,7 +316,7 @@ impl Layout {
                 expires_at: session.expires_at(),
             }),
             counts: NavCounts::default(),
-            host: None,
+            instance: None,
         }
     }
 
@@ -333,7 +327,7 @@ impl Layout {
             flash: None,
             user: None,
             counts: NavCounts::default(),
-            host: None,
+            instance: None,
         }
     }
 

@@ -17,6 +17,7 @@
 
 mod events;
 mod images;
+mod instance;
 mod secrets;
 mod sessions;
 mod types;
