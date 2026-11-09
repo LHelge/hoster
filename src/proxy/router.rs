@@ -66,6 +66,10 @@ impl RoutingProxy {
 pub struct RequestCtx {
     /// When the request header had been read, for the access log's duration.
     started: Instant,
+    /// How long after `started` the upstream's response header was ready for the client: the
+    /// request's latency in the statistics. `None` until then, and for a request hoster
+    /// answers itself.
+    header_after: Option<Duration>,
     /// The request host as the client sent it, for `X-Forwarded-Host`.
     host: String,
     /// The matched route, taken from the request's table snapshot.
@@ -80,6 +84,7 @@ impl Default for RequestCtx {
     fn default() -> Self {
         Self {
             started: Instant::now(),
+            header_after: None,
             host: String::new(),
             route: None,
             inflight: None,
@@ -169,6 +174,19 @@ impl ProxyHttp for RoutingProxy {
         forwarding.apply(ctx.route()?, upstream_request)
     }
 
+    /// Notes when the response header arrived. What follows it (a body, an event stream, an
+    /// upgraded connection) can last as long as it likes without counting as latency.
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        _upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        ctx.header_after
+            .get_or_insert_with(|| ctx.started.elapsed());
+        Ok(())
+    }
+
     /// A fresh connection to the single upstream that just refused is not worth retrying.
     fn fail_to_connect(
         &self,
@@ -227,7 +245,8 @@ impl ProxyHttp for RoutingProxy {
     /// and the request counted in its route's statistics (requests that failed before routing
     /// count as unrouted).
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
-        let record = AccessRecord::new(session, &ctx.host, ctx.route.as_ref(), ctx.started, e);
+        let record = AccessRecord::new(session, &ctx.host, ctx.route.as_ref(), ctx.started, e)
+            .header_after(ctx.header_after);
         record.emit();
         let outcome = RequestOutcome::from(&record);
         ctx.stats
@@ -248,7 +267,12 @@ pub(super) struct AccessRecord<'a> {
     route: Option<&'a RouteEntry>,
     /// The status sent to the client; `None` when no response header went out.
     status: Option<u16>,
+    /// From reading the request header to the end of the request, however long its body or
+    /// stream lasted.
     duration: Duration,
+    /// From reading the request header to the upstream's response header, for a proxied
+    /// request that got one.
+    header_after: Option<Duration>,
     /// Response body bytes sent to the client.
     bytes: usize,
     client: Option<IpAddr>,
@@ -274,9 +298,18 @@ impl<'a> AccessRecord<'a> {
             route,
             status: session.response_written().map(|resp| resp.status.as_u16()),
             duration: started.elapsed(),
+            header_after: None,
             bytes: session.body_bytes_sent(),
             client: Forwarding::client_ip(session),
             error,
+        }
+    }
+
+    /// The record of a request whose response header came `header_after` its start, if one did.
+    pub(super) fn header_after(self, header_after: Option<Duration>) -> Self {
+        Self {
+            header_after,
+            ..self
         }
     }
 
@@ -324,12 +357,15 @@ impl<'a> AccessRecord<'a> {
 }
 
 impl From<&AccessRecord<'_>> for RequestOutcome {
-    /// The outcome the statistics count: an error counts against the upstream when the
-    /// upstream caused it (connect, read or write failures, timeouts).
+    /// The outcome the statistics count. The latency is the time to the response header, so a
+    /// long download, an event stream or a WebSocket counts as fast as its upstream answered;
+    /// a request without one (answered by hoster, or failed first) counts its whole duration.
+    /// An error counts against the upstream when the upstream caused it (connect, read or
+    /// write failures, timeouts).
     fn from(record: &AccessRecord<'_>) -> Self {
         RequestOutcome {
             status: record.status,
-            latency: record.duration,
+            latency: record.header_after.unwrap_or(record.duration),
             upstream_error: record
                 .error
                 .is_some_and(|e| e.esource() == &ErrorSource::Upstream),
@@ -774,6 +810,7 @@ mod tests {
                 route: Some(&entry),
                 status: Some(504),
                 duration: Duration::from_micros(1500),
+                header_after: None,
                 bytes: 24,
                 client: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
                 error: Some(&error),
@@ -786,6 +823,7 @@ mod tests {
                 route: None,
                 status: None,
                 duration: Duration::ZERO,
+                header_after: None,
                 bytes: 0,
                 client: None,
                 error: None,
@@ -827,6 +865,33 @@ mod tests {
             assert!(!bare.contains_key(absent), "{absent}: {bare:?}");
         }
         assert_eq!(bare["host"], "");
+    }
+
+    /// A stream open for half a minute whose upstream answered at once is a fast request.
+    #[test]
+    fn the_counted_latency_is_the_time_to_the_response_header() {
+        let record = AccessRecord {
+            host: "blog.example.com",
+            method: "GET",
+            path: "/events",
+            route: None,
+            status: Some(200),
+            duration: Duration::from_secs(30),
+            header_after: None,
+            bytes: 512,
+            client: None,
+            error: None,
+        };
+        // Without an upstream response header (hoster's own answer) the whole request counts.
+        assert_eq!(
+            RequestOutcome::from(&record).latency,
+            Duration::from_secs(30)
+        );
+        let record = record.header_after(Some(Duration::from_millis(4)));
+        assert_eq!(
+            RequestOutcome::from(&record).latency,
+            Duration::from_millis(4)
+        );
     }
 
     #[test]

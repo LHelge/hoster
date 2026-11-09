@@ -8,7 +8,8 @@
 - **No metrics export.** hoster keeps **in-process statistics** and shows them in the web UI. It
   does not expose a Prometheus/metrics endpoint. The statistics are:
   - per-route request counts by status class
-  - recent latency (p50/p95 over a rolling window)
+  - recent latency (p50/p95 over a rolling window), measured to the response header, so that
+    event streams, WebSockets and long downloads do not count as slow requests (2026-11-09)
   - upstream errors and current in-flight requests
   - deploy outcomes and durations (from SQLite)
   - certificate expiry

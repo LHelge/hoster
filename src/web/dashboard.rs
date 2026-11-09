@@ -1,9 +1,10 @@
 //! The dashboard at `/` (spec §5.4, ADR-0021, ADR-0045, ADR-0054), from data hoster has:
 //!
 //! - **KPI tiles**: requests since hoster started, their 5xx rate, p50 and p95 over the latency
-//!   window (all routes together), stacks running out of all (with how many are degraded or
-//!   deploying) and certificates valid out of all (with how many are failing or expiring). Each
-//!   tile takes the tone of the worst state it counts.
+//!   window (all the stacks' routes and unrouted requests together, without hoster's own admin
+//!   UI), stacks running out of all (with how many are degraded or deploying) and certificates
+//!   valid out of all (with how many are failing or expiring). Each tile takes the tone of the
+//!   worst state it counts.
 //! - **Warnings**, v1's only alerting surface, as an alert list shown only while there are any.
 //! - **Stacks**: one row per stack with its [`Condition`] pill, healthy services out of all, p50
 //!   and p95 over all its routes, its 4xx and 5xx shares since start, the restarts of its running
@@ -409,7 +410,10 @@ impl Overview {
         }
     }
 
-    /// The tiles; `rows` is `None` when the stacks cannot be read.
+    /// The tiles; `rows` is `None` when the stacks cannot be read. The traffic tiles are about
+    /// what hoster hosts: they leave out hoster's own routes (the admin UI, whose live pages
+    /// would otherwise weigh on a quiet host's figures), which the note under the stacks
+    /// table counts.
     fn kpis(
         traffic: &TrafficSnapshot,
         rows: Option<&Vec<StackRow>>,
@@ -419,6 +423,7 @@ impl Overview {
             traffic
                 .routes
                 .iter()
+                .filter(|r| !r.is_reserved())
                 .map(|r| &r.counts)
                 .chain([&traffic.unrouted]),
         );
@@ -436,10 +441,15 @@ impl Overview {
                 Count(all.requests)
             )
         };
-        let latency_title = format!("Over every request the proxy finished in the last {window}");
+        let latency_title = format!(
+            "Time to the response header, over the requests to every stack's routes and \
+             unrouted that finished in the last {window}"
+        );
         vec![
-            Kpi::new("requests", Count(all.requests), requests_sub)
-                .title("Finished requests since hoster started, to every route and unrouted"),
+            Kpi::new("requests", Count(all.requests), requests_sub).title(
+                "Finished requests since hoster started, to every stack's routes and \
+                     unrouted; not hoster's own admin UI",
+            ),
             Kpi::new("5xx rate", &all.errors, errors_sub)
                 .tone(all.errors_tone)
                 .title("Share of 5xx responses since hoster started"),

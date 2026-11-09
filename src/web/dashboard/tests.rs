@@ -498,15 +498,15 @@ fn the_stacks_table_aggregates_each_stacks_routes_and_deployments() {
         "{html}"
     );
 
-    // The tiles count everything: 105 requests, two 5xx.
+    // The tiles count everything but hoster's own admin UI: 102 requests, two 5xx.
     let tiles: Vec<String> = overview.kpis.iter().map(ToString::to_string).collect();
     assert!(
-        tiles[0].contains(r#"<dd class="kpi-value">105</dd>"#),
+        tiles[0].contains(r#"<dd class="kpi-value">102</dd>"#),
         "{tiles:?}"
     );
     assert!(
         tiles[1].contains(
-            r#"<dd class="kpi-value">1.9 %</dd><dd class="kpi-sub">2 of 105 since start</dd>"#
+            r#"<dd class="kpi-value">2.0 %</dd><dd class="kpi-sub">2 of 102 since start</dd>"#
         ),
         "{tiles:?}"
     );
