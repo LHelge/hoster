@@ -20,6 +20,7 @@ The library behaviour this design depends on was checked against crate sources a
 | GitHub Actions OIDC (OQ-29) | discovery document, live | `curl` of `token.actions.githubusercontent.com/.well-known/openid-configuration` | Issuer `https://token.actions.githubusercontent.com`, JWKS at `/.well-known/jwks`, RS256. Claims include `repository_id`, `ref`, `ref_protected`, `environment`, `job_workflow_ref` and `jti`. |
 | Admin UI stack (ADR-0021) | `axum` 0.8.9, `askama` 0.16.1, `oauth2` 5.0.0, `tower-sessions` 0.15.0, htmx.org **4.0.1** (npm, 2026-11-01; npm `latest` tag still points at 2.0.11, `next` at 4.0.1) | crates.io / npm registry | Versions noted for the plan. APIs not yet exercised. |
 | Pingora Unix-socket upstreams | pingora-core 0.9.1 | crate source | `HttpPeer::new_uds(path, tls, sni)` exists, so the proxy can reach the admin Axum app over a Unix socket (ADR-0031). |
+| Exec API, exec session removal, `Healthcheck NONE` (ADR-0056) | podman **6.1.4** (runc, rootless), bollard 0.21.1, checked 2026-11-09 | live, through the compat API and the podman-gated tests in `src/runtime/podman.rs` | See §1.6. |
 
 ### 1.1 Pingora 0.9.1
 
@@ -120,6 +121,49 @@ uses:
 Container IPs live inside the rootless network namespace and cannot be reached from the host. This
 is why published loopback ports are the only path from the proxy to a container, which matches
 ADR-0007.
+
+### 1.6 Exec and podman's healthchecks (podman 6.1.4)
+
+Checked live on a rootless podman 6.1.4 with runc, through the compat API (curl and the
+`TEST_HOSTER_PODMAN=1` tests `exec_*`, `a_timed_out_exec_*` and
+`podman_never_runs_an_images_healthcheck`):
+
+- **Exec.** bollard's `create_exec` / `start_exec` (attached, `Connection: Upgrade`) /
+  `inspect_exec` work against podman. The attached output closes when the exec's main process
+  exits, even while a backgrounded child still holds stdout (`sh -c "sleep 4 & echo hi"` returns
+  at once). Exec inspect reports `Running`, the host `Pid` while it runs (0 after) and
+  `ExitCode`. Exit 0, a non-zero exit and a shell's 127 (`sh: pg_isready: not found`) are plain
+  exit codes.
+- **Cannot run.** When the OCI runtime cannot execute argv[0], the output is podman's one line
+  `Error: runc: exec failed: unable to start container process: exec: "<argv0>": <reason>: OCI
+  …` followed by `Error: read unixpacket @->/proc/self/fd/13/attach: read: connection reset by
+  peer`, with exit 127 (`executable file not found in $PATH`), 126 (`permission denied`) or
+  **125** (a directory, `is a directory: OCI runtime error`). hoster drops the trailer and treats
+  a 125/126/127 whose only output is that `Error: … OCI …` line as "cannot run".
+- **Not running.** An exec create on a stopped container is HTTP 500 `can only create exec
+  sessions on running containers: container state improper`. A container stopped while an exec
+  runs ends the exec (non-zero exit); hoster reports both as "the container is stopping or
+  stopped".
+- **Timeout.** The exec is its own process-group leader with a host PID; `kill(-pgid, SIGTERM)`
+  ends it and its children, and exec inspect then shows exit 143. Outside a user namespace
+  (a shell, not the shipped unit) hoster's uid, as the owner of podman's user namespace, can also
+  signal an exec running as a non-root container user (a subuid); under the unit's
+  `PrivateUsers=yes` it cannot, so such an exec is abandoned (§5.5). When the client drops the
+  attached start request before it is answered, podman still runs the command, but exec
+  inspect reports the session exited with 125 and `Pid` 0 while it runs, so it can be neither
+  watched nor signalled.
+- **Session removal.** `POST /v4.0.0/libpod/exec/{id}/remove` with body `{}` answers 200, and a
+  second removal a JSON 404 with cause `no such exec session`. libpod routes are served only under
+  a version prefix: the unversioned `/libpod/exec/{id}/remove` is the router's plain-text
+  `404 Not Found`, the same answer as a podman without the route, so hoster always sends a
+  version (any supported one; it uses 4.0.0). Compat container inspect lists the remaining
+  sessions in `ExecIDs`.
+- **`Healthcheck {Test: ["NONE"]}`.** A docker-format image with a `HEALTHCHECK` (written by
+  compat commit) gets podman's check on a systemd user timer in a container created without
+  `Healthcheck`. With `NONE` the check never runs and `State.Health` is null. Through the compat
+  API podman fills in its defaults (`Interval` 30 s) and still registers a transient
+  `<id>-<hash>.timer`/`.service` pair, but the timer never elapses (`NextElapseUSecMonotonic=
+  infinity`, no trigger); `podman create --no-healthcheck` registers none.
 
 ## 2. Component overview
 
@@ -524,7 +568,7 @@ its timings changes the hash, like any other `health` change.
 90 ms. Exec has no timeout. Podman removes a finished compat exec session itself after
 `exit_command_delay` (300 s by default, `containers.conf`). hoster never set `Healthcheck` at
 create, so docker-format images got podman's own systemd-timer
-check; `Healthcheck {Test: ["NONE"]}` turns it off. (Podman drops the check from OCI-format images
+check; `Healthcheck {Test: ["NONE"]}` turns it off (§1.6). (Podman drops the check from OCI-format images
 when it stores them, one reason ADR-0056 does not use it as a default.) While a container is
 stopping, compat inspect still reports `running` (libpod says `stopping`), but an exec create
 already fails.
@@ -532,7 +576,8 @@ already fails.
 **Running an exec check.** The exec is created with the argv and no `Env`, `User` or
 `Privileged`, so it runs, without a shell, as the container's user with its environment. Exit 0
 passes. The check **cannot run** only when podman itself could not execute argv[0]: its OCI
-runtime error text (`executable file not found`, `permission denied`) comes with exit 126/127. A
+runtime error text (`executable file not found`, `permission denied`, `is a directory`) is then
+the only output, with exit 125, 126 or 127 (§1.6). A
 deploy then aborts at once with a reason built from that text, e.g. "`health.exec` cannot run:
 `pg_isready`: executable file not found". In the monitor it is plain `Unhealthy` with the reason.
 Any other exit, including a 126/127 that a shell or script returns for an inner command
@@ -547,25 +592,34 @@ ordinary failure retried until the deadline. Exec defaults are `interval = "1s"`
 - **Timeout.** The probe fails at `timeout` whether or not the exec ends, and the deploy deadline
   never waits for it. hoster reads the exec's host PID while the session is `Running`, opens a
   pidfd for it, re-inspects that the session is still `Running` with that PID, and reads the
-  process group from `/proc/<pid>/stat`. The exec is its own process-group leader, and
+  process group (`getpgid(2)`). The exec is its own process-group leader, and
   `pidfd_send_signal` reaches only that one process, so hoster checks through the pidfd that the
   leader is alive and still leads that group, then signals the group with `kill(-pgid)`: SIGTERM,
-  then SIGKILL after 1 s if the pidfd has not signalled exit. The group stays reserved while any
-  member lives, so the only race is the leader and every member exiting between the check and
-  the kill and a new process taking that id as its group; children that left the group (`setsid`)
+  then SIGKILL 1 s later, also when the leader has exited, so a member that ignores SIGTERM goes
+  too (`ESRCH` means every member is gone). The group stays reserved while any member lives, so
+  the only race is the leader and every member exiting before the kill and a new process taking
+  that id as its group, which with Linux's cyclic PID allocation needs the PID space to wrap
+  within the second. The exec's create and start requests are never cut off by the timeout: one
+  still in flight then finishes in the background and the exec is ended as above, because
+  podman runs the command even when the start's connection drops (§1.6). Children that left the group (`setsid`)
   are not reached and end when the container stops. Rootless podman maps container uids other
   than root to subuids, where hoster has no `CAP_KILL`, so this succeeds only for an exec running
   as container root (hoster's own uid); any other exec is abandoned and ends with the container.
-- **Abandoned execs.** Up to three abandoned execs may run per container, so a probe starts a new
+- **Abandoned execs.** `ExecOutcome::TimedOut` carries a `RunningExec` that tells when the exec has
+  ended (killed, finished or gone with its container), which the check counts against the cap.
+  Up to three abandoned execs may run per container, so a probe starts a new
   exec while earlier ones hang. At that cap a deploy probe waits for one to end (the deadline still
   applies), and the monitor reports `Unhealthy` ("check stuck: 3 checks still running") without
   starting another.
 - **Sessions.** After reading a finished session's exit code, hoster removes it, best effort,
-  with `POST /libpod/exec/{id}/remove` (a raw HTTP call over the podman socket, next to bollard).
-  A 404 is never an error: a JSON body with cause `no such exec session` means the session is
+  with `POST /v4.0.0/libpod/exec/{id}/remove` (a raw HTTP call over the podman socket, next to
+  bollard; libpod routes need the version prefix, §1.6), in the background so the probe result
+  never waits for it. A timed-out exec's session is removed once exec inspect no longer reports
+  it running. A 404 is never an error: a JSON body with cause `no such exec session` means the session is
   already gone (podman's own cleanup, a container restart or removal won the race), and a
   plain-text `Not Found` means the route is missing (podman before 4.9, e.g. Debian bookworm's
-  4.3.1). Other failures are retried on the next probe. Either way podman's `exit_command_delay`
+  4.3.1; hoster then stops trying). Other failures are retried with the next removal (at most 64
+  are kept). Either way podman's `exit_command_delay`
   bounds the finished sessions per container to about 300 s divided by the probe interval, so
   there is no podman minimum and no fallback cadence.
 - **Container state.** An exec create that fails with HTTP 500 "container state improper" is

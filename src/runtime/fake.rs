@@ -3,7 +3,7 @@
 //! It models just enough of podman to catch ordering mistakes: containers need their image
 //! pulled and their network and volumes present, names are unique, and networks and volumes
 //! with containers cannot be removed. Failures are injected per [`Operation`], and every call
-//! is recorded.
+//! is recorded. Execs succeed unless scripted otherwise ([`FakeRuntime::script_exec`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -13,9 +13,11 @@ use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
 use tokio::sync::{Semaphore, mpsc};
 
+use super::exec::Argv;
 use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, EngineInfo,
-    LogLine, LogOptions, NetworkSpec, ObjectKind, Operation, RuntimeError, VolumeSpec,
+    ExecOutcome, ExecOutput, LogLine, LogOptions, NetworkSpec, ObjectKind, Operation, RuntimeError,
+    VolumeSpec,
 };
 use crate::stack::PinnedImage;
 
@@ -41,7 +43,15 @@ struct State {
     holds: Vec<(String, Arc<PullHold>)>,
     /// Removals of images whose reference contains the pattern wait at the hold.
     removal_holds: Vec<(String, Arc<PullHold>)>,
+    /// What execs in containers whose name contains the pattern come to, in order; the last
+    /// one repeats. The first matching pattern applies.
+    exec_scripts: Vec<(String, VecDeque<ExecResult>)>,
+    /// Every exec that reached a running container: its name and argv.
+    execs: Vec<(String, Vec<String>)>,
 }
+
+/// One scripted exec result.
+pub type ExecResult = Result<ExecOutcome, RuntimeError>;
 
 /// A point where pulls (or image removals) wait until the test releases them
 /// ([`FakeRuntime::hold_pulls`], [`FakeRuntime::hold_image_removals`]), for tests that
@@ -197,6 +207,23 @@ impl FakeRuntime {
             .removal_holds
             .push((pattern.to_owned(), Arc::clone(&hold)));
         hold
+    }
+
+    /// Makes execs in containers whose name contains `pattern` come to `results`, in order,
+    /// the last one repeating; replaces an earlier script for the same pattern. Without a
+    /// script an exec exits with 0 and no output. A [`ExecOutcome::TimedOut`] is returned only
+    /// after the exec's timeout has passed, as podman's would be.
+    pub fn script_exec(&self, pattern: &str, results: impl IntoIterator<Item = ExecResult>) {
+        let results: VecDeque<_> = results.into_iter().collect();
+        assert!(!results.is_empty(), "an exec script needs a result");
+        let mut state = self.lock();
+        state.exec_scripts.retain(|(p, _)| p != pattern);
+        state.exec_scripts.push((pattern.to_owned(), results));
+    }
+
+    /// Every exec that reached a running container, in order: its name and argv.
+    pub fn execs(&self) -> Vec<(String, Vec<String>)> {
+        self.lock().execs.clone()
     }
 
     pub fn clear_failures(&self) {
@@ -493,6 +520,46 @@ impl ContainerRuntime for FakeRuntime {
         Ok(state.container(id)?.info(id))
     }
 
+    /// Runs nothing: the argv must not be empty and the container must exist and be running,
+    /// and the result is the next one scripted for it (exit 0 without a script).
+    async fn exec(
+        &self,
+        id: &ContainerId,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<ExecOutcome, RuntimeError> {
+        Argv::try_from(argv)?;
+        let result = {
+            let mut state = self.lock();
+            state.enter(Operation::Exec)?;
+            let container = state.container(id)?;
+            let name = container.spec.name.clone();
+            if !container.state.is_running() {
+                return Err(RuntimeError::NotRunning {
+                    name: id.to_string(),
+                });
+            }
+            state.execs.push((name.clone(), argv.to_vec()));
+            let script = state
+                .exec_scripts
+                .iter_mut()
+                .find(|(pattern, _)| name.contains(pattern.as_str()))
+                .map(|(_, results)| results);
+            match script {
+                Some(results) if results.len() > 1 => results.pop_front().expect("not empty"),
+                Some(results) => results.front().cloned().expect("not empty"),
+                None => Ok(ExecOutcome::Exited {
+                    code: 0,
+                    output: ExecOutput::default(),
+                }),
+            }
+        };
+        if matches!(result, Ok(ExecOutcome::TimedOut { .. })) {
+            tokio::time::sleep(timeout).await;
+        }
+        result
+    }
+
     /// podman 5.4.2, rootless, on cgroups v2 with systemd.
     async fn engine(&self) -> Result<EngineInfo, RuntimeError> {
         self.lock().enter(Operation::Engine)?;
@@ -567,7 +634,7 @@ impl ContainerRuntime for FakeRuntime {
 mod tests {
     use futures_util::TryStreamExt;
 
-    use super::super::{Labels, LogStream, PortBinding, PublishedPort, label};
+    use super::super::{Labels, LogStream, PortBinding, PublishedPort, RunningExec, label};
     use super::*;
 
     fn image() -> PinnedImage {
@@ -851,6 +918,93 @@ mod tests {
         runtime.stop(&id, Duration::ZERO).await.unwrap();
         assert_eq!(stream.next().await.unwrap().unwrap().text, "after");
         assert_eq!(stream.next().await, None, "stopping ends the stream");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn execs_follow_their_script() {
+        let runtime = ready().await;
+        let web = runtime
+            .create_container(&spec("hoster-notes-web-g1"))
+            .await
+            .unwrap();
+        let db = runtime
+            .create_container(&spec("hoster-notes-db-g1"))
+            .await
+            .unwrap();
+        let argv = vec!["pg_isready".to_owned()];
+        let timeout = Duration::from_secs(5);
+        assert_eq!(
+            runtime.exec(&db, &argv, timeout).await.unwrap_err(),
+            RuntimeError::NotRunning {
+                name: db.to_string()
+            },
+            "a created container is not running"
+        );
+        runtime.start(&web).await.unwrap();
+        runtime.start(&db).await.unwrap();
+        let (running, guard) = RunningExec::new();
+        runtime.script_exec(
+            "-db-",
+            [
+                Ok(ExecOutcome::finished(1, "no response\n".into())),
+                Ok(ExecOutcome::TimedOut {
+                    output: ExecOutput::default(),
+                    exec: running,
+                }),
+                Ok(ExecOutcome::finished(0, "accepting connections\n".into())),
+            ],
+        );
+        // Unscripted containers pass.
+        assert!(runtime.exec(&web, &argv, timeout).await.unwrap().passed());
+        let failed = runtime.exec(&db, &argv, timeout).await.unwrap();
+        assert!(
+            matches!(failed, ExecOutcome::Exited { code: 1, .. }),
+            "{failed:?}"
+        );
+        assert_eq!(failed.output().as_ref(), "no response\n");
+        let before = tokio::time::Instant::now();
+        let ExecOutcome::TimedOut { exec, .. } = runtime.exec(&db, &argv, timeout).await.unwrap()
+        else {
+            panic!("the second result times out");
+        };
+        assert_eq!(before.elapsed(), timeout, "a timeout takes the timeout");
+        assert!(exec.is_running());
+        drop(guard);
+        assert!(!exec.is_running());
+        // The last result repeats.
+        for _ in 0..2 {
+            assert!(runtime.exec(&db, &argv, timeout).await.unwrap().passed());
+        }
+        assert_eq!(runtime.execs().len(), 5);
+        assert_eq!(
+            runtime.execs()[1],
+            ("hoster-notes-db-g1".to_owned(), argv.clone())
+        );
+
+        // Refused like podman's: an empty argv before anything else.
+        assert!(matches!(
+            runtime.exec(&db, &[], timeout).await,
+            Err(RuntimeError::Api {
+                operation: Operation::Exec,
+                ..
+            })
+        ));
+        assert_eq!(
+            runtime.execs().len(),
+            5,
+            "an empty argv reaches no container"
+        );
+
+        runtime.fail_next(
+            Operation::Exec,
+            RuntimeError::NotRunning { name: "x".into() },
+        );
+        assert!(runtime.exec(&db, &argv, timeout).await.is_err());
+        let missing = ContainerId::from("nope".to_owned());
+        assert!(matches!(
+            runtime.exec(&missing, &argv, timeout).await,
+            Err(RuntimeError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]
