@@ -467,6 +467,9 @@ pub struct ServiceStatus {
     pub restarts: RestartStats,
     /// The running generation's liveness and probe statistics (ADR-0038, ADR-0045).
     pub health: HealthStats,
+    /// The `depends_on` services the reconciler waits for before it starts the stopped
+    /// container ("waiting for db", ADR-0056); empty when it waits for nothing.
+    pub waiting_for: Vec<String>,
 }
 
 impl ServiceStatus {
@@ -507,6 +510,9 @@ pub struct Orchestrator<R> {
     /// Signalled when a stack's removal starts or a deployment is cancelled, so the deploy
     /// task stops waiting and aborts.
     interrupt: Notify,
+    /// Signalled when a container passes its check for the first time since its (re)start,
+    /// so the reconcile loop starts the services waiting for it (ADR-0056).
+    reconcile_wake: Notify,
     /// Bounds the image pulls running at once, over every stack (ADR-0040).
     pulls: Semaphore,
     /// Orders image pulls against image removal (ADR-0041): a deployment holds it shared while
@@ -707,6 +713,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }),
             finished: Notify::new(),
             interrupt: Notify::new(),
+            reconcile_wake: Notify::new(),
             pulls,
             images: RwLock::new(()),
             reconciler: Mutex::default(),
@@ -1438,6 +1445,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         let health = pointer
                             .map(|p| self.health_stats(&stack.name, &p.service, p.generation))
                             .unwrap_or_default();
+                        let waiting_for = pointer
+                            .map(|p| self.waiting_for(&stack.name, &p.service, p.generation))
+                            .unwrap_or_default();
                         let state = match pointer {
                             Some(p) => ServiceState::Running {
                                 generation: p.generation,
@@ -1457,6 +1467,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                             state,
                             restarts,
                             health,
+                            waiting_for,
                         }
                     })
                     .collect(),

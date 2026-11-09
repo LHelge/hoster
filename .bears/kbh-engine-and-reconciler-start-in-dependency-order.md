@@ -1,15 +1,16 @@
 ---
 id: kbh
 title: "Engine and reconciler: start in dependency order"
-status: open
+status: done
 priority: P1
 created: "2026-11-09T17:23:25.583018503Z"
-updated: "2026-11-09T19:11:06.557668828Z"
+updated: "2026-11-09T21:52:13.958353202Z"
 tags:
   - orchestrator
 depends_on:
   - rxt
 parent: qq9
+attempts: 1
 ---
 
 ## Summary

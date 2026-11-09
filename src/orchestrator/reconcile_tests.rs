@@ -11,7 +11,8 @@ use super::tests::{FakeProber, Harness, NOTES, digest, harness, settings};
 use super::*;
 use crate::config::PortRange;
 use crate::runtime::{
-    ContainerId, ContainerSpec, ContainerState, FakeRuntime, Labels, Operation, ServiceGeneration,
+    ContainerId, ContainerSpec, ContainerState, ExecOutcome, FakeRuntime, Labels, Operation,
+    RuntimeError, ServiceGeneration,
 };
 use crate::store::{EventKind, EventQuery, NewDeployment, ServicePointer, Severity};
 
@@ -830,5 +831,281 @@ async fn entering_and_leaving_crash_loop_are_events() {
                 "generation 2".to_owned()
             ),
         ]
+    );
+}
+
+// Service dependencies (ADR-0056 Decision 3).
+
+/// DEPS (app → db) live, with `db`'s check given `start_period`.
+async fn dependent(start_period: &str) -> Harness {
+    let h = harness().await;
+    let stack = super::tests::DEPS.replace(
+        "interval = \"10ms\"",
+        &format!("interval = \"10ms\"\nstart_period = \"{start_period}\""),
+    );
+    let live = h
+        .finish(h.apply(&stack).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    h
+}
+
+fn stopped(h: &Harness, name: &str) {
+    let id = h.container(name).id;
+    h.runtime.set_state(&id, ContainerState::Exited(Some(1)));
+}
+
+async fn service_status(
+    orchestrator: &Orchestrator<FakeRuntime>,
+    service: &str,
+) -> super::ServiceStatus {
+    orchestrator.status().await.unwrap()[0]
+        .services
+        .iter()
+        .find(|s| s.name == service)
+        .unwrap()
+        .clone()
+}
+
+/// A dependency that is not running holds its dependents without a bound and at no
+/// crash-loop cost; once it runs and passes, the dependent starts.
+#[tokio::test]
+async fn a_stopped_dependency_holds_its_dependents_at_no_crash_loop_cost() {
+    let h = dependent("30s").await;
+    let orchestrator = &h.orchestrator;
+    stopped(&h, "hoster-notes-db-g1");
+    stopped(&h, "hoster-notes-app-g1");
+    // db cannot start, again and again.
+    h.runtime.fail_always(
+        Operation::Start,
+        RuntimeError::Api {
+            operation: Operation::Start,
+            message: "no".into(),
+        },
+    );
+    let start = Instant::now();
+    for i in 0..8 {
+        let report = orchestrator
+            .reconcile_at(start + Duration::from_secs((1 << i) - 1))
+            .await
+            .unwrap();
+        assert_eq!(report.waiting, ["hoster-notes-app-g1"], "pass {i}");
+    }
+    let app = service_status(orchestrator, "app").await;
+    assert_eq!(app.waiting_for, ["db"]);
+    assert_eq!(app.restarts, RestartStats::default());
+    assert!(
+        service_status(orchestrator, "db")
+            .await
+            .restarts
+            .crash_looping
+    );
+
+    // db starts, but has not passed yet: app still waits.
+    h.runtime.clear_failures();
+    let at = start + Duration::from_secs(4000);
+    let report = orchestrator.reconcile_at(at).await.unwrap();
+    assert_eq!(report.started, ["hoster-notes-db-g1"]);
+    assert_eq!(report.waiting, ["hoster-notes-app-g1"]);
+    // Once it passes, app starts with its usual restart record.
+    orchestrator
+        .monitor_at(at + Duration::from_millis(1))
+        .await
+        .unwrap();
+    let report = orchestrator
+        .reconcile_at(at + Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(report.started, ["hoster-notes-app-g1"]);
+    assert!(report.waiting.is_empty());
+    let app = service_status(orchestrator, "app").await;
+    assert!(app.waiting_for.is_empty());
+    assert_eq!(app.restarts.restarts, 1);
+    assert!(h.container("hoster-notes-app-g1").state.is_running());
+}
+
+/// A dependency that runs but has not passed within min(`start_period`, 5 min) stops holding:
+/// the dependent starts, and one event per hold says so.
+#[tokio::test]
+async fn a_hold_on_a_running_dependency_ends_after_its_start_period_with_one_event() {
+    let h = dependent("30s").await;
+    let orchestrator = &h.orchestrator;
+    h.runtime
+        .script_exec("-db-", [Ok(ExecOutcome::finished(2, "no\n".into()))]);
+    stopped(&h, "hoster-notes-app-g1");
+    let start = Instant::now();
+    orchestrator.monitor_at(start).await.unwrap();
+    let report = orchestrator
+        .reconcile_at(start + Duration::from_secs(29))
+        .await
+        .unwrap();
+    assert_eq!(report.waiting, ["hoster-notes-app-g1"]);
+    // The reconcile loop wakes when the hold ends, not at its next tick.
+    assert_eq!(
+        orchestrator.next_hold_end(start + Duration::from_secs(29)),
+        Some(start + Duration::from_secs(30))
+    );
+
+    let report = orchestrator
+        .reconcile_at(start + Duration::from_secs(31))
+        .await
+        .unwrap();
+    assert_eq!(report.started, ["hoster-notes-app-g1"]);
+    // It keeps crashing during the same hold: its restarts write only their usual events.
+    stopped(&h, "hoster-notes-app-g1");
+    let report = orchestrator
+        .reconcile_at(start + Duration::from_secs(40))
+        .await
+        .unwrap();
+    assert_eq!(report.started, ["hoster-notes-app-g1"]);
+    let events = lifecycle_events(&h).await;
+    let past: Vec<_> = events.iter().filter(|e| e.2.contains("although")).collect();
+    assert_eq!(
+        past,
+        [&(
+            EventKind::ContainerRestarted,
+            Severity::Warning,
+            "Started notes/app although db has not passed its check".to_owned(),
+            "generation 1".to_owned()
+        )]
+    );
+    assert_eq!(events.len(), 3, "two restarts and the hold: {events:#?}");
+    assert_eq!(
+        service_status(orchestrator, "app").await.restarts.restarts,
+        2
+    );
+}
+
+/// At startup, a container whose dependencies are not ready is left to the periodic pass,
+/// which starts it as a startup start once they are: no restart record, no event.
+#[tokio::test]
+async fn startup_defers_containers_whose_dependencies_are_not_ready() {
+    let h = dependent("30s").await;
+    // A reboot: nothing runs.
+    stopped(&h, "hoster-notes-db-g1");
+    stopped(&h, "hoster-notes-app-g1");
+    let orchestrator = restarted(&h, RestartPolicy::default());
+    let report = orchestrator.recover().await.unwrap();
+    assert_eq!(report.started, ["hoster-notes-db-g1"]);
+    assert_eq!(report.waiting, ["hoster-notes-app-g1"]);
+    assert!(!h.container("hoster-notes-app-g1").state.is_running());
+
+    let start = Instant::now();
+    let report = orchestrator.reconcile_at(start).await.unwrap();
+    assert_eq!(report.waiting, ["hoster-notes-app-g1"]);
+    // db passes; the monitor wakes the reconcile loop.
+    orchestrator
+        .monitor_at(start + Duration::from_millis(1))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        orchestrator.reconcile_wake.notified(),
+    )
+    .await
+    .expect("the first pass wakes the reconciler");
+    let report = orchestrator
+        .reconcile_at(start + Duration::from_millis(2))
+        .await
+        .unwrap();
+    assert_eq!(report.started, ["hoster-notes-app-g1"]);
+    assert!(h.container("hoster-notes-app-g1").state.is_running());
+    assert_eq!(
+        service_status(&orchestrator, "app").await.restarts,
+        RestartStats::default()
+    );
+    assert!(lifecycle_events(&h).await.is_empty());
+}
+
+/// A deferred startup start past its hold is still a startup start, with the hold's event.
+#[tokio::test]
+async fn a_deferred_startup_start_past_its_hold_writes_the_hold_event() {
+    let h = dependent("1s").await;
+    stopped(&h, "hoster-notes-app-g1");
+    h.runtime
+        .script_exec("-db-", [Ok(ExecOutcome::finished(2, "no\n".into()))]);
+    let orchestrator = restarted(&h, RestartPolicy::default());
+    let start = Instant::now();
+    let report = orchestrator.recover().await.unwrap();
+    assert_eq!(report.waiting, ["hoster-notes-app-g1"]);
+    let report = orchestrator
+        .reconcile_at(start + Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(report.started, ["hoster-notes-app-g1"]);
+    assert_eq!(
+        service_status(&orchestrator, "app").await.restarts,
+        RestartStats::default()
+    );
+    let events = lifecycle_events(&h).await;
+    assert_eq!(events.len(), 1, "{events:#?}");
+    assert!(events[0].2.contains("although db"), "{events:#?}");
+}
+
+/// A `depends_on` service without a pointer (a CI-built one that never got a digest) is
+/// ignored: the dependent starts at once.
+#[tokio::test]
+async fn a_dependency_without_a_pointer_holds_nothing() {
+    let h = harness().await;
+    let stack = super::tests::DEPS.replace("depends_on = [\"db\"]", "depends_on = [\"ci\"]")
+        + "\n[services.ci]\nimage = \"ghcr.io/acme/ci\"\n";
+    let applied = h.apply(&stack).await;
+    assert_eq!(applied.changed, ["app", "db"]);
+    let live = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    stopped(&h, "hoster-notes-app-g1");
+    let report = h.orchestrator.reconcile_at(Instant::now()).await.unwrap();
+    assert_eq!(report.started, ["hoster-notes-app-g1"]);
+    assert!(report.waiting.is_empty(), "{report:?}");
+    assert!(
+        service_status(&h.orchestrator, "app")
+            .await
+            .waiting_for
+            .is_empty()
+    );
+}
+
+/// An unrouted dependency without a health table is checked by running for the settle period:
+/// it holds its dependents until it has run that long since it was first seen running, and the
+/// first pass after that starts them as ready, with no monitor probe in between and no
+/// past-hold event (ADR-0056 Decision 3).
+#[tokio::test]
+async fn a_settle_checked_dependency_passes_by_running_for_its_period() {
+    let h = harness().await;
+    let stack = super::tests::DEPS.replace(
+        "\n[services.db.health]\nexec = [\"pg_isready\"]\ninterval = \"10ms\"\n",
+        "",
+    );
+    assert!(!stack.contains("[services.db.health]"));
+    let live = h
+        .finish(h.apply(&stack).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    let orchestrator = &h.orchestrator;
+    stopped(&h, "hoster-notes-app-g1");
+    // The harness settles for 20 ms; db is first seen running now.
+    let start = Instant::now();
+    let report = orchestrator.reconcile_at(start).await.unwrap();
+    assert_eq!(report.waiting, ["hoster-notes-app-g1"]);
+    assert_eq!(
+        service_status(orchestrator, "app").await.waiting_for,
+        ["db"]
+    );
+    let report = orchestrator
+        .reconcile_at(start + Duration::from_millis(10))
+        .await
+        .unwrap();
+    assert_eq!(report.waiting, ["hoster-notes-app-g1"]);
+
+    let report = orchestrator
+        .reconcile_at(start + Duration::from_millis(21))
+        .await
+        .unwrap();
+    assert_eq!(report.started, ["hoster-notes-app-g1"]);
+    assert!(report.waiting.is_empty());
+    let events = lifecycle_events(&h).await;
+    assert!(
+        !events.iter().any(|e| e.2.contains("although")),
+        "{events:#?}"
     );
 }

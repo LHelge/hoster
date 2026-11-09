@@ -30,6 +30,18 @@ impl Stack {
         self.graph().order()
     }
 
+    /// Sorts `items` by their service `name` in [`Self::dependency_order`], name as tie-break;
+    /// a service the stack does not have comes last. Edges to services not among `items`
+    /// only order, they never hold anything back.
+    pub fn sort_in_dependency_order<T>(&self, items: &mut [T], name: impl Fn(&T) -> &Name) {
+        let order = self.dependency_order();
+        items.sort_by_cached_key(|item| {
+            let name = name(item);
+            let at = order.iter().position(|o| *o == name);
+            (at.unwrap_or(usize::MAX), name.clone())
+        });
+    }
+
     fn graph(&self) -> Graph<'_, Name> {
         Graph::new(
             self.services

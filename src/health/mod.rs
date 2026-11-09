@@ -24,6 +24,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -316,6 +317,22 @@ impl Check {
     pub fn with_start_period(mut self, start_period: Duration) -> Self {
         self.start_period = start_period;
         self
+    }
+
+    /// The longest grace after a (re)start: the monitor's quiet time and the reconciler's
+    /// hold on a running dependency end after min(`start_period`, this) (ADR-0056).
+    pub const MAX_GRACE: Duration = Duration::from_secs(5 * 60);
+
+    /// min(`start_period`, [`Self::MAX_GRACE`]): how long after a (re)start a failing check
+    /// writes no event and still holds the services depending on it (ADR-0056 Decision 3).
+    /// For the settle check that is how long the container must stay up.
+    pub fn grace(&self) -> Duration {
+        self.start_period.min(Self::MAX_GRACE)
+    }
+
+    /// The time between probes, as a deploy probes.
+    pub fn interval(&self) -> Duration {
+        self.interval
     }
 
     /// Consecutive passes required.
@@ -690,8 +707,8 @@ impl fmt::Display for Check {
     }
 }
 
-/// A duration rounded to milliseconds, for event text.
-struct Elapsed(Duration);
+/// A duration rounded to milliseconds, for event text: `3s 241ms`.
+pub(crate) struct Elapsed(pub(crate) Duration);
 
 impl fmt::Display for Elapsed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -726,6 +743,9 @@ pub struct DeploymentLog {
     state: DeploymentState,
     /// Secret values to redact, longest first.
     secrets: Vec<SecretValue>,
+    /// Held while an event is written, so the writers sharing it store their events in the
+    /// order of their timestamps.
+    writes: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl DeploymentLog {
@@ -740,7 +760,15 @@ impl DeploymentLog {
             deployment,
             state,
             secrets: Vec::new(),
+            writes: Arc::default(),
         }
+    }
+
+    /// Writes its events one at a time with every other writer holding `writes`, e.g. the
+    /// logs of probes running in parallel and the deploy task's own notes.
+    pub fn serialized(mut self, writes: &Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.writes = Arc::clone(writes);
+        self
     }
 
     /// Also redacts `secrets` (those of [`Self::MIN_REDACTED_CHARS`] or more) from exec output.
@@ -764,6 +792,7 @@ impl DeploymentLog {
 #[async_trait]
 impl ProbeLog for DeploymentLog {
     async fn record(&self, message: &str) {
+        let _writing = self.writes.lock().await;
         // The store also writes the event to hoster's log (target `hoster::deploy`).
         if let Err(err) = self.store.note(self.deployment, self.state, message).await {
             tracing::warn!(deployment = %self.deployment, %err, "cannot record a health event");

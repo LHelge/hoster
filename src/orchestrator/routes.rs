@@ -302,7 +302,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
     /// The definition of `stack`'s most recent committed deployment, or its active revision
     /// when none is recorded.
-    async fn committed_definition(&self, stack: &str) -> Result<Option<Arc<Stack>>> {
+    pub(super) async fn committed_definition(&self, stack: &str) -> Result<Option<Arc<Stack>>> {
         let committed = self
             .store
             .deployments(stack, COMMITTED_LOOKBACK)

@@ -879,6 +879,11 @@ fn dependency_chains_and_diamonds() {
         names(stack.dependency_order()),
         ["admin", "db", "cache", "api", "web"]
     );
+
+    // A subset sorts in that order; a name the stack lacks comes last.
+    let mut subset = vec![name("web"), name("ghost"), name("db"), name("api")];
+    stack.sort_in_dependency_order(&mut subset, |n| n);
+    assert_eq!(names(subset.iter()), ["db", "api", "web", "ghost"]);
 }
 
 #[test]

@@ -81,6 +81,7 @@ pub(crate) fn notes_status() -> StackStatus {
                 },
                 restarts: RestartStats::default(),
                 health: HealthStats::default(),
+                waiting_for: Vec::new(),
             },
             ServiceStatus {
                 name: "storage".into(),
@@ -89,6 +90,7 @@ pub(crate) fn notes_status() -> StackStatus {
                 state: ServiceState::NotDeployed,
                 restarts: RestartStats::default(),
                 health: HealthStats::default(),
+                waiting_for: Vec::new(),
             },
         ],
         active: None,

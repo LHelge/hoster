@@ -107,6 +107,21 @@ impl fmt::Display for ConfigHash {
     }
 }
 
+/// When a deployment starts a changed service (ADR-0056 Decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Started next to what runs, in `Starting` or `HealthChecking` as soon as its start-phase
+    /// dependencies have passed: a start-first service, or a stop-first one without a previous
+    /// generation (nothing to stop, no gap).
+    Start,
+    /// A start-phase service that depends, even transitively, on a replace-phase one: started
+    /// and probed in `Replacing` once that dependency has passed, never against the old one.
+    HeldBack,
+    /// A stop-first service with a previous generation: replaced in `Replacing`, one at a time
+    /// in dependency order, behind a 503 gap.
+    Replace,
+}
+
 /// One service a deployment recreates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
@@ -116,6 +131,10 @@ pub struct Change {
     pub update: UpdateStrategy,
     /// What runs now; `None` for a service that never ran.
     pub previous: Option<ServicePointer>,
+    /// When the deployment starts it.
+    pub phase: Phase,
+    /// The services it names in `depends_on`.
+    pub depends_on: BTreeSet<Name>,
 }
 
 impl Change {
@@ -160,6 +179,11 @@ pub struct Plan {
     pub removed: Vec<ServicePointer>,
     /// CI-built services that have never received a digest (no webhook yet).
     pub awaiting: Vec<Name>,
+    /// Every service of the stack, each after its dependencies, name as tie-break.
+    order: Vec<Name>,
+    /// Each held-back service with the replace-phase services it waits for, even
+    /// transitively.
+    held_back: BTreeMap<Name, BTreeSet<Name>>,
 }
 
 impl Plan {
@@ -211,9 +235,34 @@ impl Plan {
                     config,
                     update: service.update,
                     previous: current.cloned(),
+                    phase: Phase::Start,
+                    depends_on: service.depends_on.clone(),
                 }),
             }
         }
+        let replaced: BTreeSet<Name> = plan
+            .changes
+            .iter()
+            .filter(|c| c.update == UpdateStrategy::StopFirst && c.previous.is_some())
+            .map(|c| c.service.clone())
+            .collect();
+        for change in &mut plan.changes {
+            let behind: BTreeSet<Name> = stack
+                .transitive_dependencies(&change.service)
+                .into_iter()
+                .filter(|d| replaced.contains(*d))
+                .cloned()
+                .collect();
+            change.phase = if replaced.contains(&change.service) {
+                Phase::Replace
+            } else if behind.is_empty() {
+                Phase::Start
+            } else {
+                plan.held_back.insert(change.service.clone(), behind);
+                Phase::HeldBack
+            };
+        }
+        plan.order = stack.dependency_order().into_iter().cloned().collect();
         plan.removed = running
             .values()
             .filter(|p| !stack.services.keys().any(|n| n.as_ref() == p.service))
@@ -240,9 +289,100 @@ impl Plan {
             .collect()
     }
 
-    /// The changes with `update` strategy, in name order.
-    pub fn changes_with(&self, update: UpdateStrategy) -> impl Iterator<Item = &Change> {
-        self.changes.iter().filter(move |c| c.update == update)
+    /// The changes of `phase`, in name order.
+    pub fn phase(&self, phase: Phase) -> impl Iterator<Item = &Change> {
+        self.changes.iter().filter(move |c| c.phase == phase)
+    }
+
+    /// What `Replacing` starts, one at a time: the replace-phase and held-back services, in
+    /// dependency order with name as tie-break, so every dependency comes first.
+    pub fn replacing(&self) -> impl Iterator<Item = &Change> {
+        self.order.iter().filter_map(|name| {
+            self.changes
+                .iter()
+                .find(|c| c.service == *name && c.phase != Phase::Start)
+        })
+    }
+
+    /// The start waves of the start phase (see [`StartWaves`]).
+    pub fn start_waves(&self) -> StartWaves {
+        let phase: BTreeSet<&Name> = self.phase(Phase::Start).map(|c| &c.service).collect();
+        StartWaves {
+            waiting: self
+                .phase(Phase::Start)
+                .map(|c| {
+                    let deps = c
+                        .depends_on
+                        .iter()
+                        .filter(|d| phase.contains(d))
+                        .cloned()
+                        .collect();
+                    (c.service.clone(), deps)
+                })
+                .collect(),
+        }
+    }
+
+    /// The replace-phase services the held-back `service` waits for, even transitively, in
+    /// name order; none for a service that is not held back.
+    pub fn held_back_for(&self, service: &Name) -> impl Iterator<Item = &Name> {
+        self.held_back.get(service).into_iter().flatten()
+    }
+
+    /// The unchanged services `change` names in `depends_on`: what each runs.
+    pub fn unchanged_dependencies<'a>(
+        &'a self,
+        change: &'a Change,
+    ) -> impl Iterator<Item = &'a ServicePointer> {
+        change
+            .depends_on
+            .iter()
+            .filter_map(|dependency| self.unchanged_pointer(dependency))
+    }
+
+    /// The unchanged service `service`, if it is one: what it runs.
+    pub fn unchanged_pointer(&self, service: &Name) -> Option<&ServicePointer> {
+        self.unchanged
+            .iter()
+            .find(|p| p.service == service.as_ref())
+    }
+
+    /// Whether `service` awaits its first digest: it has never run and is not deployed.
+    pub fn is_awaiting(&self, service: &Name) -> bool {
+        self.awaiting.contains(service)
+    }
+}
+
+/// The start phase as start waves (ADR-0056 Decision 2.1): a service is ready once every
+/// `depends_on` service in the start phase has passed. Services ready together start together,
+/// and one that is ready never waits for an unrelated one, so these are not strict waves.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StartWaves {
+    /// Start-phase services not started yet, with their start-phase dependencies that have
+    /// not passed.
+    waiting: BTreeMap<Name, BTreeSet<Name>>,
+}
+
+impl StartWaves {
+    /// The services that can start now, in name order; they are no longer waiting.
+    pub fn ready(&mut self) -> Vec<Name> {
+        let ready: Vec<Name> = self
+            .waiting
+            .iter()
+            .filter(|(_, deps)| deps.is_empty())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &ready {
+            self.waiting.remove(name);
+        }
+        ready
+    }
+
+    /// `service` passed its check: its dependents no longer wait for it.
+    pub fn passed(&mut self, service: &Name) {
+        for deps in self.waiting.values_mut() {
+            deps.remove(service);
+        }
     }
 }
 
@@ -490,6 +630,80 @@ update = "stop-first"
         assert_ne!(hash(&base, "storage", &none), ready);
         assert_ne!(ready, hash(&exec("[\"ready\", \"-q\"]"), "storage", &none));
         assert_eq!(ready, hash(&exec("[\"ready\"]"), "storage", &none));
+    }
+
+    /// The phases of ADR-0056 Decision 2: a stop-first service without a previous generation
+    /// starts with the start-first ones; one with a previous generation is replaced; a
+    /// start-phase service depending on it, even through an unchanged one, is held back.
+    #[test]
+    fn changes_are_classified_into_phases() {
+        const PHASES: &str = r#"
+version = 1
+name = "shop"
+
+[services.app]
+image = "docker.io/acme/app:1"
+depends_on = ["cache"]
+
+[services.cache]
+image = "docker.io/library/redis:7"
+depends_on = ["db"]
+
+[services.db]
+image = "docker.io/library/postgres:17"
+update = "stop-first"
+
+[services.search]
+image = "docker.io/library/meili:1"
+update = "stop-first"
+
+[services.web]
+image = "docker.io/acme/web:1"
+depends_on = ["search"]
+"#;
+        let s = stack(PHASES);
+        let pins: DigestSet = ["app", "cache", "db", "search", "web"]
+            .into_iter()
+            .map(|n| (n.to_owned(), digest(1)))
+            .collect();
+        let none = SecretVersions::new();
+        // First deploy: everything is in the start phase, dependencies first.
+        let plan = Plan::new(&s, &pins, &DigestSet::new(), &[], &none).unwrap();
+        assert!(plan.changes.iter().all(|c| c.phase == Phase::Start));
+        let mut waves = plan.start_waves();
+        let ready = waves.ready();
+        assert_eq!(
+            ready,
+            ["db".parse::<Name>().unwrap(), "search".parse().unwrap()]
+        );
+        waves.passed(&"search".parse().unwrap());
+        assert_eq!(waves.ready(), ["web".parse::<Name>().unwrap()]);
+        waves.passed(&"db".parse().unwrap());
+        assert_eq!(waves.ready(), ["cache".parse::<Name>().unwrap()]);
+        waves.passed(&"cache".parse().unwrap());
+        assert_eq!(waves.ready(), ["app".parse::<Name>().unwrap()]);
+        assert!(waves.ready().is_empty());
+
+        // db and app change, cache does not: app is held back behind db through cache.
+        let running: Vec<ServicePointer> = ["app", "cache", "db", "search", "web"]
+            .into_iter()
+            .map(|n| pointer(&s, n, 1, 1))
+            .collect();
+        let requested: DigestSet = [("app".into(), digest(2)), ("db".into(), digest(2))].into();
+        let plan = Plan::new(&s, &pins, &requested, &running, &none).unwrap();
+        let phases: Vec<(&str, Phase)> = plan
+            .changes
+            .iter()
+            .map(|c| (c.service.as_ref(), c.phase))
+            .collect();
+        assert_eq!(phases, [("app", Phase::HeldBack), ("db", Phase::Replace)]);
+        let behind: Vec<&Name> = plan.held_back_for(&"app".parse().unwrap()).collect();
+        assert_eq!(behind, [&"db".parse::<Name>().unwrap()]);
+        assert_eq!(plan.held_back_for(&"db".parse().unwrap()).count(), 0);
+        let replacing: Vec<&str> = plan.replacing().map(|c| c.service.as_ref()).collect();
+        assert_eq!(replacing, ["db", "app"]);
+        assert!(plan.start_waves().ready().is_empty());
+        assert!(plan.unchanged_pointer(&"cache".parse().unwrap()).is_some());
     }
 
     /// Hashes recorded before `health.exec` and `depends_on` existed (ADR-0056): adding them
