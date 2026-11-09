@@ -2,10 +2,10 @@
 id: qq9
 title: "M11: Service dependencies and readiness"
 type: epic
-status: open
+status: done
 priority: P1
 created: "2026-11-09T17:20:07.797247925Z"
-updated: "2026-11-09T17:20:07.797247925Z"
+updated: "2026-11-09T22:27:24.607934695Z"
 tags:
   - stack
   - orchestrator

@@ -180,6 +180,114 @@ impl fmt::Display for Tail<'_> {
     }
 }
 
+/// A changed probe result as a deployment event records it: `health probe <check>: <result>`,
+/// followed by `, output "<tail>"` (a [`Tail`]) for an exec check that printed something.
+/// [`ProbeOutput`] reads the tail back.
+pub(super) struct ProbeLine<'a> {
+    pub(super) check: &'a dyn fmt::Display,
+    pub(super) result: &'a str,
+    /// The formatted [`Tail`], if any.
+    pub(super) tail: Option<&'a str>,
+}
+
+impl ProbeLine<'_> {
+    const PREFIX: &'static str = "health probe ";
+    /// What separates the result from the quoted tail.
+    const OUTPUT: &'static str = ", output ";
+}
+
+impl fmt::Display for ProbeLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}: {}", ProbeLine::PREFIX, self.check, self.result)?;
+        if let Some(tail) = self.tail {
+            write!(f, "{}{tail}", ProbeLine::OUTPUT)?;
+        }
+        Ok(())
+    }
+}
+
+/// A deployment event's text with the exec output tail of a probe result split off and
+/// unescaped, so a page can show the output apart (collapsed) from the result. Any other
+/// event, or a tail that does not read back, is all `text`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProbeOutput<'a> {
+    /// The event without its tail: `health probe exec: pg_isready -U app: exit 2`.
+    pub text: &'a str,
+    /// The output tail as the command printed it (`…` in front when cut).
+    pub output: Option<String>,
+}
+
+impl<'a> From<&'a str> for ProbeOutput<'a> {
+    fn from(message: &'a str) -> Self {
+        let split = || {
+            message.strip_prefix(ProbeLine::PREFIX)?;
+            // The tail escapes every quote, so the last `, output "` with its quote unescaped
+            // starts it.
+            let at = message.rfind(&format!("{}\"", ProbeLine::OUTPUT))?;
+            let quoted = &message[at + ProbeLine::OUTPUT.len()..];
+            let output = Self::unescape(quoted.strip_prefix('"')?.strip_suffix('"')?)?;
+            Some((&message[..at], output))
+        };
+        match split() {
+            Some((text, output)) => Self {
+                text,
+                output: Some(output),
+            },
+            None => Self {
+                text: message,
+                output: None,
+            },
+        }
+    }
+}
+
+impl ProbeOutput<'_> {
+    /// Whether a health check wrote the event: a changed probe result, the verdict, or why
+    /// the probes stopped (the exec cannot run, the container stopped, inspect failed).
+    pub fn is_probe(&self) -> bool {
+        let text = self.text;
+        [
+            ProbeLine::PREFIX,
+            super::Check::VERDICT,
+            super::HealthError::CANNOT_RUN,
+            super::HealthError::INSPECT,
+        ]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+            || (text.starts_with("container ")
+                && text.ends_with(super::HealthError::BEFORE_HEALTHY))
+    }
+
+    /// The inverse of `str::escape_debug`, which [`Tail`] writes; `None` for anything it
+    /// never writes (an unknown escape, or a bare quote).
+    fn unescape(escaped: &str) -> Option<String> {
+        let mut text = String::with_capacity(escaped.len());
+        let mut chars = escaped.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return None,
+                '\\' => text.push(match chars.next()? {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '0' => '\0',
+                    c @ ('\\' | '"' | '\'') => c,
+                    'u' => {
+                        if chars.next()? != '{' {
+                            return None;
+                        }
+                        let hex: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                        char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
+                    }
+                    _ => return None,
+                }),
+                c => text.push(c),
+            }
+        }
+        Some(text)
+    }
+}
+
 /// Why podman could not run an exec check, from its OCI runtime error: `` `pg_isready`:
 /// executable file not found in $PATH ``.
 pub(super) struct CannotRun<'a> {
@@ -238,6 +346,60 @@ mod tests {
         let exact = "y".repeat(Tail::MAX_CHARS);
         assert_eq!(Tail(&exact).to_string(), format!("\"{exact}\""));
         assert!(Tail(" \n").is_empty());
+    }
+
+    #[test]
+    fn probe_output_reads_the_tail_back() {
+        let check = "exec: sh -c \"pg_isready, output \\\"x\\\"\"";
+        for output in [
+            "accepting connections",
+            "a \"quoted\", output \"x\" line\nand\ttabs \\ back\\slash 'single'",
+            "nul \0 bell \u{7} zero-width-joiner \u{200d} é ä 日本",
+        ] {
+            let tail = Tail(output).to_string();
+            let line = ProbeLine {
+                check: &check,
+                result: "exit 1",
+                tail: Some(&tail),
+            }
+            .to_string();
+            assert_eq!(
+                ProbeOutput::from(line.as_str()),
+                ProbeOutput {
+                    text: &format!("health probe {check}: exit 1"),
+                    output: Some(output.to_owned()),
+                },
+                "{line}"
+            );
+        }
+        // Cut: the ellipsis stays in front.
+        let long = format!("{}\n{}", "x".repeat(10), "y".repeat(Tail::MAX_CHARS));
+        let tail = Tail(&long).to_string();
+        let line = ProbeLine {
+            check: &"exec: check",
+            result: "exit 1",
+            tail: Some(&tail),
+        }
+        .to_string();
+        assert_eq!(
+            ProbeOutput::from(line.as_str()).output,
+            Some(format!("…{}", "y".repeat(Tail::MAX_CHARS)))
+        );
+        // Without a tail, or another event: all text.
+        for message in [
+            "health probe exec: check: exit 1",
+            "checking db with exec: check, output \"x\"",
+            "health probe exec: check: exit 1, output \"bad \\q escape\"",
+            "health probe exec: check: exit 1, output \"unterminated",
+        ] {
+            assert_eq!(
+                ProbeOutput::from(message),
+                ProbeOutput {
+                    text: message,
+                    output: None
+                }
+            );
+        }
     }
 
     #[test]

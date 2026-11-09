@@ -495,10 +495,25 @@ exactly as before: everything starts in `Starting` and `HealthChecking` only pro
   routes, never from the latest revision, which after a failed or rejected deploy is not the one
   running. The monitor moves from `latest_revision` to that source.
 
-The per-deployment log gets one line per wave (`starting db, cache`, `db healthy after 3.2 s;
-starting app`, `replacing db (stop-first)`), probe lines name their service, a passing settle check
-is recorded, and every deployment shows the check in force for each service. The ADR-0055 `failed`
-event names the failing service and the dependents that were never started.
+The per-deployment log gets one line per wave (`starting db, cache`, `db healthy after 3s 241ms;
+starting app`, `replacing db (stop-first)`, `starting app (held back for db)`), each pass in the
+start phase is recorded (the settle check's too, as `worker healthy after 5s 3ms`), and every
+deployment shows the check in force for each service (`checking db with exec: pg_isready -U app,
+declared in health.exec`) before its probe lines. The ADR-0055 `failed` event names the failing
+service and the dependents that were never started.
+
+The admin UI shows the same model (ADR-0054). The apply preview lists the start order from
+`Plan::start_order`: the start phase as levels of its start waves (each service with the
+start-phase dependencies it waits for), then `Replacing`'s replace-phase and held-back services
+one at a time. The levels are only a summary: a service still starts as soon as its own
+dependencies pass. The stack overview shows each service's `depends_on` and the check in effect
+(`health::CheckSpec`, the precedence of §5.5 in the same words as the deploy's, without ports),
+both from the same source as the reconciler and the monitor (`StackStatus::committed`, the last
+committed deployment's revision, else the active one), and the reconciler's "waiting for db" while
+the container is known not to run. A deployment's page tags these notes `wave`, `check` and
+`probe` by `orchestrator::NoteKind`, which reads the words the engine writes them with
+(`orchestrator::notes::Note`) and the health check's (`ProbeOutput::is_probe`), and shows an exec
+probe's output tail collapsed, read back from the event text by `health::ProbeOutput`.
 
 **Generations and the commit point.** The generation counter is per stack and is assigned to each
 deployment attempt, but it is **recorded per service**: a deployment recreates only the services
@@ -556,7 +571,9 @@ ADR-0051, ADR-0056):
 1. A declared probe: `health.http` or `health.tcp` (routed services only), or `health.exec` (any
    service). At most one may be set, and a `health` table on a non-routed service must set `exec`.
 2. Otherwise `GET /healthz` on the first route's container port for a routed service, and
-   "running and not restarted for 5 s" for the rest.
+   "running and not restarted for 5 s" for the rest. A routed service's timings-only `health`
+   table keeps that default probe with its own timings, and events and the overview call it the
+   default.
 
 On a routed service an exec check is paired with a TCP connect to the first route's loopback port
 and passes only when both do: an in-container check cannot see the published port.

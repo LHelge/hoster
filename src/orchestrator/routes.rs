@@ -303,6 +303,15 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// The definition of `stack`'s most recent committed deployment, or its active revision
     /// when none is recorded.
     pub(super) async fn committed_definition(&self, stack: &str) -> Result<Option<Arc<Stack>>> {
+        let revision = match self.committed_revision(stack).await? {
+            Some(revision) => Some(revision),
+            None => self.store.latest_revision(stack).await?,
+        };
+        Ok(revision.and_then(Self::parse_revision))
+    }
+
+    /// The revision of `stack`'s most recent committed deployment, if one is recorded.
+    pub(super) async fn committed_revision(&self, stack: &str) -> Result<Option<StackRevision>> {
         let committed = self
             .store
             .deployments(stack, COMMITTED_LOOKBACK)
@@ -310,15 +319,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .into_iter()
             .find(|d| d.committed_at.is_some())
             .and_then(|d| d.revision);
-        let revision = match committed {
+        Ok(match committed {
             Some(id) => self.store.revision(id).await?,
             None => None,
-        };
-        let revision = match revision {
-            Some(revision) => Some(revision),
-            None => self.store.latest_revision(stack).await?,
-        };
-        Ok(revision.and_then(Self::parse_revision))
+        })
     }
 
     /// `definition` with every service in `pointers` live on its current generation.

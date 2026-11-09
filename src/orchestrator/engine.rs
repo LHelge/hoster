@@ -22,10 +22,11 @@ use tracing::Instrument;
 
 use super::event_log::DeployEvents;
 use super::machine::{Effect, Event};
+use super::notes::Note;
 use super::plan::{Change, Phase, Plan, SecretVersions, StartWaves};
 use super::routes::Routes;
 use super::{Interruption, Orchestrator, Result};
-use crate::health::{Check, DeploymentLog, Elapsed, ProbeLog, Probes};
+use crate::health::{Check, DeploymentLog, ProbeLog, Probes};
 use crate::logging::LogSpan;
 use crate::routing::{DesiredStack, DrainOutcome, RouteClaims, ServiceState, Upstream};
 use crate::runtime::{
@@ -582,10 +583,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .iter()
                 .filter(|d| run.plan().is_awaiting(d))
             {
-                notes.push(format!(
-                    "{dependency} has never run; starting {} without it",
-                    change.service
-                ));
+                notes.push(
+                    Note::NeverRun {
+                        dependency,
+                        service: &change.service,
+                    }
+                    .to_string(),
+                );
             }
             for pointer in run.plan().unchanged_dependencies(change) {
                 if let Ok(dependency) = pointer.service.parse::<Name>() {
@@ -603,9 +607,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             let status = self
                 .health_stats(stack.as_ref(), dependency.as_ref(), *generation)
                 .status;
-            notes.push(format!(
-                "{dependency} (unchanged) is running; its monitor status is {status}"
-            ));
+            notes.push(Note::UnchangedRunning { dependency, status }.to_string());
         }
         for note in notes {
             self.note_run(run, &note).await;
@@ -627,20 +629,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         after: Option<(&Name, std::time::Duration)>,
     ) -> std::result::Result<Vec<(Name, ContainerId)>, Event> {
         let names: Vec<&str> = ready.iter().map(AsRef::as_ref).collect();
-        let note = match (after, names.is_empty()) {
-            (None, true) => None,
-            (None, false) => Some(format!("starting {}", names.join(", "))),
-            (Some((passed, took)), true) => {
-                Some(format!("{passed} healthy after {}", Elapsed(took)))
-            }
-            (Some((passed, took)), false) => Some(format!(
-                "{passed} healthy after {}; starting {}",
-                Elapsed(took),
-                names.join(", ")
-            )),
-        };
-        if let Some(note) = note {
-            self.note_run(run, &note).await;
+        if after.is_some() || !names.is_empty() {
+            let note = Note::Wave {
+                passed: after,
+                starting: &names,
+            };
+            self.note_run(run, &note.to_string()).await;
         }
         let mut started = Vec::new();
         for service in ready {
@@ -680,8 +674,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     Err(reason) => return run.failed(&service, reason),
                 };
                 let log = self.probe_log(run);
-                log.record(&format!("checking {service} with {check:#}"))
-                    .await;
+                log.record(
+                    &Note::Checking {
+                        service: &service,
+                        check: &check,
+                    }
+                    .to_string(),
+                )
+                .await;
                 let orchestrator = Arc::clone(self);
                 let probed = service.clone();
                 let task = pending.spawn(
@@ -746,7 +746,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
             match (&change.phase, &change.previous) {
                 (Phase::Replace, Some(previous)) => {
-                    self.note_run(run, &format!("replacing {} (stop-first)", change.service))
+                    self.note_run(run, &Note::Replacing(&change.service).to_string())
                         .await;
                     // The service's routes answer 503 + Retry-After until the commit or the
                     // abort.
@@ -773,15 +773,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         .held_back_for(&change.service)
                         .map(AsRef::as_ref)
                         .collect();
-                    self.note_run(
-                        run,
-                        &format!(
-                            "starting {} (held back for {})",
-                            change.service,
-                            replaced.join(", ")
-                        ),
-                    )
-                    .await;
+                    let note = Note::HeldBack {
+                        service: &change.service,
+                        behind: &replaced,
+                    };
+                    self.note_run(run, &note.to_string()).await;
                 }
             }
             let id = match self.create_and_start(run, change).await {
@@ -865,13 +861,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             else {
                 continue;
             };
-            self.note_run(
-                run,
-                &format!(
-                    "starting {service} (unchanged) again: it exited while {replaced} was replaced"
-                ),
-            )
-            .await;
+            let note = Note::Restarting { service, replaced };
+            self.note_run(run, &note.to_string()).await;
             self.runtime.start(&container.id).await.map_err(|err| {
                 (
                     service.clone(),
@@ -918,8 +909,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         check: Check,
     ) -> std::result::Result<(), String> {
         let log = self.probe_log(run);
-        log.record(&format!("checking {service} with {check:#}"))
-            .await;
+        log.record(
+            &Note::Checking {
+                service,
+                check: &check,
+            }
+            .to_string(),
+        )
+        .await;
         let probes = Probes::new(&*self.runtime, &*self.prober, &self.execs);
         match self
             .unless_interrupted(run, check.run(&probes, id, &log))

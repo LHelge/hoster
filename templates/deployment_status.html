@@ -78,7 +78,7 @@
     <thead><tr><th scope="col" class="shrink">Time</th><th scope="col" class="shrink">From</th><th scope="col" class="shrink">To</th><th scope="col">Detail</th></tr></thead>
     <tbody>
       {%- for event in deployment.events %}
-      <tr><td class="mono shrink">{{ event.at }}</td><td class="mono shrink">{{ event.from }}</td><td class="mono shrink">{{ event.to }}</td><td>{{ event.message }}</td></tr>
+      <tr{% if event.note %} class="event-note"{% endif %}><td class="mono shrink">{{ event.at }}</td>{% if event.note %}<td class="mono shrink muted" colspan="2"><span class="visually-hidden">note in </span>{{ event.to }}</td>{% else %}<td class="mono shrink">{{ event.from }}</td><td class="mono shrink">{{ event.to }}</td>{% endif %}<td>{% if let Some(kind) = event.kind %}<span class="tag event-kind">{{ kind }}</span> {% endif %}<span class="event-message">{{ event.message }}</span>{% if let Some(output) = event.output %}<details class="event-output"><summary>output</summary><pre>{{ output }}</pre></details>{% endif %}</td></tr>
       {%- endfor %}
     </tbody>
   </table></div>

@@ -7,7 +7,12 @@
 //! waiting) with the health detail as its tooltip, the reconciler's restarts (ADR-0028), the
 //! loopback port of a routed service (ADR-0026; `internal` for one that is not routed), its
 //! generation, how long its container has been up (from `State.StartedAt`, which
-//! only inspect reports) and a link to its log.
+//! only inspect reports) and a link to its log. Under the name come the services it names in
+//! `depends_on`, and under the pill the health check in effect (ADR-0056): the declared `exec`,
+//! `http` or `tcp` probe with its command, path or port, or the default, both from the
+//! revision the reconciler and the monitor use (the last committed deployment's, ADR-0056
+//! Decision 3). A stopped service the reconciler holds back for its dependencies is "waiting
+//! for db".
 //!
 //! The port is the one the running container publishes, as podman reports it: the allocation
 //! itself (the port reservations in the store) is not part of [`StackStatus`], so a routed
@@ -22,16 +27,16 @@
 //! revision no longer has is listed after the services. The containers are read from the
 //! runtime; when that fails, the services are shown without them and the card says why.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::SystemTime;
 
 use super::super::ShortDigest;
 use super::super::list::{ServiceChip, StackCard};
-use crate::health::HealthStatus;
+use crate::health::{CheckSpec, HealthStatus};
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::runtime::{ContainerInfo, PublishedPort, label};
-use crate::stack::Stack;
+use crate::stack::{Service, Stack};
 use crate::web::ui::Uptime;
 use crate::web::ui::{Pill, Tone};
 
@@ -187,7 +192,9 @@ pub struct ServiceTable {
 
 impl ServiceTable {
     /// The services of `status` (whose active revision is `stack`, when it parses), with the
-    /// `containers` the runtime reports, or why it could not, as of `now`.
+    /// `containers` the runtime reports, or why it could not, as of `now`. Dependencies and
+    /// checks come from the revision the reconciler and the monitor use: the last committed
+    /// deployment's (ADR-0056 Decision 3), else the active one.
     pub fn new(
         status: &StackStatus,
         stack: Option<&Stack>,
@@ -198,12 +205,27 @@ impl ServiceTable {
             Ok(containers) => (containers, None),
             Err(err) => (StackContainers::default(), Some(err)),
         };
-        let routed: BTreeSet<String> = stack
+        let declared: BTreeMap<&str, &Service> = stack
             .into_iter()
             .flat_map(|stack| &stack.services)
-            .filter(|(_, service)| !service.routes.is_empty())
-            .map(|(name, _)| name.to_string())
+            .map(|(name, service)| (name.as_ref(), service))
             .collect();
+        let committed = status
+            .committed
+            .as_ref()
+            .and_then(|revision| revision.toml.parse::<Stack>().ok());
+        let in_effect = |name: &str| {
+            committed
+                .as_ref()
+                .and_then(|stack| {
+                    stack
+                        .services
+                        .iter()
+                        .find(|(n, _)| n.as_ref() == name)
+                        .map(|(_, service)| service)
+                })
+                .or_else(|| declared.get(name).copied())
+        };
         let listed = error.is_none();
         let deploying = StackCard::deploying(status);
         let rows = status
@@ -217,7 +239,10 @@ impl ServiceTable {
                     &status.name,
                     service,
                     moving,
-                    routed.contains(&service.name),
+                    Declared {
+                        active: declared.get(service.name.as_str()).copied(),
+                        in_effect: in_effect(&service.name),
+                    },
                     &containers,
                     listed,
                     now,
@@ -252,6 +277,11 @@ pub struct ServiceRow {
     pub state: Pill,
     /// The state for screen readers, which cannot reach the pill's tooltip.
     pub state_detail: String,
+    /// The services it names in `depends_on`, in name order.
+    pub depends_on: Vec<String>,
+    /// The health check in effect; `None` when no revision declares the service (it does not
+    /// parse).
+    pub check: Option<CheckView>,
     pub restarts: u32,
     pub port: String,
     pub generation: Option<u32>,
@@ -264,11 +294,12 @@ pub struct ServiceRow {
 }
 
 impl ServiceRow {
+    /// The row of `service`, as the revisions in `declared` declare it.
     fn new(
         stack: &str,
         service: &ServiceStatus,
         deploying: bool,
-        routed: bool,
+        declared: Declared<'_>,
         containers: &StackContainers,
         listed: bool,
         now: SystemTime,
@@ -279,6 +310,7 @@ impl ServiceRow {
             _ => (None, None),
         };
         let (state, detail) = Self::state(service, deploying, current.map(|c| &c.info), listed);
+        let routed = declared.active.is_some_and(|s| !s.routes.is_empty());
         let port = match current {
             _ if !routed => "internal".to_owned(),
             Some(current) => Ports(&current.info.ports).to_string(),
@@ -305,6 +337,13 @@ impl ServiceRow {
             digest: digest.cloned(),
             state,
             state_detail: detail,
+            depends_on: declared
+                .in_effect
+                .into_iter()
+                .flat_map(|s| &s.depends_on)
+                .map(ToString::to_string)
+                .collect(),
+            check: declared.in_effect.map(CheckView::from),
             restarts: service.restarts.restarts,
             port,
             generation,
@@ -315,9 +354,11 @@ impl ServiceRow {
         }
     }
 
-    /// The pill, with what is behind it as its tooltip, and that detail. Crash looping and
-    /// failing probes come first, then a deploy that moves the service, then whether its
-    /// container runs. `listed` says whether the containers could be listed, so whether a
+    /// The pill, with what is behind it as its tooltip, and that detail. Crash looping comes
+    /// first, then a stopped container the reconciler holds back for its dependencies (unless a
+    /// deploy moves the service: the reconciler leaves a busy stack alone, so what it waits
+    /// for is stale), then failing probes, then a deploy that moves the service, then whether
+    /// its container runs. `listed` says whether the containers could be listed, so whether a
     /// missing `current` means the service has none.
     fn state(
         service: &ServiceStatus,
@@ -345,6 +386,29 @@ impl ServiceRow {
                     health.unwrap_or_else(|| "keeps exiting".to_owned())
                 ),
             ),
+            // Held back by the reconciler until its dependencies run and pass (ADR-0056), as
+            // long as its container is known not to run.
+            ServiceState::Running { .. }
+                if !deploying
+                    && !service.waiting_for.is_empty()
+                    && match current {
+                        Some(info) => !info.state.is_running(),
+                        None => listed,
+                    } =>
+            {
+                let deps = service.waiting_for.join(", ");
+                (
+                    Tone::Warn.pill(format!("waiting for {deps}")),
+                    format!(
+                        "stopped: the reconciler starts it once {deps} {}",
+                        if service.waiting_for.len() == 1 {
+                            "runs and passes its check"
+                        } else {
+                            "run and pass their checks"
+                        }
+                    ),
+                )
+            }
             _ if ServiceChip::failing(service) => (
                 Tone::Fail.pill("unhealthy"),
                 health.unwrap_or_else(|| "the health check fails".to_owned()),
@@ -378,6 +442,42 @@ impl ServiceRow {
                 "awaiting its first digest".to_owned(),
             ),
             ServiceState::NotDeployed => (Tone::Neutral.pill("stopped"), "not deployed".to_owned()),
+        }
+    }
+}
+
+/// How the revisions declare one service, when they parse and have it.
+#[derive(Debug, Clone, Copy)]
+struct Declared<'a> {
+    /// In the active revision: its routes.
+    active: Option<&'a Service>,
+    /// In the revision the reconciler and the monitor use (the last committed deployment's,
+    /// else the active one): its dependencies and check.
+    in_effect: Option<&'a Service>,
+}
+
+/// The health check a service's containers get, as the overview shows it under the state.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CheckView {
+    /// `exec: pg_isready -U app`, `GET /healthz on container port 8080`.
+    pub check: String,
+    /// `declared` or `default`.
+    pub source: &'static str,
+    /// Why it applies, in full: `declared in health.exec`.
+    pub why: &'static str,
+}
+
+impl From<&Service> for CheckView {
+    fn from(service: &Service) -> Self {
+        let spec = CheckSpec::from(service);
+        Self {
+            check: spec.to_string(),
+            source: if spec.is_default() {
+                "default"
+            } else {
+                "declared"
+            },
+            why: spec.why(),
         }
     }
 }
@@ -482,7 +582,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::{ContainerId, ContainerState, Labels};
-    use crate::web::stacks::tests::{NOTES, digest, notes_status};
+    use crate::web::stacks::tests::{NOTES, digest, notes_status, revision};
 
     fn container(service: &str, generation: u32, state: ContainerState) -> ContainerInfo {
         ContainerInfo {
@@ -499,6 +599,98 @@ mod tests {
             started_at: None,
             oom_killed: false,
         }
+    }
+
+    /// ADR-0056: the check and dependencies in effect come from the committed revision, and
+    /// "waiting for" shows only while the container is known not to run and no deploy moves it.
+    #[test]
+    fn waits_show_while_stopped_and_checks_follow_the_committed_revision() {
+        let now = SystemTime::now();
+        let mut status = notes_status();
+        let active = format!(
+            "{}\n[services.storage.health]\nexec = [\"pg_isready\"]\n",
+            NOTES.replace(
+                "[services.storage]\n",
+                "[services.storage]\ndepends_on = [\"api\"]\n"
+            )
+        );
+        status.revision = revision("notes", 2, &active);
+        status.committed = Some(revision("notes", 1, NOTES));
+        status.services[1].state = ServiceState::Running {
+            generation: 1,
+            digest: digest(2),
+        };
+        status.services[1].waiting_for = vec!["api".into(), "cache".into()];
+        let stack: Stack = active.parse().unwrap();
+        let storage = |status: &StackStatus, containers: Vec<ContainerInfo>| {
+            let table = ServiceTable::new(
+                status,
+                Some(&stack),
+                Ok(StackContainers::from(containers)),
+                now,
+            );
+            table.rows.into_iter().nth(1).unwrap()
+        };
+
+        // The committed revision is in effect: no dependency yet, the unrouted default.
+        let row = storage(&status, Vec::new());
+        assert!(row.depends_on.is_empty());
+        assert_eq!(
+            row.check,
+            Some(CheckView {
+                check: "running for 5s".into(),
+                source: "default",
+                why: "the default for a service without routes or health",
+            })
+        );
+        // Without a container, and with a stopped one, it waits; plural for two.
+        let waiting = "stopped: the reconciler starts it once api, cache run and pass their checks";
+        assert_eq!(row.state_detail, waiting);
+        let stopped = container("storage", 1, ContainerState::Exited(Some(0)));
+        assert_eq!(
+            storage(&status, vec![stopped.clone()]).state_detail,
+            waiting
+        );
+        // A running container is not waiting, whatever the reconciler last recorded.
+        let running = container("storage", 1, ContainerState::Running);
+        assert_eq!(
+            storage(&status, vec![running.clone()]).state_detail,
+            "not probed yet"
+        );
+        // A deploy that moves it wins over a stale wait; crash looping wins over both.
+        let service = &status.services[1];
+        let (pill, detail) = ServiceRow::judge(service, true, Some(&stopped), true);
+        assert_eq!(
+            detail, "a deployment is moving it to a new generation",
+            "{pill}"
+        );
+        let mut looping = service.clone();
+        looping.restarts.crash_looping = true;
+        let (_, detail) = ServiceRow::judge(&looping, false, Some(&stopped), true);
+        assert!(detail.starts_with("restarted "), "{detail}");
+
+        // Nothing committed: the active revision is in effect.
+        status.committed = None;
+        status.services[1].waiting_for = vec!["api".into()];
+        let row = storage(&status, Vec::new());
+        assert_eq!(row.depends_on, ["api"]);
+        assert_eq!(
+            row.check.as_ref().map(|c| (c.check.as_str(), c.source)),
+            Some(("exec: pg_isready", "declared"))
+        );
+        assert_eq!(
+            row.state_detail,
+            "stopped: the reconciler starts it once api runs and passes its check"
+        );
+        // A revision that does not parse declares nothing.
+        status.revision = revision("notes", 3, "not toml");
+        let table = ServiceTable::new(&status, None, Ok(StackContainers::default()), now);
+        assert!(
+            table
+                .rows
+                .iter()
+                .all(|r| r.check.is_none() && r.depends_on.is_empty())
+        );
     }
 
     #[test]

@@ -13,8 +13,9 @@
 //!   [`Prober`] for the network and the [`ExecSlots`]), until it passes, its `start_period` runs
 //!   out, or the container exits (checked with `inspect` before every probe and once more before
 //!   a pass is reported). An exec check podman cannot run fails at once.
+//! - [`CheckSpec`] names the same check from the stack file alone, for pages without the ports.
 //! - Results go to a [`ProbeLog`]; [`DeploymentLog`] records them as deployment events, an exec's
-//!   output tail with the deployment's secrets redacted.
+//!   output tail with the deployment's secrets redacted, which [`ProbeOutput`] reads back.
 //! - After a deploy, [`Check::live`] probes a live container once, through the same [`Probes`],
 //!   and [`Liveness`] turns the results into a [`HealthStatus`] (see `liveness`).
 //!
@@ -35,14 +36,14 @@ use tokio::time::Instant;
 
 use crate::runtime::{ContainerId, ContainerRuntime, ContainerState, ExecOutcome, RuntimeError};
 use crate::secrets::SecretValue;
-use crate::stack::{DEFAULT_HEALTH_PATH, ExpectStatus, Probe, Service};
+use crate::stack::{DEFAULT_HEALTH_PATH, ExpectStatus, HealthCheck, Probe, Route, Service};
 use crate::store::{DeploymentId, DeploymentState, PortMap, Store};
 
 mod exec;
 mod liveness;
 
-pub use exec::ExecSlots;
-use exec::{AtCap, CannotRun, Command, SlotError, Tail};
+use exec::{AtCap, CannotRun, Command, ProbeLine, SlotError, Tail};
+pub use exec::{ExecSlots, ProbeOutput};
 
 pub use liveness::{
     HealthChange, HealthStats, HealthStatus, Liveness, MonitorSettings, NetworkProber, Prober,
@@ -109,6 +110,9 @@ enum Kind {
 enum Origin {
     /// Its `health` table.
     Declared,
+    /// `GET /healthz` on the first route's port of a routed service whose `health` table only
+    /// sets timings.
+    TunedDefault,
     /// `GET /healthz`, a routed service without `health` (ADR-0051).
     RoutedDefault,
     /// Running for 5 s, a service without routes or `health` (ADR-0038).
@@ -167,21 +171,22 @@ pub enum HealthError {
     #[error("health probe port {0} has no allocated loopback port")]
     NoLoopbackPort(u16),
     /// Podman could not execute the exec check's argv[0] (ADR-0056): no retry helps.
-    #[error("`health.exec` cannot run: {0}")]
+    #[error("{prefix}{0}", prefix = HealthError::CANNOT_RUN)]
     CannotRun(String),
     /// An exec found the container stopping or stopped (compat inspect may still say running).
-    #[error("container {0} is stopping or stopped before it became healthy")]
+    #[error("container {0} is stopping or stopped{end}", end = HealthError::BEFORE_HEALTHY)]
     Stopping(ContainerId),
-    #[error("cannot inspect container {id}: {source}")]
+    #[error("{}{id}: {source}", HealthError::INSPECT)]
     Inspect {
         id: ContainerId,
         #[source]
         source: RuntimeError,
     },
-    #[error("container {name} {state} before it became healthy")]
+    #[error("container {name} {state}{}", HealthError::BEFORE_HEALTHY)]
     Exited { name: String, state: ContainerState },
     #[error(
-        "health check {check} did not pass within {}: last result: {last}{}",
+        "{}{check} did not pass within {}: last result: {last}{}",
+        Check::VERDICT,
         humantime::format_duration(*.within),
         if *.default_path { DEFAULT_PATH_HINT } else { "" }
     )]
@@ -194,10 +199,23 @@ pub enum HealthError {
     },
 }
 
+impl HealthError {
+    /// What a check's error says when podman cannot run its exec command.
+    const CANNOT_RUN: &'static str = "`health.exec` cannot run: ";
+    /// How the errors of a container that stopped during its check end.
+    const BEFORE_HEALTHY: &'static str = " before it became healthy";
+    /// How an inspection error during the check starts.
+    const INSPECT: &'static str = "cannot inspect container ";
+}
+
 const DEFAULT_PATH_HINT: &str = " (`/healthz` is the default health path for routed services; \
                                  set `health.http.path` to probe another path)";
 
 impl Check {
+    /// How a check's verdict starts in deployment events: `health check … passed …`, `health
+    /// check … did not pass within …`.
+    const VERDICT: &'static str = "health check ";
+
     /// The check for a service's new container, whose route ports were allocated `ports`
     /// (container port → loopback port). A declared `health` table wins, `exec` included on any
     /// service (on a routed one paired with a TCP connect to the first route's port, ADR-0056);
@@ -219,19 +237,21 @@ impl Check {
                 expect,
             })
         };
-        let Some(health) = &service.health else {
-            return Ok(match service.routes.first() {
-                Some(route) => {
-                    let mut check = Self::probe(http(
-                        DEFAULT_HEALTH_PATH,
-                        route.port,
-                        ExpectStatus::default(),
-                    )?);
-                    check.origin = Origin::RoutedDefault;
-                    check
-                }
-                None => Self::settle(DEFAULT_SETTLE, DEFAULT_SETTLE_POLL),
-            });
+        let source = Source::from(service);
+        let health = match source {
+            Source::Declared(health) | Source::TunedDefault(health) => health,
+            Source::RoutedDefault(route) => {
+                let mut check = Self::probe(http(
+                    DEFAULT_HEALTH_PATH,
+                    route.port,
+                    ExpectStatus::default(),
+                )?);
+                check.origin = Origin::RoutedDefault;
+                return Ok(check);
+            }
+            Source::UnroutedDefault => {
+                return Ok(Self::settle(DEFAULT_SETTLE, DEFAULT_SETTLE_POLL));
+            }
         };
         let kind = match &health.probe {
             Probe::Http {
@@ -253,6 +273,7 @@ impl Check {
             },
         };
         let mut check = Self::probe(kind);
+        check.origin = source.into();
         if matches!(check.kind, Kind::Exec { .. }) {
             check.timeout = DEFAULT_EXEC_TIMEOUT;
         }
@@ -414,7 +435,8 @@ impl Check {
                         return Err(err);
                     }
                     log.record(&format!(
-                        "health check {self} passed {streak} time(s) in a row after {}",
+                        "{}{self} passed {streak} time(s) in a row after {}",
+                        Check::VERDICT,
                         Elapsed(started.elapsed())
                     ))
                     .await;
@@ -422,11 +444,13 @@ impl Check {
                 }
                 if last.as_ref() != Some(&result) {
                     let (Ok(text) | Err(text)) = &result;
-                    let message = match tail {
-                        Some(tail) => format!("health probe {self}: {text}, output {tail}"),
-                        None => format!("health probe {self}: {text}"),
-                    };
-                    log.record(&message).await;
+                    let line = ProbeLine {
+                        check: self,
+                        result: text,
+                        tail: tail.as_deref(),
+                    }
+                    .to_string();
+                    log.record(&line).await;
                 }
                 last = Some(result);
             }
@@ -657,53 +681,234 @@ impl Check {
 /// `exec: pg_isready -U postgres, declared in health.exec`.
 impl fmt::Display for Check {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
+        fmt::Display::fmt(&Words::from(self), f)
+    }
+}
+
+/// Where a service's check comes from, by ADR-0056's precedence: its declared `health` table,
+/// else `GET /healthz` on its first route's port (ADR-0051), else the settle check (ADR-0038).
+#[derive(Debug, Clone, Copy)]
+enum Source<'a> {
+    /// A `health` table that names its probe.
+    Declared(&'a HealthCheck),
+    /// A routed service's timings-only `health` table: the default probe with its timings.
+    TunedDefault(&'a HealthCheck),
+    RoutedDefault(&'a Route),
+    UnroutedDefault,
+}
+
+impl<'a> From<&'a Service> for Source<'a> {
+    fn from(service: &'a Service) -> Self {
+        match (&service.health, service.routes.first()) {
+            // A timings-only table parses to the default probe; one that spells the default
+            // probe out probes the same.
+            (Some(health), Some(route))
+                if health.probe
+                    == (Probe::Http {
+                        path: DEFAULT_HEALTH_PATH.to_owned(),
+                        port: route.port,
+                        expect_status: ExpectStatus::default(),
+                    }) =>
+            {
+                Self::TunedDefault(health)
+            }
+            (Some(health), _) => Self::Declared(health),
+            (None, Some(route)) => Self::RoutedDefault(route),
+            (None, None) => Self::UnroutedDefault,
+        }
+    }
+}
+
+impl From<Source<'_>> for Origin {
+    fn from(source: Source<'_>) -> Self {
+        match source {
+            Source::Declared(_) => Self::Declared,
+            Source::TunedDefault(_) => Self::TunedDefault,
+            Source::RoutedDefault(_) => Self::RoutedDefault,
+            Source::UnroutedDefault => Self::UnroutedDefault,
+        }
+    }
+}
+
+/// A check in words, the one wording of [`Check`] (with the loopback addresses) and
+/// [`CheckSpec`] (without): what it probes and, in the alternate form, why it applies.
+struct Words<'a> {
+    what: What<'a>,
+    origin: Origin,
+}
+
+/// What a check probes, each probed container port with its loopback address when known.
+enum What<'a> {
+    Http {
+        path: &'a str,
+        port: u16,
+        addr: Option<SocketAddr>,
+    },
+    Tcp {
+        port: u16,
+        addr: Option<SocketAddr>,
+    },
+    Exec {
+        command: &'a [String],
+        connect: Option<(u16, Option<SocketAddr>)>,
+    },
+    Settle(Duration),
+}
+
+impl<'a> From<&'a Check> for Words<'a> {
+    fn from(check: &'a Check) -> Self {
+        let what = match &check.kind {
             Kind::Http {
                 addr,
                 container_port,
                 path,
                 ..
-            } => write!(f, "GET {path} on container port {container_port} ({addr})")?,
+            } => What::Http {
+                path,
+                port: *container_port,
+                addr: Some(*addr),
+            },
             Kind::Tcp {
                 addr,
                 container_port,
-            } => write!(f, "TCP connect to container port {container_port} ({addr})")?,
-            Kind::Exec { command, connect } => {
-                write!(f, "exec: {}", Command(command))?;
-                if let Some((addr, container_port)) = connect {
-                    write!(
-                        f,
-                        " and TCP connect to container port {container_port} ({addr})"
-                    )?;
+            } => What::Tcp {
+                port: *container_port,
+                addr: Some(*addr),
+            },
+            Kind::Exec { command, connect } => What::Exec {
+                command,
+                connect: connect.map(|(addr, port)| (port, Some(addr))),
+            },
+            Kind::Settle => What::Settle(check.start_period),
+        };
+        Self {
+            what,
+            origin: check.origin,
+        }
+    }
+}
+
+impl<'a> From<&'a Service> for Words<'a> {
+    fn from(service: &'a Service) -> Self {
+        let source = Source::from(service);
+        let what = match source {
+            Source::Declared(health) | Source::TunedDefault(health) => match &health.probe {
+                Probe::Http { path, port, .. } => What::Http {
+                    path,
+                    port: *port,
+                    addr: None,
+                },
+                Probe::Tcp { port } => What::Tcp {
+                    port: *port,
+                    addr: None,
+                },
+                Probe::Exec { command } => What::Exec {
+                    command,
+                    connect: service.routes.first().map(|route| (route.port, None)),
+                },
+            },
+            Source::RoutedDefault(route) => What::Http {
+                path: DEFAULT_HEALTH_PATH,
+                port: route.port,
+                addr: None,
+            },
+            Source::UnroutedDefault => What::Settle(DEFAULT_SETTLE),
+        };
+        Self {
+            what,
+            origin: source.into(),
+        }
+    }
+}
+
+impl Words<'_> {
+    /// Why the check applies: `declared in health.exec`, `the default for a routed service
+    /// without health`.
+    fn why(&self) -> &'static str {
+        match (self.origin, &self.what) {
+            (Origin::Declared, What::Http { .. }) => "declared in health.http",
+            (Origin::Declared, What::Tcp { .. }) => "declared in health.tcp",
+            (Origin::Declared, What::Exec { connect: None, .. }) => "declared in health.exec",
+            (Origin::Declared, What::Exec { .. }) => {
+                "declared in health.exec; a routed service's exec check also connects to its \
+                 first route's port"
+            }
+            (Origin::TunedDefault, _) => {
+                "the default for a routed service, with the timings of its health table"
+            }
+            (Origin::RoutedDefault, _) => "the default for a routed service without health",
+            // A settle check is never declared: `settle()` is the unrouted default.
+            (Origin::UnroutedDefault, _) | (Origin::Declared, What::Settle(_)) => {
+                "the default for a service without routes or health"
+            }
+        }
+    }
+}
+
+impl fmt::Display for Words<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        /// ` (127.0.0.1:20001)` after a container port, when its loopback address is known.
+        struct At(Option<SocketAddr>);
+        impl fmt::Display for At {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self.0 {
+                    Some(addr) => write!(f, " ({addr})"),
+                    None => Ok(()),
                 }
             }
-            Kind::Settle => write!(
-                f,
-                "running for {}",
-                humantime::format_duration(self.start_period)
-            )?,
         }
-        if !f.alternate() {
-            return Ok(());
-        }
-        match (self.origin, &self.kind) {
-            (Origin::Declared, Kind::Http { .. }) => f.write_str(", declared in health.http"),
-            (Origin::Declared, Kind::Tcp { .. }) => f.write_str(", declared in health.tcp"),
-            (Origin::Declared, Kind::Exec { connect: None, .. }) => {
-                f.write_str(", declared in health.exec")
+        match &self.what {
+            What::Http { path, port, addr } => {
+                write!(f, "GET {path} on container port {port}{}", At(*addr))?;
             }
-            (Origin::Declared, Kind::Exec { .. }) => f.write_str(
-                ", declared in health.exec; a routed service's exec check also connects to its \
-                 first route's port",
-            ),
-            (Origin::RoutedDefault, _) => {
-                f.write_str(", the default for a routed service without health")
+            What::Tcp { port, addr } => {
+                write!(f, "TCP connect to container port {port}{}", At(*addr))?;
             }
-            // A settle check is never declared: `settle()` is the unrouted default.
-            (Origin::UnroutedDefault, _) | (Origin::Declared, Kind::Settle) => {
-                f.write_str(", the default for a service without routes or health")
+            What::Exec { command, connect } => {
+                write!(f, "exec: {}", Command(command))?;
+                if let Some((port, addr)) = connect {
+                    write!(f, " and TCP connect to container port {port}{}", At(*addr))?;
+                }
+            }
+            What::Settle(period) => {
+                write!(f, "running for {}", humantime::format_duration(*period))?;
             }
         }
+        if f.alternate() {
+            write!(f, ", {}", self.why())?;
+        }
+        Ok(())
+    }
+}
+
+/// The check a service's containers get, as its stack file decides it (the precedence and the
+/// words of [`Check::for_service`]), for pages that show it without the allocated loopback
+/// ports: `exec: pg_isready -U app`, `GET /healthz on container port 8080`, `running for 5s`.
+/// The alternate form (`{spec:#}`) adds [`Self::why`], as [`Check`]'s does.
+pub struct CheckSpec<'a>(Words<'a>);
+
+impl<'a> From<&'a Service> for CheckSpec<'a> {
+    fn from(service: &'a Service) -> Self {
+        Self(Words::from(service))
+    }
+}
+
+impl CheckSpec<'_> {
+    /// Whether it is a default probe, not one a `health` table names.
+    pub fn is_default(&self) -> bool {
+        self.0.origin != Origin::Declared
+    }
+
+    /// Why it applies: `declared in health.exec`, `the default for a routed service without
+    /// health`.
+    pub fn why(&self) -> &'static str {
+        self.0.why()
+    }
+}
+
+impl fmt::Display for CheckSpec<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
     }
 }
 

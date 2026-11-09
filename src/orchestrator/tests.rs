@@ -546,6 +546,38 @@ async fn preview_shows_what_an_apply_would_do_without_doing_it() {
     assert!(matches!(err, OrchestratorError::Invalid(_)), "{err}");
 }
 
+/// The preview lists the order the apply would start the services in (ADR-0056 Decision 2).
+#[tokio::test]
+async fn preview_lists_the_start_order() {
+    let h = harness().await;
+    let name = |n: &str| n.parse::<Name>().unwrap();
+    let preview = h.orchestrator.preview(DEPS).await.unwrap();
+    assert_eq!(
+        preview.start_order,
+        [
+            Wave::Start(BTreeMap::from([(name("db"), Vec::new())])),
+            Wave::Start(BTreeMap::from([(name("app"), vec![name("db")])])),
+        ]
+    );
+    // Once both run, a changed db is replaced and app, changed too, is held back for it.
+    let applied = h.apply(DEPS).await;
+    h.finish(applied.deployment.as_ref().unwrap()).await;
+    let both = DEPS
+        .replace("app:1\"", "app:1\"\nenv = { A = \"1\" }")
+        .replace("postgres:17\"", "postgres:17\"\nenv = { A = \"1\" }");
+    let preview = h.orchestrator.preview(&both).await.unwrap();
+    assert_eq!(
+        preview.start_order,
+        [
+            Wave::Replace(name("db")),
+            Wave::HeldBack {
+                service: name("app"),
+                behind: vec![name("db")],
+            },
+        ]
+    );
+}
+
 #[tokio::test]
 async fn deployment_lookup_returns_the_transitions_of_that_stack_only() {
     let h = harness().await;
