@@ -46,11 +46,11 @@
   --hover: #dce0e8;       /* crust: hovered rows and ghost buttons */
   --border: #ccd0da;      /* surface0 */
   --divider: #dce0e8;     /* crust: lines inside a card */
-  --input-border: #bcc0cc; /* surface1 */
+  --input-border: #7c7f93; /* overlay2: 3:1 on input and card (surface1 is 1.8:1) */
   --text: #4c4f69;        /* text */
   --text-2: #54576e;      /* between text and subtext1 */
   --muted: #5c5f77;       /* subtext1: the dimmest text allowed (overlay2, subtext0 fail) */
-  --accent: #7a21ed;      /* mauve #8839ef darkened from 3.9:1 */
+  --accent: #7420e3;      /* mauve #8839ef darkened from 3.9:1 (also on its 12% tint) */
   --on-accent: #ffffff;
   --link: #0a52e0;        /* blue #1e66f5 darkened from 3.6:1 */
   --ok: #2c6e1d;          /* green #40a02b darkened from 2.5:1 */
@@ -71,7 +71,7 @@
     --hover: #313244;       /* surface0 */
     --border: #313244;      /* surface0 */
     --divider: #26263a;
-    --input-border: #45475a; /* surface1 */
+    --input-border: #6c7086; /* overlay0: 3:1 on input and card (surface1 is 2:1) */
     --text: #cdd6f4;        /* text */
     --text-2: #a6adc8;      /* subtext0 */
     --muted: #9399b2;       /* overlay2: the dimmest text allowed (overlay0/1 fail) */
@@ -124,7 +124,7 @@ h2 { margin: 1.75rem 0 0.75rem; font-size: 16px; font-weight: 600; }
 h3 { margin: 1.25rem 0 0.5rem; font-size: 14px; font-weight: 600; }
 p { margin: 0 0 0.75rem; }
 
-code, kbd, samp, pre, .mono { font-family: var(--mono); }
+code, pre, .mono { font-family: var(--mono); }
 code { font-size: 0.92em; overflow-wrap: anywhere; }
 .mono { font-variant-numeric: tabular-nums; }
 
@@ -321,7 +321,7 @@ a.brand:hover { text-decoration: none; }
   .nav-count { margin-left: 2px; }
   /* One row: who, then both log-out actions. */
   .account { grid-template-columns: auto minmax(0, 1fr) auto auto; margin-top: 0; padding-top: 12px; }
-  .account-everywhere { grid-column: 3; grid-row: 1; }
+  .account-everywhere { grid-column: 3; grid-row: 1; min-height: 44px; }
   .account .icon-button { grid-column: 4; grid-row: 1; }
   .content { padding: 20px 16px 40px; }
 }
@@ -369,7 +369,7 @@ a.brand:hover { text-decoration: none; }
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);
 }
-.card-head h2, .card-head h3 { margin: 0; font-size: 14px; }
+.card-head h2 { margin: 0; font-size: 14px; }
 .card-body { padding: 14px 18px; }
 .card-foot { padding: 11px 18px; border-top: 1px solid var(--divider); color: var(--muted); font-size: 12px; }
 
@@ -396,7 +396,7 @@ th {
   text-transform: uppercase;
   white-space: nowrap;
 }
-th[scope="row"], th[scope="rowgroup"] {
+th[scope="row"] {
   vertical-align: top;
   color: var(--text);
   font-size: 13px;
@@ -418,7 +418,7 @@ td code.wrap { white-space: normal; overflow-wrap: anywhere; }
 td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 /* A table that is its own card (pages that do not wrap it in one yet). */
-table.list, table.containers {
+table.list {
   margin: 0 0 1.25rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
@@ -426,18 +426,15 @@ table.list, table.containers {
   border-spacing: 0;
   background: var(--surface);
 }
-.card table.list, .card table.containers { margin: 0; border: 0; border-radius: 0; background: none; }
+.card table.list { margin: 0; border: 0; border-radius: 0; background: none; }
 /* Wrapped in a scroller, the scroller is the card, so a wide table scrolls inside its frame. */
-.table-scroll:has(> table.list, > table.containers) {
+.table-scroll:has(> table.list) {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--surface);
 }
 .card .table-scroll:has(> table) { border: 0; border-radius: 0; background: none; }
-.table-scroll > table.list, .table-scroll > table.containers { border: 0; border-radius: 0; background: none; }
-
-
-ul.plain { margin: 0; padding: 0; list-style: none; }
+.table-scroll > table.list { border: 0; border-radius: 0; background: none; }
 
 /* ---- Buttons -------------------------------------------------------------------------------- */
 
@@ -477,13 +474,13 @@ button .icon, .button .icon { margin-inline-end: 0; }
 .danger, button.danger { border-color: var(--fail); color: var(--fail); }
 .danger:hover, button.danger:hover { background: var(--fail-tint); }
 
-button:disabled, .button[aria-disabled="true"] { opacity: 0.6; cursor: not-allowed; }
+button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 
 /* ---- Forms ---------------------------------------------------------------------------------- */
 
-input, textarea, select {
+input, textarea {
   min-height: 36px;
   padding: 7px 10px;
   border: 1px solid var(--input-border);
@@ -493,7 +490,7 @@ input, textarea, select {
   font: 14px/1.4 var(--sans);
 }
 ::placeholder { color: var(--muted); opacity: 1; }
-input[type="checkbox"], input[type="radio"] { min-height: 0; accent-color: var(--accent); }
+input[type="checkbox"] { min-height: 0; accent-color: var(--accent); }
 input[type="file"] { padding: 5px 8px; }
 input[type="file"]::file-selector-button {
   margin-inline-end: 10px;
@@ -505,8 +502,8 @@ input[type="file"]::file-selector-button {
   font: inherit;
   cursor: pointer;
 }
-input:focus, textarea:focus, select:focus { border-color: var(--accent); outline: 2px solid var(--accent-tint); outline-offset: 0; }
-input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input:focus, textarea:focus { border-color: var(--accent); outline: 2px solid var(--accent-tint); outline-offset: 0; }
+input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 label { color: var(--text-2); }
 
 .inline-form { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0 0.25rem 0.25rem 0; }
@@ -665,7 +662,7 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
   width: 26px;
   height: 14px;
   border-radius: 7px;
-  background: var(--input-border);
+  background: var(--border);
   box-shadow: inset 0 0 0 1px var(--muted);
 }
 .switch-track::after {
@@ -1197,7 +1194,8 @@ table.events { min-width: 640px; }
 table.events .shrink { width: 1%; white-space: nowrap; }
 
 @media (max-width: 760px) {
-  .row-ghost { min-height: 44px; }
+  .row-ghost, .deployment-actions button, .row-button.row-danger,
+  .apply-link .button, .actions .button { min-height: 44px; }
   dl.kv { grid-template-columns: minmax(0, 1fr); gap: 0; }
   dl.kv dd { margin-bottom: 8px; }
 }

@@ -2,10 +2,10 @@
 id: "8bf"
 title: "M10: Admin UI design pass"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:18:53.543022428Z"
-updated: "2026-11-08T18:18:53.543022428Z"
+updated: "2026-11-09T00:16:30.219905833Z"
 tags:
   - web
   - ui

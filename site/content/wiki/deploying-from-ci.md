@@ -40,7 +40,7 @@ renamed or transferred. Any of these gives it:
 
 - `gh api repos/acme/notes --jq .id`
 - `${{ github.repository_id }}` inside any workflow of the repository
-- the **Refused webhook deploys** table on the stack page: send one deploy before adding the
+- the **Refused webhook deploys** table on the stack's overview tab: send one deploy before adding the
   rule (the attempt is refused with `403`) and copy the `repository_id` column.
 
 ## 1.3 Allow the repository in the stack's `[deploy]` rule
@@ -172,7 +172,7 @@ verified token, not from the body.
 
 The `202` means the deployment was accepted, not that it went live: a failed health check aborts
 it and leaves the old containers serving ([ADR-0017](https://github.com/LHelge/hoster/blob/main/docs/adr/0017-zero-downtime-deploy-sequence.md)). Watch the deployment page or the stack's
-history.
+**Deployments** tab.
 
 # 3. What hoster checks in the token
 
@@ -224,7 +224,7 @@ example):
 | `environment` | `environment` |
 | `job_workflow_ref` | `job_workflow_ref` |
 
-The stack page's refused-attempts table shows `repository`, `repository_id`, `ref`,
+The refused-attempts table on the stack's overview tab shows `repository`, `repository_id`, `ref`,
 `environment` and `workflow_ref` of each refused token, never the token itself.
 
 # 4. Troubleshooting
@@ -234,7 +234,7 @@ The stack page's refused-attempts table shows `repository`, `repository_id`, `re
 - **`401` every time:** compare the audience the job requests with hoster's
   (`https://<admin_host>` unless `[webhook] audience` is set), and check the server clock
   (`hoster doctor`). A retried POST with the same token is a replay and is refused.
-- **`403`:** open the stack page and compare the refused attempt's claims with the `[deploy]`
+- **`403`:** open the stack's overview tab and compare the refused attempt's claims with the `[deploy]`
   rule. A job without `environment:` has no `environment` claim; a branch push has
   `refs/heads/…`, not `refs/tags/…`.
 - **`422` "not in its repository":** the image was pushed to a different repository than the

@@ -1,10 +1,10 @@
 ---
 id: z7x
 title: "Design pass close-out: contrast, narrow widths, dead CSS, docs"
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:21:30.066090727Z"
-updated: "2026-11-08T18:21:30.066090727Z"
+updated: "2026-11-09T00:16:30.219693850Z"
 tags:
   - web
   - ui
@@ -22,6 +22,7 @@ depends_on:
   - "8qb"
   - uf5
 parent: "8bf"
+attempts: 1
 ---
 
 Final check across all pages before the epic PR.

@@ -38,15 +38,20 @@ same deploy. Both triggers are idempotent: a digest that is already running depl
 
 # The admin UI
 
+Every page shares one layout: a sidebar with the version, the hostname and the navigation
+(Dashboard, Stacks, Certificates, Settings, System), which moves above the page on a phone. The
+colours follow your system's light or dark mode.
+
 | Page | What you see and do |
 |---|---|
 | **Dashboard** | Request, error-rate, latency, stack and certificate figures; warnings; every stack with its status, healthy services, latency, error shares, restarts and last deploy; the certificates closest to expiry. |
-| **Stack** | Services, routes and generations. Apply a new revision of the stack file (with a diff), manage secrets, see the `[deploy]` rule and refused webhook attempts, redeploy, remove the stack. |
-| **Deployments** | History per stack, with each step and failure reasons. "Redeploy this one" is the rollback. |
-| **Logs** | Tail and follow logs per container. |
-| **Certificates** | Hosts, issuer, expiry, the last ACME error and the DNS check. |
-| **Settings** | Registry credentials for private images. |
-| **System** | The running version; check for updates, read the release notes and update. |
+| **Stacks** | Every stack as a card with its services, routes and traffic, filterable by status. **New stack** applies a stack file, with a plan and pre-flight checks before you confirm. |
+| **Stack** | One stack under four tabs that share a header with **Redeploy** and **Re-resolve tags**. **Overview**: traffic figures, the slowest routes, the services with their containers, generations, uptime and ports, routes, volumes, deploying explicit digests, applying a new revision of the stack file (with a diff), refused webhook attempts, and removing the stack at the bottom. **Logs**: tail and follow the logs of each service's containers. **Environment**: the environment variables and the secrets, whose values are write-only. **Deployments**: the history, with each step and failure reasons; "Redeploy this one" or "Roll back to this one" is the rollback. |
+| **Certificates** | Hosts, issuer, expiry, the last ACME error and the DNS check, per host or for all at once; retry the failing ones. |
+| **Settings** | General, registries (credentials for private images), deploy webhook, reverse proxy and certificates. Only registries are edited here; the rest shows the effective `hoster.toml`. |
+| **System** | The running and previous versions, the host; check for updates, read the release notes and update. |
+
+There is no separate containers page: a container and its logs are on its stack's pages.
 
 Login is GitHub OAuth, and only the GitHub account named in the configuration gets in. Apps never
 get access to podman, and a container is only reachable from outside through a declared route.

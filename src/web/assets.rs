@@ -286,7 +286,9 @@ mod tests {
     }
 
     /// ADR-0054: every text and status colour reaches 4.5:1 on the page, card and input
-    /// backgrounds, and status colours also on their own 10% tint (pills), in Latte and Mocha.
+    /// backgrounds, and on its own tint over them (pills, tags: 12% for the accent, 10% for the
+    /// rest), in Latte and Mocha. Hovered rows, nav items and ghost buttons (`--hover`) carry
+    /// only `--text`, `--text-2` and the accent. Input borders reach 3:1 on the card and the field.
     #[test]
     fn text_colours_meet_the_contrast_rule_in_both_themes() {
         let css = include_str!("../../assets/hoster.css");
@@ -303,8 +305,10 @@ mod tests {
                 "p50", "p95",
             ] {
                 let colour = token(text);
+                let share = if text == "accent" { 0.12 } else { 0.1 };
                 for background in backgrounds {
-                    let tint = std::array::from_fn(|i| 0.1 * colour[i] + 0.9 * background[i]);
+                    let tint =
+                        std::array::from_fn(|i| share * colour[i] + (1.0 - share) * background[i]);
                     for (on, behind) in [("background", background), ("tint", tint)] {
                         let ratio = contrast(colour, behind);
                         assert!(
@@ -313,6 +317,22 @@ mod tests {
                         );
                     }
                 }
+            }
+            for text in ["text", "text-2", "accent"] {
+                let ratio = contrast(token(text), token("hover"));
+                assert!(
+                    ratio >= 4.5,
+                    "{flavour}: --{text} on --hover is only {ratio:.2}:1"
+                );
+            }
+            // WCAG 1.4.11: the border is a text field's only edge, so it needs 3:1 against the
+            // field and the card around it.
+            for background in ["surface", "inset"] {
+                let ratio = contrast(token("input-border"), token(background));
+                assert!(
+                    ratio >= 3.0,
+                    "{flavour}: --input-border on --{background} is only {ratio:.2}:1"
+                );
             }
             let ratio = contrast(token("on-accent"), token("accent"));
             assert!(

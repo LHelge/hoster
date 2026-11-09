@@ -37,7 +37,7 @@ One file per screen, linked together by `<a href="X.dc.html">`:
 ## Design tokens (Catppuccin Mocha)
 
 - Backgrounds: page `#1e1e2e` (base), cards and sidebar `#181825` (mantle), code and inputs `#11111b` (crust)
-- Borders: `#313244` (surface0), inner dividers `#26263a`, input borders `#45475a` (surface1)
+- Borders: `#313244` (surface0), inner dividers `#26263a`, input borders `#6c7086` (overlay0; Latte `#7c7f93` overlay2), for 3:1 against the field and the card
 - Text: `#cdd6f4` primary; `#bac2de` / `#a6adc8` secondary; `#9399b2` muted. Do not go dimmer than `#9399b2` for text on base, mantle or crust: overlay0/1 fail 4.5:1 contrast on base. On surface0 (chips, tags, hovered rows) `#9399b2` only reaches 4.45:1, so use `#a6adc8` or brighter there (ADR-0054).
 - Accent: mauve `#cba6f7` (primary buttons with `#11111b` text, active nav, focus rings)
 - Status colours:
