@@ -1,15 +1,16 @@
 ---
 id: p6e
 title: "Runtime: exec in container and Healthcheck NONE at create"
-status: open
+status: done
 priority: P1
 created: "2026-11-09T17:22:16.197557929Z"
-updated: "2026-11-09T18:50:08.884987737Z"
+updated: "2026-11-09T20:33:46.624686449Z"
 tags:
   - runtime
 depends_on:
   - "4qn"
 parent: qq9
+attempts: 1
 ---
 
 ## Summary

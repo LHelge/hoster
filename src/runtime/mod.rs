@@ -5,6 +5,7 @@
 //! …); bollard stays an implementation detail of [`PodmanRuntime`]. Object naming and labels
 //! follow docs/architecture.md §8.
 
+mod exec;
 #[cfg(test)]
 pub mod fake;
 mod podman;
@@ -24,6 +25,11 @@ use crate::secrets::SecretValue;
 use crate::stack::{DEFAULT_STOP_TIMEOUT, Name, PinnedImage, Stack};
 use crate::store::DeploymentId;
 
+#[allow(
+    unused_imports,
+    reason = "ExecGuard is used by the fake runtime and the health check's tests"
+)]
+pub use exec::{ExecGuard, ExecOutcome, ExecOutput, RunningExec};
 #[allow(
     unused_imports,
     reason = "the fake is used by the orchestrator's tests"
@@ -149,6 +155,26 @@ pub trait ContainerRuntime: Send + Sync + 'static {
 
     /// What the engine behind the socket says about itself, for the System page.
     fn engine(&self) -> impl Future<Output = Result<EngineInfo, RuntimeError>> + Send;
+
+    /// Runs `argv` in the running container `id`, without a shell, as the container's user with
+    /// its environment, and without stdin or a TTY (ADR-0056, docs/architecture.md §5.5).
+    ///
+    /// Returns once the command has ended, or at `timeout` with [`ExecOutcome::TimedOut`]
+    /// whether or not it has: the runtime then tries to end it in the background and otherwise
+    /// abandons it. A finished exec's session is removed in the background, best effort, so
+    /// cleanup never delays the result. A caller that drops the future before it resolves
+    /// leaves the exec to run out and its session to podman. An empty `argv` is
+    /// [`RuntimeError::Api`].
+    ///
+    /// Fails with [`RuntimeError::NotFound`] when there is no such container and
+    /// [`RuntimeError::NotRunning`] when it is stopping or stopped, before or while the
+    /// command runs; neither is a result of the command.
+    fn exec(
+        &self,
+        id: &ContainerId,
+        argv: &[String],
+        timeout: Duration,
+    ) -> impl Future<Output = Result<ExecOutcome, RuntimeError>> + Send;
 }
 
 /// The container engine as it describes itself (podman's compat `/info`). Every part is
@@ -674,6 +700,7 @@ pub enum Operation {
     ListManaged,
     Logs,
     Engine,
+    Exec,
 }
 
 impl fmt::Display for Operation {
@@ -695,6 +722,7 @@ impl fmt::Display for Operation {
             Self::ListManaged => "list containers",
             Self::Logs => "read logs",
             Self::Engine => "read engine info",
+            Self::Exec => "exec in container",
         })
     }
 }
@@ -746,6 +774,10 @@ pub enum RuntimeError {
     Conflict { kind: ObjectKind, name: String },
     #[error("{kind} {name} is in use")]
     InUse { kind: ObjectKind, name: String },
+    /// A container that must be running is stopping or stopped (podman's "container state
+    /// improper"). Compat inspect may still say `running` while it stops.
+    #[error("container {name} is stopping or stopped")]
+    NotRunning { name: String },
     /// The registry refused the pull: missing, wrong or insufficient credentials. The message
     /// is the registry's; credentials are never part of it.
     #[error(
