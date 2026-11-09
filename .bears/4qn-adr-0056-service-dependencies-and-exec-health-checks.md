@@ -1,15 +1,16 @@
 ---
 id: "4qn"
-title: "ADR: service dependencies, exec health checks and image HEALTHCHECK"
-status: open
+title: "ADR-0056: service dependencies and exec health checks"
+status: done
 priority: P1
 created: "2026-11-09T17:21:18.065202598Z"
-updated: "2026-11-09T17:21:18.065202598Z"
+updated: "2026-11-09T19:41:28.332898574Z"
 tags:
   - decision
   - docs
   - adr
 parent: qq9
+attempts: 1
 ---
 
 ## Summary

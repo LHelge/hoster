@@ -17,7 +17,7 @@ parent: qq9
 Show what M11 added, and document it.
 
 ## Acceptance Criteria
-- [ ] Stack overview: each service shows its `depends_on`, which health check is in effect (declared / image HEALTHCHECK / default) with the command or path, and "waiting for <dep>" when the reconciler defers it.
+- [ ] Stack overview: each service shows its `depends_on`, which health check is in effect (declared exec / http / tcp, or the default) with the command or path, and "waiting for <dep>" when the reconciler defers it.
 - [ ] Apply preview: the start order (waves) of the services being (re)deployed.
 - [ ] Deployment events render wave and exec-probe events readably, with the output tail collapsed.
 - [ ] stack-format.md: `depends_on` and `health.exec` in §2.2 / §2.4, the precedence rules, a new worked example (§3.x) of a generic app + postgres + redis stack using `depends_on`, exec checks and `update = "stop-first"` where it matters. architecture.md §5 is consistent with the implementation. `aphid build` passes.

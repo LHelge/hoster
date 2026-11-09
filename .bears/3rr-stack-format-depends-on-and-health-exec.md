@@ -13,13 +13,14 @@ parent: qq9
 ---
 
 ## Summary
-Parse and validate the two new service fields from the M11 ADR, and carry them in the validated model. Pure parser work: nothing runs them yet.
+Parse and validate the two new service fields from ADR-0056, and carry them in the validated model. Pure parser work: nothing runs them yet.
 
 ## Acceptance Criteria
-- [ ] `Service.depends_on: BTreeSet<Name>`. Errors (all collected, with spans and field paths): unknown service, self-dependency, cycle. A cycle names its members in order, e.g. `app → worker → app`.
-- [ ] `Stack` exposes the dependency order as a method, e.g. `Stack::start_order()` returning topological waves `Vec<BTreeSet<Name>>`, deterministic by name within a wave. The engine and reconciler use it; nothing else re-derives it.
+- [ ] `Service.depends_on: BTreeSet<Name>`. Errors (all collected, with spans and field paths): unknown service, duplicate entry, self-dependency, cycle. A cycle names its members in order, e.g. `app → worker → app`.
+- [ ] `Stack` exposes the dependency graph through narrow methods: a service's dependencies, its transitive dependencies, and a deterministic dependency order (name as tie-break). The engine, `Plan` and the reconciler use them; nothing else re-derives the graph. ADR-0056 starts each service once its own dependencies pass, so don't model strict waves.
+- [ ] Health validation per ADR-0056 Decision 4: at most one of `http` / `tcp` / `exec`; `exec` is the only probe allowed on a non-routed service; a timings-only `health` table on a non-routed service is an error.
 - [ ] `Probe::Exec { command: Vec<String> }`: non-empty, first element non-empty, mutually exclusive with `http` / `tcp`. `health` is now allowed on non-routed services when it uses `exec`; `http` / `tcp` on a non-routed service stays an error.
-- [ ] `ConfigHash::new` (`src/orchestrator/plan.rs`) covers `depends_on` and the exec probe. Check against the ADR whether `depends_on` belongs in the hash; recommend yes for simplicity.
+- [ ] `ConfigHash::new` (`src/orchestrator/plan.rs`) adds the exec probe only when set, so no existing hash changes. `depends_on` is **not** in the hash (ADR-0056 Decision 1): changing it reorders starts and never recreates a container.
 - [ ] stack-format.md §2.2 / §2.4 document both fields; the JSON Schema is regenerated if zcu has landed.
 
 ## Implementation Notes
@@ -28,10 +29,10 @@ Parse and validate the two new service fields from the M11 ADR, and carry them i
 
 ## Testing
 - `src/stack/tests.rs` + insta snapshots: valid chains, diamond, cycle of 2 and 3, unknown name, self-dependency, exec on routed / non-routed, exec + http conflict.
-- Topological-wave unit tests.
+- Dependency-graph unit tests (transitive dependencies, deterministic order).
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## References
-- The M11 ADR (task 4qn); ADR-0038
+- ADR-0056 (task 4qn); ADR-0038
 - `site/content/wiki/stack-format.md` §2.2, §2.4
 - `src/stack/raw.rs`, `src/stack/mod.rs`, `src/orchestrator/plan.rs`

@@ -22,7 +22,7 @@ A new aphid wiki page, `site/content/wiki/third-party-images.md`, for hosting im
 - [ ] **Registries and credentials:** image references, resolve-at-apply, Docker Hub anonymous rate limits and adding a `docker.io` credential.
 - [ ] **Translating a compose file by hand:** a mapping table from compose keys to stack TOML (`image`, `environment` / `env_file` → `env` / `secrets`, `ports` → `routes`, named `volumes`, `depends_on`, `healthcheck` → `health.exec`, `configs` → `files`, `shm_size` / `tmpfs` / `init`, `deploy.resources.limits` → limits). Also list what has no equivalent and why: bind mounts, `privileged`, `devices`, `cap_add`, `network_mode`, `build`, raw TCP / UDP ports.
 - [ ] **A complete worked example** of a generic multi-service app: web app + postgres + redis + background worker, with routes, `depends_on`, exec health, files, limits and `auto_update`. Explain each choice.
-- [ ] **Pitfalls:** bind `0.0.0.0` not `127.0.0.1`; `PORT` injection; health path / image HEALTHCHECK; rootless UID mapping and volume ownership; `update = "stop-first"` for anything holding a volume; start-first peak memory; updating databases across major versions.
+- [ ] **Pitfalls:** bind `0.0.0.0` not `127.0.0.1`; `PORT` injection; health path, and that an image's own HEALTHCHECK is never used (translate it to `health.exec`, ADR-0056); rootless UID mapping and volume ownership; `update = "stop-first"` for anything holding a volume; start-first peak memory; updating databases across major versions.
 - [ ] Linked from overview.md and stack-format.md with `[[third-party-images]]`; `aphid build` passes.
 
 ## References

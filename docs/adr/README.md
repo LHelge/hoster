@@ -38,7 +38,7 @@ becomes a new ADR here.
 | [0025](0025-registry-credentials-and-image-references.md) | Classic PAT with read:packages for ghcr, per-registry credentials in the secret store (resolves OQ-06) | see ADR |
 | [0026](0026-upstream-port-allocation.md) | Round-robin port allocation over a configured range (default 20000-29999), persisted in SQLite (resolves OQ-20) | see ADR |
 | [0027](0027-stacks-applied-via-ui-webhooks-carry-digests.md) | Stack files applied through the web UI; webhooks carry only image digests (resolves OQ-10) | see ADR |
-| [0028](0028-hoster-reconciles-container-restarts.md) | hoster reconciles and restarts containers itself; podman restart policy off (resolves OQ-17) | see ADR |
+| [0028](0028-hoster-reconciles-container-restarts.md) | hoster reconciles and restarts containers itself; podman restart policy off (resolves OQ-17; dependency-ordered restarts per 0056) | see ADR |
 | [0029](0029-secret-store-and-config-aware-idempotency.md) | Encrypted secret store in SQLite, injected as env; idempotency on digest + config hash (resolves OQ-02; "apply & redeploy" option refined by 0049) | see ADR |
 | [0030](0030-named-volumes-and-documented-backups.md) | Named podman volumes kept on stack removal; backups documented with a hoster backup db command (resolves OQ-03) | see ADR |
 | [0031](0031-admin-ui-exposure-identity-sessions.md) | Admin UI on a reserved host via Unix socket; GitHub handle compared; SQLite sessions with CSRF tokens; no break-glass (resolves OQ-05) | see ADR |
@@ -48,7 +48,7 @@ becomes a new ADR here.
 | [0035](0035-confirmed-implementation-details.md) | Confirmed implementation details from architecture.md (resolves OQ-28) | see ADR |
 | [0036](0036-certificates-issued-at-apply-non-blocking.md) | Certificates requested at stack apply after a DNS check; deploys never wait (resolves OQ-16; DNS check advisory per 0051) | see ADR |
 | [0037](0037-ring-crypto-provider-everywhere.md) | ring crypto provider everywhere (resolves OQ-21) | see ADR |
-| [0038](0038-host-driven-health-probes-no-limits-v1.md) | hoster-driven HTTP/TCP health probes; no resource limits in v1 (resolves OQ-07; default path per 0051) | see ADR |
+| [0038](0038-host-driven-health-probes-no-limits-v1.md) | hoster-driven HTTP/TCP health probes; no resource limits in v1 (resolves OQ-07; default path per 0051; exec checks per 0056) | see ADR |
 | [0039](0039-per-service-update-strategy.md) | Per-service update = start-first (default) or stop-first (resolves OQ-14; mixed-stack ordering superseded by 0048) | see ADR |
 | [0040](0040-deploy-concurrency-and-coalescing.md) | One active deployment per stack; queue keeps only the newest target (resolves OQ-15) | see ADR |
 | [0041](0041-rollback-and-garbage-collection.md) | Rollback by redeploying a previous deployment; keep the last 3 successful images (resolves OQ-08) | see ADR |
@@ -58,7 +58,7 @@ becomes a new ADR here.
 | [0045](0045-observability-in-ui-only.md) | Observability in the web UI only; no metrics endpoint or alerting in v1 (resolves OQ-26) | see ADR |
 | [0046](0046-no-cross-stack-networking.md) | No direct cross-stack networking in v1 (resolves OQ-23) | see ADR |
 | [0047](0047-oidc-authenticated-deploy-webhook.md) | Deploy webhook authenticated with GitHub Actions OIDC tokens only (resolves OQ-29) | see ADR |
-| [0048](0048-atomic-stack-commit-mixed-update-strategies.md) | A deployment commits the whole stack at once; stop-first services are replaced after start-first ones are healthy (resolves OQ-30; supersedes ADR-0039's ordering) | Half-applied `Failed`, rejecting mixed deployments |
+| [0048](0048-atomic-stack-commit-mixed-update-strategies.md) | A deployment commits the whole stack at once; stop-first services are replaced after start-first ones are healthy (resolves OQ-30; supersedes ADR-0039's ordering; first-deploy stop-first, dependency order and held-back dependents lengthening the stop-first gap per 0056) | Half-applied `Failed`, rejecting mixed deployments |
 | [0049](0049-apply-always-redeploys.md) | Applying a revision or changing a secret redeploys the affected services immediately; no staged apply (resolves OQ-32; refines ADR-0029) | Next-deploy pickup, applied/deployed pointer pair |
 | [0050](0050-orchestrator-handle-with-async-methods.md) | The orchestrator is an `Arc<Orchestrator>` with async methods and one internal lock, not a command-channel actor (resolves OQ-33) | Actor + `Command` enum, hybrid |
 | [0051](0051-poller-bootstrap-advisory-dns-health-default-port.md) | Poller deploys on first sighting of a never-run service; advisory DNS check; default health `GET /healthz`; `PORT` injected; no host redirects in v1 (resolves OQ-34; amends 0036, 0038, 0043) | Hard DNS gate, prefix-following health default, `[[redirects]]` target |
@@ -66,6 +66,7 @@ becomes a new ADR here.
 | [0053](0053-lucide-icons-as-one-svg-sprite.md) | Admin UI icons are Lucide glyphs from `icondata`, named by meaning in one `Icon` enum and served as one content-hashed SVG sprite (`immutable`, one year) used with `<use>` so they take `currentColor` | Tabler/Heroicons, one file per icon with CSS masks, `<img>`, inline SVG per page, vendored SVG files |
 | [0054](0054-admin-ui-design-system.md) | Admin UI design system: Catppuccin Mocha (dark) / Latte (light) by `prefers-color-scheme`; vendored JetBrains Mono for machine-derived text, `system-ui` prose; 232 px sidebar shell; Containers folded into stack pages; stack tabs as separate URLs; CSP unchanged, so meters and charts are server-drawn SVG; mockups in `docs/design/` are reference only | Mocha only, Latte toggle, vendoring Inter, system fonts only, single-page stack detail, Containers in the nav, `style-src 'unsafe-inline'` |
 | [0055](0055-persisted-event-log.md) | Persisted event log (deploys, container lifecycle, certificates, operator/system actions) in one SQLite `events` table with no stack foreign key; written explicitly by each producer, then broadcast; 30-day retention; dashboard card, per-stack feed and Events page; basis for notifications (amends 0045) | Recorder on the `UiEvent` broadcast, deriving from `deployment_events` + journal, count cap or configurable retention |
+| [0056](0056-service-dependencies-and-exec-health-checks.md) | Per-service `depends_on`: deploys and the reconciler start a service once its dependencies pass; `health.exec` through the podman exec API; podman's own healthchecks off (amends 0028, 0038, 0048) | Image HEALTHCHECK as default check, podman-run HEALTHCHECK, compose `condition` variants, app retries only, probing held-back dependents against the old dependency, unbounded reconciler hold on a running dependency, strict start waves, a podman 4.9 minimum |
 
 ## Template
 
