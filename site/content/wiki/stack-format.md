@@ -37,6 +37,65 @@ app's repository and is applied through the web UI ([ADR-0027](https://github.co
 **Downside accepted:** deeply nested arrays of tables (`[[services.api.routes]]`) are verbose.
 Inline tables are allowed where they read better.
 
+## 1.1 Editor support: the JSON Schema
+
+hoster publishes a JSON Schema (draft 2020-12) for stack files at
+`https://docs.hoster.lhelge.se/stack.schema.json`. Editors with TOML schema support use it for
+completion, hover docs and validation while you write a stack file. Each hoster also serves the
+schema of the version it runs at `https://<admin host>/schema/stack-v1.json`, without a login,
+and `hoster stack schema` prints it.
+
+Name the schema in the file's **first line**:
+
+```toml
+#:schema https://docs.hoster.lhelge.se/stack.schema.json
+version = 1
+name = "notes"
+```
+
+`#:schema` is a [Taplo](https://taplo.tamasfe.dev) directive. To hoster it is an ordinary
+comment.
+
+- **VS Code:** install the "Even Better TOML" extension (`tamasfe.even-better-toml`), which is
+  built on Taplo. The directive is enough. To cover every stack file without it, map the schema in
+  `settings.json`:
+
+  ```json
+  "evenBetterToml.schema.associations": {
+    ".*\\.stack\\.toml$": "https://docs.hoster.lhelge.se/stack.schema.json"
+  }
+  ```
+
+- **Taplo elsewhere** (its language server in Neovim, Helix or Zed, or `taplo check` in CI): the
+  directive works too, or put a rule in `.taplo.toml` at the repository root:
+
+  ```toml
+  [[rule]]
+  include = ["**/*.stack.toml"]
+
+  [rule.schema]
+  url = "https://docs.hoster.lhelge.se/stack.schema.json"
+  ```
+
+- **JetBrains IDEs:** add the URL under *Settings → Languages & Frameworks → Schemas and DTDs →
+  JSON Schema Mappings*, with the file path pattern `*.stack.toml`.
+
+The schema checks each field on its own: types, required fields, unknown fields (as
+`deny_unknown_fields` does), `update` values, and the rules for names, hosts, prefixes, mount
+paths, environment variable and secret names, `expect_status` and durations. Rules that need more
+than one value stay with hoster, which checks them when the stack is applied:
+
+- a (host, prefix) used twice, within the stack or by another stack (§2.3);
+- `depends_on` cycles, unknown services, or a service that names itself;
+- secrets of another stack, a name set in both `env` and `secrets`, and a mount path used twice;
+- a tag or digest on third-party images, and `track` only on CI-built `ghcr.io` images without
+  one;
+- `http` and `tcp` checks only on routed services and against one of their routes' ports, and a
+  timings-only `health` table only on routed services.
+
+hoster also rejects durations that overflow or whose fraction is not a whole number of
+nanoseconds, such as `"0.001h"`. The apply preview stays the final word.
+
 # 2. Schema
 
 ## 2.1 Top level
@@ -409,3 +468,7 @@ min(`start_period`, 5 min) stops holding them back.
 `version = 1` is required. Breaking schema changes bump the version. hoster rejects unknown fields
 (`deny_unknown_fields`), so typos fail loudly instead of being ignored. A compatibility policy for
 older versions is decided when version 2 exists.
+
+The JSON Schema (§1.1) is generated from the parser's own types, so a release that adds a field
+also adds it to the schema. The admin host serves the schema of the version it supports as
+`/schema/stack-v<version>.json`.

@@ -2,7 +2,7 @@ use super::*;
 
 /// The worked example from `site/content/wiki/stack-format.md` §3, taken from the document itself so the
 /// two cannot drift apart.
-fn worked_example() -> &'static str {
+pub(super) fn worked_example() -> &'static str {
     let doc = include_str!("../../site/content/wiki/stack-format.md");
     let section = &doc[doc.find("\n# 3. Worked example").expect("§3 exists")..];
     let start = section.find("```toml\n").expect("§3 has a TOML block") + "```toml\n".len();
@@ -11,7 +11,7 @@ fn worked_example() -> &'static str {
 }
 
 /// The second worked example (§3.2): an app and a worker depending on postgres and redis.
-fn dependency_example() -> &'static str {
+pub(super) fn dependency_example() -> &'static str {
     let doc = include_str!("../../site/content/wiki/stack-format.md");
     let section = &doc[doc.find("\n## 3.2 Worked example").expect("§3.2 exists")..];
     let start = section.find("```toml\n").expect("§3.2 has a TOML block") + "```toml\n".len();
@@ -53,7 +53,7 @@ fn dependency_example_validates_with_its_dependencies_and_checks() {
 }
 
 /// A minimal valid stack; tests append to or substitute into it.
-const MINIMAL: &str = r#"
+pub(super) const MINIMAL: &str = r#"
 version = 1
 name = "demo"
 

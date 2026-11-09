@@ -9,8 +9,9 @@
 //!   (`Sec-Fetch-Site: same-origin` and/or a matching `Origin`), and, when it carries a session,
 //!   the session's CSRF token in the `X-CSRF-Token` header. HTMX sends that header from the
 //!   `hx-headers` on `<body>`.
-//! - `/healthz`, `/assets/*` and `/auth/*` are public; everything else needs a session, and a
-//!   browser without one is sent to `/auth/login`.
+//! - `/healthz`, `/assets/*`, `/schema/*` (the stack file JSON Schema, for editors) and
+//!   `/auth/*` are public; everything else needs a session, and a browser without one is sent to
+//!   `/auth/login`.
 //!
 //! Sessions live 12 h at most and end earlier after `web.session_idle_timeout` without a
 //! request. The cookie `__Host-hoster_session` holds a random token; SQLite keeps its SHA-256.
@@ -162,7 +163,11 @@ impl From<&str> for Access {
     fn from(path: &str) -> Self {
         if path == "/hooks" || path.starts_with("/hooks/") {
             Access::Webhook
-        } else if path == "/healthz" || path.starts_with("/assets/") || path.starts_with("/auth/") {
+        } else if path == "/healthz"
+            || ["/assets/", "/schema/", "/auth/"]
+                .iter()
+                .any(|prefix| path.starts_with(prefix))
+        {
             Access::Public
         } else {
             Access::Admin
