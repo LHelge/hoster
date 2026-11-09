@@ -19,7 +19,8 @@ pub type SecretVersions = BTreeMap<String, SecretVersion>;
 /// SHA-256 over a service's resolved spec, everything but the image digest: the second half of
 /// the idempotency key (ADR-0029). It covers the container environment including the injected
 /// `PORT` (ADR-0051), the *versions* of the secrets it references (never their values),
-/// command, volumes, update strategy, health and routes.
+/// command, volumes, update strategy, health and routes. It leaves out `depends_on`
+/// (ADR-0056 Decision 1): changing it reorders starts and never recreates a container.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConfigHash(String);
 
@@ -37,6 +38,8 @@ impl ConfigHash {
                 } => json!({"http": {"path": path, "port": port,
                                      "expect": format!("{expect_status:?}")}}),
                 Probe::Tcp { port } => json!({"tcp": {"port": port}}),
+                // New in ADR-0056; existing specs never hash it, so their hashes stand.
+                Probe::Exec { command } => json!({"exec": {"command": command}}),
             };
             json!({
                 "probe": probe,
@@ -464,5 +467,53 @@ update = "stop-first"
         let plan = Plan::new(&s, &pins(), &DigestSet::new(), &running, &version(2)).unwrap();
         let names: Vec<_> = plan.changes.iter().map(|c| c.service.to_string()).collect();
         assert_eq!(names, ["api"]);
+    }
+
+    /// `depends_on` reorders starts but never recreates a container (ADR-0056 Decision 1); an
+    /// exec check is part of the spec.
+    #[test]
+    fn config_hash_skips_depends_on_but_covers_exec() {
+        let none = SecretVersions::new();
+        let base = stack(STACK);
+        let dependent = stack(&STACK.replace(
+            "image = \"ghcr.io/acme/notes-api\"",
+            "image = \"ghcr.io/acme/notes-api\"\ndepends_on = [\"storage\"]",
+        ));
+        assert_eq!(hash(&base, "api", &none), hash(&dependent, "api", &none));
+
+        let exec = |argv: &str| {
+            stack(&format!(
+                "{STACK}\n[services.storage.health]\nexec = {argv}\n"
+            ))
+        };
+        let ready = hash(&exec("[\"ready\"]"), "storage", &none);
+        assert_ne!(hash(&base, "storage", &none), ready);
+        assert_ne!(ready, hash(&exec("[\"ready\", \"-q\"]"), "storage", &none));
+        assert_eq!(ready, hash(&exec("[\"ready\"]"), "storage", &none));
+    }
+
+    /// Hashes recorded before `health.exec` and `depends_on` existed (ADR-0056): adding them
+    /// must not recreate any running container.
+    #[test]
+    fn config_hash_is_stable_for_existing_specs() {
+        let none = SecretVersions::new();
+        let s = stack(&format!(
+            "{STACK}\n[services.api.health]\nhttp = {{ path = \"/api/healthz\" }}\nstart_period = \"1m\"\n\n[[services.storage.routes]]\nhost = \"s3.example.com\"\nport = 9000\n\n[services.storage.health]\ntcp = {{ port = 9000 }}\n"
+        ));
+        let hashes = [
+            hash(&stack(STACK), "api", &none).to_string(),
+            hash(&stack(STACK), "storage", &none).to_string(),
+            hash(&s, "api", &none).to_string(),
+            hash(&s, "storage", &none).to_string(),
+        ];
+        assert_eq!(
+            hashes,
+            [
+                "08cd366b6cfd1fac82df5fff38fc10f5265faa655f1cf9714e77b4e1728acacb",
+                "e77545e8b51f5194bee9dce401c2cafdaa064c2893d6c2985f29e8bd905c93af",
+                "89bc79f29dd74ae38632e12d5a7de45f0c4a85e016fd4b5c0a456ae88ccb6cf4",
+                "cdd26fd4b5dc8e035961957016b2d79abe397481273f1bfb9d8b83e41375a1f8",
+            ]
+        );
     }
 }

@@ -1,15 +1,16 @@
 ---
 id: "3rr"
 title: "Stack format: `depends_on` and `health.exec`"
-status: open
+status: done
 priority: P1
 created: "2026-11-09T17:22:16.187295405Z"
-updated: "2026-11-09T17:22:16.187295405Z"
+updated: "2026-11-09T19:57:58.265621657Z"
 tags:
   - stack
 depends_on:
   - "4qn"
 parent: qq9
+attempts: 1
 ---
 
 ## Summary

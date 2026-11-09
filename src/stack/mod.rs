@@ -13,6 +13,7 @@
 // The orchestrator and web UI that consume the model land in later tasks.
 #![allow(dead_code)]
 
+mod dependency;
 mod deploy;
 mod diagnostic;
 mod image;
@@ -111,6 +112,10 @@ impl fmt::Display for Name {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
     pub image: ImageRef,
+    /// Services of this stack that must pass their check before this one starts (ADR-0056).
+    /// Validated: known, not itself, acyclic. Not part of the config hash; read the graph
+    /// through [`Stack::dependencies`] and its siblings.
+    pub depends_on: BTreeSet<Name>,
     /// Tag the ghcr poller watches (ADR-0043). Only set for CI-built ghcr images.
     pub track: Option<String>,
     pub command: Option<Vec<String>>,
@@ -120,7 +125,8 @@ pub struct Service {
     pub secrets: BTreeMap<String, String>,
     /// Volume name → absolute mount path (ADR-0030).
     pub volumes: BTreeMap<String, String>,
-    /// Declared health check. `None` means the defaults of ADR-0038/ADR-0051 apply.
+    /// Declared health check. `None` means the defaults of ADR-0038/ADR-0051 apply. A service
+    /// without routes only ever declares an [`Probe::Exec`] check (ADR-0056).
     pub health: Option<HealthCheck>,
     pub update: UpdateStrategy,
     pub stop_timeout: Duration,
@@ -187,7 +193,8 @@ pub struct HealthCheck {
     pub start_period: Option<Duration>,
 }
 
-/// What a health check probes, on the allocated loopback port of a container port.
+/// What a health check probes: `Http` and `Tcp` on the allocated loopback port of a container
+/// port, `Exec` inside the container (ADR-0056).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Probe {
     Http {
@@ -197,6 +204,11 @@ pub enum Probe {
     },
     Tcp {
         port: u16,
+    },
+    /// An argv run through podman's exec API without a shell; exit 0 passes. Non-empty, with a
+    /// non-empty first element.
+    Exec {
+        command: Vec<String>,
     },
 }
 

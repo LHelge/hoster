@@ -502,6 +502,19 @@ fn a_probe_port_without_a_loopback_port_is_an_error() {
     assert!(matches!(err, HealthError::NoLoopbackPort(8080)), "{err:?}");
 }
 
+/// `health.exec` parses (ADR-0056) before hoster can run it; until then it fails clearly.
+#[test]
+fn exec_checks_are_not_run_yet() {
+    let toml = format!(
+        "version = 1\nname = \"demo\"\n[services.db]\nimage = \"docker.io/library/w@sha256:{}\"\nhealth = {{ exec = [\"pg_isready\"] }}",
+        "ab".repeat(32)
+    );
+    let stack: Stack = toml.parse().unwrap();
+    let db = &stack.services[&"db".parse::<Name>().unwrap()];
+    let err = Check::for_service(db, &PortMap::new()).unwrap_err();
+    assert!(matches!(err, HealthError::ExecUnsupported), "{err:?}");
+}
+
 #[tokio::test]
 async fn services_without_routes_settle() {
     let toml = format!(

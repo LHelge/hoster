@@ -1,0 +1,13 @@
+---
+source: src/stack/tests.rs
+assertion_line: 822
+expression: parse(source).unwrap_err().to_string()
+---
+invalid stack file (7 errors):
+  line 6, column 18: services.db.health.tcp: `tcp` probes need a route; a service without routes can only use `exec`, e.g. exec = ["pg_isready", "-U", "app"]
+  line 10, column 10: services.cache.health: a service without routes needs `exec` in its `health` table; without `health` it is healthy after running for 5 s
+  line 14, column 19: services.queue.health.exec: must name the command and its arguments, e.g. ["pg_isready", "-U", "app"]
+  line 18, column 43: services.app.health.tcp: set at most one of `http`, `tcp` or `exec`
+  line 26, column 20: services.web.health.exec[0]: the command must not be empty
+  line 30, column 20: services.worker.health.exec[0]: the command must not start or end with whitespace: it is run without a shell
+  line 34, column 29: services.jobs.health.exec[1]: must not contain a NUL character
