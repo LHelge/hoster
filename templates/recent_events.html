@@ -1,13 +1,18 @@
 <section class="card" id="{{ self.id() }}" aria-labelledby="recent-events-title">
   <header class="card-head">
     <h2 id="recent-events-title">Recent events</h2>
+    <a class="card-link" href="{{ self.all_url() }}">{% if stack.is_some() %}all events of this stack{% else %}view all{% endif %} →</a>
   </header>
   {%- if self.unreadable() %}
   <p class="card-body muted">The events cannot be read right now.</p>
   {%- else %}
   {%- let rows = self.rows() %}
   {%- if rows.is_empty() %}
+  {%- if stack.is_some() %}
+  <p class="card-body muted">No events yet. Deploys, restarts and changes to this stack show up here as they happen.</p>
+  {%- else %}
   <p class="card-body muted">No events yet. Deploys, restarts, certificates and operator actions show up here as they happen.</p>
+  {%- endif %}
   {%- else %}
   <ol class="events-feed">
     {%- for row in rows %}

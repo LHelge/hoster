@@ -1,13 +1,16 @@
-//! The event log's views (ADR-0055). [`EventRow`] is one event as a feed row, the
+//! The event log's views (ADR-0055 §5). [`EventRow`] is one event as a feed row, the
 //! `event_row.html` partial every feed shares: how long ago it happened (the time itself in the
 //! tooltip), a tone dot for its [`Severity`], its message, linked to what it is about when it
-//! names a page, and its short mono meta line. [`RecentEvents`] is the dashboard's card of the
-//! newest of them.
+//! names a page, and its short mono meta line. [`RecentEvents`] is a card of the newest of them:
+//! every stack's on the dashboard, one stack's on its overview ([`RecentEvents::of_stack`]).
+//! Each card links to the Events page ([`EventsPage`], `page.rs`), which pages through every event
+//! with filters for kind, severity and stack.
 //!
 //! The dashboard's live stream keeps the card it last sent: an event recorded since is added to
 //! it in memory and only the card is sent again, as an `<hx-partial>` that replaces it
 //! ([`RecentEvents::partial`]), not the whole overview. Anything else re-reads the card from the
-//! store with the overview.
+//! store with the overview. A stack's card has a stream of its own ([`StackFeed`], `live.rs`),
+//! which sends the card again whenever an event of that stack is recorded.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +19,12 @@ use askama::Template;
 use super::stacks::{Ago, When};
 use super::ui::Tone;
 use crate::store::{Event, EventQuery, Severity};
+
+mod live;
+mod page;
+
+pub(super) use self::live::StackFeed;
+pub use self::page::EventsPage;
 
 /// The tone dot of a severity: an informational event in the blue the design gives it, the
 /// others as their names say.
@@ -77,13 +86,16 @@ impl EventRow {
     }
 }
 
-/// The dashboard's Recent events card: the newest [`RecentEvents::LEN`] events, newest first.
+/// A Recent events card: the newest [`RecentEvents::LEN`] events, newest first, of every stack
+/// (the dashboard's) or of one.
 #[derive(Debug, Clone, Template)]
 #[template(path = "recent_events.html")]
 pub(super) struct RecentEvents {
     /// `None` when the event log cannot be read.
     events: Option<Vec<Event>>,
     now: SystemTime,
+    /// The stack whose events the card shows; every event when `None`.
+    stack: Option<String>,
 }
 
 impl RecentEvents {
@@ -95,31 +107,43 @@ impl RecentEvents {
     /// The card of `events` (newest first, as the store pages them) as of `now`; `None` when
     /// they cannot be read.
     pub(super) fn new(events: Option<Vec<Event>>, now: SystemTime) -> Self {
+        Self::of(None, events, now)
+    }
+
+    /// The card of `stack`'s `events`, as [`RecentEvents::new`].
+    pub(super) fn of_stack(stack: &str, events: Option<Vec<Event>>, now: SystemTime) -> Self {
+        Self::of(Some(stack.to_owned()), events, now)
+    }
+
+    fn of(stack: Option<String>, events: Option<Vec<Event>>, now: SystemTime) -> Self {
         let mut card = Self {
             events: events.is_some().then(Vec::new),
             now,
+            stack,
         };
         card.add(events.unwrap_or_default());
         card
     }
 
-    /// The query for the card's events.
-    pub(super) fn query() -> EventQuery {
+    /// The query for the events of a card of `stack` (of every stack when `None`).
+    pub(super) fn query(stack: Option<&str>) -> EventQuery {
         EventQuery {
+            stack: stack.map(str::to_owned),
             limit: Self::LEN as u32,
             ..EventQuery::default()
         }
     }
 
-    /// Adds `events` (in any order; one already shown is skipped), keeping the newest
-    /// [`Self::LEN`]. `false` when the card has no events to add to, because they could not be
-    /// read: then only a fresh read shows them.
+    /// Adds `events` (in any order; one already shown, or of another stack than the card's, is
+    /// skipped), keeping the newest [`Self::LEN`]. `false` when the card has no events to add
+    /// to, because they could not be read: then only a fresh read shows them.
     pub(super) fn add(&mut self, events: impl IntoIterator<Item = Event>) -> bool {
         let Some(shown) = &mut self.events else {
             return false;
         };
         for event in events {
-            if !shown.iter().any(|e| e.id == event.id) {
+            let ours = self.stack.is_none() || event.stack == self.stack;
+            if ours && !shown.iter().any(|e| e.id == event.id) {
                 shown.push(event);
             }
         }
@@ -152,6 +176,11 @@ impl RecentEvents {
 
     fn unreadable(&self) -> bool {
         self.events.is_none()
+    }
+
+    /// The Events page, filtered to the card's stack if it has one.
+    fn all_url(&self) -> String {
+        EventsPage::url(self.stack.as_deref())
     }
 
     fn id(&self) -> &'static str {

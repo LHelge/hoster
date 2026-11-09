@@ -469,7 +469,7 @@ impl<'a> OperatorEvents<'a> {
     }
 
     /// The stack was removed; `volumes` are the named volumes deleted with it, if the removal
-    /// asked for that. The stack's page is gone, so the event links nowhere.
+    /// asked for that. The stack's page is gone, so the event links to its event history.
     pub(super) fn removed(&self, delete_volumes: bool, volumes: &[String]) -> NewEvent {
         let (severity, message, detail) = match (delete_volumes, volumes) {
             (false, _) => (
@@ -489,11 +489,13 @@ impl<'a> OperatorEvents<'a> {
             ),
         };
         self.event(EventKind::StackRemoved, severity, message)
+            .subject(self.history())
             .meta(self.meta([detail]))
     }
 
     /// The kept volumes of the stack, removed earlier, were deleted (ADR-0030's separate
-    /// action), or `None` when it had none left to delete.
+    /// action), or `None` when it had none left to delete. Like the removal, it links to the
+    /// stack's event history.
     pub(super) fn volumes_deleted(&self, volumes: &[String]) -> Option<NewEvent> {
         (!volumes.is_empty()).then(|| {
             self.event(
@@ -501,6 +503,7 @@ impl<'a> OperatorEvents<'a> {
                 Severity::Warning,
                 format!("Deleted the kept volumes of {}", self.stack),
             )
+            .subject(self.history())
             .meta(self.meta([format!("volumes deleted: {}", volumes.join(", "))]))
         })
     }
@@ -527,6 +530,12 @@ impl<'a> OperatorEvents<'a> {
 
     fn event(&self, kind: EventKind, severity: Severity, message: String) -> NewEvent {
         NewEvent::new(kind, severity, message).stack(self.stack)
+    }
+
+    /// The Events page filtered to the stack (the web layer's `EventsPage::url`): the one
+    /// page about it that outlives its removal.
+    fn history(&self) -> String {
+        format!("/activity?stack={}", self.stack)
     }
 
     /// `parts`, then who did it, as one mono line.
@@ -732,6 +741,20 @@ mod tests {
         assert_eq!(rolled_back.severity, Severity::Warning);
         assert_eq!(rolled_back.message, "Rolled hoster back to v0.2.0");
         assert_eq!(rolled_back.meta.as_deref(), Some("v0.3.0 → v0.2.0"));
+    }
+
+    #[test]
+    fn removal_events_link_to_the_stack_history_not_its_gone_page() {
+        let by = Operator::from("octocat");
+        let events = OperatorEvents::new("notes", Some(&by));
+        for event in [
+            events.removed(false, &[]),
+            events.removed(true, &["notes_data".into()]),
+            events.volumes_deleted(&["notes_data".into()]).unwrap(),
+        ] {
+            assert_eq!(event.kind, EventKind::StackRemoved);
+            assert_eq!(event.subject.as_deref(), Some("/activity?stack=notes"));
+        }
     }
 
     #[test]

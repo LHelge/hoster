@@ -154,7 +154,7 @@ async fn a_removal_that_deletes_the_volumes_says_which() {
         .unwrap();
     assert_eq!(event.severity, Severity::Warning);
     assert_eq!(event.stack.as_deref(), Some("notes"));
-    assert_eq!(event.subject, None);
+    assert_eq!(event.subject.as_deref(), Some("/activity?stack=notes"));
     assert_eq!(event.message, "Removed notes and deleted its volumes");
     assert_eq!(
         event.meta.as_deref(),

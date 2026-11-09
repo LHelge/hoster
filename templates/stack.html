@@ -138,6 +138,10 @@
 </section>
 </div>
 
+<div id="stack-events" hx-sse:connect="{{ stack.events_url() }}" hx-swap="innerHTML" hx-sse:close="end">
+{{ stack.events|safe }}
+</div>
+
 {%- if stack.deployable %}
 <section class="card" aria-labelledby="deploy-title">
   <header class="card-head">
