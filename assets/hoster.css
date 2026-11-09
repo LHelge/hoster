@@ -1452,7 +1452,10 @@ code.field-name { font-size: 13px; overflow-wrap: anywhere; }
 .field-env code { color: inherit; font-size: inherit; }
 .field-actions { flex: 0 1 auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
 .field-actions .inline-form { margin: 0; }
-.field-inline { flex-direction: row; flex-wrap: wrap; align-items: center; }
+.field-inline { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
+.field-control > .card-result { width: 100%; }
+.field-control > .card-result:not(:empty) { padding: 0; }
+.field-control > .card-result > .flash { margin: 0; }
 .field-inline input { flex: 1 1 220px; }
 .field-empty { margin: 0; padding: 18px 20px; color: var(--muted); }
 .registry-rows { margin: 0; padding: 0; list-style: none; }

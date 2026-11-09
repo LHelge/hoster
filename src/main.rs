@@ -10,6 +10,7 @@ mod config;
 mod doctor;
 mod health;
 mod installation;
+mod instance;
 mod logging;
 mod orchestrator;
 mod ports;

@@ -16,7 +16,7 @@
       <span class="brand-mark">{{ crate::web::Icon::Brand }}</span>
       <span class="brand-text">
         <span class="brand-name">hoster</span>
-        <span class="brand-meta">v{{ layout.version() }}{% if let Some(host) = layout.host %} · {{ host }}{% endif %}</span>
+        <span class="brand-meta">v{{ layout.version() }}{% if let Some(name) = layout.instance %} · {{ name }}{% endif %}</span>
       </span>
     </a>
     <ul class="nav">

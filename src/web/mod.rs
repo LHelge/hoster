@@ -3,8 +3,8 @@
 //! `dashboard.rs`), the event log's feeds and Events page (ADR-0055, see `events.rs`), container
 //! logs (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
 //! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029, ADR-0049, see
-//! `stacks.rs`), Settings: Registries (ADR-0025) and read-only views of the configuration
-//! (ADR-0024, see `settings.rs`), the deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`), and
+//! `stacks.rs`), Settings: Registries (ADR-0025), the instance name (ADR-0058) and read-only
+//! views of the configuration (ADR-0024, see `settings.rs`), the deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`), and
 //! the System page with self-update (ADR-0052, see `system.rs`).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
@@ -51,6 +51,7 @@ use tokio_util::sync::CancellationToken;
 use crate::acme::{CertMap, DnsCheck};
 use crate::config::Config;
 use crate::installation::Installation;
+use crate::instance::Instance;
 use crate::orchestrator::Orchestrator;
 use crate::runtime::ContainerRuntime;
 use crate::stack::StackSchema;
@@ -154,8 +155,8 @@ impl WebApp {
     /// The app for `config`, with sessions in `store`, containers from `runtime`, stacks managed
     /// through `orchestrator`, the served certificates in `certs` with the DNS check `dns`
     /// (shared with the ACME task), registry credentials in `registry`, the GitHub OAuth App's
-    /// credentials read from their files or systemd credentials, the dashboard's `stats`, and
-    /// `shutdown`, which the System page requests after a self-update (ADR-0052). Fails when the
+    /// credentials read from their files or systemd credentials, the dashboard's `stats`, the
+    /// `instance` name (ADR-0058) and `shutdown`, which the System page requests after a self-update (ADR-0052). Fails when the
     /// credentials are missing. Deploy webhook tokens are verified against GitHub's key set for
     /// the configured audience (ADR-0047).
     #[expect(
@@ -171,6 +172,7 @@ impl WebApp {
         dns: DnsCheck,
         registry: RegistryAccess,
         stats: Stats,
+        instance: Instance,
         shutdown: ShutdownRequest,
     ) -> anyhow::Result<Self> {
         let installation = Installation::from_env()
@@ -207,6 +209,7 @@ impl WebApp {
             verifier,
             store,
             stats,
+            instance,
         ))
     }
 
@@ -225,9 +228,14 @@ impl WebApp {
         verifier: OidcVerifier,
         store: Store,
         stats: Stats,
+        instance: Instance,
     ) -> Self {
         WebApp {
-            shell: ShellSource::new(Arc::clone(&stacks), Arc::clone(&certificates)),
+            shell: ShellSource::new(
+                Arc::clone(&stacks),
+                Arc::clone(&certificates),
+                instance.clone(),
+            ),
             stats,
             system,
             auth: Arc::new(auth),
@@ -235,7 +243,12 @@ impl WebApp {
             certificates: Certificates::from(Arc::clone(&certificates)),
             webhook: Webhook::new(verifier, store, Arc::clone(&stacks)),
             stacks: Stacks::from(stacks),
-            settings: Settings::new(config, Arc::clone(&certificates), Arc::clone(&registries)),
+            settings: Settings::new(
+                config,
+                Arc::clone(&certificates),
+                Arc::clone(&registries),
+                instance,
+            ),
             registries: Registries::from(registries),
         }
     }
@@ -319,6 +332,8 @@ impl WebApp {
             .route("/settings/registries/delete", post(Registries::delete))
             .route("/settings/registries/test", post(Registries::test))
             .layer(Extension(self.registries.clone()))
+            .route("/settings/general/name", post(Settings::save_name))
+            .route("/settings/general/name/reset", post(Settings::reset_name))
             .route("/settings", get(Settings::index))
             .route("/settings/{part}", get(Settings::section))
             .layer(Extension(self.settings.clone()))

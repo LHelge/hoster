@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap, DnsCheck, PublicAddresses};
 use crate::config::{Config, ProxyConfig};
 use crate::installation::Version;
+use crate::instance::Instance;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
 use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
@@ -801,6 +802,8 @@ impl Startup for Supervisor {
                 );
                 tokio::spawn(poller.run(self.teardown.token.child_token()));
 
+                // The instance name (ADR-0058 §2), cached for the sidebar and the notifier.
+                let instance = Instance::load(store.clone()).await?;
                 let web = WebApp::from_config(
                     &self.config,
                     store,
@@ -810,6 +813,7 @@ impl Startup for Supervisor {
                     dns,
                     registry,
                     stats,
+                    instance,
                     self.shutdown.clone(),
                 )?
                 .start(listen, self.teardown.token.child_token())

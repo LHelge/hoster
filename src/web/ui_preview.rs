@@ -1343,7 +1343,6 @@ async fn ui_preview() {
         std::sync::Arc::new(Facts::sample()),
     )
     .started_at(SystemTime::now() - (9 * DAY + 4 * HOUR));
-    app.app.shell = app.app.shell.clone().with_host("srv-01");
     let browser = app.sign_in().await;
     let session = Session { app: &app, browser };
 
@@ -1678,8 +1677,8 @@ async fn ui_preview() {
         config,
         staging.certificates.clone(),
         staging.registries.clone(),
+        staging.instance.clone(),
     );
-    staging.app.shell = staging.app.shell.clone().with_host("srv-01");
     let browser = staging.sign_in().await;
     let session = Session {
         app: &staging,

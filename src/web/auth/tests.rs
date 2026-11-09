@@ -11,6 +11,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::installation::Installation;
+use crate::instance::Instance;
 use crate::runtime::FakeRuntime;
 use crate::stats::tests::FakeStats;
 use crate::stats::{Stats, Traffic};
@@ -46,6 +47,8 @@ pub struct TestApp {
     pub traffic: Traffic,
     /// The rest of the dashboard's statistics.
     pub stats: Arc<FakeStats>,
+    /// The instance name the sidebar and Settings → General show; the hostname is `srv-01`.
+    pub instance: Instance,
     pub app: WebApp,
     _dir: TempDir,
 }
@@ -92,6 +95,9 @@ impl TestApp {
         let verifier = OidcVerifier::new(ORIGIN, base.join(JWKS_PATH).unwrap()).unwrap();
         let traffic = Traffic::default();
         let stats = Arc::new(FakeStats::default());
+        let instance = Instance::with_default(store.clone(), "srv-01".parse().unwrap())
+            .await
+            .unwrap();
         let system = System::new(
             Updater::new(
                 Installation::new(dir.path().join("lib")),
@@ -114,6 +120,7 @@ impl TestApp {
             verifier,
             store.clone(),
             Stats::new(traffic.clone(), stats.clone()),
+            instance.clone(),
         );
         TestApp {
             github,
@@ -124,6 +131,7 @@ impl TestApp {
             registries,
             traffic,
             stats,
+            instance,
             app,
             _dir: dir,
         }
