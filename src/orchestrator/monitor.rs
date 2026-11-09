@@ -5,7 +5,9 @@
 //! ([`MonitorSettings`]). Each status change — `Healthy`, `Unhealthy` or `CrashLooping`, the
 //! last one taken from the reconciler (ADR-0028) — is logged, kept as in-process statistics
 //! (ADR-0045, shown by [`Orchestrator::status`]) and sent on `ui_events` as
-//! [`UiEvent::Health`]. Nothing is restarted here.
+//! [`UiEvent::Health`]. A move between healthy and unhealthy is also written to the event log
+//! (ADR-0055) with the probe detail; a flapping service writes one event per real transition,
+//! never one per probe. Nothing is restarted here.
 //!
 //! Stacks with an active deployment or a removal are left alone (their last status is kept):
 //! the deployment owns their containers and runs its own checks.
@@ -17,6 +19,7 @@ use futures_util::future::join_all;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::event_log::ServiceEvents;
 use super::{Orchestrator, Result, UiEvent};
 use crate::health::{Check, HealthChange, HealthStats, HealthStatus, Liveness};
 use crate::runtime::{ContainerRuntime, ContainerState, ServiceGeneration};
@@ -88,6 +91,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let mut held = BTreeSet::new();
         let mut jobs = Vec::new();
         let mut events = Vec::new();
+        // The changes the event log keeps (ADR-0055): only real moves between healthy and
+        // unhealthy, see [`ServiceEvents::health_changed`].
+        let mut recorded = Vec::new();
         for stack in self.store.stacks().await? {
             if self.is_busy(&stack.name) || self.is_removing(&stack.name) {
                 held.insert(stack.name);
@@ -134,6 +140,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                             restarts.restarts
                         );
                         if let Some(change) = watched.liveness.crash_looping(now, detail) {
+                            recorded.extend(ServiceEvents::from(&key).health_changed(&change));
                             events.push(UiEvent::health(&key, change));
                         }
                         false
@@ -166,6 +173,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 if let Some(watched) = watchlist.get_mut(&job.key)
                     && let Some(change) = watched.liveness.observe(now, result)
                 {
+                    recorded.extend(ServiceEvents::from(&job.key).health_changed(&change));
                     events.push(UiEvent::health(&job.key, change));
                 }
             }
@@ -183,6 +191,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         for event in &events {
             event.log();
             self.emit(event.clone());
+        }
+        for event in recorded {
+            self.events.record(event).await;
         }
         Ok(events)
     }

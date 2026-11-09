@@ -8,6 +8,8 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use super::{CANCELLED, STACK_REMOVED, UiEvent};
+use crate::health::{HealthChange, HealthStatus};
+use crate::runtime::{ContainerInfo, ContainerState, ServiceGeneration};
 use crate::store::{
     Deployment, DeploymentId, DeploymentSource, DeploymentState, Event, EventKind, EventPage,
     EventQuery, NewEvent, Severity, ShortDigest, ShortSha, Store, StoreError, Timestamp,
@@ -230,6 +232,104 @@ impl DeployEvents {
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ")
+    }
+}
+
+/// The container lifecycle events of one service generation (ADR-0055 §2): a reconciler
+/// restart, the service entering or leaving crash loop (ADR-0028), and a health change of the
+/// live service (ADR-0038). Each links to the service's stack.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ServiceEvents<'a>(&'a ServiceGeneration);
+
+impl<'a> From<&'a ServiceGeneration> for ServiceEvents<'a> {
+    fn from(generation: &'a ServiceGeneration) -> Self {
+        Self(generation)
+    }
+}
+
+impl ServiceEvents<'_> {
+    /// The reconciler restarted `container`, which had exited (as inspect reported it), on its
+    /// `attempt`th restart attempt since hoster started (a failed attempt counts but writes no
+    /// event, so the numbers can skip).
+    pub(super) fn restarted(&self, container: &ContainerInfo, attempt: u32) -> NewEvent {
+        let exit = match container.state {
+            ContainerState::Exited(Some(code)) => format!("exit {code}"),
+            state => state.to_string(),
+        };
+        let oom = if container.oom_killed {
+            ", OOM killed"
+        } else {
+            ""
+        };
+        self.event(
+            EventKind::ContainerRestarted,
+            Severity::Warning,
+            format!("Restarted {} ({exit}{oom})", self.name()),
+        )
+        .meta(format!("{} · attempt {attempt}", self.generation()))
+    }
+
+    /// The service restarted `restarts` times within `window`: it is crash looping, and the
+    /// reconciler retries it at the maximum backoff.
+    pub(super) fn crash_loop_entered(&self, restarts: usize, window: Duration) -> NewEvent {
+        self.event(
+            EventKind::CrashLoopEntered,
+            Severity::Error,
+            format!("{} is crash looping", self.name()),
+        )
+        .meta(format!(
+            "{} · {restarts} restarts in {}",
+            self.generation(),
+            humantime::format_duration(window)
+        ))
+    }
+
+    /// The service stayed up for a whole crash-loop window: its restart history reset.
+    pub(super) fn crash_loop_left(&self) -> NewEvent {
+        self.event(
+            EventKind::CrashLoopLeft,
+            Severity::Success,
+            format!("{} stopped crash looping", self.name()),
+        )
+        .meta(self.generation())
+    }
+
+    /// The event a health `change` writes, if it writes one: only a move between healthy and
+    /// unhealthy. The first verdict on a healthy service (from `Unknown`) is no change, and
+    /// crash looping is written by the reconciler ([`Self::crash_loop_entered`] and
+    /// [`Self::crash_loop_left`]), so the moves into it, out of it to `Healthy`, and on to
+    /// `Unhealthy` while it recovers are left out.
+    pub(super) fn health_changed(&self, change: &HealthChange) -> Option<NewEvent> {
+        let (severity, message) = match (change.from, change.to) {
+            (HealthStatus::Unknown | HealthStatus::Healthy, HealthStatus::Unhealthy) => {
+                (Severity::Warning, format!("{} is unhealthy", self.name()))
+            }
+            (HealthStatus::Unhealthy, HealthStatus::Healthy) => (
+                Severity::Success,
+                format!("{} is healthy again", self.name()),
+            ),
+            _ => return None,
+        };
+        Some(
+            self.event(EventKind::HealthChanged, severity, message)
+                .meta(format!("{} · {}", self.generation(), change.detail)),
+        )
+    }
+
+    fn event(&self, kind: EventKind, severity: Severity, message: String) -> NewEvent {
+        let stack = self.0.stack.as_ref();
+        NewEvent::new(kind, severity, message)
+            .stack(stack)
+            .subject(format!("/stacks/{stack}"))
+    }
+
+    /// `stack/service`, as the messages name it.
+    fn name(&self) -> String {
+        format!("{}/{}", self.0.stack, self.0.service)
+    }
+
+    fn generation(&self) -> String {
+        format!("generation {}", self.0.generation)
     }
 }
 

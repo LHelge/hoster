@@ -497,6 +497,7 @@ mod tests {
             state,
             ports: Vec::new(),
             started_at: None,
+            oom_killed: false,
         }
     }
 

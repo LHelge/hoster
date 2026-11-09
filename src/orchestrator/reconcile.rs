@@ -9,6 +9,8 @@
 //!   about every 15 s, restarting exited containers of the current generation with exponential
 //!   backoff (1 s → 5 min) and marking a service *crash looping* after 5 restarts in 10 minutes.
 //!   Stacks with an active deployment are skipped: the deployment owns their containers.
+//!   Each restart, and a service entering or leaving crash loop, is written to the event log
+//!   (ADR-0055); starting the current generation at startup is not a restart and writes none.
 //!
 //! The per-service current pointers decide everything (§5.4): a container of the generation a
 //! pointer names is kept, any other generation of a known stack is removed. A container whose
@@ -29,7 +31,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::event_log::DeployEvents;
+use super::event_log::{DeployEvents, ServiceEvents};
 use super::{Orchestrator, Result};
 use crate::runtime::{
     ContainerInfo, ContainerRuntime, ContainerState, NetworkSpec, ObjectKind, RuntimeError,
@@ -137,17 +139,23 @@ impl Restarts {
         self.crash_looping && !was
     }
 
-    /// The container was seen running at `now`. Returns whether that cleared its history.
-    pub(super) fn running(&mut self, now: Instant) -> bool {
+    /// The container was seen running at `now`: clears its history if it stayed up for a whole
+    /// window, and says whether it did and whether that ended a crash loop.
+    pub(super) fn running(&mut self, now: Instant) -> Running {
         self.prune(now);
         if !self.recent.is_empty() || self.not_before.is_none() {
-            return false;
+            return Running::Steady;
         }
+        let was_crash_looping = self.crash_looping;
         let policy = self.policy;
         let total = self.total;
         *self = Self::new(policy);
         self.total = total;
-        true
+        if was_crash_looping {
+            Running::LeftCrashLoop
+        } else {
+            Running::Reset
+        }
     }
 
     pub(super) fn is_crash_looping(&self) -> bool {
@@ -158,6 +166,17 @@ impl Restarts {
     fn backoff(&self) -> Duration {
         self.backoff
     }
+}
+
+/// What seeing a container running did to its [`Restarts`] history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Running {
+    /// Nothing: a restart is still within the window, or there was none to forget.
+    Steady,
+    /// The history reset: the container stayed up for a whole window.
+    Reset,
+    /// The history reset, and with it the crash loop the service was in.
+    LeftCrashLoop,
 }
 
 /// What the reconciler remembers between passes.
@@ -483,15 +502,23 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     ) {
         let (stack, service, gen_no) = fields(generation);
         if container.state.is_running() {
-            if let Some(restarts) = self.reconciler().restarts.get_mut(generation)
-                && restarts.running(now)
-            {
+            let running = self
+                .reconciler()
+                .restarts
+                .get_mut(generation)
+                .map_or(Running::Steady, |restarts| restarts.running(now));
+            if running != Running::Steady {
                 tracing::info!(
                     stack,
                     service,
                     generation = gen_no,
                     "container stayed up; restart backoff reset"
                 );
+            }
+            if running == Running::LeftCrashLoop {
+                self.events
+                    .record(ServiceEvents::from(generation).crash_loop_left())
+                    .await;
             }
             report.adopted.push(container.name.clone());
             return;
@@ -527,6 +554,20 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             report.backing_off.push(container.name.clone());
             return;
         }
+        // How it ended, for the event: inspect reports the exit code and whether the OOM
+        // killer ended it, which the listing does not.
+        let inspected = self.runtime.inspect(&container.id).await;
+        let exited: &ContainerInfo = match &inspected {
+            Ok(inspected) if !inspected.state.is_running() => inspected,
+            Ok(_) => container,
+            Err(err) => {
+                tracing::debug!(
+                    stack, service, generation = gen_no, container = %container.name, %err,
+                    "cannot inspect exited container; reporting its listed state"
+                );
+                container
+            }
+        };
         let started = self.runtime.start(&container.id).await;
         let (looping, total, backoff) = {
             let mut reconciler = self.reconciler();
@@ -542,10 +583,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             Ok(()) => {
                 tracing::warn!(
                     stack, service, generation = gen_no, container = %container.name,
-                    state = %container.state, restarts = total, next_backoff = ?backoff,
-                    "restarted exited container"
+                    state = %exited.state, oom_killed = exited.oom_killed, restarts = total,
+                    next_backoff = ?backoff, "restarted exited container"
                 );
                 report.started.push(container.name.clone());
+                self.events
+                    .record(ServiceEvents::from(generation).restarted(exited, total))
+                    .await;
             }
             Err(err) => self.problem(
                 generation,
@@ -560,6 +604,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 window = ?self.settings.restart.crash_loop_window,
                 "service is crash looping; retrying at the maximum backoff"
             );
+            let policy = self.settings.restart;
+            self.events
+                .record(
+                    ServiceEvents::from(generation)
+                        .crash_loop_entered(policy.crash_loop_restarts, policy.crash_loop_window),
+                )
+                .await;
         }
     }
 
@@ -798,12 +849,13 @@ mod tests {
         }
         // Up for a whole window without a restart: the history resets.
         tokio::time::advance(Duration::from_secs(5 * 60)).await;
-        assert!(
-            !restarts.running(Instant::now()),
+        assert_eq!(
+            restarts.running(Instant::now()),
+            Running::Steady,
             "the last restart is 5 min ago"
         );
         tokio::time::advance(Duration::from_secs(5 * 60)).await;
-        assert!(restarts.running(Instant::now()));
+        assert_eq!(restarts.running(Instant::now()), Running::LeftCrashLoop);
         assert!(!restarts.is_crash_looping());
         let now = Instant::now();
         restarts.record(now);

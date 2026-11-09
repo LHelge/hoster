@@ -1,10 +1,10 @@
 ---
 id: nnd
 title: "Record container lifecycle events: restarts, crash loops, health changes"
-status: open
+status: done
 priority: P2
 created: "2026-11-09T14:05:07.896514310Z"
-updated: "2026-11-09T14:05:07.896514310Z"
+updated: "2026-11-09T15:45:44.238717469Z"
 tags:
   - orchestrator
   - runtime
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - nbj
 parent: "4qj"
+attempts: 1
 ---
 
 ## Summary
