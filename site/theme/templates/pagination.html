@@ -1,0 +1,15 @@
+<nav class="pagination" aria-label="Pagination">
+    {% if pagination.prev_url %}<a class="button" rel="prev" href="{{ pagination.prev_url | safe }}">Newer</a>{% endif %}
+    <ol class="pagination-pages">
+        {% for link in pagination.pages %}
+        <li>
+            {% if link.n == pagination.current %}
+            <span class="button current" aria-current="page">{{ link.n }}</span>
+            {% else %}
+            <a class="button ghost" href="{{ link.url | safe }}">{{ link.n }}</a>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ol>
+    {% if pagination.next_url %}<a class="button" rel="next" href="{{ pagination.next_url | safe }}">Older</a>{% endif %}
+</nav>

@@ -5,6 +5,7 @@ title = "hoster"
 base_url = "https://docs.hoster.lhelge.se"
 description = "A single-binary deployment orchestrator for one VPS"
 wiki_default_category = "Other"
+theme_dir = "theme"
 
 [[wiki_categories]]
 name = "Getting Started"
@@ -25,3 +26,7 @@ description = "Backups, restores and recovery."
 [[socials]]
 platform = "GitHub"
 url = "https://github.com/LHelge/hoster"
+
+[[authors]]
+name = "LHelge"
+link = "https://github.com/LHelge"

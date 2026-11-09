@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block page_title %}Not found{% endblock page_title %}
+
+{% block content %}
+<header class="page-head">
+    <p class="crumb">~/404</p>
+    <h1><span class="pill pill-warn">404</span> Not found</h1>
+</header>
+{% if not_found %}<div class="prose">{{ not_found.content | safe }}</div>{% endif %}
+{% endblock content %}

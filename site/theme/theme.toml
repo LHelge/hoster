@@ -1,0 +1,9 @@
+# The docs site's own theme: the admin UI's design system (ADR-0054) applied to aphid's templates,
+# so docs.hoster.lhelge.se and the admin UI read as one product. Started from aphid 0.3.0's
+# bundled theme (`aphid new`); the template variables are listed by `aphid agent claude`.
+#
+# static/css/theme.css copies its colour tokens from assets/hoster.css, and static/fonts/ holds
+# copies of the admin UI's vendored JetBrains Mono (assets/VENDORED.md). Change either there first.
+name = "hoster"
+version = "0.1.0"
+description = "The hoster admin UI's look, for the documentation site."

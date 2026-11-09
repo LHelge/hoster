@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block content %}
+<div class="doc-layout">
+<article class="doc">
+    <header class="page-head">
+        <p class="crumb"><a href="/">~</a>{{ url | trim_end_matches(pat="/") }}</p>
+        <h1>{{ title }}</h1>
+    </header>
+    <div class="prose">
+        {{ content | safe }}
+    </div>
+</article>
+{{ m::toc(entries=toc) }}
+</div>
+{% endblock content %}

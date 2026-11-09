@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block og_type %}article{% endblock og_type %}
+{% block nav_blog %} aria-current="page"{% endblock nav_blog %}
+
+{% block article_meta %}
+    <meta property="article:published_time" content="{{ created }}">
+    {% if updated %}<meta property="article:modified_time" content="{{ updated }}">{% endif %}
+    {% if author %}<meta property="article:author" content="{{ author.name }}">{% endif %}
+    {% for tag in tags %}<meta property="article:tag" content="{{ tag.name }}">{% endfor %}
+{% endblock article_meta %}
+
+{% block content %}
+<div class="doc-layout">
+<article class="doc">
+    <header class="page-head">
+        <p class="crumb"><a href="/">~</a>/<a href="/blog/">blog</a>/{{ url | trim_start_matches(pat="/blog/") | trim_end_matches(pat="/") }}</p>
+        <h1>{{ title }}</h1>
+        <p class="meta">
+            <time datetime="{{ created }}">{{ created }}</time>
+            {%- if updated %} · updated <time datetime="{{ updated }}">{{ updated }}</time>{% endif %}
+            · {{ reading_time_minutes }} min read
+            {%- if author %} · {% if author.link %}<a href="{{ author.link }}">{{ author.name }}</a>{% else %}{{ author.name }}{% endif %}{% endif %}
+        </p>
+        {{ m::tags(list=tags) }}
+    </header>
+
+    {% if image %}<img src="{{ image }}" alt="" class="post-hero">{% endif %}
+
+    <div class="prose">
+        {{ content | safe }}
+    </div>
+
+    {#- aphid orders same-day posts by slug, so its newer/older links can point the wrong way
+        between releases cut on one day. Link to the full list (sorted in blog_index.html) instead. A
+        release post's slug is hoster-X-Y-Z, which gives its GitHub release. #}
+    {% set slug = url | trim_start_matches(pat="/blog/") | trim_end_matches(pat="/") %}
+    <nav class="post-nav" aria-label="More releases">
+        <a class="card" href="/blog/">
+            <span class="post-nav-label">{{ m::icon(name="left") }}Releases</span>
+            <span class="post-nav-title">All releases</span>
+        </a>
+        {%- if slug is starting_with("hoster-") %}
+        {% set version = slug | trim_start_matches(pat="hoster-") | replace(from="-", to=".") %}
+        <a class="card post-nav-newer" href="https://github.com/LHelge/hoster/releases/tag/v{{ version }}">
+            <span class="post-nav-label">GitHub{{ m::icon(name="right") }}</span>
+            <span class="post-nav-title">v{{ version }} release notes</span>
+        </a>
+        {%- endif %}
+    </nav>
+</article>
+{{ m::toc(entries=toc) }}
+</div>
+{% endblock content %}
