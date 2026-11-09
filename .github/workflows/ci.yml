@@ -41,12 +41,7 @@ jobs:
       - name: Install cargo-nextest
         run: scripts/install-nextest.sh
 
-      # The streaming test sends 1 GiB each way, which takes longer than every other test
-      # together. A pull request sends 256 MiB, checked against the same 128 MiB memory bound;
-      # main and the release build keep the full size (an empty value is the default).
       - name: Test
-        env:
-          TEST_HOSTER_PROXY_STREAM_BYTES: ${{ github.event_name == 'pull_request' && '268435456' || '' }}
         run: cargo nextest run --profile ci --all-targets --locked
 
   # The documentation site (site/, published by release.yml). aphid fails the build on a broken

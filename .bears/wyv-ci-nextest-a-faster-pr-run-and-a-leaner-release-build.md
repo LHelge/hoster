@@ -24,8 +24,9 @@ checked on `main`. Decided with the owner on 2026-11-09.
 - [x] On a PR the static musl build only runs when the build inputs changed (`Cargo.toml`,
       `Cargo.lock`, `rust-toolchain.toml`, `build.rs`, the workflows, the two check scripts);
       always on `main`. The job still reports, since it is a required check
-- [x] On a PR the 1 GiB streaming test runs at 256 MiB (same 128 MiB memory bound); `main` and
-      the release build keep 1 GiB
+- Not done: running the 1 GiB streaming test at 256 MiB on PRs. It takes ~50 s on the owner's
+  machine but about 10 s on a CI runner, where the test step is 53 s of compiling and 18 s of
+  running; the smaller size made no difference to the PR run.
 - [x] `release.yml` no longer runs fmt and clippy; it keeps the tests (the only aarch64 run)
 - [x] A new push to a PR cancels the run in progress
 
