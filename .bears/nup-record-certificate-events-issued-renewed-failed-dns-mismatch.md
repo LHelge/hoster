@@ -1,16 +1,17 @@
 ---
 id: nup
 title: "Record certificate events: issued, renewed, failed, DNS mismatch"
-status: open
+status: done
 priority: P2
 created: "2026-11-09T14:05:07.914414992Z"
-updated: "2026-11-09T14:05:07.914414992Z"
+updated: "2026-11-09T15:56:13.383766756Z"
 tags:
   - acme
   - observability
 depends_on:
   - nbj
 parent: "4qj"
+attempts: 1
 ---
 
 ## Summary
