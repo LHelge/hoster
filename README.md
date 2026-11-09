@@ -39,9 +39,9 @@ don't have it.
 
 CI (`.github/workflows/ci.yml`) runs the same format, lint and test steps on every pull request
 and every push to `main`, checks that `.sqlx/` is up to date, and checks that the static musl
-release build links statically. Two things are lighter on a pull request than on `main`: the
-static build only runs when the pull request touches the dependencies, the toolchain, `build.rs`
-or a workflow, and the proxy's streaming test sends 256 MiB instead of 1 GiB.
+release build links statically. On a pull request the static build only runs when the pull
+request touches the dependencies, the toolchain, `build.rs` or a workflow; every push to `main`
+runs it.
 
 ### Tests against real podman
 
