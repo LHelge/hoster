@@ -82,7 +82,7 @@ use crate::stack::{
 };
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
-    NewDeployment, Provenance, StackRevision, Store, StoreError, WebhookRejection,
+    NewDeployment, NewEvent, Provenance, StackRevision, Store, StoreError, WebhookRejection,
 };
 
 use certs::CertHosts;
@@ -713,20 +713,36 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 
     /// Persists a deployment's move to `to` (see [`Store::transition`]) and tells the open UI
-    /// pages about it. Every transition the orchestrator makes goes through here.
+    /// pages about it. Every transition the orchestrator makes goes through here. `event`, the
+    /// deploy event the move writes to the event log (ADR-0055), if any, is stored in the
+    /// same transaction.
     async fn persist(
         &self,
         stack: &str,
         id: DeploymentId,
         to: DeploymentState,
         message: Option<&str>,
+        event: Option<NewEvent>,
     ) -> std::result::Result<(), StoreError> {
-        self.store.transition(id, to, message).await?;
+        let recorded = match &event {
+            Some(event) => Some(
+                self.store
+                    .transition_recorded(id, to, message, event)
+                    .await?,
+            ),
+            None => {
+                self.store.transition(id, to, message).await?;
+                None
+            }
+        };
         self.emit(UiEvent::Deployment {
             stack: stack.to_owned(),
             id,
             state: to,
         });
+        if let Some(event) = recorded {
+            self.events.announce(event);
+        }
         Ok(())
     }
 
@@ -1079,7 +1095,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         // The old revision is the active one again, so its hosts are ensured and the ones only
         // the newer revision routed are forgotten, exactly as at apply (ADR-0036).
         self.lock().certs.apply(&definition);
-        let target = Target::new(definition, revision, pins, earlier.target);
+        let target =
+            Target::new(definition, revision, pins, earlier.target).rolling_back(earlier.id);
         self.submit(target, DeploymentSource::Rollback, None).await
     }
 
@@ -1124,6 +1141,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 pending.id(),
                 DeploymentState::Superseded,
                 Some(STACK_REMOVED),
+                None,
             )
             .await?;
             self.finished.notify_waiters();
@@ -1563,13 +1581,20 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             })
             .await?;
         let id = record.id;
-        let mut run = Run::new(id, target, record.target);
+        let mut run = Run::new(target, record);
         let first = match self.claim(&stack, id, DeploymentState::Received) {
             Claim::Free => self.check_running(&mut run).await,
             Claim::Removing => {
                 // The removal started after the check above.
-                self.persist(&stack, id, DeploymentState::Rejected, Some(STACK_REMOVED))
-                    .await?;
+                // Never accepted, so not a deploy event: it never started.
+                self.persist(
+                    &stack,
+                    id,
+                    DeploymentState::Rejected,
+                    Some(STACK_REMOVED),
+                    None,
+                )
+                .await?;
                 return Err(OrchestratorError::Removing(stack));
             }
             Claim::Busy => {
@@ -1582,8 +1607,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         Event::Dequeued
                     }
                     Enqueued::Removing(_) => {
-                        self.persist(&stack, id, DeploymentState::Superseded, Some(STACK_REMOVED))
-                            .await?;
+                        self.persist(
+                            &stack,
+                            id,
+                            DeploymentState::Superseded,
+                            Some(STACK_REMOVED),
+                            None,
+                        )
+                        .await?;
                         self.finished.notify_waiters();
                         return Err(OrchestratorError::Removing(stack));
                     }
@@ -1725,6 +1756,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 }
 
+#[cfg(test)]
+mod deploy_events_tests;
 #[cfg(test)]
 mod gc_tests;
 #[cfg(test)]

@@ -1670,11 +1670,11 @@ async fn rollback_and_restart_follow_the_active_revisions_hosts() {
 // ---------------------------------------------------------------------------------------------
 
 /// NOTES with a `[deploy]` rule: repository 42, tags `v*` only.
-fn hooked() -> String {
+pub(super) fn hooked() -> String {
     format!("{NOTES}\n[deploy]\nrepository_id = 42\nrefs = [\"refs/tags/v*\"]\n")
 }
 
-fn caller(repository_id: u64, git_ref: &str) -> DeployCaller {
+pub(super) fn caller(repository_id: u64, git_ref: &str) -> DeployCaller {
     DeployCaller {
         repository_id,
         git_ref: git_ref.into(),
@@ -1683,10 +1683,10 @@ fn caller(repository_id: u64, git_ref: &str) -> DeployCaller {
     }
 }
 
-fn provenance() -> Provenance {
+pub(super) fn provenance() -> Provenance {
     Provenance {
         repository: "acme/notes".into(),
-        sha: "0f3c".into(),
+        sha: "0f3c5e1a9d2b7c4e8f6a1b3d5c7e9f0a2b4c6d8e".into(),
         git_ref: "refs/tags/v1.4.2".into(),
         run_id: "123456".into(),
         actor: "octocat".into(),
@@ -1694,7 +1694,7 @@ fn provenance() -> Provenance {
     }
 }
 
-fn webhook(stack: &str, images: &[(&str, u8)], caller: DeployCaller) -> WebhookDeploy {
+pub(super) fn webhook(stack: &str, images: &[(&str, u8)], caller: DeployCaller) -> WebhookDeploy {
     WebhookDeploy {
         stack: stack.into(),
         images: images

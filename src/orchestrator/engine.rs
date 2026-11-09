@@ -16,6 +16,7 @@ use std::sync::Arc;
 use futures_util::future::{join_all, try_join_all};
 use tracing::Instrument;
 
+use super::event_log::DeployEvents;
 use super::machine::{Effect, Event};
 use super::plan::{Change, Plan, SecretVersions};
 use super::routes::Routes;
@@ -29,7 +30,8 @@ use crate::runtime::{
 };
 use crate::stack::{Name, Stack, UpdateStrategy};
 use crate::store::{
-    DeploymentId, DeploymentState, DigestSet, PortMap, RevisionId, ServicePointer, StackRevision,
+    Deployment, DeploymentId, DeploymentState, DigestSet, NewEvent, PortMap, RevisionId,
+    ServicePointer, StackRevision, Timestamp,
 };
 
 /// What a deployment wants to reach, before it is recorded.
@@ -41,6 +43,8 @@ pub(super) struct Target {
     pins: DigestSet,
     /// Digests asked for explicitly (webhook, poller, UI, rollback).
     requested: DigestSet,
+    /// The earlier deployment a rollback redeploys (ADR-0041).
+    rollback_of: Option<DeploymentId>,
 }
 
 impl Target {
@@ -55,7 +59,14 @@ impl Target {
             revision,
             pins,
             requested,
+            rollback_of: None,
         }
+    }
+
+    /// The target, as the rollback to the `earlier` deployment (ADR-0041).
+    pub(super) fn rolling_back(mut self, earlier: DeploymentId) -> Self {
+        self.rollback_of = Some(earlier);
+        self
     }
 
     pub(super) fn stack(&self) -> &Name {
@@ -106,17 +117,20 @@ pub(super) struct Run {
     /// What the stack's routes served before `Switching` published this deployment's: put
     /// back should the pointers fail to commit, and the old upstreams `Draining` waits for.
     served_before: Option<DesiredStack>,
+    /// What the deployment writes to the event log (ADR-0055).
+    events: DeployEvents,
 }
 
 type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 impl Run {
-    /// A deployment whose record was created with the target digest set `recorded`.
-    pub(super) fn new(id: DeploymentId, target: Target, recorded: DigestSet) -> Self {
+    /// A deployment of `target`, as its `record` was created.
+    pub(super) fn new(target: Target, record: Deployment) -> Self {
+        let events = DeployEvents::from(&record).rolling_back(target.rollback_of);
         Self {
-            id,
+            id: record.id,
             target,
-            recorded,
+            recorded: record.target,
             state: DeploymentState::Received,
             plan: Err("not checked yet".into()),
             generation: 0,
@@ -124,6 +138,7 @@ impl Run {
             created: Vec::new(),
             stopped: Vec::new(),
             served_before: None,
+            events,
         }
     }
 
@@ -137,6 +152,24 @@ impl Run {
 
     fn stack_name(&self) -> String {
         self.target.stack().to_string()
+    }
+
+    /// The event log entry the move to `to` writes, if any (see [`DeployEvents::on`]): the
+    /// services listed are the ones the plan changes, or the recorded target without one.
+    fn event_on(&mut self, to: DeploymentState, message: Option<&str>) -> Option<NewEvent> {
+        let services: Vec<(&str, &str)> = match &self.plan {
+            Ok(plan) => plan
+                .changes
+                .iter()
+                .map(|c| (c.service.as_ref(), c.image.digest().as_ref()))
+                .collect(),
+            Err(_) => self
+                .recorded
+                .iter()
+                .map(|(service, digest)| (service.as_str(), digest.as_str()))
+                .collect(),
+        };
+        self.events.on(to, message, services)
     }
 
     fn plan(&self) -> &Plan {
@@ -296,8 +329,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     async fn execute(self: &Arc<Self>, run: &mut Run, effect: Effect) -> Option<Event> {
         match effect {
             Effect::Persist { to, message } => {
+                let event = run.event_on(to, message.as_deref());
                 if let Err(err) = self
-                    .persist(&run.stack_name(), run.id, to, message.as_deref())
+                    .persist(&run.stack_name(), run.id, to, message.as_deref(), event)
                     .await
                 {
                     tracing::error!(deployment = %run.id, %err, "cannot persist transition");
@@ -572,8 +606,16 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .iter()
             .map(|p| p.service.clone())
             .collect();
-        match self.store.commit(run.id, &pointers, &removed).await {
-            Ok(()) => Some(Event::Switched),
+        let succeeded = run.events.succeeded(Timestamp::now());
+        match self
+            .store
+            .commit_recorded(run.id, &pointers, &removed, &succeeded)
+            .await
+        {
+            Ok(event) => {
+                self.events.announce(event);
+                Some(Event::Switched)
+            }
             Err(err) => {
                 tracing::error!(deployment = %run.id, %err, "cannot commit the per-service pointers; halting");
                 self.lock()

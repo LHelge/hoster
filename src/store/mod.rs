@@ -45,8 +45,8 @@ pub use types::{
     DeploymentState, DigestSet, Event, EventCursor, EventId, EventKind, EventPage, EventQuery,
     ImageUse, ImageUseKind, InvalidEventCursor, NewDeployment, NewEvent, PortAllocation, PortMap,
     PortRequest, Provenance, RecordedImage, RevisionId, SchemaVersion, SealedSecret, SecretEntry,
-    ServicePointer, SessionRecord, Severity, Stack, StackRevision, Timestamp, UnknownEventText,
-    WebhookRejection,
+    ServicePointer, SessionRecord, Severity, ShortDigest, ShortSha, Stack, StackRevision,
+    Timestamp, UnknownEventText, WebhookRejection,
 };
 
 /// The embedded migrations from `migrations/`. Every one is a reversible `.up.sql` / `.down.sql`
@@ -855,16 +855,49 @@ impl Store {
         message: Option<&str>,
     ) -> Result<()> {
         let now = Timestamp::now();
+        let mut tx = self.begin().await?;
+        let (stack, logged) = Self::transition_in(&mut tx, id, to, message, now).await?;
+        tx.commit().await?;
+        logged.log(id, &stack);
+        Ok(())
+    }
+
+    /// [`transition`](Self::transition), recording `event` in the event log (ADR-0055) in the
+    /// same transaction: the event is stored if and only if the transition is.
+    pub async fn transition_recorded(
+        &self,
+        id: DeploymentId,
+        to: DeploymentState,
+        message: Option<&str>,
+        event: &NewEvent,
+    ) -> Result<Event> {
+        let now = Timestamp::now();
+        let mut tx = self.begin().await?;
+        let (stack, logged) = Self::transition_in(&mut tx, id, to, message, now).await?;
+        let recorded = Self::insert_event(&mut tx, event, now).await?;
+        tx.commit().await?;
+        logged.log(id, &stack);
+        Ok(recorded)
+    }
+
+    /// The transition on `conn` (inside the caller's transaction): the deployment's stack
+    /// and the logged transition, to print once the transaction commits.
+    async fn transition_in(
+        conn: &mut SqliteConnection,
+        id: DeploymentId,
+        to: DeploymentState,
+        message: Option<&str>,
+        now: Timestamp,
+    ) -> Result<(String, DeploymentEvent)> {
         let finished_at = to.is_terminal().then_some(now);
         let error = matches!(to, DeploymentState::Failed | DeploymentState::Rejected)
             .then_some(message)
             .flatten();
-        let mut tx = self.begin().await?;
         let from = sqlx::query_scalar!(
             r#"SELECT state AS "state: DeploymentState" FROM deployments WHERE id = ?"#,
             id,
         )
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?
         .ok_or(StoreError::UnknownDeployment(id))?;
         sqlx::query!(
@@ -878,15 +911,13 @@ impl Store {
             error,
             id,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
         let stack = sqlx::query_scalar!("SELECT stack FROM deployments WHERE id = ?", id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
-        let event = Self::log_event(&mut tx, id, Some(from), to, message, now).await?;
-        tx.commit().await?;
-        event.log(id, &stack);
-        Ok(())
+        let logged = Self::log_event(conn, id, Some(from), to, message, now).await?;
+        Ok((stack, logged))
     }
 
     /// Logs a note on a deployment without changing its state: an event from `state` to
@@ -926,10 +957,40 @@ impl Store {
         pointers: &[ServicePointer],
         removed: &[String],
     ) -> Result<()> {
+        let mut tx = self.begin().await?;
+        Self::commit_in(&mut tx, id, pointers, removed, Timestamp::now()).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// [`commit`](Self::commit), recording `event` (the deployment's success, ADR-0055) in the
+    /// same transaction, so a committed deployment never lacks it and a failed commit never
+    /// claims it.
+    pub async fn commit_recorded(
+        &self,
+        id: DeploymentId,
+        pointers: &[ServicePointer],
+        removed: &[String],
+        event: &NewEvent,
+    ) -> Result<Event> {
         let now = Timestamp::now();
         let mut tx = self.begin().await?;
+        Self::commit_in(&mut tx, id, pointers, removed, now).await?;
+        let recorded = Self::insert_event(&mut tx, event, now).await?;
+        tx.commit().await?;
+        Ok(recorded)
+    }
+
+    /// The commit on `conn`, inside the caller's transaction.
+    async fn commit_in(
+        conn: &mut SqliteConnection,
+        id: DeploymentId,
+        pointers: &[ServicePointer],
+        removed: &[String],
+        now: Timestamp,
+    ) -> Result<()> {
         let stack = sqlx::query_scalar!("SELECT stack FROM deployments WHERE id = ?", id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *conn)
             .await?
             .ok_or(StoreError::UnknownDeployment(id))?;
         for p in pointers {
@@ -949,14 +1010,14 @@ impl Store {
                 id,
                 now,
             )
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
             sqlx::query!(
                 "DELETE FROM service_ports WHERE stack = ? AND service = ?",
                 stack,
                 p.service,
             )
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
             for (container_port, host_port) in &p.ports {
                 sqlx::query!(
@@ -967,7 +1028,7 @@ impl Store {
                     container_port,
                     host_port,
                 )
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await?;
             }
         }
@@ -977,7 +1038,7 @@ impl Store {
                 stack,
                 service,
             )
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
         }
         sqlx::query!(
@@ -986,9 +1047,8 @@ impl Store {
             now,
             id,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 
