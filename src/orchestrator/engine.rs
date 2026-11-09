@@ -21,13 +21,14 @@ use super::machine::{Effect, Event};
 use super::plan::{Change, Plan, SecretVersions};
 use super::routes::Routes;
 use super::{Interruption, Orchestrator, Result};
-use crate::health::{Check, DeploymentLog};
+use crate::health::{Check, DeploymentLog, ProbeLog, Probes};
 use crate::logging::LogSpan;
 use crate::routing::{DesiredStack, DrainOutcome, RouteClaims, ServiceState, Upstream};
 use crate::runtime::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, NetworkSpec, PortBinding,
     ServiceGeneration, VolumeMount, label,
 };
+use crate::secrets::SecretValue;
 use crate::stack::{Name, Stack, UpdateStrategy};
 use crate::store::{
     Deployment, DeploymentId, DeploymentState, DigestSet, NewEvent, PortMap, RevisionId,
@@ -112,6 +113,8 @@ pub(super) struct Run {
     ports: BTreeMap<Name, PortMap>,
     /// New containers created by this deployment, by service.
     created: Vec<(Name, ContainerId)>,
+    /// The secret values given to the new containers, redacted from exec check output.
+    secrets: Vec<SecretValue>,
     /// Old stop-first containers `Replacing` stopped (kept until clean-up).
     stopped: Vec<ContainerId>,
     /// What the stack's routes served before `Switching` published this deployment's: put
@@ -136,6 +139,7 @@ impl Run {
             generation: 0,
             ports: BTreeMap::new(),
             created: Vec::new(),
+            secrets: Vec::new(),
             stopped: Vec::new(),
             served_before: None,
             events,
@@ -726,6 +730,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             for (env, secret) in &service.secrets {
                 match self.secrets.reveal(secret).await {
                     Ok(Some((value, _))) => {
+                        run.secrets.push(value.clone());
                         spec.secrets.insert(env.clone(), value);
                     }
                     Ok(None) => {
@@ -761,21 +766,26 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 
     /// `HealthChecking` and `Replacing`: probes the new containers `created` concurrently, each
-    /// with its service's resolved health check (ADR-0038, ADR-0051) through the orchestrator's
-    /// [`Prober`](crate::health::Prober). Probe results are recorded as events of the
-    /// deployment; the first failure is the reason the deployment aborts.
+    /// with its service's resolved health check (ADR-0038, ADR-0051, ADR-0056) through the
+    /// orchestrator's [`Prober`](crate::health::Prober), or, for an exec check, in the
+    /// container. Which check each service gets and why, and the probe results, are recorded
+    /// as events of the deployment (exec output with the deployment's secrets redacted); the
+    /// first failure is the reason the deployment aborts.
     async fn probe(&self, run: &Run, created: &[(Name, ContainerId)]) -> Result<(), String> {
         let checks = created
             .iter()
-            .map(|(service, id)| Ok((self.check(run, service)?, id)))
+            .map(|(service, id)| Ok((service, self.check(run, service)?, id)))
             .collect::<Result<Vec<_>, String>>()?;
-        let log = DeploymentLog::new(self.store.clone(), run.id, run.state);
-        let runtime = &*self.runtime;
-        let prober = &*self.prober;
+        let log = DeploymentLog::new(self.store.clone(), run.id, run.state).redacting(&run.secrets);
+        for (service, check, _) in &checks {
+            log.record(&format!("checking {service} with {check:#}"))
+                .await;
+        }
+        let probes = Probes::new(&*self.runtime, &*self.prober, &self.execs);
         try_join_all(
             checks
                 .iter()
-                .map(|(check, id)| check.run(runtime, id, prober, &log)),
+                .map(|(_, check, id)| check.run(&probes, id, &log)),
         )
         .await
         .map(drop)

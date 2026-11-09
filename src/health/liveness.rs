@@ -58,6 +58,21 @@ pub struct HealthStats {
     pub changes: u32,
     /// What the last probe (or the reconciler) said.
     pub last: Option<String>,
+    /// Which check the probes run and why (`{check:#}`), once the generation is watched.
+    pub check: Option<String>,
+}
+
+impl HealthStats {
+    /// What the UI shows: the last result and, when known, the check that gave it
+    /// (`exit 0 · exec: pg_isready, declared in health.exec`). Nothing before a result, so the
+    /// UI can say "not probed yet" rather than show the check as if it were one.
+    pub fn detail(&self) -> Option<String> {
+        let last = self.last.as_ref()?;
+        Some(match &self.check {
+            Some(check) => format!("{last} · {check}"),
+            None => last.clone(),
+        })
+    }
 }
 
 /// A status change, as it is logged and sent to the UI.
@@ -152,7 +167,16 @@ impl Liveness {
     }
 }
 
-/// Carries out one probe of a [`Check`].
+/// A generation not probed yet with `check`, which its statistics name.
+impl From<&Check> for Liveness {
+    fn from(check: &Check) -> Self {
+        let mut liveness = Self::new(check.healthy_after());
+        liveness.stats.check = Some(format!("{check:#}"));
+        liveness
+    }
+}
+
+/// Carries out one network probe of a [`Check`].
 #[async_trait]
 pub trait Prober: Send + Sync {
     /// `Ok` with what passed, `Err` with why it failed; bounded by the check's timeout.
@@ -258,6 +282,7 @@ mod tests {
                 failures: 2,
                 changes: 2,
                 last: Some("HTTP 200".into()),
+                check: None,
             }
         );
     }

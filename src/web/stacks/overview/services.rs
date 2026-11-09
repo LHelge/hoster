@@ -335,7 +335,7 @@ impl ServiceRow {
         current: Option<&ContainerInfo>,
         listed: bool,
     ) -> (Pill, String) {
-        let health = service.health.last.clone();
+        let health = service.health.detail();
         match &service.state {
             _ if service.is_crash_looping() => (
                 Tone::Fail.pill("crash looping"),
@@ -633,6 +633,11 @@ mod tests {
         let (html, detail) = pill(api, false, None);
         assert!(html.contains(">running</span>"), "{html}");
         assert_eq!(detail, "not probed yet");
+        // A watched generation not probed yet: its check is no result.
+        api.health.check = Some("exec: pg_isready -U postgres, declared in health.exec".into());
+        let (_, detail) = pill(api, false, None);
+        assert_eq!(detail, "not probed yet");
+        api.health.check = None;
 
         // With one, a service that has no container of its generation is not running.
         let (html, detail) = ServiceRow::state(api, false, None, true);
@@ -656,6 +661,14 @@ mod tests {
         assert!(html.contains("pill-ok"), "{html}");
         assert!(html.contains(">healthy</span>"), "{html}");
         assert_eq!(detail, "GET /healthz: 200");
+        // The monitor names the check in effect and why (ADR-0056).
+        api.health.check = Some("exec: pg_isready -U postgres, declared in health.exec".into());
+        let (_, detail) = pill(api, false, None);
+        assert_eq!(
+            detail,
+            "GET /healthz: 200 · exec: pg_isready -U postgres, declared in health.exec"
+        );
+        api.health.check = None;
 
         api.health.status = HealthStatus::Unhealthy;
         api.health.last = Some("GET /healthz: <503>".into());
