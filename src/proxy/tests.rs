@@ -158,6 +158,7 @@ fn route(host: &str, prefix: &str, strip_prefix: bool, timeouts: RouteTimeouts) 
 fn service(routes: Vec<Route>) -> Service {
     Service {
         image: "ghcr.io/acme/app".parse().unwrap(),
+        depends_on: Default::default(),
         track: None,
         command: None,
         entrypoint: None,

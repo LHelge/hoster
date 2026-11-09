@@ -20,6 +20,7 @@ The library behaviour this design depends on was checked against crate sources a
 | GitHub Actions OIDC (OQ-29) | discovery document, live | `curl` of `token.actions.githubusercontent.com/.well-known/openid-configuration` | Issuer `https://token.actions.githubusercontent.com`, JWKS at `/.well-known/jwks`, RS256. Claims include `repository_id`, `ref`, `ref_protected`, `environment`, `job_workflow_ref` and `jti`. |
 | Admin UI stack (ADR-0021) | `axum` 0.8.9, `askama` 0.16.1, `oauth2` 5.0.0, `tower-sessions` 0.15.0, htmx.org **4.0.1** (npm, 2026-11-01; npm `latest` tag still points at 2.0.11, `next` at 4.0.1) | crates.io / npm registry | Versions noted for the plan. APIs not yet exercised. |
 | Pingora Unix-socket upstreams | pingora-core 0.9.1 | crate source | `HttpPeer::new_uds(path, tls, sni)` exists, so the proxy can reach the admin Axum app over a Unix socket (ADR-0031). |
+| Exec API, exec session removal, `Healthcheck NONE` (ADR-0056) | podman **6.1.4** (runc, rootless), bollard 0.21.1, checked 2026-11-09 | live, through the compat API and the podman-gated tests in `src/runtime/podman.rs` | See §1.6. |
 
 ### 1.1 Pingora 0.9.1
 
@@ -121,6 +122,49 @@ Container IPs live inside the rootless network namespace and cannot be reached f
 is why published loopback ports are the only path from the proxy to a container, which matches
 ADR-0007.
 
+### 1.6 Exec and podman's healthchecks (podman 6.1.4)
+
+Checked live on a rootless podman 6.1.4 with runc, through the compat API (curl and the
+`TEST_HOSTER_PODMAN=1` tests `exec_*`, `a_timed_out_exec_*` and
+`podman_never_runs_an_images_healthcheck`):
+
+- **Exec.** bollard's `create_exec` / `start_exec` (attached, `Connection: Upgrade`) /
+  `inspect_exec` work against podman. The attached output closes when the exec's main process
+  exits, even while a backgrounded child still holds stdout (`sh -c "sleep 4 & echo hi"` returns
+  at once). Exec inspect reports `Running`, the host `Pid` while it runs (0 after) and
+  `ExitCode`. Exit 0, a non-zero exit and a shell's 127 (`sh: pg_isready: not found`) are plain
+  exit codes.
+- **Cannot run.** When the OCI runtime cannot execute argv[0], the output is podman's one line
+  `Error: runc: exec failed: unable to start container process: exec: "<argv0>": <reason>: OCI
+  …` followed by `Error: read unixpacket @->/proc/self/fd/13/attach: read: connection reset by
+  peer`, with exit 127 (`executable file not found in $PATH`), 126 (`permission denied`) or
+  **125** (a directory, `is a directory: OCI runtime error`). hoster drops the trailer and treats
+  a 125/126/127 whose only output is that `Error: … OCI …` line as "cannot run".
+- **Not running.** An exec create on a stopped container is HTTP 500 `can only create exec
+  sessions on running containers: container state improper`. A container stopped while an exec
+  runs ends the exec (non-zero exit); hoster reports both as "the container is stopping or
+  stopped".
+- **Timeout.** The exec is its own process-group leader with a host PID; `kill(-pgid, SIGTERM)`
+  ends it and its children, and exec inspect then shows exit 143. Outside a user namespace
+  (a shell, not the shipped unit) hoster's uid, as the owner of podman's user namespace, can also
+  signal an exec running as a non-root container user (a subuid); under the unit's
+  `PrivateUsers=yes` it cannot, so such an exec is abandoned (§5.5). When the client drops the
+  attached start request before it is answered, podman still runs the command, but exec
+  inspect reports the session exited with 125 and `Pid` 0 while it runs, so it can be neither
+  watched nor signalled.
+- **Session removal.** `POST /v4.0.0/libpod/exec/{id}/remove` with body `{}` answers 200, and a
+  second removal a JSON 404 with cause `no such exec session`. libpod routes are served only under
+  a version prefix: the unversioned `/libpod/exec/{id}/remove` is the router's plain-text
+  `404 Not Found`, the same answer as a podman without the route, so hoster always sends a
+  version (any supported one; it uses 4.0.0). Compat container inspect lists the remaining
+  sessions in `ExecIDs`.
+- **`Healthcheck {Test: ["NONE"]}`.** A docker-format image with a `HEALTHCHECK` (written by
+  compat commit) gets podman's check on a systemd user timer in a container created without
+  `Healthcheck`. With `NONE` the check never runs and `State.Health` is null. Through the compat
+  API podman fills in its defaults (`Interval` 30 s) and still registers a transient
+  `<id>-<hash>.timer`/`.service` pair, but the timer never elapses (`NextElapseUSecMonotonic=
+  infinity`, no trigger); `podman create --no-healthcheck` registers none.
+
 ## 2. Component overview
 
 ```mermaid
@@ -202,10 +246,10 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 | **Supervisor** (`main`) | main thread → orchestrator runtime | Loads config, builds the orchestrator runtime, starts everything in order (§4), owns OS signals, coordinates shutdown. |
 | **Orchestrator** | orchestrator runtime, `Arc<Orchestrator>` shared by all callers (ADR-0050) | The single writer of desired state. Exposes async methods (`apply`, `deploy`, `remove`, `rollback`, `status`, `transition`) to the web UI, webhook, poller and reconciler; applies idempotency by digest and config hash; enforces at most one deploy per stack; spawns deploy tasks; owns `ArcSwap<RouteTable>` writes. One internal `Mutex<State>` held only for in-memory work. |
 | **Deploy task** | orchestrator runtime, one per active stack deploy | Runs the deploy state machine (§5) for one stack by executing effects and calling `orchestrator.transition(id, event)` after each step. |
-| **Reconciler** | orchestrator runtime | Startup: compares persisted state with `podman ps` by label, then adopts, restarts or removes containers. Periodic (about every 15 s): restarts exited containers with backoff and flags CrashLooping (ADR-0028). |
-| **Podman client** | orchestrator runtime | A thin `ContainerRuntime` trait over bollard (network, pull, create, start, stop, remove, inspect, list, logs). Production uses `PodmanRuntime`; tests use a fake. |
+| **Reconciler** | orchestrator runtime | Startup: compares persisted state with `podman ps` by label, then adopts, restarts or removes containers. Periodic (about every 15 s): restarts exited containers with backoff and flags CrashLooping (ADR-0028). Both passes visit containers in `depends_on` order, read from the last committed deployment's revision, and start one only once its dependencies are running and have passed their check since hoster (re)started them or first saw them running: without a bound while a dependency is down, for at most min(`start_period`, 5 min) while it runs without passing (§5.5). The startup pass defers unready containers to the periodic loop, which starts them as startup starts, not restarts (ADR-0056). |
+| **Podman client** | orchestrator runtime | A thin `ContainerRuntime` trait over bollard (network, pull, create, start, stop, remove, inspect, list, logs, exec). Finished exec sessions are removed, best effort, with a raw libpod call over the same socket (ADR-0056, §5.5). Production uses `PodmanRuntime`; tests use a fake. |
 | **State store** | orchestrator runtime | SQLite via sqlx (ADR-0022): `SqlitePool`, WAL mode, embedded migrations, compile-time checked queries. Persists stacks, deployments, digests, generations, port allocations, deploy history, sessions. |
-| **Health checker** | orchestrator runtime | Probes new containers on their `127.0.0.1` port before the swap, with HTTP or TCP probes (ADR-0038). Afterwards, periodic probes feed status only. |
+| **Health checker** | orchestrator runtime | Probes new containers before the swap with the service's check: HTTP or TCP on their `127.0.0.1` port, or an exec inside the container (ADR-0038, ADR-0056, §5.5). Afterwards, periodic probes feed status only. |
 | **ACME task** | orchestrator runtime, single task | Account lifecycle, issuance, renewal. Writes `CertMap` and `ChallengeMap`. Persists account and certs to disk. |
 | **Registry client** | orchestrator runtime | Generic OCI distribution client (ADR-0025): token discovery from `WWW-Authenticate`, `HEAD` manifest → digest. Per-registry-host credentials. Used by the poller and for resolving third-party tags at stack apply. |
 | **Digest poller** | orchestrator runtime | Periodically resolves tracked ghcr tags to digests. Calls `orchestrator.deploy` only when a tag's observed digest changes (ADR-0043). |
@@ -327,7 +371,10 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
    user's `podman.socket` unit (ADR-0023). Fail fast with a clear message if it is missing.
 5. Reconcile: list containers by the `hoster.managed=true` label and compare with persisted
    state. Adopt running containers of the current generation, start or recreate missing ones,
-   remove orphans from interrupted deploys (§5.4).
+   remove orphans from interrupted deploys (§5.4). A container whose `depends_on` services are not
+   yet running and passing is deferred to the periodic reconcile loop, so this step never waits on
+   a probe. The loop starts it as a startup start, with no restart record or backoff, even once its
+   hold runs out; in that case it writes the past-hold event (§5.5, ADR-0056).
 6. Build and store the initial `RouteTable`.
 7. Spawn the Pingora thread and wait for `ExecutionPhase::Running`. If it fails to bind :80/:443,
    exit non-zero so systemd shows the failure.
@@ -365,12 +412,12 @@ stateDiagram-v2
     Validating --> Pulling
     Pulling --> Starting
     Starting --> HealthChecking
-    HealthChecking --> Replacing: all start-first containers healthy
-    Replacing --> Switching: all stop-first services replaced and healthy
+    HealthChecking --> Replacing: start-phase containers healthy (except held-back)
+    Replacing --> Switching: replace-phase and held-back services healthy
     Pulling --> Aborting: pull failed
     Starting --> Aborting: create/start failed
-    HealthChecking --> Aborting: health timeout / container exited
-    Replacing --> Aborting: stop-first start/health failed
+    HealthChecking --> Aborting: health timeout / container exited / create or start failed
+    Replacing --> Aborting: stop-first or held-back start/health failed
     Aborting --> Failed: new containers removed, stopped ones restarted, old generation serving
     Switching --> Draining: RouteTable stored
     Draining --> CleaningUp: old inflight == 0 or drain timeout
@@ -388,20 +435,85 @@ stateDiagram-v2
 | **Received** | Compare target digests with running ones per service. | none | — |
 | **Validating** | Parse the stack, check route collisions against other stacks' routes, allocate new ports for routed services that change, assign generation *n+1*. | Port allocations reserved (persisted). | → `Rejected`, reservations released. |
 | **Pulling** | Pull every changed image `repo@digest`, with credentials if configured. | Images in local storage. | → `Aborting`. |
-| **Starting** | Ensure network `hoster-<stack>`. For each changed **start-first** service, create and start `hoster-<stack>-<svc>-g<n+1>` with labels, the network alias `<svc>`, and `127.0.0.1:<port>` publishing for routed services. | New containers running next to the old ones. | → `Aborting`. |
-| **HealthChecking** | Probe each new start-first container on its loopback port (or by the service's check type) until it passes, it times out, or the container exits. | none | → `Aborting`. |
-| **Replacing** | For each changed **stop-first** service, one at a time (ADR-0048): publish a `RouteTable` with its routes `Unavailable`, stop the old container (keep it), start the new one, probe it. Empty when no stop-first service changed. | Old stop-first containers stopped; new ones running. 503 for their routes meanwhile. | → `Aborting`. |
+| **Starting** | Ensure network `hoster-<stack>`. For each changed **start-phase** service (see below) that is not held back and has no `depends_on` service left to start in this phase, create and start `hoster-<stack>-<svc>-g<n+1>` with labels, the network alias `<svc>`, and `127.0.0.1:<port>` publishing for routed services. | New containers running next to the old ones. | → `Aborting`. |
+| **HealthChecking** | Probe the started start-phase containers concurrently, each by its check (§5.5), until it passes, it times out, or the container exits. As soon as every in-phase dependency of a waiting service has passed, create and start it and probe it too (a start wave). Services held back for the replace phase (below) are not started here. Done when every other start-phase container has passed. | Dependents' containers created and started. | → `Aborting`; dependents not yet started are never created. |
+| **Replacing** | For each changed **replace-phase** service, one at a time in dependency order, name as tie-break (ADR-0048, ADR-0056): publish a `RouteTable` with its routes `Unavailable`, stop the old container (keep it), start the new one, probe it. Start each held-back start-phase service, and probe it, once its dependencies have passed, after re-checking that its unchanged dependencies run; a replacement that depends on one waits for it. After a replacement passes, start again, in dependency order, every unchanged service depending on it that was running when the deployment began and has exited since (no restart record), and probe each within its `start_period` before any changed service depending on it starts. Empty when no replace-phase service and no held-back service exists. | Old stop-first containers stopped; new ones running. 503 for their routes meanwhile. | → `Aborting`. |
 | **Switching** | The deploy task calls `transition(id, Healthy)`. The orchestrator rebuilds `RouteTable` with every changed service's new upstream and `store`s it, then writes all per-service pointers in one transaction. | Traffic moves atomically for the whole stack. | Cannot fail once in memory. A persist failure is fatal and logged; the reconciler fixes it at next start. |
 | **Draining** | Wait for `old_upstream.inflight == 0`, polled every 100 ms, or for the per-stack drain timeout. Keep-alive connections that are idle at Pingora's upstream pool are fine. New requests already go to the new upstream, and the old container is only stopped after this state. | none | Timeout → proceed; long-lived requests (SSE, WebSockets) get cut. |
 | **CleaningUp** | Stop old containers (SIGTERM, then the stop timeout), remove them, release their ports. | Old generation gone. | → `LiveWithWarnings`. The reconciler garbage-collects later. |
-| **Aborting** | Stop and remove the new generation's containers, start any stop-first containers that `Replacing` stopped and restore their routes, release reserved ports. | Back to the previous state. | Leftovers labelled with the aborted generation are GC'd by the reconciler. |
+| **Aborting** | Stop and remove the new generation's containers in reverse creation order, start any stop-first containers that `Replacing` stopped, in the dependency order of the last committed deployment's revision (order only: edges to services without a current pointer are ignored, and nothing waits for running or health; whatever does not come up is left to the reconciler), restore their routes, release reserved ports. | Back to the previous state. | Leftovers labelled with the aborted generation are GC'd by the reconciler. |
 
 Non-routed services (no ports, e.g. a worker) follow the same sequence. They have no upstream to
 swap, so "Switching" only records the new generation and draining is skipped. Services that must
 not run twice at once, e.g. anything holding an exclusive lock on a volume, need a stop-first
-variant, `update = "stop-first"` (ADR-0039). Stop-first services are replaced in the `Replacing`
-step, after every start-first service is healthy and before the single swap, so a deployment is
-always one atomic change to the stack (ADR-0048).
+variant, `update = "stop-first"` (ADR-0039). Stop-first services that have a previous generation
+are replaced in the `Replacing` step, after every start-phase service except held-back ones is
+healthy and before the single swap, so a deployment is always one atomic change to the stack
+(ADR-0048).
+
+**Phases and start waves (ADR-0056).** The changed services split into two phases:
+
+- The **start phase** is every changed start-first service plus every changed stop-first service
+  **without a previous generation**. Such a service has nothing to stop and opens no gap, so a
+  first deploy of a stop-first `db` and an `app` that depends on it starts `db` first.
+- The **replace phase** is every changed stop-first service with a previous generation.
+
+Within the start phase a service starts once each `depends_on` service *in the start phase* has
+passed its probe. Services whose dependencies have all passed start together, so independent
+services still start and probe in parallel. Creates run one at a time, each after an interruption
+check; only the probe waits are dropped on cancel or removal. A stack without `depends_on` behaves
+exactly as before: everything starts in `Starting` and `HealthChecking` only probes.
+
+- A dependency that is unchanged in the deployment must have a running current container, or
+  the deploy fails (`db (unchanged) is not running`). This is checked at the start and again
+  before each held-back start, since an unchanged service may exit on the lost connection while a
+  replaced dependency is down (`app -> cache (unchanged) -> db (replaced)`). Its monitor status is
+  written to the deployment log but not waited on. When the deployment begins it records which
+  unchanged services are running. After a replace-phase service passes, `Replacing` starts again,
+  in dependency order, each unchanged service depending on it (directly or transitively) that was
+  running then and has exited since: no restart record, backoff or event. Each is probed with its
+  own check within its `start_period` before any held-back or replace-phase service depending on
+  it starts, so `app` never starts against a `cache` still starting up; a failed probe aborts the
+  deploy (ADR-0056 2.4). An unchanged service that was already stopped (in reconciler
+  backoff or crash looping) is left to the reconciler and its crash-loop accounting.
+- A dependency that has never run (awaiting its first digest, `ServiceState::AwaitingFirstDigest`)
+  and is not part of the deployment is ignored, as the reconciler ignores a dependency without a
+  current pointer. The dependent deploys with its requested digest and the deployment log says
+  `api has never run; starting web without it`. Holding it instead would drop the digest: `Plan`
+  keeps no pending digest and leaves `awaiting` services out of its target.
+- A start-phase service that depends, directly or transitively, on a changed replace-phase
+  service is **held back**: `Replacing` creates it once that dependency has been replaced and has
+  passed, so it is never probed against the old dependency. Its own old generation keeps serving
+  until `Switching`, so it opens no gap of its own. But gaps close only at `Switching` (or the
+  abort), so its start and probe add to the 503 gap of every replace-phase service already stopped
+  in this deployment, not only its dependency's. A replace-phase service's start-phase dependencies
+  have all passed already, except held-back ones, which `Replacing` starts before it.
+- There is no deploy-wide timeout: a dependency chain takes the sum of its probe times.
+- Inside a deployment, dependencies and checks come from its target revision. Everywhere else (the
+  reconciler and its gate, the monitor, and `Aborting`'s restart order) they come from the
+  revision of the last committed deployment, the source `committed_definition` already uses for
+  routes, never from the latest revision, which after a failed or rejected deploy is not the one
+  running. The monitor moves from `latest_revision` to that source.
+
+The per-deployment log gets one line per wave (`starting db, cache`, `db healthy after 3s 241ms;
+starting app`, `replacing db (stop-first)`, `starting app (held back for db)`), each pass in the
+start phase is recorded (the settle check's too, as `worker healthy after 5s 3ms`), and every
+deployment shows the check in force for each service (`checking db with exec: pg_isready -U app,
+declared in health.exec`) before its probe lines. The ADR-0055 `failed` event names the failing
+service and the dependents that were never started.
+
+The admin UI shows the same model (ADR-0054). The apply preview lists the start order from
+`Plan::start_order`: the start phase as levels of its start waves (each service with the
+start-phase dependencies it waits for), then `Replacing`'s replace-phase and held-back services
+one at a time. The levels are only a summary: a service still starts as soon as its own
+dependencies pass. The stack overview shows each service's `depends_on` and the check in effect
+(`health::CheckSpec`, the precedence of §5.5 in the same words as the deploy's, without ports),
+both from the same source as the reconciler and the monitor (`StackStatus::committed`, the last
+committed deployment's revision, else the active one), and the reconciler's "waiting for db" while
+the container is known not to run. A deployment's page tags these notes `wave`, `check` and
+`probe` by `orchestrator::NoteKind`, which reads the words the engine writes them with
+(`orchestrator::notes::Note`) and the health check's (`ProbeOutput::is_probe`), and shows an exec
+probe's output tail collapsed, read back from the event text by `health::ProbeOutput`.
 
 **Generations and the commit point.** The generation counter is per stack and is assigned to each
 deployment attempt, but it is **recorded per service**: a deployment recreates only the services
@@ -444,12 +556,129 @@ Each persisted state tells the reconciler what to do at startup:
 | Persisted state at crash | Recovery |
 |---|---|
 | `Validating`, `Pulling` | Mark `Failed (interrupted)`, release reservations. |
-| `Starting`, `HealthChecking`, `Replacing` | Remove containers of generation *n+1*, start any stopped stop-first containers of the previous generation, mark `Failed (interrupted)`. The old generation keeps serving. |
+| `Starting`, `HealthChecking`, `Replacing` | Remove containers of generation *n+1* (every start wave's containers are generation *n+1*, so no wave index is persisted), start any stopped stop-first containers of the previous generation, mark `Failed (interrupted)`. The old generation keeps serving; a start-phase stop-first service without a previous generation is simply absent. |
 | `Switching` with the per-service pointers not yet written | The swap never happened in a running proxy (the table is in memory), so treat it like `HealthChecking`. |
 | `Draining`, `CleaningUp` (pointers written) | The new pointers are authoritative: remove the containers of every service's previous generation, mark `Live`. |
 
 The per-service current pointers are the one durable fact that decides which containers are
 routed. Writing them in one transaction is the commit point of a deploy (§5.1).
+
+### 5.5 Health checks and exec probes
+
+The deploy probes and the live monitor use the same check, resolved from the revision (ADR-0038,
+ADR-0051, ADR-0056):
+
+1. A declared probe: `health.http` or `health.tcp` (routed services only), or `health.exec` (any
+   service). At most one may be set, and a `health` table on a non-routed service must set `exec`.
+2. Otherwise `GET /healthz` on the first route's container port for a routed service, and
+   "running and not restarted for 5 s" for the rest. A routed service's timings-only `health`
+   table keeps that default probe with its own timings, and events and the overview call it the
+   default.
+
+On a routed service an exec check is paired with a TCP connect to the first route's loopback port
+and passes only when both do: an in-container check cannot see the published port.
+
+**Config hash.** `exec` adds a key only when set, so no existing hash changes. Changing the argv or
+its timings changes the hash, like any other `health` change.
+
+**What the spike found** (podman 6.1.4, rootless, the shipped unit). A compat exec costs about
+90 ms. Exec has no timeout. Podman removes a finished compat exec session itself after
+`exit_command_delay` (300 s by default, `containers.conf`). hoster never set `Healthcheck` at
+create, so docker-format images got podman's own systemd-timer
+check; `Healthcheck {Test: ["NONE"]}` turns it off (§1.6). (Podman drops the check from OCI-format images
+when it stores them, one reason ADR-0056 does not use it as a default.) While a container is
+stopping, compat inspect still reports `running` (libpod says `stopping`), but an exec create
+already fails.
+
+**Running an exec check.** The exec is created with the argv and no `Env`, `User` or
+`Privileged`, so it runs, without a shell, as the container's user with its environment. Exit 0
+passes. The check **cannot run** only when podman itself could not execute argv[0]: its OCI
+runtime error text (`executable file not found`, `permission denied`, `is a directory`) is then
+the only output, with exit 125, 126 or 127 (§1.6). A
+deploy then aborts at once with a reason built from that text, e.g. "`health.exec` cannot run:
+`pg_isready`: executable file not found". In the monitor it is plain `Unhealthy` with the reason.
+Any other exit, including a 126/127 that a shell or script returns for an inner command
+(`["sh", "-c", "curl …"]` without curl, or a binary a volume provides a moment after start), is an
+ordinary failure retried until the deadline. Exec defaults are `interval = "1s"`,
+`timeout = "5s"`, `healthy_after = 1` and `start_period = "30s"`; http and tcp keep
+`timeout = "2s"`.
+
+- **Output.** It goes into a 4 KiB ring. The last 256 characters go to the deployment log as one
+  escaped line, with podman's `read unixpacket` trailer stripped and secret values of 4 or more
+  characters redacted. The monitor, SSE and the ADR-0055 event log record the exit code only.
+- **Timeout.** The probe fails at `timeout` whether or not the exec ends, and the deploy deadline
+  never waits for it. hoster reads the exec's host PID while the session is `Running`, opens a
+  pidfd for it, re-inspects that the session is still `Running` with that PID, and reads the
+  process group (`getpgid(2)`). The exec is its own process-group leader, and
+  `pidfd_send_signal` reaches only that one process, so hoster checks through the pidfd that the
+  leader is alive and still leads that group, then signals the group with `kill(-pgid)`: SIGTERM,
+  then SIGKILL 1 s later, also when the leader has exited, so a member that ignores SIGTERM goes
+  too (`ESRCH` means every member is gone). The group stays reserved while any member lives, so
+  the only race is the leader and every member exiting before the kill and a new process taking
+  that id as its group, which with Linux's cyclic PID allocation needs the PID space to wrap
+  within the second. The exec's create and start requests are never cut off by the timeout: one
+  still in flight then finishes in the background and the exec is ended as above, because
+  podman runs the command even when the start's connection drops (§1.6). Children that left the group (`setsid`)
+  are not reached and end when the container stops. Rootless podman maps container uids other
+  than root to subuids, where hoster has no `CAP_KILL`, so this succeeds only for an exec running
+  as container root (hoster's own uid); any other exec is abandoned and ends with the container.
+- **Abandoned execs.** `ExecOutcome::TimedOut` carries a `RunningExec` that tells when the exec has
+  ended (killed, finished or gone with its container), which the check counts against the cap.
+  Up to three abandoned execs may run per container, so a probe starts a new
+  exec while earlier ones hang. At that cap a deploy probe waits for one to end (the deadline still
+  applies), and the monitor reports `Unhealthy` ("check stuck: 3 checks still running") without
+  starting another.
+- **Sessions.** After reading a finished session's exit code, hoster removes it, best effort,
+  with `POST /v4.0.0/libpod/exec/{id}/remove` (a raw HTTP call over the podman socket, next to
+  bollard; libpod routes need the version prefix, §1.6), in the background so the probe result
+  never waits for it. A timed-out exec's session is removed once exec inspect no longer reports
+  it running. A 404 is never an error: a JSON body with cause `no such exec session` means the session is
+  already gone (podman's own cleanup, a container restart or removal won the race), and a
+  plain-text `Not Found` means the route is missing (podman before 4.9, e.g. Debian bookworm's
+  4.3.1; hoster then stops trying). Other failures are retried with the next removal (at most 64
+  are kept). Either way podman's `exit_command_delay`
+  bounds the finished sessions per container to about 300 s divided by the probe interval, so
+  there is no podman minimum and no fallback cadence.
+- **Container state.** An exec create that fails with HTTP 500 "container state improper" is
+  reported as "the container is stopping or stopped" (compat inspect would still say `running`),
+  never as a failed probe or as "cannot run". The monitor re-checks that the stack is not busy or
+  being removed before it records a status change from an exec result.
+
+**Monitor start period.** A (re)start the monitor sees (a new container ID or `StartedAt`) resets
+the service's status to `Unknown`. The grace is min(`start_period`, 5 min) from when hoster
+started the container or first saw it running. Within it the monitor probes at the deploy interval
+until the first pass, and failures keep the status `Unknown` and write no ADR-0055 health event.
+After the first pass, or once the grace ends without one, it probes at its cadence (ADR-0038's
+10–30 s) and records changes as before. Because `Unknown` → `Healthy` is no change in
+`health_changed`, the first pass after a restart that followed an "is unhealthy" event records
+"is healthy again" explicitly. A container's first pass after a (re)start wakes the reconciler,
+which may start dependents waiting on it (§4 step 5, ADR-0056). A crash-looping generation is
+still probed at the deploy interval while it runs, until it passes since its (re)start, so that
+pass can end its dependents' hold; while it is down it is looked at at its usual interval. Its
+status stays crash looping until the reconciler ends that.
+
+**Reconciler gate.** Dependencies and checks come from the last committed deployment's revision
+(§5.1). A stopped current container starts once each dependency's current container is running
+and has passed its check since hoster (re)started it or first saw it running; that time lives in
+memory, so after a hoster restart (a self-update, say) a dependency that has run for days starts a
+fresh hold rather than counting from podman's older `StartedAt`. For the settle check a pass means
+running for 5 s, as in deploys, not the monitor's "running" (`Check::live`); the gate counts it as
+passed once that time is up, without waiting for a monitor probe. The gate does not use
+the monitor's current status, so a later flap or a stuck check does not hold dependents.
+
+- A dependency that is **not running** holds its dependents without a bound and at no crash-loop
+  cost; its own restarts and crash loop are the visible events.
+- A dependency that is **running** but has not passed within min(`start_period`, 5 min) stops
+  holding. The dependent starts as it would have without the hold: a restart of an exited
+  container with its restart record and backoff, a deferred startup start (§4 step 5) still as a
+  startup start. Either way one ADR-0055 event, of the existing reconciler-restart kind, records
+  it ("started app although db has not passed its check"), once per hold: further backoff
+  restarts of a crash-looping dependent during the same hold write only their usual events. The
+  hold ends when the dependency passes or is (re)started. The reconcile loop runs a pass when
+  the earliest such hold ends, not only at its next tick.
+
+Containers are created with `Healthcheck {Test: ["NONE"]}`, so podman never runs a check of its
+own.
 
 ## 6. Routing
 
@@ -684,7 +913,10 @@ same card on each stack's overview, and the Events page at `/activity`.
 - **Producers.** Every producer writes explicitly through the orchestrator's `EventLog` handle:
   the orchestrator for deploy outcomes (started, succeeded, failed, rolled back), stack applies
   and removals and secret changes; the reconciler for restarts and crash loops; the health
-  monitor for health changes; the orchestrator again for the ACME task's outcomes as it relays
+  monitor for health changes (none while a (re)started service's status stays `Unknown` in its
+  grace, ADR-0056, §5.5); the reconciler again, under its restart kind, once for a dependent it
+  started past its hold, a deferred startup start included (other deferred starts write
+  nothing); the orchestrator again for the ACME task's outcomes as it relays
   them (issued, renewed, failed, DNS mismatch, §3.3 #2); the supervisor for `hoster started`; the update flow for self-update and rollback. When the event
   describes a state change, the store writes it in the same transaction
   (`Store::insert_event`), so a rolled-back change leaves no event. Secret events carry the

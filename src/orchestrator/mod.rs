@@ -57,6 +57,7 @@ mod event_log;
 mod gc;
 pub mod machine;
 mod monitor;
+mod notes;
 mod plan;
 mod reconcile;
 mod routes;
@@ -73,7 +74,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::{Notify, RwLock, Semaphore, broadcast};
 
-use crate::health::{HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
+use crate::health::{ExecSlots, HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
 use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError, TrackedService};
 use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
@@ -94,8 +95,9 @@ use event_log::OperatorEvents;
 pub use event_log::{EventLog, HosterEvents, Operator, RegistryEvents};
 pub use gc::GcSettings;
 use machine::Event;
-pub use plan::PlanError;
+pub use notes::NoteKind;
 use plan::{Plan, SecretVersions};
+pub use plan::{PlanError, Wave};
 use reconcile::Reconciler;
 pub use reconcile::{RestartPolicy, RestartStats};
 use routes::Routes;
@@ -277,6 +279,8 @@ pub struct ApplyPreview {
     /// Services the apply would redeploy: their (digest, config hash) changes, or they leave
     /// the stack.
     pub changed: Vec<String>,
+    /// The order the redeploy starts them in (ADR-0056 Decision 2).
+    pub start_order: Vec<Wave>,
 }
 
 /// A third-party service's pinned digest (ADR-0025), before and after an apply.
@@ -294,6 +298,8 @@ struct Prepared {
     images: DigestSet,
     warnings: Vec<Diagnostic>,
     changed: Vec<String>,
+    /// The plan, for the preview's start order.
+    plan: Plan,
     noop: bool,
 }
 
@@ -439,6 +445,11 @@ pub struct StackStatus {
     pub name: String,
     /// The active revision.
     pub revision: StackRevision,
+    /// The revision of the last committed deployment when it is not the active one (after a
+    /// failed or rejected deploy, or while one runs): outside a deployment the reconciler and
+    /// the monitor take dependencies and checks from it (ADR-0056 Decision 3). `None` when the
+    /// active revision is the one, or nothing was committed yet.
+    pub committed: Option<StackRevision>,
     pub services: Vec<ServiceStatus>,
     /// The deployment running now, with its state.
     pub active: Option<(DeploymentId, DeploymentState)>,
@@ -467,6 +478,9 @@ pub struct ServiceStatus {
     pub restarts: RestartStats,
     /// The running generation's liveness and probe statistics (ADR-0038, ADR-0045).
     pub health: HealthStats,
+    /// The `depends_on` services the reconciler waits for before it starts the stopped
+    /// container ("waiting for db", ADR-0056); empty when it waits for nothing.
+    pub waiting_for: Vec<String>,
 }
 
 impl ServiceStatus {
@@ -507,6 +521,9 @@ pub struct Orchestrator<R> {
     /// Signalled when a stack's removal starts or a deployment is cancelled, so the deploy
     /// task stops waiting and aborts.
     interrupt: Notify,
+    /// Signalled when a container passes its check for the first time since its (re)start,
+    /// so the reconcile loop starts the services waiting for it (ADR-0056).
+    reconcile_wake: Notify,
     /// Bounds the image pulls running at once, over every stack (ADR-0040).
     pulls: Semaphore,
     /// Orders image pulls against image removal (ADR-0041): a deployment holds it shared while
@@ -518,6 +535,8 @@ pub struct Orchestrator<R> {
     watchlist: Mutex<monitor::Watchlist>,
     /// Carries out the health probes, of deployments and of the health monitor.
     prober: Arc<dyn Prober>,
+    /// Keeps exec probes of one container apart and counts its abandoned ones (ADR-0056).
+    execs: ExecSlots,
     /// Status changes for open UI pages (architecture §3.3 #5).
     ui_events: broadcast::Sender<UiEvent>,
     /// Records events and announces them on `ui_events` (ADR-0055).
@@ -705,11 +724,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }),
             finished: Notify::new(),
             interrupt: Notify::new(),
+            reconcile_wake: Notify::new(),
             pulls,
             images: RwLock::new(()),
             reconciler: Mutex::default(),
             watchlist: Mutex::default(),
             prober,
+            execs: ExecSlots::default(),
             ui_events,
             events,
         })
@@ -743,6 +764,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             warnings: prepared.warnings,
             pins,
             changed: prepared.changed,
+            start_order: prepared.plan.start_order(),
         })
     }
 
@@ -914,6 +936,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             warnings,
             changed,
             noop,
+            ..
         } = prepared;
         let name = definition.name.to_string();
         let (revision, event) = self
@@ -964,6 +987,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             images,
             warnings: parsed.warnings,
             changed,
+            plan,
             noop,
         })
     }
@@ -1435,6 +1459,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         let health = pointer
                             .map(|p| self.health_stats(&stack.name, &p.service, p.generation))
                             .unwrap_or_default();
+                        let waiting_for = pointer
+                            .map(|p| self.waiting_for(&stack.name, &p.service, p.generation))
+                            .unwrap_or_default();
                         let state = match pointer {
                             Some(p) => ServiceState::Running {
                                 generation: p.generation,
@@ -1454,6 +1481,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                             state,
                             restarts,
                             health,
+                            waiting_for,
                         }
                     })
                     .collect(),
@@ -1485,9 +1513,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .store
                 .rejections(&stack.name, Self::SHOWN_REJECTIONS)
                 .await?;
+            let committed = self
+                .committed_revision(&stack.name)
+                .await?
+                .filter(|committed| committed.id != revision.id);
             out.push(StackStatus {
                 rejections,
                 name: stack.name,
+                committed,
                 revision,
                 services,
                 active,
@@ -1542,8 +1575,18 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .deployment(id)
                 .await?
                 .ok_or(OrchestratorError::UnknownDeployment(id))?;
-            if deployment.state.is_terminal() || !self.holds(&deployment.stack, id) {
+            if deployment.state.is_terminal() {
                 return Ok(deployment);
+            }
+            if !self.holds(&deployment.stack, id) {
+                // It may have ended and let go of its slot since the record was read, which
+                // would make this copy a state it has already left. The slot is let go after
+                // the last state is stored, so a second read is what it ended as.
+                return self
+                    .store
+                    .deployment(id)
+                    .await?
+                    .ok_or(OrchestratorError::UnknownDeployment(id));
             }
             notified.await;
         }

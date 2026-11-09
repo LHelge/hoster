@@ -782,6 +782,7 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .plan-text a strong { color: var(--link); }
 .plan-note { color: var(--muted); }
 .plan-detail { display: block; color: var(--muted); }
+.start-order .plan-mark { width: auto; min-width: 2ch; color: var(--accent); text-align: right; }
 .plan-detail code { color: var(--text-2); font-size: inherit; }
 
 /* Pre-flight checks and problems: ✓ passed, ! a warning, ✗ a problem, each with its source line. */
@@ -1030,7 +1031,9 @@ table.services tbody + tbody > tr:first-child > * { border-top: 1px solid var(--
 table.services tbody > tr:not(:last-child) > * { border-bottom: 0; }
 table.services tbody > tr.row-muted > * { padding-top: 4px; }
 .service-name { display: block; font-weight: 600; }
-.service-container, .service-digest { display: block; margin-top: 2px; color: var(--muted); font: 11.5px/1.5 var(--mono); }
+.service-container, .service-digest, .service-deps, .service-check { display: block; margin-top: 2px; color: var(--muted); font: 11.5px/1.5 var(--mono); }
+.service-check { max-width: 28ch; overflow-wrap: anywhere; }
+.service-check-source { color: var(--text-2); }
 .row-muted td { color: var(--muted); font-size: 12px; }
 .row-muted code { color: var(--muted); }
 td.nowrap, .nowrap { white-space: nowrap; }
@@ -1192,6 +1195,21 @@ dl.kv code { font-size: inherit; }
 dl.kv code.wrap { overflow-wrap: anywhere; }
 table.events { min-width: 640px; }
 table.events .shrink { width: 1%; white-space: nowrap; }
+table.events .event-kind { margin: 0 4px 0 0; }
+.event-message { overflow-wrap: anywhere; }
+.event-output { margin-top: 4px; }
+.event-output summary { color: var(--muted); font: 11.5px/1.5 var(--mono); cursor: pointer; }
+.event-output pre {
+  margin: 4px 0 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--inset);
+  color: var(--text);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 @media (max-width: 760px) {
   .row-ghost, .deployment-actions button, .row-button.row-danger,

@@ -1,7 +1,9 @@
 //! The `/apply` page (ADR-0027, ADR-0049), laid out as the design's "New stack" (epic 8bf): the
 //! stack file in an editor on the left, and on the right an aside that `POST /apply/preview`
 //! fills with the **Plan** (what appears `+`, changes `~`, goes away `−` or stays `=`), the
-//! **Pre-flight** checks the preview passed with its warnings (`!`), and the confirm button. The
+//! **Start order** of the services it (re)deploys (ADR-0056: start waves by `depends_on`, then
+//! the stop-first replacements one at a time), the **Pre-flight** checks the preview passed
+//! with its warnings (`!`), and the confirm button. The
 //! diff of the stack file goes into a full-width card under both, as an out-of-band swap, so the
 //! aside can stay in view while the editor scrolls. When the file fails a check, the aside shows
 //! the problems in a fail-tinted Pre-flight card and the diff is cleared.
@@ -19,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use similar::{ChangeTag, TextDiff};
 
 use super::{Outcome, Problem, StackView};
-use crate::orchestrator::{ApplyPreview, PinChange};
+use crate::orchestrator::{ApplyPreview, PinChange, Wave};
 use crate::stack::Stack;
 use crate::web::pages::{Layout, Page};
 
@@ -153,6 +155,54 @@ impl Step {
     }
 }
 
+/// One line of the start order: `start db, cache`, `replace db`, with what it waits for.
+#[derive(Debug, PartialEq, Eq)]
+struct OrderLine {
+    verb: &'static str,
+    services: Vec<String>,
+    note: Option<String>,
+}
+
+impl From<&Wave> for OrderLine {
+    fn from(wave: &Wave) -> Self {
+        let names = |names: &[crate::stack::Name]| {
+            names.iter().map(ToString::to_string).collect::<Vec<_>>()
+        };
+        match wave {
+            Wave::Start(services) => {
+                let waits: Vec<String> = services
+                    .iter()
+                    .filter(|(_, after)| !after.is_empty())
+                    .map(|(service, after)| format!("{service} after {}", names(after).join(", ")))
+                    .collect();
+                Self {
+                    verb: "start",
+                    services: services.keys().map(ToString::to_string).collect(),
+                    note: (!waits.is_empty()).then(|| waits.join("; ")),
+                }
+            }
+            Wave::Replace(service) => Self {
+                verb: "replace",
+                services: vec![service.to_string()],
+                note: Some("stop-first: down until the new one passes".to_owned()),
+            },
+            Wave::HeldBack { service, behind } => Self {
+                verb: "start",
+                services: vec![service.to_string()],
+                note: Some(format!(
+                    "held back until {} {}",
+                    names(behind).join(", "),
+                    if behind.len() == 1 {
+                        "is replaced and passes"
+                    } else {
+                        "are replaced and pass"
+                    }
+                )),
+            },
+        }
+    }
+}
+
 /// What a stack file declares that the plan compares: its services and routes.
 #[derive(Debug, Default)]
 struct Shape {
@@ -204,6 +254,8 @@ pub(super) struct PreviewView {
     stack: String,
     /// What the apply does, in plan order: the stack, its services, its routes.
     steps: Vec<Step>,
+    /// The order the redeploy starts the services in.
+    order: Vec<OrderLine>,
     /// The pre-flight checks the file passed.
     checks: Vec<String>,
     warnings: Vec<Problem>,
@@ -285,6 +337,7 @@ impl PreviewView {
 
         Self {
             steps,
+            order: preview.start_order.iter().map(OrderLine::from).collect(),
             checks,
             warnings,
             pins,
@@ -465,6 +518,8 @@ impl FileDiff {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn names(names: &[&str]) -> BTreeSet<String> {
@@ -544,6 +599,70 @@ mod tests {
         // A new stack: every line is added.
         let created = FileDiff::between("", "a\nb\n");
         assert!(created.hunks[0].iter().all(|l| l.sign == '+'));
+    }
+
+    #[test]
+    fn order_lines_say_what_each_service_waits_for() {
+        let name = |n: &str| n.parse::<crate::stack::Name>().unwrap();
+        let line = |verb, services: &[&str], note: Option<&str>| OrderLine {
+            verb,
+            services: services.iter().map(|&s| s.to_owned()).collect(),
+            note: note.map(ToOwned::to_owned),
+        };
+        let table = [
+            (
+                Wave::Start(BTreeMap::from([
+                    (name("cache"), Vec::new()),
+                    (name("db"), Vec::new()),
+                ])),
+                line("start", &["cache", "db"], None),
+            ),
+            (
+                Wave::Start(BTreeMap::from([
+                    (name("app"), vec![name("cache"), name("db")]),
+                    (name("mail"), Vec::new()),
+                    (name("worker"), vec![name("db")]),
+                ])),
+                line(
+                    "start",
+                    &["app", "mail", "worker"],
+                    Some("app after cache, db; worker after db"),
+                ),
+            ),
+            (
+                Wave::Replace(name("db")),
+                line(
+                    "replace",
+                    &["db"],
+                    Some("stop-first: down until the new one passes"),
+                ),
+            ),
+            (
+                Wave::HeldBack {
+                    service: name("app"),
+                    behind: vec![name("db")],
+                },
+                line(
+                    "start",
+                    &["app"],
+                    Some("held back until db is replaced and passes"),
+                ),
+            ),
+            (
+                Wave::HeldBack {
+                    service: name("app"),
+                    behind: vec![name("cache"), name("db")],
+                },
+                line(
+                    "start",
+                    &["app"],
+                    Some("held back until cache, db are replaced and pass"),
+                ),
+            ),
+        ];
+        for (wave, expected) in table {
+            assert_eq!(OrderLine::from(&wave), expected, "{wave:?}");
+        }
     }
 
     #[test]

@@ -12,6 +12,16 @@
 //!   Each restart, and a service entering or leaving crash loop, is written to the event log
 //!   (ADR-0055); starting the current generation at startup is not a restart and writes none.
 //!
+//! **Dependencies (ADR-0056 Decision 3).** A stopped current container starts only once each
+//! `depends_on` service's current container runs and has passed its check since hoster
+//! (re)started it or first saw it running ([`Orchestrator::readiness`]); dependencies and checks
+//! come from the last committed deployment's revision, and one without a pointer is ignored. A
+//! dependency that is not running holds its dependents without a bound and at no crash-loop
+//! cost ("waiting for db"); one that runs but has not passed within min(`start_period`, 5 min)
+//! stops holding, and the start that follows writes one reconciler-restart event per hold. The
+//! startup pass starts only containers that are ready and defers the rest to the periodic pass,
+//! which starts them as startup starts (no restart record or backoff), past their hold too.
+//!
 //! The per-service current pointers decide everything (§5.4): a container of the generation a
 //! pointer names is kept, any other generation of a known stack is removed. A container whose
 //! `hoster.*` labels are missing or do not match its name is not hoster's; it is left alone
@@ -32,12 +42,13 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::event_log::{DeployEvents, ServiceEvents};
+use super::monitor::Readiness;
 use super::{Orchestrator, Result};
 use crate::runtime::{
     ContainerInfo, ContainerRuntime, ContainerState, NetworkSpec, ObjectKind, RuntimeError,
     ServiceGeneration, label,
 };
-use crate::stack::{DEFAULT_STOP_TIMEOUT, Name};
+use crate::stack::{DEFAULT_STOP_TIMEOUT, Name, Stack};
 use crate::store::{Deployment, DeploymentId, DeploymentState, ServicePointer};
 
 /// How the reconciler restarts crashed containers (ADR-0028).
@@ -187,6 +198,17 @@ pub(super) struct Reconciler {
     /// What was already warned about (foreign objects, missing containers), so the loop does
     /// not repeat it every pass.
     warned: BTreeSet<String>,
+    /// Stopped current containers held for their dependencies, with what they wait for.
+    waiting: BTreeMap<ServiceGeneration, Vec<Name>>,
+    /// When the earliest hold on a waiting container ends without its dependency passing: the
+    /// reconcile loop runs a pass then (ADR-0056 Decision 3).
+    hold_ends: BTreeMap<ServiceGeneration, Instant>,
+    /// Stopped current containers the startup pass left to the periodic one, which starts
+    /// them as startup starts.
+    deferred: BTreeSet<ServiceGeneration>,
+    /// The holds whose end without a pass was written to the event log, by dependent: each
+    /// dependency with the end of its hold, so one hold writes one event.
+    past_holds: BTreeMap<ServiceGeneration, BTreeMap<Name, Instant>>,
 }
 
 impl Reconciler {
@@ -203,6 +225,22 @@ pub struct RestartStats {
     pub restarts: u32,
     /// 5 restarts within 10 minutes (ADR-0028).
     pub crash_looping: bool,
+}
+
+/// What the gate says about starting a stopped container (ADR-0056 Decision 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Gate {
+    /// Every dependency with a current container runs and has passed since its (re)start.
+    Ready,
+    /// Waiting for these: not running, or running and within their grace. `until` is when the
+    /// earliest hold on a running one ends; none while only stopped ones hold it.
+    Hold {
+        waiting: Vec<Name>,
+        until: Option<Instant>,
+    },
+    /// These run but have not passed within their grace (each with the end of its hold):
+    /// they no longer hold the container.
+    PastHold(Vec<(Name, Instant)>),
 }
 
 /// Which pass is running: the startup one starts stopped containers at once and resolves
@@ -224,6 +262,8 @@ pub struct ReconcileReport {
     pub started: Vec<String>,
     /// Exited containers whose restart waits for the backoff.
     pub backing_off: Vec<String>,
+    /// Stopped containers waiting for their `depends_on` services (ADR-0056).
+    pub waiting: Vec<String>,
     /// Containers of old or aborted generations, or of removed stacks.
     pub removed: Vec<String>,
     /// Networks of removed stacks.
@@ -281,17 +321,22 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 
     /// The reconcile loop (ADR-0028): a pass every [`RestartPolicy::interval`], and early when
-    /// a backed-off restart falls due. Ends when `cancel` fires.
+    /// a backed-off restart falls due, a hold ends, or a dependency passes its check (ADR-0056).
+    /// Ends when `cancel` fires.
     pub async fn run_reconciler(self: Arc<Self>, cancel: CancellationToken) {
         let interval = self.settings.restart.interval;
         let mut tick = Instant::now() + interval;
         loop {
-            let wake = self
-                .next_restart(Instant::now())
-                .map_or(tick, |at| at.min(tick));
+            let now = Instant::now();
+            let wake = [self.next_restart(now), self.next_hold_end(now)]
+                .into_iter()
+                .flatten()
+                .fold(tick, Instant::min);
             tokio::select! {
                 () = cancel.cancelled() => break,
                 () = tokio::time::sleep_until(wake) => {}
+                // A dependency passed its check: its dependents may start (ADR-0056).
+                () = self.reconcile_wake.notified() => {}
             }
             let now = Instant::now();
             if now >= tick {
@@ -327,12 +372,37 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .unwrap_or_default()
     }
 
+    /// The `depends_on` services the stopped container of `stack`'s `service` at `generation`
+    /// waits for, if it waits (ADR-0056).
+    pub(super) fn waiting_for(&self, stack: &str, service: &str, generation: u32) -> Vec<String> {
+        self.reconciler()
+            .waiting
+            .iter()
+            .find(|(key, _)| {
+                key.stack.as_ref() == stack
+                    && key.service.as_ref() == service
+                    && key.generation == generation
+            })
+            .map(|(_, deps)| deps.iter().map(ToString::to_string).collect())
+            .unwrap_or_default()
+    }
+
     /// The earliest backed-off restart still ahead of `now`.
     fn next_restart(&self, now: Instant) -> Option<Instant> {
         self.reconciler()
             .restarts
             .values()
             .filter_map(|r| r.due_after(now))
+            .min()
+    }
+
+    /// The earliest end of a hold still ahead of `now`.
+    pub(super) fn next_hold_end(&self, now: Instant) -> Option<Instant> {
+        self.reconciler()
+            .hold_ends
+            .values()
+            .copied()
+            .filter(|&at| at > now)
             .min()
     }
 
@@ -432,9 +502,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             )
             .await?;
         }
-        self.reconciler()
-            .restarts
-            .retain(|key, _| current.contains(key) || skipped.contains(key.stack.as_ref()));
+        let keep =
+            |key: &ServiceGeneration| current.contains(key) || skipped.contains(key.stack.as_ref());
+        let mut reconciler = self.reconciler();
+        reconciler.restarts.retain(|key, _| keep(key));
+        reconciler.waiting.retain(|key, _| keep(key));
+        reconciler.hold_ends.retain(|key, _| keep(key));
+        reconciler.deferred.retain(|key| keep(key));
+        reconciler.past_holds.retain(|key, _| keep(key));
         Ok(())
     }
 
@@ -473,6 +548,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
 
         let pointers = self.store.services(stack).await?;
+        let definition = self.committed_definition(stack).await?;
         let (keep, old): (Vec<_>, Vec<_>) = containers
             .iter()
             .partition(|(generation, _)| is_current(&pointers, generation));
@@ -484,24 +560,121 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
         for (generation, container) in keep {
             current.insert(generation.clone());
-            self.keep_running(pass, now, generation, container, report)
+            let gate = if container.state.is_running() {
+                Gate::Ready
+            } else {
+                self.gate(
+                    definition.as_deref(),
+                    generation,
+                    &pointers,
+                    &containers,
+                    now,
+                )
+            };
+            self.keep_running(pass, now, generation, container, gate, report)
                 .await;
         }
         self.warn_missing(stack, &pointers, &containers);
         Ok(())
     }
 
-    /// Keeps a current-generation container running: adopts it, or (re)starts it.
+    /// Whether the stopped current container of `generation` may start (ADR-0056 Decision 3):
+    /// each `depends_on` service of the committed `definition` with a current pointer must
+    /// have a running container that passed its check since its (re)start, or have run for
+    /// its whole grace without passing.
+    fn gate(
+        &self,
+        definition: Option<&Stack>,
+        generation: &ServiceGeneration,
+        pointers: &[ServicePointer],
+        containers: &[(ServiceGeneration, ContainerInfo)],
+        now: Instant,
+    ) -> Gate {
+        let Some(definition) = definition else {
+            return Gate::Ready;
+        };
+        let mut hold = Vec::new();
+        let mut hold_until: Option<Instant> = None;
+        let mut past = Vec::new();
+        for dependency in definition.dependencies(&generation.service) {
+            // A dependency that never ran is ignored.
+            let Some(pointer) = pointers.iter().find(|p| p.service == dependency.as_ref()) else {
+                continue;
+            };
+            let running = containers.iter().find(|(g, c)| {
+                g.service == *dependency
+                    && g.generation == pointer.generation
+                    && c.state.is_running()
+            });
+            let Some((key, container)) = running else {
+                hold.push(dependency.clone());
+                continue;
+            };
+            let check = self.check_for(&definition.services[dependency], &pointer.ports);
+            match self.readiness(key, &check, container, now) {
+                Readiness::Passed => {}
+                Readiness::Pending { until } if now < until => {
+                    hold.push(dependency.clone());
+                    hold_until = Some(hold_until.map_or(until, |at| at.min(until)));
+                }
+                Readiness::Pending { until } => past.push((dependency.clone(), until)),
+            }
+        }
+        if !hold.is_empty() {
+            Gate::Hold {
+                waiting: hold,
+                until: hold_until,
+            }
+        } else if !past.is_empty() {
+            Gate::PastHold(past)
+        } else {
+            Gate::Ready
+        }
+    }
+
+    /// Writes the event of a start past its hold on `past`, once per hold (ADR-0056).
+    async fn record_past_hold(&self, generation: &ServiceGeneration, past: &[(Name, Instant)]) {
+        let new = {
+            let mut reconciler = self.reconciler();
+            let recorded = reconciler.past_holds.entry(generation.clone()).or_default();
+            let new = past
+                .iter()
+                .any(|(dependency, until)| recorded.get(dependency) != Some(until));
+            recorded.extend(past.iter().cloned());
+            new
+        };
+        if new {
+            let dependencies: Vec<Name> = past.iter().map(|(d, _)| d.clone()).collect();
+            let (stack, service, gen_no) = fields(generation);
+            tracing::warn!(
+                stack, service, generation = gen_no, waited_for = ?dependencies,
+                "starting a container although its dependencies have not passed their checks"
+            );
+            self.events
+                .record(ServiceEvents::from(generation).started_past_hold(&dependencies))
+                .await;
+        }
+    }
+
+    /// Keeps a current-generation container running: adopts it, or (re)starts it once `gate`
+    /// lets it.
     async fn keep_running(
         &self,
         pass: Pass,
         now: Instant,
         generation: &ServiceGeneration,
         container: &ContainerInfo,
+        gate: Gate,
         report: &mut ReconcileReport,
     ) {
         let (stack, service, gen_no) = fields(generation);
         if container.state.is_running() {
+            {
+                let mut reconciler = self.reconciler();
+                reconciler.waiting.remove(generation);
+                reconciler.hold_ends.remove(generation);
+                reconciler.deferred.remove(generation);
+            }
             let running = self
                 .reconciler()
                 .restarts
@@ -526,18 +699,66 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         if container.state == ContainerState::Removing {
             return;
         }
-        if pass == Pass::Startup {
+        let past = match gate {
+            Gate::Hold {
+                waiting: dependencies,
+                until,
+            } => {
+                tracing::debug!(
+                    stack, service, generation = gen_no, waiting_for = ?dependencies,
+                    "not starting a container whose dependencies are not ready"
+                );
+                let mut reconciler = self.reconciler();
+                reconciler.waiting.insert(generation.clone(), dependencies);
+                match until {
+                    Some(until) => reconciler.hold_ends.insert(generation.clone(), until),
+                    None => reconciler.hold_ends.remove(generation),
+                };
+                if pass == Pass::Startup {
+                    reconciler.deferred.insert(generation.clone());
+                }
+                report.waiting.push(container.name.clone());
+                return;
+            }
+            Gate::PastHold(_) if pass == Pass::Startup => {
+                let mut reconciler = self.reconciler();
+                reconciler.hold_ends.remove(generation);
+                reconciler.deferred.insert(generation.clone());
+                report.waiting.push(container.name.clone());
+                return;
+            }
+            Gate::PastHold(past) => past,
+            Gate::Ready => Vec::new(),
+        };
+        let deferred = {
+            let mut reconciler = self.reconciler();
+            reconciler.waiting.remove(generation);
+            reconciler.hold_ends.remove(generation);
+            reconciler.deferred.remove(generation)
+        };
+        if pass == Pass::Startup || deferred {
             tracing::info!(
                 stack, service, generation = gen_no, container = %container.name,
                 state = %container.state, "starting stopped container of the current generation"
             );
             match self.runtime.start(&container.id).await {
-                Ok(()) => report.started.push(container.name.clone()),
-                Err(err) => self.problem(
-                    generation,
-                    format!("cannot start {}: {err}", container.name),
-                    report,
-                ),
+                Ok(()) => {
+                    report.started.push(container.name.clone());
+                    self.restarted(generation, now);
+                    if !past.is_empty() {
+                        self.record_past_hold(generation, &past).await;
+                    }
+                }
+                Err(err) => {
+                    if deferred {
+                        self.reconciler().deferred.insert(generation.clone());
+                    }
+                    self.problem(
+                        generation,
+                        format!("cannot start {}: {err}", container.name),
+                        report,
+                    );
+                }
             }
             return;
         }
@@ -587,9 +808,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     next_backoff = ?backoff, "restarted exited container"
                 );
                 report.started.push(container.name.clone());
+                self.restarted(generation, now);
                 self.events
                     .record(ServiceEvents::from(generation).restarted(exited, total))
                     .await;
+                if !past.is_empty() {
+                    self.record_past_hold(generation, &past).await;
+                }
             }
             Err(err) => self.problem(
                 generation,

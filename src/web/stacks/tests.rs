@@ -9,7 +9,7 @@ use http_body_util::BodyExt as _;
 
 use super::*;
 use crate::health::HealthStats;
-use crate::orchestrator::{PinChange, RestartStats, ServiceState, ServiceStatus};
+use crate::orchestrator::{PinChange, RestartStats, ServiceState, ServiceStatus, Wave};
 use crate::runtime::VolumeMount;
 use crate::stack::Stack;
 use crate::store::{ContentHash, RevisionId, StackRevision};
@@ -69,6 +69,7 @@ pub(super) fn deployment(id: i64, state: DeploymentState) -> Deployment {
 pub(crate) fn notes_status() -> StackStatus {
     StackStatus {
         name: "notes".into(),
+        committed: None,
         revision: revision("notes", 1, NOTES),
         services: vec![
             ServiceStatus {
@@ -81,6 +82,7 @@ pub(crate) fn notes_status() -> StackStatus {
                 },
                 restarts: RestartStats::default(),
                 health: HealthStats::default(),
+                waiting_for: Vec::new(),
             },
             ServiceStatus {
                 name: "storage".into(),
@@ -89,6 +91,7 @@ pub(crate) fn notes_status() -> StackStatus {
                 state: ServiceState::NotDeployed,
                 restarts: RestartStats::default(),
                 health: HealthStats::default(),
+                waiting_for: Vec::new(),
             },
         ],
         active: None,
@@ -149,6 +152,8 @@ pub struct FakeStacks {
     pub deployments: Mutex<Vec<(Deployment, Vec<DeploymentEvent>)>>,
     /// The services a preview or apply reports as changing.
     pub changed: Mutex<Vec<String>>,
+    /// The start order a preview reports.
+    pub start_order: Mutex<Vec<Wave>>,
     /// The state a deploy answers with.
     pub deploy_state: Mutex<DeploymentState>,
     /// The secrets of `notes`.
@@ -176,6 +181,7 @@ impl Default for FakeStacks {
             stacks: Mutex::new(vec![notes_status()]),
             deployments: Mutex::new(Vec::new()),
             changed: Mutex::new(vec!["api".into()]),
+            start_order: Mutex::new(Vec::new()),
             deploy_state: Mutex::new(DeploymentState::Received),
             secrets: Mutex::new(notes_secrets()),
             tags_moved: Mutex::new(true),
@@ -239,6 +245,7 @@ impl StackControl for FakeStacks {
             stack,
             warnings: parsed.warnings,
             changed: self.changed.lock().unwrap().clone(),
+            start_order: self.start_order.lock().unwrap().clone(),
         })
     }
 
@@ -490,6 +497,7 @@ impl StackControl for FakeStacks {
             } else {
                 Vec::new()
             },
+            start_order: Vec::new(),
         })
     }
 
@@ -984,6 +992,216 @@ async fn the_services_table_lists_the_containers_with_ports_and_uptime() {
     assert!(html.contains(r#"class="log-chip""#), "{html}");
     assert!(html.contains("could not be listed"), "{html}");
     assert!(!html.contains("has no container yet"), "{html}");
+}
+
+/// ADR-0056: each service shows its `depends_on`, the health check in effect (declared or the
+/// default, with its command or path) and the dependencies the reconciler waits for.
+#[tokio::test]
+async fn the_services_table_shows_dependencies_checks_and_waits() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let toml = format!(
+        "{}\n[services.storage.health]\nexec = [\"pg_isready\", \"-U\", \"app\"]\n",
+        NOTES.replace(
+            "[services.storage]\n",
+            "[services.storage]\ndepends_on = [\"api\"]\n"
+        )
+    );
+    {
+        let mut stacks = app.stacks.stacks.lock().unwrap();
+        let notes = &mut stacks[0];
+        notes.revision = revision("notes", 2, &toml);
+        let storage = &mut notes.services[1];
+        storage.state = ServiceState::Running {
+            generation: 1,
+            digest: digest(2),
+        };
+        storage.waiting_for = vec!["api".into()];
+    }
+    start_container(
+        &app,
+        "notes",
+        "api",
+        2,
+        &[(20004, 8080)],
+        std::time::Duration::ZERO,
+    )
+    .await;
+
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    // storage names its dependency under its name; api depends on nothing.
+    assert!(
+        html.contains(r#"<span class="mono service-name">storage</span><span class="service-deps">depends on api</span>"#),
+        "{html}"
+    );
+    assert_eq!(html.matches("service-deps").count(), 1, "{html}");
+    // api gets the routed default, storage its declared exec check.
+    assert!(
+        html.contains(r#"<span class="service-check" title="the default for a routed service without health"><span class="visually-hidden">health check </span>GET /healthz on container port 8080 <span class="service-check-source">· default</span></span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="service-check" title="declared in health.exec"><span class="visually-hidden">health check </span>exec: pg_isready -U app <span class="service-check-source">· declared</span></span>"#),
+        "{html}"
+    );
+    // The reconciler holds storage back until api runs and passes.
+    assert!(
+        html.contains(&format!(
+            r#"<span class="pill pill-warn" title="stopped: the reconciler starts it once api runs and passes its check">{}waiting for api</span>"#,
+            crate::web::Icon::Warning
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="visually-hidden">: stopped: the reconciler starts it once api runs and passes its check</span>"#),
+        "{html}"
+    );
+}
+
+/// ADR-0056: notes within a state span the From and To columns and say what they are; an exec
+/// probe's output is collapsed under its result.
+#[tokio::test]
+async fn the_deployment_page_shows_waves_checks_and_probe_output() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let at = Timestamp::now();
+    let event = |from: DeploymentState, to: DeploymentState, message: &str| DeploymentEvent {
+        from: Some(from),
+        to,
+        message: Some(message.into()),
+        at,
+    };
+    let checking = DeploymentState::HealthChecking;
+    let events = vec![
+        event(
+            DeploymentState::Pulling,
+            DeploymentState::Starting,
+            "pulled 2 images",
+        ),
+        event(
+            DeploymentState::Starting,
+            DeploymentState::Starting,
+            "starting db, cache",
+        ),
+        event(DeploymentState::Starting, checking, ""),
+        event(
+            checking,
+            checking,
+            "checking db with exec: pg_isready -U app, declared in health.exec",
+        ),
+        event(
+            checking,
+            checking,
+            r#"health probe exec: pg_isready -U app: exit 2, output "/run/postgresql:5432 - no response
+<retrying>""#,
+        ),
+        event(
+            checking,
+            checking,
+            "health check exec: pg_isready -U app passed 1 time(s) in a row after 3s 241ms",
+        ),
+        event(
+            checking,
+            checking,
+            "db healthy after 3s 241ms; starting app",
+        ),
+        event(checking, checking, "health probe exec: true: exit 1"),
+        event(
+            checking,
+            checking,
+            r#"health probe exec: x: exit 1, output "bad \q escape""#,
+        ),
+        event(
+            checking,
+            checking,
+            "`health.exec` cannot run: `pg_isready`: executable file not found in $PATH",
+        ),
+        event(
+            DeploymentState::Replacing,
+            DeploymentState::Replacing,
+            "replacing db (stop-first)",
+        ),
+        event(
+            DeploymentState::Replacing,
+            DeploymentState::Replacing,
+            "starting app (held back for db)",
+        ),
+        event(checking, checking, "drain timed out"),
+    ];
+    app.stacks
+        .deployments
+        .lock()
+        .unwrap()
+        .push((deployment(8, DeploymentState::HealthChecking), events));
+
+    let html = body(
+        app.get("/stacks/notes/deployments/8", Some(&browser.cookie))
+            .await,
+    )
+    .await;
+    // A transition keeps its From and To.
+    assert!(
+        html.contains(r#"<td class="mono shrink">Pulling</td><td class="mono shrink">Starting</td><td><span class="event-message">pulled 2 images</span></td>"#),
+        "{html}"
+    );
+    // Notes span both columns and carry their kind.
+    assert!(html.contains(r#"<tr class="event-note">"#), "{html}");
+    assert!(
+        html.contains(r#"<td class="mono shrink muted" colspan="2"><span class="visually-hidden">note in </span>Starting</td><td><span class="tag event-kind">wave</span> <span class="event-message">starting db, cache</span></td>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="tag event-kind">check</span> <span class="event-message">checking db with exec: pg_isready -U app, declared in health.exec</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="tag event-kind">wave</span> <span class="event-message">db healthy after 3s 241ms; starting app</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="tag event-kind">probe</span> <span class="event-message">health check exec: pg_isready -U app passed"#),
+        "{html}"
+    );
+    // The probe's output is unescaped (then escaped as HTML) and collapsed.
+    assert!(
+        html.contains("<span class=\"tag event-kind\">probe</span> <span class=\"event-message\">health probe exec: pg_isready -U app: exit 2</span><details class=\"event-output\"><summary>output</summary><pre>/run/postgresql:5432 - no response\n&#60;retrying&#62;</pre></details>"),
+        "{html}"
+    );
+    // Only the probe that printed something has an output; one whose tail does not read back
+    // is shown as written.
+    assert_eq!(html.matches("event-output").count(), 1, "{html}");
+    assert!(
+        html.contains(r#"<span class="tag event-kind">probe</span> <span class="event-message">health probe exec: true: exit 1</span></td>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="tag event-kind">probe</span> <span class="event-message">health probe exec: x: exit 1, output &#34;bad \q escape&#34;</span></td>"#),
+        "{html}"
+    );
+    // Why the probes stopped is a probe event too.
+    assert!(
+        html.contains(r#"<span class="tag event-kind">probe</span> <span class="event-message">`health.exec` cannot run: "#),
+        "{html}"
+    );
+    // Replacements and held-back starts are waves.
+    for wave in [
+        "replacing db (stop-first)",
+        "starting app (held back for db)",
+    ] {
+        assert!(
+            html.contains(&format!(
+                r#"<span class="tag event-kind">wave</span> <span class="event-message">{wave}</span>"#
+            )),
+            "{html}"
+        );
+    }
+    // A note of another kind gets no tag.
+    assert!(
+        html.contains(
+            r#"HealthChecking</td><td><span class="event-message">drain timed out</span></td>"#
+        ),
+        "{html}"
+    );
 }
 
 #[tokio::test]
@@ -1641,6 +1859,7 @@ fn preview_lists_warnings_as_pre_flight_lines_with_their_source() {
         warnings: parsed.warnings,
         pins: Vec::new(),
         changed: vec!["web".into()],
+        start_order: Vec::new(),
     };
     let html = PreviewView::new(preview, toml.into()).render().unwrap();
     assert!(
@@ -1671,6 +1890,7 @@ fn preview_of_a_new_stack_says_so_and_lists_no_redeploy() {
         warnings: Vec::new(),
         pins: Vec::new(),
         changed: Vec::new(),
+        start_order: Vec::new(),
     };
     let html = PreviewView::new(preview, NOTES.into()).render().unwrap();
     assert!(
@@ -1688,6 +1908,81 @@ fn preview_of_a_new_stack_says_so_and_lists_no_redeploy() {
     );
     assert!(html.contains("a new stack"), "{html}");
     assert!(html.contains(">Apply</button>"), "{html}");
+    // Nothing starts: no start order.
+    assert!(!html.contains("Start order"), "{html}");
+}
+
+/// ADR-0056: the preview lists the start waves, then the stop-first replacements and the
+/// services held back behind them.
+#[tokio::test]
+async fn preview_shows_the_start_order() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let name = |n: &str| n.parse::<crate::stack::Name>().unwrap();
+    *app.stacks.changed.lock().unwrap() = ["app", "cache", "db", "web", "worker"]
+        .map(str::to_owned)
+        .to_vec();
+    *app.stacks.start_order.lock().unwrap() = vec![
+        Wave::Start(
+            [(name("cache"), Vec::new()), (name("web"), Vec::new())]
+                .into_iter()
+                .collect(),
+        ),
+        Wave::Start(
+            [(name("worker"), vec![name("cache"), name("web")])]
+                .into_iter()
+                .collect(),
+        ),
+        Wave::Replace(name("db")),
+        Wave::HeldBack {
+            service: name("app"),
+            behind: vec![name("db")],
+        },
+    ];
+    let html = body(
+        app.send(post(
+            "/apply/preview",
+            &browser,
+            FORM,
+            encoded(&[("toml", NOTES)]),
+        ))
+        .await,
+    )
+    .await;
+    assert!(
+        html.contains(r#"<h2 id="order-title">Start order</h2><span class="card-note">each service starts once its own dependencies pass</span>"#),
+        "{html}"
+    );
+    let order: Vec<&str> = html
+        .split(r#"<ol class="plan start-order">"#)
+        .nth(1)
+        .and_then(|rest| rest.split("</ol>").next())
+        .unwrap()
+        .split("<li>")
+        .skip(1)
+        .collect();
+    assert_eq!(order.len(), 4, "{html}");
+    assert!(
+        order[0].starts_with(r#"<span class="plan-mark" aria-hidden="true">1</span><span class="plan-text">start <strong>cache</strong>, <strong>web</strong></span></li>"#),
+        "{}",
+        order[0]
+    );
+    assert!(
+        order[1].contains(r#"start <strong>worker</strong> <span class="plan-note">worker after cache, web</span>"#),
+        "{}",
+        order[1]
+    );
+    assert!(
+        order[2].contains(r#"replace <strong>db</strong> <span class="plan-note">stop-first: down until the new one passes</span>"#),
+        "{}",
+        order[2]
+    );
+    assert!(
+        order[3].contains(r#"<span class="plan-mark" aria-hidden="true">4</span>"#)
+            && order[3].contains(r#"start <strong>app</strong> <span class="plan-note">held back until db is replaced and passes</span>"#),
+        "{}",
+        order[3]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

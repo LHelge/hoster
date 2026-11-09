@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::config::PortRange;
 use crate::health::Check;
-use crate::runtime::{ContainerInfo, ContainerState, FakeRuntime, Operation};
+use crate::runtime::{ContainerInfo, ContainerState, ExecOutcome, FakeRuntime, Operation};
 use crate::secrets::{SecretKey, SecretName};
 use crate::stack::ImageRef;
 
@@ -404,7 +404,7 @@ async fn happy_path_deploys_every_service_and_records_each_transition() {
         ]
     );
     let events = h.store.events(second.id).await.unwrap();
-    assert!(events.windows(2).all(|w| w[0].at <= w[1].at));
+    assert!(events.windows(2).all(|w| w[0].at <= w[1].at), "{events:#?}");
     // storage was not recreated and keeps its generation (stack-format §3.1).
     assert_eq!(
         h.generations().await,
@@ -544,6 +544,38 @@ async fn preview_shows_what_an_apply_would_do_without_doing_it() {
         .await
         .unwrap_err();
     assert!(matches!(err, OrchestratorError::Invalid(_)), "{err}");
+}
+
+/// The preview lists the order the apply would start the services in (ADR-0056 Decision 2).
+#[tokio::test]
+async fn preview_lists_the_start_order() {
+    let h = harness().await;
+    let name = |n: &str| n.parse::<Name>().unwrap();
+    let preview = h.orchestrator.preview(DEPS).await.unwrap();
+    assert_eq!(
+        preview.start_order,
+        [
+            Wave::Start(BTreeMap::from([(name("db"), Vec::new())])),
+            Wave::Start(BTreeMap::from([(name("app"), vec![name("db")])])),
+        ]
+    );
+    // Once both run, a changed db is replaced and app, changed too, is held back for it.
+    let applied = h.apply(DEPS).await;
+    h.finish(applied.deployment.as_ref().unwrap()).await;
+    let both = DEPS
+        .replace("app:1\"", "app:1\"\nenv = { A = \"1\" }")
+        .replace("postgres:17\"", "postgres:17\"\nenv = { A = \"1\" }");
+    let preview = h.orchestrator.preview(&both).await.unwrap();
+    assert_eq!(
+        preview.start_order,
+        [
+            Wave::Replace(name("db")),
+            Wave::HeldBack {
+                service: name("app"),
+                behind: vec![name("db")],
+            },
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1538,6 +1570,154 @@ port = 9090
     assert!(volume_kept, "the volume survives stack removal");
 }
 
+/// Exec health checks on a real rootless podman (ADR-0056): `db` (no routes) becomes ready a
+/// moment after it starts, `app` (routed) also needs its port; the monitor runs the same checks
+/// in the live containers, and a check podman cannot run fails a deploy at once. Run with
+/// `TEST_HOSTER_PODMAN=1 cargo test`.
+#[tokio::test]
+async fn exec_checks_on_real_podman() {
+    use crate::registry::Anonymous;
+    use crate::runtime::{PodmanRuntime, PodmanSocket};
+
+    if !std::env::var("TEST_HOSTER_PODMAN").is_ok_and(|v| v == "1") {
+        eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to deploy on rootless podman");
+        return;
+    }
+    let stack = |db_check: &str| {
+        format!(
+            r#"
+version = 1
+name = "hosterexecrxt"
+
+[services.db]
+image = "docker.io/library/busybox:1.37"
+command = ["sh", "-c", "sleep 2 && touch /tmp/ready && exec sleep 3600"]
+stop_timeout = "1s"
+
+[services.db.health]
+exec = {db_check}
+interval = "500ms"
+start_period = "20s"
+
+[services.app]
+image = "docker.io/library/busybox:1.37"
+command = ["sh", "-c", "mkdir -p /www && exec httpd -f -p 8080 -h /www"]
+stop_timeout = "1s"
+
+[services.app.health]
+exec = ["true"]
+
+[[services.app.routes]]
+host = "app.hoster.test"
+port = 8080
+"#
+        )
+    };
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(&dir.path().join("state")).await.unwrap();
+    let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(std::path::PathBuf::from);
+    let runtime = Arc::new(
+        PodmanRuntime::connect(&PodmanSocket::from_env(socket.as_deref()))
+            .await
+            .expect("connect to rootless podman"),
+    );
+    let orchestrator = Orchestrator::new(
+        store.clone(),
+        Arc::clone(&runtime),
+        Arc::new(RegistryClient::new(Arc::new(Anonymous)).unwrap()),
+        PortAllocator::new(store.clone(), PortRange::try_from(28120..=28135).unwrap()),
+        SecretStore::new(store.clone(), &SecretKey::generate()),
+        Settings::default(),
+        Arc::default(),
+    );
+
+    let started = tokio::time::Instant::now();
+    let applied = orchestrator
+        .apply(&stack(r#"["sh", "-c", "test -f /tmp/ready"]"#))
+        .await
+        .unwrap();
+    let first = orchestrator
+        .wait(applied.deployment.unwrap().deployment)
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    let first_notes: Vec<String> = store
+        .events(first.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| e.message)
+        .collect();
+    let live = orchestrator
+        .monitor_at(tokio::time::Instant::now())
+        .await
+        .unwrap();
+
+    let started = tokio::time::Instant::now();
+    let broken = orchestrator
+        .apply(&stack(r#"["pg_isready", "-U", "postgres"]"#))
+        .await
+        .unwrap();
+    let second = orchestrator
+        .wait(broken.deployment.unwrap().deployment)
+        .await
+        .unwrap();
+    let failed_after = started.elapsed();
+    let removed = orchestrator
+        .remove(RemoveStack::keeping_volumes("hosterexecrxt"))
+        .await;
+
+    assert_eq!(first.state, S::Live, "{first:?} {first_notes:#?}");
+    assert!(
+        took >= Duration::from_secs(2),
+        "db became ready after 2 s: {took:?}"
+    );
+    let has = |text: &str| first_notes.iter().any(|n| n.contains(text));
+    assert!(
+        has(r#"checking db with exec: sh -c "test -f /tmp/ready", declared in health.exec"#),
+        "{first_notes:#?}"
+    );
+    assert!(
+        has("health probe exec: sh -c \"test -f /tmp/ready\": exit 1"),
+        "{first_notes:#?}"
+    );
+    assert!(
+        has("health check exec: true and TCP connect to container port 8080"),
+        "{first_notes:#?}"
+    );
+    let mut healthy: Vec<_> = live
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::Health {
+                service,
+                to,
+                detail,
+                ..
+            } => Some((service.as_str(), *to, detail.as_str())),
+            _ => None,
+        })
+        .collect();
+    healthy.sort_by_key(|h| h.0);
+    assert_eq!(
+        healthy,
+        [
+            ("app", HealthStatus::Healthy, "exit 0; TCP: connected"),
+            ("db", HealthStatus::Healthy, "exit 0"),
+        ]
+    );
+    assert_eq!(second.state, S::Failed, "{second:?}");
+    let error = second.error.as_deref().unwrap();
+    assert!(
+        error.contains("`health.exec` cannot run: `pg_isready`: executable file not found"),
+        "{error}"
+    );
+    assert!(
+        failed_after < Duration::from_secs(20),
+        "at once: {failed_after:?}"
+    );
+    assert_eq!(removed.unwrap().containers, 2);
+}
+
 #[tokio::test]
 async fn apply_ensures_certificates_before_deploying_and_remove_forgets_them() {
     use crate::acme::{AcmeCommand, AcmeEvent};
@@ -1885,4 +2065,413 @@ async fn refused_webhook_attempts_show_in_the_stack_status() {
     let status = h.orchestrator.status().await.unwrap();
     assert_eq!(status[0].rejections, [rejection]);
     assert!(h.store.rejections("ghost", 10).await.unwrap().is_empty());
+}
+
+/// A stack whose services declare exec checks: `db` without routes, `app` routed (so its exec
+/// check also connects to container port 8080).
+pub(super) const SHOP: &str = r#"
+version = 1
+name = "shop"
+
+[services.db]
+image = "docker.io/library/postgres:17"
+secrets = { POSTGRES_PASSWORD = "shop/db-password" }
+
+[services.db.health]
+exec = ["pg_isready", "-U", "postgres"]
+interval = "10ms"
+timeout = "20ms"
+
+[services.app]
+image = "docker.io/library/shop:1"
+
+[[services.app.routes]]
+host = "shop.example.com"
+port = 8080
+
+[services.app.health]
+exec = ["/bin/check"]
+interval = "10ms"
+"#;
+
+#[tokio::test]
+async fn deploys_run_exec_checks_and_name_them() {
+    let h = harness().await;
+    h.set_secret("shop/db-password", "hunter22").await;
+    h.runtime.script_exec(
+        "-db-",
+        [
+            Ok(ExecOutcome::finished(
+                2,
+                "no response; password hunter22 rejected\n".into(),
+            )),
+            Ok(ExecOutcome::finished(0, "accepting connections\n".into())),
+        ],
+    );
+    let applied = h.apply(SHOP).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, DeploymentState::Live, "{deployment:?}");
+
+    // Both execs ran in their containers; app's TCP part went through the prober.
+    let execs = h.runtime.execs();
+    assert_eq!(
+        execs
+            .iter()
+            .filter(|(c, _)| c == "hoster-shop-db-g1")
+            .count(),
+        2
+    );
+    assert!(execs.contains(&(
+        "hoster-shop-app-g1".to_owned(),
+        vec!["/bin/check".to_owned()]
+    )));
+    assert!(
+        h.prober
+            .take_probes()
+            .iter()
+            .any(|p| p.starts_with("TCP connect to container port 8080 ")),
+    );
+
+    let notes: Vec<_> = h
+        .notes(deployment.id)
+        .await
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    let has = |text: &str| notes.iter().any(|n| n.contains(text));
+    assert!(
+        has("checking db with exec: pg_isready -U postgres, declared in health.exec"),
+        "{notes:#?}"
+    );
+    assert!(
+        has("checking app with exec: /bin/check and TCP connect to container port 8080"),
+        "{notes:#?}"
+    );
+    assert!(
+        has("health probe exec: pg_isready -U postgres: exit 2, output \
+             \"no response; password <redacted> rejected\""),
+        "{notes:#?}"
+    );
+    assert!(!notes.iter().any(|n| n.contains("hunter22")), "{notes:#?}");
+}
+
+#[tokio::test]
+async fn an_exec_check_that_cannot_run_fails_the_deploy_at_once() {
+    let h = harness().await;
+    h.set_secret("shop/db-password", "hunter22").await;
+    h.runtime.script_exec(
+        "-db-",
+        [Ok(ExecOutcome::finished(
+            127,
+            "Error: runc: exec failed: unable to start container process: exec: \
+             \"pg_isready\": executable file not found in $PATH: OCI runtime attempted to \
+             invoke a command that was not found\n"
+                .into(),
+        ))],
+    );
+    let applied = h.apply(SHOP).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, DeploymentState::Failed);
+    assert!(
+        deployment
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("`health.exec` cannot run: `pg_isready`: executable file not found in $PATH"),
+        "{deployment:?}"
+    );
+    assert_eq!(
+        h.runtime
+            .execs()
+            .iter()
+            .filter(|(c, _)| c == "hoster-shop-db-g1")
+            .count(),
+        1,
+        "not retried"
+    );
+}
+
+/// `app` (start-first, routed) depends on `db` (stop-first, with an exec check), both
+/// third-party images, so one apply deploys both (ADR-0056).
+pub(super) const DEPS: &str = r#"
+version = 1
+name = "notes"
+
+[services.app]
+image = "docker.io/acme/app:1"
+depends_on = ["db"]
+
+[[services.app.routes]]
+host = "notes.example.com"
+port = 8080
+
+[services.db]
+image = "docker.io/library/postgres:17"
+update = "stop-first"
+
+[services.db.health]
+exec = ["pg_isready"]
+interval = "10ms"
+"#;
+
+/// The position of the first note of `notes` containing `text`.
+fn note_at(notes: &[(DeploymentState, String)], text: &str) -> usize {
+    notes
+        .iter()
+        .position(|(_, n)| n.contains(text))
+        .unwrap_or_else(|| panic!("no note {text:?} in {notes:#?}"))
+}
+
+/// A stop-first service without a previous generation opens no gap, so it starts in the start
+/// phase, and its dependent starts only once it has passed (ADR-0056 Decision 2.1).
+#[tokio::test]
+async fn a_first_deploy_starts_a_stop_first_dependency_before_its_dependent() {
+    let h = harness().await;
+    h.runtime.script_exec(
+        "-db-",
+        [
+            Ok(ExecOutcome::finished(2, "no response\n".into())),
+            Ok(ExecOutcome::finished(0, "accepting connections\n".into())),
+        ],
+    );
+    let applied = h.apply(DEPS).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+    assert_eq!(
+        h.runtime.take_starts(),
+        ["hoster-notes-db-g1", "hoster-notes-app-g1"]
+    );
+    let notes = h.notes(deployment.id).await;
+    let starting = note_at(&notes, "starting db");
+    let passed = note_at(&notes, "health check exec: pg_isready passed");
+    let next = note_at(&notes, "db healthy after");
+    let checking = note_at(&notes, "checking app with");
+    assert!(
+        starting < passed && passed < next && next < checking,
+        "{notes:#?}"
+    );
+    assert_eq!(notes[starting], (S::Starting, "starting db".to_owned()));
+    let (state, message) = &notes[next];
+    assert_eq!(*state, S::HealthChecking);
+    assert!(message.ends_with("; starting app"), "{message}");
+    // Nothing waits for `Replacing`.
+    assert!(!notes.iter().any(|(s, _)| *s == S::Replacing), "{notes:#?}");
+}
+
+/// a → b, c → d: d first, then b and c together, then a once both passed. Each service starts
+/// as soon as its own dependencies have passed (ADR-0056 Decision 2.1).
+#[tokio::test]
+async fn a_diamond_starts_each_service_once_its_dependencies_passed() {
+    const DIAMOND: &str = r#"
+version = 1
+name = "notes"
+
+[services.a]
+image = "docker.io/library/busybox:1"
+depends_on = ["b", "c"]
+
+[services.b]
+image = "docker.io/library/busybox:1"
+depends_on = ["d"]
+
+[services.c]
+image = "docker.io/library/busybox:1"
+depends_on = ["d"]
+
+[services.d]
+image = "docker.io/library/busybox:1"
+"#;
+    let h = harness().await;
+    let applied = h.apply(DIAMOND).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+    assert_eq!(
+        h.runtime.take_starts(),
+        [
+            "hoster-notes-d-g1",
+            "hoster-notes-b-g1",
+            "hoster-notes-c-g1",
+            "hoster-notes-a-g1"
+        ]
+    );
+    let notes = h.notes(deployment.id).await;
+    let waves: Vec<&str> = notes
+        .iter()
+        .map(|(_, n)| n.as_str())
+        .filter(|n| n.starts_with("starting ") || n.contains(" healthy after "))
+        .collect();
+    assert_eq!(waves.len(), 5, "{waves:#?}");
+    assert_eq!(waves[0], "starting d");
+    assert!(waves[1].starts_with("d healthy after ") && waves[1].ends_with("; starting b, c"));
+    // b and c are probed in parallel; the later one to pass starts a.
+    let (first, second) = (waves[2], waves[3]);
+    assert!(!first.contains("starting"), "{waves:#?}");
+    assert!(second.ends_with("; starting a"), "{waves:#?}");
+    assert_ne!(first[..1], second[..1]);
+    assert!(waves[4].starts_with("a healthy after "), "{waves:#?}");
+}
+
+/// A dependency that has never run and is not deployed is ignored, and the log says so
+/// (ADR-0056 Decision 2.5).
+#[tokio::test]
+async fn an_edge_to_a_service_that_never_ran_is_ignored_and_logged() {
+    let h = harness().await;
+    let stack = NOTES.replace(
+        "[services.web]\nimage = \"ghcr.io/acme/notes-web\"",
+        "[services.web]\nimage = \"docker.io/acme/notes-web:1\"\ndepends_on = [\"api\"]",
+    );
+    let applied = h.apply(&stack).await;
+    assert_eq!(applied.changed, ["storage", "web"]);
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+    let notes = h.notes(deployment.id).await;
+    assert!(
+        notes.contains(&(
+            S::Starting,
+            "api has never run; starting web without it".to_owned()
+        )),
+        "{notes:#?}"
+    );
+}
+
+/// An unchanged dependency must run when the deployment begins (ADR-0056 Decision 2.4); its
+/// monitor status is logged, not awaited.
+#[tokio::test]
+async fn an_unchanged_dependency_that_is_down_fails_the_deploy() {
+    let h = harness().await;
+    let first = h
+        .finish(h.apply(DEPS).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(first.state, S::Live, "{first:?}");
+    let db = h.container("hoster-notes-db-g1").id;
+    h.runtime.set_state(&db, ContainerState::Exited(Some(1)));
+
+    let app_changed = DEPS.replace(
+        "depends_on = [\"db\"]",
+        "depends_on = [\"db\"]\nenv = { A = \"1\" }",
+    );
+    let failed = h
+        .finish(h.apply(&app_changed).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("db (unchanged) is not running; never started: app")
+    );
+    assert_eq!(
+        h.container_names(),
+        ["hoster-notes-app-g1", "hoster-notes-db-g1"]
+    );
+    let events = h
+        .store
+        .event_page(&crate::store::EventQuery {
+            kinds: [crate::store::EventKind::DeployFailed].into(),
+            limit: crate::store::EventQuery::MAX,
+            ..crate::store::EventQuery::default()
+        })
+        .await
+        .unwrap()
+        .events;
+    assert!(
+        events[0].message.ends_with("never started: app"),
+        "{events:?}"
+    );
+
+    // Running again, it is logged with its monitor status and not waited for.
+    h.runtime.set_state(&db, ContainerState::Running);
+    let app_changed = app_changed.replace("A = \"1\"", "A = \"2\"");
+    let live = h
+        .finish(h.apply(&app_changed).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    assert!(
+        h.notes(live.id).await.contains(&(
+            S::Starting,
+            "db (unchanged) is running; its monitor status is unknown".to_owned()
+        )),
+        "{:#?}",
+        h.notes(live.id).await
+    );
+}
+
+/// A stack whose name order is the wrong start order deploys cleanly on a real rootless
+/// podman (ADR-0056): `app` exits at once unless `db`, which needs 2 s to come up, answers
+/// (its settle check catches that). Neither publishes a port. Run with
+/// `TEST_HOSTER_PODMAN=1 cargo test`.
+#[tokio::test]
+async fn dependencies_start_in_order_on_real_podman() {
+    use crate::registry::Anonymous;
+    use crate::runtime::{PodmanRuntime, PodmanSocket};
+
+    if !std::env::var("TEST_HOSTER_PODMAN").is_ok_and(|v| v == "1") {
+        eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to deploy on rootless podman");
+        return;
+    }
+    const STACK: &str = r#"
+version = 1
+name = "hosterdepskbh"
+
+[services.app]
+image = "docker.io/library/busybox:1.37"
+command = ["sh", "-c", "wget -q -O /dev/null http://db:8080/ || exit 1; mkdir -p /www && exec httpd -f -p 8080 -h /www"]
+depends_on = ["db"]
+stop_timeout = "1s"
+
+[services.db]
+image = "docker.io/library/busybox:1.37"
+command = ["sh", "-c", "sleep 2 && mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p 8080 -h /www"]
+update = "stop-first"
+stop_timeout = "1s"
+
+[services.db.health]
+exec = ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+interval = "500ms"
+start_period = "20s"
+"#;
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(&dir.path().join("state")).await.unwrap();
+    let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(std::path::PathBuf::from);
+    let runtime = Arc::new(
+        PodmanRuntime::connect(&PodmanSocket::from_env(socket.as_deref()))
+            .await
+            .expect("connect to rootless podman"),
+    );
+    let orchestrator = Orchestrator::new(
+        store.clone(),
+        Arc::clone(&runtime),
+        Arc::new(RegistryClient::new(Arc::new(Anonymous)).unwrap()),
+        PortAllocator::new(store.clone(), PortRange::try_from(28140..=28155).unwrap()),
+        SecretStore::new(store.clone(), &SecretKey::generate()),
+        Settings::default(),
+        Arc::default(),
+    );
+    let applied = orchestrator.apply(STACK).await.unwrap();
+    let first = orchestrator
+        .wait(applied.deployment.unwrap().deployment)
+        .await
+        .unwrap();
+    let notes: Vec<String> = store
+        .events(first.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| e.message)
+        .collect();
+    let removed = orchestrator
+        .remove(RemoveStack::keeping_volumes("hosterdepskbh"))
+        .await;
+
+    assert_eq!(first.state, S::Live, "{first:?} {notes:#?}");
+    let at = |text: &str| {
+        notes
+            .iter()
+            .position(|n| n.contains(text))
+            .unwrap_or_else(|| panic!("no note {text:?} in {notes:#?}"))
+    };
+    assert!(at("starting db") < at("db healthy after"), "{notes:#?}");
+    assert!(
+        notes[at("db healthy after")].ends_with("; starting app"),
+        "{notes:#?}"
+    );
+    assert_eq!(removed.unwrap().containers, 2);
 }

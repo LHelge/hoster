@@ -14,7 +14,7 @@ use super::tests::{FakeProber, Harness, NOTES, digest, harness, harness_with, se
 use super::*;
 use crate::config::PortRange;
 use crate::routing::{Target, Upstream};
-use crate::runtime::{ContainerState, FakeRuntime, Operation};
+use crate::runtime::{ContainerState, ExecOutcome, FakeRuntime, Operation};
 
 use DeploymentState as S;
 
@@ -791,4 +791,470 @@ async fn after_a_crash_the_next_deployment_runs_normally() {
     assert_eq!(live.state, S::Live);
     assert_eq!(api(&routes).generation, live.generation.unwrap());
     assert_eq!(api(&routes).addr.port(), h.api_port().await);
+}
+
+// Service dependencies (ADR-0056 Decision 2).
+
+/// `two_stop_first()` with api depending on the stop-first db.
+fn api_on_db() -> String {
+    two_stop_first().replace(
+        "image = \"ghcr.io/acme/notes-api\"",
+        "image = \"ghcr.io/acme/notes-api\"\ndepends_on = [\"db\"]",
+    )
+}
+
+/// `toml` with db's config changed.
+fn db_changed(toml: &str) -> String {
+    toml.replace(
+        "pg = \"/var/lib/postgresql\"",
+        "pg = \"/var/lib/postgresql\"\n\n[services.db.env]\nC = \"1\"",
+    )
+}
+
+/// A start-first service depending on a replaced stop-first one is held back: `Replacing`
+/// starts and probes it once the new db has passed, never against the old one, while its own
+/// old generation keeps serving until the swap.
+#[tokio::test]
+async fn a_start_first_service_is_held_back_behind_a_replaced_dependency() {
+    let h = harness().await;
+    bootstrap_with(&h, &api_on_db()).await;
+    h.runtime.take_starts();
+    let changed = db_changed(&api_on_db()).replace(
+        "depends_on = [\"db\"]",
+        "depends_on = [\"db\"]\nenv = { B = \"1\" }",
+    );
+    h.prober.hold(8080);
+    let applied = h.apply(&changed).await;
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(8080).await;
+    // The new db runs and passed; the new api is probed against it while api g2 serves.
+    assert!(h.container("hoster-notes-db-g3").state.is_running());
+    assert!(!h.container("hoster-notes-db-g1").state.is_running());
+    assert_eq!(api(&h.routes).generation, 2);
+    h.prober.release(8080);
+    let live = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    assert_eq!(
+        h.runtime.take_starts(),
+        ["hoster-notes-db-g3", "hoster-notes-api-g3"]
+    );
+    let notes = h.notes(id).await;
+    let replacing = notes
+        .iter()
+        .position(|n| *n == (S::Replacing, "replacing db (stop-first)".to_owned()))
+        .unwrap_or_else(|| panic!("{notes:#?}"));
+    let held = notes
+        .iter()
+        .position(|n| *n == (S::Replacing, "starting api (held back for db)".to_owned()))
+        .unwrap_or_else(|| panic!("{notes:#?}"));
+    assert!(replacing < held, "{notes:#?}");
+    assert!(
+        notes
+            .iter()
+            .any(|(s, n)| *s == S::Replacing && n.starts_with("checking api with")),
+        "{notes:#?}"
+    );
+    assert!(
+        !notes.iter().any(|(s, _)| *s == S::HealthChecking),
+        "nothing to probe before Replacing: {notes:#?}"
+    );
+    assert_eq!(
+        (api(&h.routes).generation, db(&h.routes).generation),
+        (3, 3)
+    );
+    h.assert_one_generation_each(&h.routes).await;
+}
+
+/// An unchanged service that exits while a dependency is replaced is started again once the
+/// replacement passes, without a restart record, and probed before the deployment goes on
+/// (ADR-0056 Decision 2.4).
+#[tokio::test]
+async fn an_unchanged_dependent_that_exited_during_the_gap_is_started_again() {
+    let h = harness().await;
+    bootstrap_with(&h, &api_on_db()).await;
+    h.prober.hold(5432);
+    let applied = h.apply(&db_changed(&api_on_db())).await;
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(5432).await;
+    // api loses its database and exits.
+    let api_g2 = h.container("hoster-notes-api-g2").id;
+    h.runtime
+        .set_state(&api_g2, ContainerState::Exited(Some(1)));
+    h.runtime.take_starts();
+    h.prober.release(5432);
+    let live = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    assert_eq!(h.runtime.take_starts(), ["hoster-notes-api-g2"]);
+    assert!(h.container("hoster-notes-api-g2").state.is_running());
+    let notes = h.notes(id).await;
+    assert!(
+        notes.contains(&(
+            S::Replacing,
+            "starting api (unchanged) again: it exited while db was replaced".to_owned()
+        )),
+        "{notes:#?}"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|(s, n)| *s == S::Replacing && n.starts_with("checking api with")),
+        "{notes:#?}"
+    );
+    // Not a reconciler restart: no record, no event.
+    let status = h.orchestrator.status().await.unwrap();
+    let api_status = status[0].services.iter().find(|s| s.name == "api").unwrap();
+    assert_eq!(api_status.restarts, RestartStats::default());
+    let restarts = h
+        .store
+        .event_page(&crate::store::EventQuery {
+            kinds: [crate::store::EventKind::ContainerRestarted].into(),
+            limit: crate::store::EventQuery::MAX,
+            ..crate::store::EventQuery::default()
+        })
+        .await
+        .unwrap()
+        .events;
+    assert!(restarts.is_empty(), "{restarts:?}");
+    assert_eq!(db(&h.routes).generation, 3);
+    h.assert_one_generation_each(&h.routes).await;
+}
+
+/// `Aborting` starts the stopped stop-first containers in the dependency order of the last
+/// committed revision, not the failed target's, ignoring its edge to a service without a
+/// pointer (ADR-0056 Decision 2.6).
+#[tokio::test]
+async fn an_abort_restarts_the_stopped_containers_in_committed_dependency_order() {
+    const STACK: &str = r#"
+version = 1
+name = "notes"
+
+[services.a]
+image = "docker.io/library/busybox:1"
+update = "stop-first"
+depends_on = ["b", "c"]
+
+[services.a.health]
+exec = ["check"]
+interval = "10ms"
+start_period = "100ms"
+
+[services.b]
+image = "docker.io/library/busybox:1"
+update = "stop-first"
+
+[services.b.health]
+exec = ["check"]
+interval = "10ms"
+start_period = "100ms"
+
+# CI-built and never deployed: an edge to it orders nothing and holds nothing.
+[services.c]
+image = "ghcr.io/acme/c"
+"#;
+    let h = harness().await;
+    let first = h
+        .finish(h.apply(STACK).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(first.state, S::Live, "{first:?}");
+    assert_eq!(
+        h.runtime.take_starts(),
+        ["hoster-notes-b-g1", "hoster-notes-a-g1"]
+    );
+    // The target turns the edge around and changes both, so `Replacing` goes a, then b.
+    let target = STACK
+        .replace("depends_on = [\"b\", \"c\"]\n", "env = { A = \"1\" }\n")
+        .replace(
+            "[services.b]\nimage = \"docker.io/library/busybox:1\"\n",
+            "[services.b]\nimage = \"docker.io/library/busybox:1\"\ndepends_on = [\"a\"]\nenv = { B = \"1\" }\n",
+        );
+    h.runtime
+        .script_exec("-b-g2", [Ok(ExecOutcome::finished(1, "no\n".into()))]);
+    let failed = h
+        .finish(h.apply(&target).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("b: health check"),
+        "{failed:?}"
+    );
+    assert_eq!(
+        h.runtime.take_starts(),
+        [
+            "hoster-notes-a-g2",
+            "hoster-notes-b-g2",
+            "hoster-notes-b-g1",
+            "hoster-notes-a-g1"
+        ]
+    );
+    assert_eq!(
+        h.container_names(),
+        ["hoster-notes-a-g1", "hoster-notes-b-g1"]
+    );
+}
+
+/// `two_stop_first()` with the stop-first storage depending on the start-first web.
+fn storage_on_web() -> String {
+    let toml = two_stop_first().replace(
+        "update = \"stop-first\"\n\n[services.storage.volumes]",
+        "update = \"stop-first\"\ndepends_on = [\"web\"]\n\n[services.storage.volumes]",
+    );
+    assert!(toml.contains("depends_on = [\"web\"]"));
+    toml
+}
+
+/// An unchanged dependency must still run when a later replace-phase dependent starts: one
+/// that stopped while an earlier service was replaced fails the deployment, and the abort
+/// starts the old stop-first container again behind its old upstream (ADR-0056 Decision 2.4).
+#[tokio::test]
+async fn an_unchanged_dependency_that_stops_while_replacing_fails_the_deploy() {
+    let h = harness().await;
+    bootstrap_with(&h, &storage_on_web()).await;
+    let before = h.container_names();
+    let old_db = db(&h.routes);
+    h.prober.hold(5432);
+    let applied = h.apply(&both_stop_first_changed(&storage_on_web())).await;
+    assert_eq!(applied.changed, ["db", "storage"]);
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(5432).await;
+    // db is being replaced; web, which storage needs, goes down meanwhile.
+    let web = h.container("hoster-notes-web-g2").id;
+    h.runtime.set_state(&web, ContainerState::Exited(Some(1)));
+    h.prober.release(5432);
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("web (unchanged) is not running; never started: storage")
+    );
+    // storage was never stopped; db's old container runs again behind its old upstream.
+    assert_eq!(h.container_names(), before);
+    assert!(h.container("hoster-notes-db-g1").state.is_running());
+    assert!(h.container("hoster-notes-storage-g1").state.is_running());
+    assert!(Arc::ptr_eq(&db(&h.routes), &old_db));
+}
+
+/// One stop-first service depending on another, sorting before it by name: `Replacing` takes
+/// the dependency first (ADR-0056 Decision 2.2).
+#[tokio::test]
+async fn replacing_follows_dependencies_before_names() {
+    const STACK: &str = r#"
+version = 1
+name = "notes"
+
+[services.api]
+image = "docker.io/library/busybox:1"
+update = "stop-first"
+depends_on = ["db"]
+
+[services.api.health]
+exec = ["check"]
+interval = "10ms"
+
+[services.db]
+image = "docker.io/library/busybox:1"
+update = "stop-first"
+
+[services.db.health]
+exec = ["check"]
+interval = "10ms"
+"#;
+    let h = harness().await;
+    let first = h
+        .finish(h.apply(STACK).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(first.state, S::Live, "{first:?}");
+    assert_eq!(
+        h.runtime.take_starts(),
+        ["hoster-notes-db-g1", "hoster-notes-api-g1"]
+    );
+    let both = STACK
+        .replace(
+            "depends_on = [\"db\"]\n",
+            "depends_on = [\"db\"]\nenv = { A = \"1\" }\n",
+        )
+        .replace(
+            "[services.db]\nimage = \"docker.io/library/busybox:1\"\n",
+            "[services.db]\nimage = \"docker.io/library/busybox:1\"\nenv = { B = \"1\" }\n",
+        );
+    let applied = h.apply(&both).await;
+    assert_eq!(applied.changed, ["api", "db"]);
+    let live = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    assert_eq!(
+        h.runtime.take_starts(),
+        ["hoster-notes-db-g2", "hoster-notes-api-g2"]
+    );
+    let notes = h.notes(live.id).await;
+    let at = |text: &str| {
+        notes
+            .iter()
+            .position(|(_, n)| n == text)
+            .unwrap_or_else(|| panic!("no note {text:?} in {notes:#?}"))
+    };
+    assert!(at("replacing db (stop-first)") < at("replacing api (stop-first)"));
+}
+
+/// A restarted unchanged dependent whose check fails aborts the deployment, and its exec
+/// output has the secrets it references redacted, though the deployment did not create it
+/// (ADR-0056 Decisions 2.4 and 4).
+#[tokio::test]
+async fn a_restarted_unchanged_dependent_that_fails_its_check_aborts_with_secrets_redacted() {
+    const STACK: &str = r#"
+version = 1
+name = "notes"
+
+[services.db]
+image = "docker.io/library/postgres:17"
+update = "stop-first"
+
+[[services.db.routes]]
+host = "db.notes.example.com"
+port = 5432
+
+[services.db.health]
+tcp = { port = 5432 }
+interval = "10ms"
+start_period = "200ms"
+
+[services.worker]
+image = "docker.io/acme/worker:1"
+depends_on = ["db"]
+secrets = { DB_PASSWORD = "notes/db-password" }
+
+[services.worker.health]
+exec = ["sh", "-c", "env; exit 1"]
+interval = "10ms"
+start_period = "100ms"
+"#;
+    let h = harness().await;
+    h.set_secret("notes/db-password", "hunter22").await;
+    let first = h
+        .finish(h.apply(STACK).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(first.state, S::Live, "{first:?}");
+
+    h.runtime.script_exec(
+        "-worker-",
+        [Ok(ExecOutcome::finished(
+            1,
+            "DB_PASSWORD=hunter22\n".into(),
+        ))],
+    );
+    h.prober.hold(5432);
+    let changed = STACK.replace(
+        "update = \"stop-first\"\n",
+        "update = \"stop-first\"\nenv = { C = \"1\" }\n",
+    );
+    let applied = h.apply(&changed).await;
+    assert_eq!(applied.changed, ["db"]);
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(5432).await;
+    let worker = h.container("hoster-notes-worker-g1").id;
+    h.runtime
+        .set_state(&worker, ContainerState::Exited(Some(1)));
+    h.runtime.take_starts();
+    h.prober.release(5432);
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    let error = failed.error.as_deref().unwrap();
+    assert!(
+        error.starts_with("worker (unchanged): health check"),
+        "{error}"
+    );
+    // worker was started again and checked; the abort starts the old db again.
+    assert_eq!(
+        h.runtime.take_starts(),
+        ["hoster-notes-worker-g1", "hoster-notes-db-g1"]
+    );
+    assert!(h.container("hoster-notes-db-g1").state.is_running());
+    assert_eq!(
+        h.container_names(),
+        ["hoster-notes-db-g1", "hoster-notes-worker-g1"]
+    );
+    let notes: Vec<String> = h.notes(id).await.into_iter().map(|(_, n)| n).collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("output \"DB_PASSWORD=<redacted>\"")),
+        "{notes:#?}"
+    );
+    assert!(!notes.iter().any(|n| n.contains("hunter22")), "{notes:#?}");
+}
+
+/// An unchanged dependent that was not running when the deployment began is left alone: it
+/// is the reconciler's (ADR-0056 Decision 2.4).
+#[tokio::test]
+async fn an_unchanged_dependent_already_down_is_not_started_by_the_deploy() {
+    let h = harness().await;
+    bootstrap_with(&h, &api_on_db()).await;
+    let api_g2 = h.container("hoster-notes-api-g2").id;
+    h.runtime
+        .set_state(&api_g2, ContainerState::Exited(Some(1)));
+    h.runtime.take_starts();
+    let live = h
+        .finish(
+            h.apply(&db_changed(&api_on_db()))
+                .await
+                .deployment
+                .as_ref()
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    assert_eq!(h.runtime.take_starts(), ["hoster-notes-db-g3"]);
+    assert!(!h.container("hoster-notes-api-g2").state.is_running());
+}
+
+/// A held-back service depending on an unchanged one that is started again after the gap
+/// starts only once that one has passed its check (ADR-0056 Decision 2.4).
+#[tokio::test]
+async fn a_held_back_service_waits_for_its_restarted_unchanged_dependency() {
+    let h = harness().await;
+    let toml = api_on_db().replace(
+        "[services.web]\nimage = \"ghcr.io/acme/notes-web\"",
+        "[services.web]\nimage = \"ghcr.io/acme/notes-web\"\ndepends_on = [\"api\"]",
+    );
+    assert!(toml.contains("depends_on = [\"api\"]"));
+    bootstrap_with(&h, &toml).await;
+    let changed = db_changed(&toml).replace(
+        "depends_on = [\"api\"]",
+        "depends_on = [\"api\"]\nenv = { D = \"1\" }",
+    );
+    h.prober.hold(5432);
+    let applied = h.apply(&changed).await;
+    assert_eq!(applied.changed, ["db", "web"]);
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(5432).await;
+    let api_g2 = h.container("hoster-notes-api-g2").id;
+    h.runtime
+        .set_state(&api_g2, ContainerState::Exited(Some(1)));
+    h.runtime.take_starts();
+    h.prober.release(5432);
+    let live = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    assert_eq!(
+        h.runtime.take_starts(),
+        ["hoster-notes-api-g2", "hoster-notes-web-g3"]
+    );
+    let notes = h.notes(id).await;
+    let at = |test: &dyn Fn(&str) -> bool| {
+        notes
+            .iter()
+            .position(|(_, n)| test(n))
+            .unwrap_or_else(|| panic!("{notes:#?}"))
+    };
+    let restarted = at(&|n| n == "starting api (unchanged) again: it exited while db was replaced");
+    let passed = at(&|n| n.contains("container port 8080") && n.contains(" passed "));
+    let web = at(&|n| n == "starting web (held back for db)");
+    assert!(restarted < passed && passed < web, "{notes:#?}");
+    h.assert_one_generation_each(&h.routes).await;
 }

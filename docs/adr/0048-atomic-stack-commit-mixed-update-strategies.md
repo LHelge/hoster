@@ -1,6 +1,6 @@
 # ADR-0048: A deployment commits the whole stack at once; stop-first services are replaced after start-first services are healthy
 
-- Status: Accepted (resolves OQ-30; supersedes the "Mixed stacks" ordering of ADR-0039)
+- Status: Accepted (resolves OQ-30; supersedes the "Mixed stacks" ordering of ADR-0039); a stop-first service with no previous generation starts with the start-first services, each phase follows `depends_on` order, and a start-phase service depending on a stop-first replacement is held back into `Replacing`, where its start and probe add to the 503 gap of every stop-first service already stopped, since ADR-0056
 - Date: 2026-11-07
 
 ## Context

@@ -13,6 +13,7 @@ use crate::acme::DnsMismatch;
 use crate::health::{HealthChange, HealthStatus};
 use crate::installation::Version;
 use crate::runtime::{ContainerInfo, ContainerState, ServiceGeneration};
+use crate::stack::Name;
 use crate::store::{
     Deployment, DeploymentId, DeploymentSource, DeploymentState, Event, EventKind, EventPage,
     EventQuery, NewEvent, Severity, ShortDigest, ShortSha, StackRevision, Store, StoreError,
@@ -318,6 +319,38 @@ impl ServiceEvents<'_> {
             self.event(EventKind::HealthChanged, severity, message)
                 .meta(format!("{} · {}", self.generation(), change.detail)),
         )
+    }
+
+    /// The first pass after a (re)start that interrupted an unhealthy spell (`change` is from
+    /// `Unknown`, which [`Self::health_changed`] leaves out): the service is healthy again.
+    pub(super) fn healthy_again(&self, change: &HealthChange) -> NewEvent {
+        self.event(
+            EventKind::HealthChanged,
+            Severity::Success,
+            format!("{} is healthy again", self.name()),
+        )
+        .meta(format!("{} · {}", self.generation(), change.detail))
+    }
+
+    /// The reconciler started the container although the `dependencies` it waited for, which
+    /// run, have not passed their checks within their grace (ADR-0056 Decision 3): one event
+    /// per hold, of the reconciler-restart kind.
+    pub(super) fn started_past_hold(&self, dependencies: &[Name]) -> NewEvent {
+        let names: Vec<&str> = dependencies.iter().map(AsRef::as_ref).collect();
+        let (them, have) = match names.len() {
+            1 => ("its check", "has"),
+            _ => ("their checks", "have"),
+        };
+        self.event(
+            EventKind::ContainerRestarted,
+            Severity::Warning,
+            format!(
+                "Started {} although {} {have} not passed {them}",
+                self.name(),
+                names.join(", ")
+            ),
+        )
+        .meta(self.generation())
     }
 
     fn event(&self, kind: EventKind, severity: Severity, message: String) -> NewEvent {

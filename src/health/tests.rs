@@ -7,7 +7,10 @@ use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpSocket};
 
 use super::*;
-use crate::runtime::{ContainerSpec, FakeRuntime, NetworkSpec, ServiceGeneration};
+use crate::runtime::{
+    ContainerSpec, ExecGuard, FakeRuntime, NetworkSpec, Operation, RunningExec, ServiceGeneration,
+};
+use crate::secrets::SecretValue;
 use crate::stack::{Name, Stack};
 use crate::store::{DeploymentSource, DigestSet, NewDeployment};
 
@@ -171,6 +174,11 @@ fn ports(container_port: u16, loopback: u16) -> PortMap {
     PortMap::from([(container_port, loopback), (9090, 1)])
 }
 
+/// Probes through `runtime` and the network, with exec slots of their own.
+fn net(runtime: &FakeRuntime) -> Probes<'_, FakeRuntime> {
+    Probes::new(runtime, &NetworkProber, &ExecSlots::default())
+}
+
 /// A running container in a fresh [`FakeRuntime`].
 async fn running() -> (FakeRuntime, ContainerId) {
     let runtime = FakeRuntime::new();
@@ -209,10 +217,7 @@ async fn http_probe_passes_after_the_server_becomes_healthy() {
     let check = Check::for_service(&service(FAST), &ports(8080, server.port)).unwrap();
     let (runtime, id) = running().await;
     let events = Events::default();
-    check
-        .run(&runtime, &id, &NetworkProber, &events)
-        .await
-        .unwrap();
+    check.run(&net(&runtime), &id, &events).await.unwrap();
 
     // Three 503s, then two passes in a row.
     let requests = server.requests();
@@ -251,10 +256,7 @@ async fn a_failure_resets_the_streak() {
         .unwrap()
         .with_start_period(Duration::from_millis(150));
     let (runtime, id) = running().await;
-    let err = check
-        .run(&runtime, &id, &NetworkProber, &())
-        .await
-        .unwrap_err();
+    let err = check.run(&net(&runtime), &id, &()).await.unwrap_err();
     assert!(matches!(err, HealthError::Unhealthy { .. }), "{err:?}");
     assert!(server.requests().len() >= 3);
 }
@@ -270,10 +272,7 @@ async fn an_exact_expected_status_rejects_other_codes() {
         .unwrap()
         .with_start_period(Duration::from_millis(100));
     let (runtime, id) = running().await;
-    let err = check
-        .run(&runtime, &id, &NetworkProber, &())
-        .await
-        .unwrap_err();
+    let err = check.run(&net(&runtime), &id, &()).await.unwrap_err();
     assert!(
         err.to_string()
             .ends_with("last result: HTTP 200, expected 204"),
@@ -290,10 +289,7 @@ async fn a_server_that_never_becomes_healthy_times_out() {
     let (runtime, id) = running().await;
     let events = Events::default();
     let started = Instant::now();
-    let err = check
-        .run(&runtime, &id, &NetworkProber, &events)
-        .await
-        .unwrap_err();
+    let err = check.run(&net(&runtime), &id, &events).await.unwrap_err();
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(matches!(err, HealthError::Unhealthy { .. }), "{err:?}");
     let text = err.to_string();
@@ -313,10 +309,7 @@ async fn a_server_that_hangs_up_or_stays_silent_fails() {
     let check = Check::for_service(&service(FAST), &ports(8080, hangup.port))
         .unwrap()
         .with_start_period(Duration::from_millis(100));
-    let err = check
-        .run(&runtime, &id, &NetworkProber, &())
-        .await
-        .unwrap_err();
+    let err = check.run(&net(&runtime), &id, &()).await.unwrap_err();
     assert!(
         err.to_string()
             .contains("connection closed before an HTTP status line"),
@@ -328,10 +321,7 @@ async fn a_server_that_hangs_up_or_stays_silent_fails() {
     let check = Check::for_service(&service(&toml), &ports(8080, silent.port))
         .unwrap()
         .with_start_period(Duration::from_millis(100));
-    let err = check
-        .run(&runtime, &id, &NetworkProber, &())
-        .await
-        .unwrap_err();
+    let err = check.run(&net(&runtime), &id, &()).await.unwrap_err();
     assert!(err.to_string().contains("no answer within 30ms"), "{err}");
 }
 
@@ -347,7 +337,8 @@ async fn a_crashing_server_is_unhealthy() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         server.crash();
     };
-    let (result, ()) = tokio::join!(check.run(&runtime, &id, &NetworkProber, &events), crash);
+    let probes = net(&runtime);
+    let (result, ()) = tokio::join!(check.run(&probes, &id, &events), crash);
     let dropped = |text: &str| {
         [
             "connection closed before an HTTP status line",
@@ -380,7 +371,8 @@ async fn a_container_exiting_during_the_check_aborts_early() {
         runtime.set_state(&id, ContainerState::Exited(Some(137)));
     };
     let started = Instant::now();
-    let (result, ()) = tokio::join!(check.run(&runtime, &id, &NetworkProber, &events), crash);
+    let probes = net(&runtime);
+    let (result, ()) = tokio::join!(check.run(&probes, &id, &events), crash);
     assert!(started.elapsed() < Duration::from_secs(5), "aborted early");
     let err = result.unwrap_err();
     assert!(matches!(err, HealthError::Exited { .. }), "{err:?}");
@@ -407,7 +399,7 @@ async fn routed_services_default_to_get_healthz_on_the_first_route_port() {
     assert_eq!(check.start_period, DEFAULT_START_PERIOD);
     let (runtime, id) = running().await;
     // 3xx counts as healthy by default.
-    check.run(&runtime, &id, &NetworkProber, &()).await.unwrap();
+    check.run(&net(&runtime), &id, &()).await.unwrap();
     assert_eq!(server.requests(), ["GET /healthz HTTP/1.1"]);
 }
 
@@ -420,10 +412,7 @@ async fn a_failing_default_probe_says_how_to_override_the_path() {
         .with_start_period(Duration::from_millis(50));
     let (runtime, id) = running().await;
     let events = Events::default();
-    let err = check
-        .run(&runtime, &id, &NetworkProber, &events)
-        .await
-        .unwrap_err();
+    let err = check.run(&net(&runtime), &id, &events).await.unwrap_err();
     let text = err.to_string();
     assert!(
         text.contains("GET /healthz on container port 8080"),
@@ -445,7 +434,7 @@ async fn tcp_probe_connects() {
         format!("TCP connect to container port 9090 (127.0.0.1:{port})")
     );
     let (runtime, id) = running().await;
-    check.run(&runtime, &id, &NetworkProber, &()).await.unwrap();
+    check.run(&net(&runtime), &id, &()).await.unwrap();
 
     let closed = ClosedPort::new();
     let check = Check::for_service(
@@ -453,10 +442,7 @@ async fn tcp_probe_connects() {
         &PortMap::from([(8080, 1), (9090, closed.port)]),
     )
     .unwrap();
-    let err = check
-        .run(&runtime, &id, &NetworkProber, &())
-        .await
-        .unwrap_err();
+    let err = check.run(&net(&runtime), &id, &()).await.unwrap_err();
     assert!(err.to_string().contains("cannot connect"), "{err}");
 }
 
@@ -502,6 +488,634 @@ fn a_probe_port_without_a_loopback_port_is_an_error() {
     assert!(matches!(err, HealthError::NoLoopbackPort(8080)), "{err:?}");
 }
 
+/// A stack with one service `app` without routes, plus `health_toml`.
+fn unrouted(health_toml: &str) -> Service {
+    let toml = format!(
+        "version = 1\nname = \"demo\"\n[services.app]\nimage = \"docker.io/library/w@sha256:{}\"\n{health_toml}",
+        "ab".repeat(32)
+    );
+    let stack: Stack = toml.parse().unwrap();
+    stack.services[&"app".parse::<Name>().unwrap()].clone()
+}
+
+const EXEC: &str = r#"
+[services.app.health]
+exec = ["pg_isready", "-U", "postgres"]
+interval = "1s"
+start_period = "10s"
+"#;
+
+fn exited(code: i64, output: &str) -> crate::runtime::fake::ExecResult {
+    Ok(ExecOutcome::finished(code, output.into()))
+}
+
+/// An exec that outlives its timeout and keeps running until `guard` is dropped.
+fn hung() -> (crate::runtime::fake::ExecResult, ExecGuard) {
+    let (exec, guard) = RunningExec::new();
+    let outcome = ExecOutcome::TimedOut {
+        output: "still waiting\n".into(),
+        exec,
+    };
+    (Ok(outcome), guard)
+}
+
+/// ADR-0056: declared `health` (exec on any service) → `GET /healthz` for routed services →
+/// running for 5 s; an exec check on a routed service also connects to the first route's port.
+#[test]
+fn checks_follow_the_precedence_of_adr_0056() {
+    let ports = ports(8080, 20001);
+    let exec = "[services.app.health]\nexec = [\"pg_isready\", \"-U\", \"postgres\"]";
+    let table = [
+        (
+            service(""),
+            "GET /healthz on container port 8080 (127.0.0.1:20001), the default for a routed \
+             service without health",
+            DEFAULT_TIMEOUT,
+        ),
+        (
+            service("[services.app.health]\nhttp = { path = \"/up\", port = 9090 }"),
+            "GET /up on container port 9090 (127.0.0.1:1), declared in health.http",
+            DEFAULT_TIMEOUT,
+        ),
+        (
+            service("[services.app.health]\ntcp = { port = 9090 }"),
+            "TCP connect to container port 9090 (127.0.0.1:1), declared in health.tcp",
+            DEFAULT_TIMEOUT,
+        ),
+        (
+            service(exec),
+            "exec: pg_isready -U postgres and TCP connect to container port 8080 \
+             (127.0.0.1:20001), declared in health.exec; a routed service's exec check also \
+             connects to its first route's port",
+            DEFAULT_EXEC_TIMEOUT,
+        ),
+        (
+            unrouted(exec),
+            "exec: pg_isready -U postgres, declared in health.exec",
+            DEFAULT_EXEC_TIMEOUT,
+        ),
+        (
+            unrouted(""),
+            "running for 5s, the default for a service without routes or health",
+            DEFAULT_TIMEOUT,
+        ),
+    ];
+    for (service, explained, timeout) in table {
+        let check = Check::for_service(&service, &ports).unwrap();
+        assert_eq!(format!("{check:#}"), explained);
+        assert!(explained.starts_with(&check.to_string()), "{check}");
+        assert_eq!(check.timeout, timeout, "{check}");
+        if !check.is_settle() {
+            assert_eq!(check.interval, DEFAULT_INTERVAL, "{check}");
+            assert_eq!(check.start_period, DEFAULT_START_PERIOD, "{check}");
+        }
+    }
+    // A declared timeout wins over the exec default.
+    let check =
+        Check::for_service(&unrouted(&format!("{exec}\ntimeout = \"9s\"")), &ports).unwrap();
+    assert_eq!(check.timeout, Duration::from_secs(9));
+    // The exec check of a routed service needs the first route's loopback port.
+    let err = Check::for_service(&service(exec), &PortMap::from([(9090, 1)])).unwrap_err();
+    assert!(matches!(err, HealthError::NoLoopbackPort(8080)), "{err:?}");
+}
+
+/// The check the stack file decides, as the overview names it: the same precedence and words
+/// as [`Check`], plain and alternate, without the loopback ports.
+#[test]
+fn check_spec_names_the_check_without_ports() {
+    let exec = "[services.app.health]\nexec = [\"pg_isready\", \"-U\", \"postgres\"]";
+    let table = [
+        (
+            service(""),
+            "GET /healthz on container port 8080, the default for a routed service without \
+             health",
+            true,
+        ),
+        // A timings-only table tunes the default probe (ADR-0051).
+        (
+            service("[services.app.health]\nstart_period = \"60s\""),
+            "GET /healthz on container port 8080, the default for a routed service, with the \
+             timings of its health table",
+            true,
+        ),
+        (
+            service("[services.app.health]\nhttp = { path = \"/up\", port = 9090 }"),
+            "GET /up on container port 9090, declared in health.http",
+            false,
+        ),
+        (
+            service("[services.app.health]\ntcp = { port = 9090 }"),
+            "TCP connect to container port 9090, declared in health.tcp",
+            false,
+        ),
+        (
+            service(exec),
+            "exec: pg_isready -U postgres and TCP connect to container port 8080, declared in \
+             health.exec; a routed service's exec check also connects to its first route's port",
+            false,
+        ),
+        (
+            unrouted(exec),
+            "exec: pg_isready -U postgres, declared in health.exec",
+            false,
+        ),
+        (
+            unrouted(""),
+            "running for 5s, the default for a service without routes or health",
+            true,
+        ),
+    ];
+    let ports = ports(8080, 20001);
+    let without_ports = |text: String| {
+        text.replace(" (127.0.0.1:20001)", "")
+            .replace(" (127.0.0.1:1)", "")
+    };
+    for (service, explained, default) in table {
+        let spec = CheckSpec::from(&service);
+        assert_eq!(format!("{spec:#}"), explained);
+        assert_eq!(spec.is_default(), default, "{spec}");
+        assert_eq!(format!("{spec}, {}", spec.why()), explained);
+        // The same check as the deploy resolves and words, ports left out.
+        let check = Check::for_service(&service, &ports).unwrap();
+        assert_eq!(spec.to_string(), without_ports(check.to_string()));
+        assert_eq!(explained, without_ports(format!("{check:#}")));
+    }
+}
+
+/// Every event a check writes reads back as a probe event; the engine's notes do not.
+#[test]
+fn probe_events_are_told_apart() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let id = ContainerId::from("c1".to_owned());
+    let probe = [
+        super::exec::ProbeLine {
+            check: &check,
+            result: "exit 2",
+            tail: Some("\"no response\""),
+        }
+        .to_string(),
+        format!(
+            "{}{check} passed 1 time(s) in a row after 1s",
+            Check::VERDICT
+        ),
+        HealthError::Unhealthy {
+            check: check.to_string(),
+            within: Duration::from_secs(30),
+            last: "exit 2".into(),
+            default_path: false,
+        }
+        .to_string(),
+        HealthError::CannotRun("`pg_isready`: executable file not found in $PATH".into())
+            .to_string(),
+        HealthError::Stopping(id.clone()).to_string(),
+        HealthError::Exited {
+            name: "hoster-demo-app-g1".into(),
+            state: ContainerState::Exited(Some(1)),
+        }
+        .to_string(),
+        HealthError::Inspect {
+            id,
+            source: RuntimeError::Unreachable {
+                socket: "/run/podman.sock".into(),
+                message: "refused".into(),
+            },
+        }
+        .to_string(),
+    ];
+    for message in &probe {
+        assert!(ProbeOutput::from(message.as_str()).is_probe(), "{message}");
+    }
+    for message in [
+        "starting db, cache",
+        "checking db with exec: pg_isready, declared in health.exec",
+        "replacing db (stop-first)",
+    ] {
+        assert!(!ProbeOutput::from(message).is_probe(), "{message}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_exec_check_passes_once_the_command_exits_0() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let (runtime, id) = running().await;
+    runtime.script_exec(
+        "-app-",
+        [
+            exited(2, "/var/run/postgresql:5432 - no response\n"),
+            exited(2, "/var/run/postgresql:5432 - no response\n"),
+            exited(0, "/var/run/postgresql:5432 - accepting connections\n"),
+        ],
+    );
+    let events = Events::default();
+    let started = Instant::now();
+    check.run(&net(&runtime), &id, &events).await.unwrap();
+    assert_eq!(started.elapsed(), Duration::from_secs(2), "two intervals");
+
+    let argv = ["pg_isready", "-U", "postgres"].map(str::to_owned).to_vec();
+    assert_eq!(
+        runtime.execs(),
+        vec![("hoster-demo-app-g1".to_owned(), argv); 3]
+    );
+    let events = events.all();
+    assert_eq!(
+        events[0],
+        "health probe exec: pg_isready -U postgres: exit 2, output \
+         \"/var/run/postgresql:5432 - no response\"",
+        "{events:?}"
+    );
+    assert!(
+        events[1].starts_with("health check exec: pg_isready -U postgres passed 1 time(s)"),
+        "{events:?}"
+    );
+    assert_eq!(events.len(), 2, "a steady failure is one event: {events:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_exec_check_fails_at_the_start_period() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let (runtime, id) = running().await;
+    runtime.script_exec("-app-", [exited(1, "no response from /etc/app.conf\n")]);
+    let events = Events::default();
+    let err = check.run(&net(&runtime), &id, &events).await.unwrap_err();
+    assert!(matches!(err, HealthError::Unhealthy { .. }), "{err:?}");
+    // The error is the deployment's failure reason (record, SSE, event log): no output in it.
+    assert_eq!(
+        err.to_string(),
+        "health check exec: pg_isready -U postgres did not pass within 10s: last result: exit 1"
+    );
+    assert_eq!(
+        runtime.execs().len(),
+        11,
+        "one per second, the last at the deadline"
+    );
+    // The output tail goes to the probe's deployment event alone.
+    assert_eq!(
+        events.all(),
+        [
+            "health probe exec: pg_isready -U postgres: exit 1, output \
+             \"no response from /etc/app.conf\""
+                .to_owned(),
+            err.to_string()
+        ]
+    );
+
+    // The monitor: the exit code only.
+    let probes = net(&runtime);
+    assert_eq!(check.live(&probes, &id).await, Err("exit 1".to_owned()));
+    runtime.script_exec("-app-", [exited(0, "accepting connections\n")]);
+    assert_eq!(check.live(&probes, &id).await, Ok("exit 0".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn output_that_changes_between_probes_is_no_status_change() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new())
+        .unwrap()
+        .with_start_period(Duration::from_secs(5));
+    let (runtime, id) = running().await;
+    runtime.script_exec(
+        "-app-",
+        (0..6).map(|n| exited(2, &format!("attempt {n}: no response\n"))),
+    );
+    let events = Events::default();
+    let err = check.run(&net(&runtime), &id, &events).await.unwrap_err();
+    assert_eq!(runtime.execs().len(), 6);
+    let events = events.all();
+    assert_eq!(
+        events,
+        [
+            "health probe exec: pg_isready -U postgres: exit 2, output \"attempt 0: no response\""
+                .to_owned(),
+            err.to_string()
+        ],
+        "a steady failure is one event"
+    );
+    assert!(err.to_string().ends_with("last result: exit 2"), "{err}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_exec_is_a_failure_and_at_most_three_are_abandoned() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new())
+        .unwrap()
+        .with_start_period(Duration::from_secs(20));
+    let (runtime, id) = running().await;
+    let (a, guard_a) = hung();
+    let (b, _guard_b) = hung();
+    let (c, _guard_c) = hung();
+    runtime.script_exec("-app-", [a, b, c, exited(0, "")]);
+    let execs = ExecSlots::default();
+    let probes = Probes::new(&runtime, &NetworkProber, &execs);
+    let events = Events::default();
+    let started = Instant::now();
+    let err = check.run(&probes, &id, &events).await.unwrap_err();
+
+    // Three probes time out after 5 s each (plus an interval between them); the fourth finds
+    // three execs still running at 18 s and waits for one until the deadline.
+    assert_eq!(runtime.execs().len(), 3, "no fourth exec while three hang");
+    assert_eq!(execs.abandoned(&id), 3);
+    assert_eq!(started.elapsed(), Duration::from_secs(20));
+    let events = events.all();
+    assert_eq!(
+        events[0],
+        "health probe exec: pg_isready -U postgres: no result within 5s, output \
+         \"still waiting\"",
+        "{events:?}"
+    );
+    assert!(
+        err.to_string()
+            .ends_with("last result: check stuck: 3 checks still running"),
+        "{err}"
+    );
+
+    // The monitor starts none at the cap either, and says why at once.
+    let before = Instant::now();
+    assert_eq!(
+        check.live(&probes, &id).await,
+        Err("check stuck: 3 checks still running".to_owned())
+    );
+    assert_eq!(before.elapsed(), Duration::ZERO);
+
+    // Once one ends, the next probe runs again.
+    drop(guard_a);
+    assert_eq!(check.live(&probes, &id).await, Ok("exit 0".to_owned()));
+    assert_eq!(execs.abandoned(&id), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deploy_probe_at_the_cap_waits_for_an_abandoned_exec_to_end() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new())
+        .unwrap()
+        .with_start_period(Duration::from_secs(30));
+    let (runtime, id) = running().await;
+    let (a, guard) = hung();
+    let (b, _b) = hung();
+    let (c, _c) = hung();
+    runtime.script_exec("-app-", [a, b, c, exited(0, "")]);
+    let execs = ExecSlots::default();
+    let probes = Probes::new(&runtime, &NetworkProber, &execs);
+    for _ in 0..3 {
+        assert_eq!(
+            check.live(&probes, &id).await,
+            Err("no result within 5s".to_owned())
+        );
+    }
+    assert_eq!(execs.abandoned(&id), 3);
+
+    // One of them ends 12 s into the deploy probe, within its start period.
+    let release = async {
+        tokio::time::sleep(Duration::from_secs(12)).await;
+        drop(guard);
+    };
+    let started = Instant::now();
+    let (result, ()) = tokio::join!(check.run(&probes, &id, &()), release);
+    result.unwrap();
+    assert_eq!(started.elapsed(), Duration::from_secs(12));
+    assert_eq!(runtime.execs().len(), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn exec_probes_of_one_container_never_overlap() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let (runtime, id) = running().await;
+    let (a, _a) = hung();
+    let (b, _b) = hung();
+    runtime.script_exec("-app-", [a, b]);
+    let probes = net(&runtime);
+    let started = Instant::now();
+    let (first, second) = tokio::join!(check.live(&probes, &id), check.live(&probes, &id));
+    assert!(first.is_err() && second.is_err());
+    assert_eq!(
+        started.elapsed(),
+        2 * DEFAULT_EXEC_TIMEOUT,
+        "the second waited for the first"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_exec_check_that_cannot_run_aborts_at_once() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let (runtime, id) = running().await;
+    let not_found = "Error: runc: exec failed: unable to start container process: exec: \
+                     \"pg_isready\": executable file not found in $PATH: OCI runtime attempted \
+                     to invoke a command that was not found\n";
+    runtime.script_exec("-app-", [exited(127, not_found)]);
+    let events = Events::default();
+    let started = Instant::now();
+    let err = check.run(&net(&runtime), &id, &events).await.unwrap_err();
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert!(matches!(err, HealthError::CannotRun(_)), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "`health.exec` cannot run: `pg_isready`: executable file not found in $PATH"
+    );
+    assert_eq!(events.all(), [err.to_string()]);
+    // The monitor reports it as a failure with the reason.
+    assert_eq!(check.live(&net(&runtime), &id).await, Err(err.to_string()));
+
+    // A shell's 127 is an ordinary failure, retried.
+    runtime.script_exec(
+        "-app-",
+        [exited(127, "sh: pg_isready: not found\n"), exited(0, "")],
+    );
+    check.run(&net(&runtime), &id, &()).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_container_stopping_during_an_exec_aborts_at_once() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let (runtime, id) = running().await;
+    // Compat inspect still says running while podman refuses the exec.
+    runtime.fail_next(
+        Operation::Exec,
+        RuntimeError::NotRunning {
+            name: id.to_string(),
+        },
+    );
+    let started = Instant::now();
+    let err = check.run(&net(&runtime), &id, &()).await.unwrap_err();
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert!(matches!(err, HealthError::Stopping(_)), "{err:?}");
+
+    // Exited by the time it is looked at: the exit is the reason.
+    runtime.script_exec("-app-", [exited(1, "")]);
+    let crash = async {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        runtime.set_state(&id, ContainerState::Exited(Some(137)));
+    };
+    let started = Instant::now();
+    let probes = net(&runtime);
+    let (result, ()) = tokio::join!(check.run(&probes, &id, &()), crash);
+    let err = result.unwrap_err();
+    assert!(matches!(err, HealthError::Exited { .. }), "{err:?}");
+    assert!(started.elapsed() < Duration::from_secs(3), "aborted early");
+    assert_eq!(
+        check.live(&net(&runtime), &id).await,
+        Err("the container is stopping or stopped".to_owned())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_container_exiting_while_an_exec_runs_aborts_at_its_end() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let (runtime, id) = running().await;
+    let (exec, _guard) = hung();
+    runtime.script_exec("-app-", [exec]);
+    let crash = async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        runtime.set_state(&id, ContainerState::Exited(Some(137)));
+    };
+    let started = Instant::now();
+    let probes = net(&runtime);
+    let (result, ()) = tokio::join!(check.run(&probes, &id, &()), crash);
+    let err = result.unwrap_err();
+    assert!(matches!(err, HealthError::Exited { .. }), "{err:?}");
+    // Noticed at the next look, after the exec's timeout and an interval; not the start period.
+    assert_eq!(started.elapsed(), DEFAULT_EXEC_TIMEOUT + DEFAULT_INTERVAL);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deploy_probe_at_the_cap_gives_up_once_the_container_stops() {
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new()).unwrap();
+    let (runtime, id) = running().await;
+    let (a, _a) = hung();
+    let (b, _b) = hung();
+    let (c, _c) = hung();
+    runtime.script_exec("-app-", [a, b, c]);
+    let execs = ExecSlots::default();
+    let probes = Probes::new(&runtime, &NetworkProber, &execs);
+    for _ in 0..3 {
+        check.live(&probes, &id).await.unwrap_err();
+    }
+    assert_eq!(execs.abandoned(&id), 3);
+
+    // The deploy probe waits at the cap; the container stops 2 s in, its execs still hung.
+    let crash = async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        runtime.set_state(&id, ContainerState::Exited(Some(137)));
+    };
+    let started = Instant::now();
+    let (result, ()) = tokio::join!(check.run(&probes, &id, &()), crash);
+    let err = result.unwrap_err();
+    assert!(matches!(err, HealthError::Exited { .. }), "{err:?}");
+    assert!(
+        started.elapsed() <= Duration::from_secs(3),
+        "well before the 30 s start period: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(runtime.execs().len(), 3, "no fourth exec");
+}
+
+#[tokio::test]
+async fn a_routed_exec_check_also_needs_the_tcp_connect() {
+    let toml = format!("{EXEC}\ninterval = \"10ms\"\nstart_period = \"100ms\"")
+        .replace("interval = \"1s\"\n", "")
+        .replace("start_period = \"10s\"\n", "");
+    let closed = ClosedPort::new();
+    let check = Check::for_service(&service(&toml), &ports(8080, closed.port)).unwrap();
+    let (runtime, id) = running().await;
+    let err = check.run(&net(&runtime), &id, &()).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("last result: exit 0; TCP: cannot connect"),
+        "{err}"
+    );
+    assert_eq!(
+        check
+            .live(&net(&runtime), &id)
+            .await
+            .unwrap_err()
+            .split(';')
+            .next(),
+        Some("exit 0")
+    );
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let check = Check::for_service(&service(&toml), &ports(8080, port)).unwrap();
+    check.run(&net(&runtime), &id, &()).await.unwrap();
+    assert_eq!(
+        check.live(&net(&runtime), &id).await,
+        Ok("exit 0; TCP: connected".to_owned())
+    );
+    runtime.script_exec("-app-", [exited(1, "")]);
+    assert_eq!(
+        check.live(&net(&runtime), &id).await,
+        Err("exit 1; TCP: connected".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn exec_output_goes_to_deployment_events_with_secrets_redacted() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(&dir.path().join("state")).await.unwrap();
+    store.add_revision("demo", "x").await.unwrap();
+    let deployment = store
+        .create_deployment(&NewDeployment {
+            stack: "demo".into(),
+            revision: None,
+            source: DeploymentSource::Webhook,
+            target: DigestSet::new(),
+            provenance: None,
+        })
+        .await
+        .unwrap();
+    let check = Check::for_service(&unrouted(EXEC), &PortMap::new())
+        .unwrap()
+        .with_interval(Duration::from_millis(5))
+        .with_start_period(Duration::from_millis(20));
+    let (runtime, id) = running().await;
+    let output = format!(
+        "{}connecting as postgres:hunter22 with key abc\nrefused\n",
+        "x".repeat(400)
+    );
+    runtime.script_exec("-app-", [exited(2, &output)]);
+    let secrets = [SecretValue::from("hunter22"), SecretValue::from("abc")];
+    let log = DeploymentLog::new(
+        store.clone(),
+        deployment.id,
+        DeploymentState::HealthChecking,
+    )
+    .redacting(&secrets);
+    check.run(&net(&runtime), &id, &log).await.unwrap_err();
+
+    let events = store.events(deployment.id).await.unwrap();
+    let probe = events
+        .iter()
+        .filter_map(|e| e.message.as_deref())
+        .find(|m| m.starts_with("health probe"))
+        .unwrap();
+    assert!(
+        probe.ends_with("connecting as postgres:<redacted> with key abc\\nrefused\""),
+        "{probe}"
+    );
+    assert!(!probe.contains("hunter22"), "{probe}");
+    assert!(probe.contains("output \"…x"), "cut to its tail: {probe}");
+    // The tail, its quotes and the ellipsis.
+    let tail = probe.split_once("output ").unwrap().1;
+    assert!(tail.chars().count() <= Tail::MAX_CHARS + 4, "{tail}");
+}
+
+#[tokio::test]
+async fn a_secret_containing_another_is_redacted_whole() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(&dir.path().join("state")).await.unwrap();
+    let secrets = [
+        SecretValue::from("hunter22"),
+        SecretValue::from("hunter22-extended"),
+        SecretValue::from("hunter22"),
+    ];
+    let log = DeploymentLog::new(
+        store,
+        DeploymentId::from(1),
+        DeploymentState::HealthChecking,
+    )
+    .redacting(&secrets);
+    assert_eq!(log.secrets.len(), 2, "duplicates dropped");
+    assert_eq!(
+        log.redact("as hunter22-extended, then hunter22"),
+        "as <redacted>, then <redacted>"
+    );
+}
+
 #[tokio::test]
 async fn services_without_routes_settle() {
     let toml = format!(
@@ -518,13 +1132,10 @@ async fn services_without_routes_settle() {
         .with_start_period(Duration::from_millis(40))
         .with_interval(Duration::from_millis(5));
     let (runtime, id) = running().await;
-    check.run(&runtime, &id, &NetworkProber, &()).await.unwrap();
+    check.run(&net(&runtime), &id, &()).await.unwrap();
 
     runtime.set_state(&id, ContainerState::Exited(Some(1)));
-    let err = check
-        .run(&runtime, &id, &NetworkProber, &())
-        .await
-        .unwrap_err();
+    let err = check.run(&net(&runtime), &id, &()).await.unwrap_err();
     assert_eq!(
         err.to_string(),
         "container hoster-demo-app-g1 exited (1) before it became healthy"
@@ -557,10 +1168,7 @@ async fn deployment_log_records_probe_results_as_events() {
         deployment.id,
         DeploymentState::HealthChecking,
     );
-    check
-        .run(&runtime, &id, &NetworkProber, &log)
-        .await
-        .unwrap_err();
+    check.run(&net(&runtime), &id, &log).await.unwrap_err();
 
     let events = store.events(deployment.id).await.unwrap();
     let notes: Vec<_> = events

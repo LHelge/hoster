@@ -31,6 +31,7 @@ fn stack(stack_name: &str, routes: &[Decl<'_>]) -> Stack {
             .entry(name(service))
             .or_insert_with(|| Service {
                 image: "ghcr.io/acme/app".parse().expect("valid image"),
+                depends_on: Default::default(),
                 track: None,
                 command: None,
                 entrypoint: None,

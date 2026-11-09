@@ -3,19 +3,24 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr};
+use std::ops::ControlFlow;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bollard::auth::DockerCredentials;
 use bollard::container::LogOutput;
 use bollard::errors::Error as BollardError;
+use bollard::exec::{StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerCreateBody, ContainerInspectResponse, ContainerSummary, EndpointSettings, HostConfig,
-    HostConfigLogConfig, Mount, MountType, NetworkCreateRequest, NetworkingConfig, PortMap,
-    PortSummaryTypeEnum, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
+    ContainerCreateBody, ContainerInspectResponse, ContainerSummary, EndpointSettings, ExecConfig,
+    ExecInspectResponse, HealthConfig, HostConfig, HostConfigLogConfig, Mount, MountType,
+    NetworkCreateRequest, NetworkingConfig, PortMap, PortSummaryTypeEnum, RestartPolicy,
+    RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
@@ -27,11 +32,15 @@ use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
+use super::exec::{Argv, ExecProcess, OutputTail};
 use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, EngineInfo,
-    LogLine, LogOptions, LogStream, NetworkSpec, ObjectKind, Operation, PortBinding, PublishedPort,
-    RuntimeError, VolumeSpec, label,
+    ExecGuard, ExecOutcome, ExecOutput, LogLine, LogOptions, LogStream, NetworkSpec, ObjectKind,
+    Operation, PortBinding, PublishedPort, RunningExec, RuntimeError, VolumeSpec, label,
 };
 use crate::registry::{Anonymous, RegistryCredential, RegistryCredentials};
 use crate::stack::PinnedImage;
@@ -129,6 +138,8 @@ pub struct PodmanRuntime {
     socket: PathBuf,
     /// Pull credentials per registry host (ADR-0025); anonymous unless set.
     credentials: Arc<dyn RegistryCredentials>,
+    /// Finished exec sessions still to be removed.
+    sessions: Arc<ExecSessions>,
 }
 
 impl PodmanRuntime {
@@ -185,6 +196,7 @@ impl PodmanRuntime {
             docker,
             socket: path,
             credentials: Arc::new(Anonymous),
+            sessions: Arc::default(),
         })
     }
 
@@ -250,11 +262,16 @@ impl<'a> Call<'a> {
                 }
                 // Docker answers 403, podman 500 "network is being used".
                 (Operation::RemoveNetwork, 403 | 409) => RuntimeError::InUse { kind, name },
-                (Operation::RemoveNetwork, _) if Self::in_use(&message) => {
+                (Operation::RemoveNetwork, _) if Self::mentions(&message, &Self::IN_USE) => {
                     RuntimeError::InUse { kind, name }
                 }
                 (Operation::RemoveVolume | Operation::RemoveImage, 409) => {
                     RuntimeError::InUse { kind, name }
+                }
+                // Docker answers 409 "is not running", podman 500 "container state improper".
+                (Operation::Exec, 409) => RuntimeError::NotRunning { name },
+                (Operation::Exec, _) if Self::mentions(&message, &Self::NOT_RUNNING) => {
+                    RuntimeError::NotRunning { name }
                 }
                 _ => RuntimeError::Api {
                     operation: self.operation,
@@ -307,11 +324,16 @@ impl<'a> Call<'a> {
         }
     }
 
-    fn in_use(message: &str) -> bool {
+    /// How podman says a network is in use when it refuses to remove it.
+    const IN_USE: [&str; 3] = ["being used", "in use", "active endpoints"];
+    /// How podman says it refused an exec because the container is not running: "can only
+    /// create exec sessions on running containers: container state improper" (podman 6.1).
+    const NOT_RUNNING: [&str; 1] = ["container state improper"];
+
+    /// Whether `message` contains one of `phrases`, ignoring case.
+    fn mentions(message: &str, phrases: &[&str]) -> bool {
         let message = message.to_ascii_lowercase();
-        ["being used", "in use", "active endpoints"]
-            .iter()
-            .any(|needle| message.contains(needle))
+        phrases.iter().any(|phrase| message.contains(phrase))
     }
 }
 
@@ -372,6 +394,12 @@ impl From<&ContainerSpec> for ContainerCreateBody {
             log_config: Some(ContainerLog::config()),
             ..HostConfig::default()
         };
+        // Podman would otherwise run a docker-format image's HEALTHCHECK itself, on systemd
+        // timers; hoster runs every check (ADR-0038, ADR-0056).
+        let healthcheck = HealthConfig {
+            test: Some(vec!["NONE".to_owned()]),
+            ..HealthConfig::default()
+        };
         let endpoint = EndpointSettings {
             aliases: Some(vec![spec.network_alias.clone()]),
             ..EndpointSettings::default()
@@ -396,6 +424,7 @@ impl From<&ContainerSpec> for ContainerCreateBody {
             user: spec.user.clone(),
             exposed_ports: Some(exposed),
             stop_timeout: Some(spec.stop_timeout.as_secs().try_into().unwrap_or(i64::MAX)),
+            healthcheck: Some(healthcheck),
             host_config: Some(host_config),
             networking_config: Some(NetworkingConfig {
                 endpoints_config: Some(HashMap::from([(spec.network.clone(), endpoint)])),
@@ -813,6 +842,83 @@ impl ContainerRuntime for PodmanRuntime {
         })
     }
 
+    /// Creates an exec session through the compat API, starts it attached and collects its
+    /// output until the output closes and exec inspect reports an exit code, or until `timeout`
+    /// passes (the whole call, create included). The session is removed in the background; a
+    /// non-zero exit from a container that is no longer running is [`RuntimeError::NotRunning`].
+    /// An exec still running at the timeout, or still being started then, is handed to a
+    /// background task that lets the start finish, tries to end it ([`ExecProcess`]), waits
+    /// until it has ended and then removes its session.
+    async fn exec(
+        &self,
+        id: &ContainerId,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<ExecOutcome, RuntimeError> {
+        let argv = Argv::try_from(argv)?;
+        let deadline = Instant::now() + timeout;
+        let call = Call::new(Operation::Exec, ObjectKind::Container, id.as_ref());
+        // Neither request is ever cut off: podman runs the command even when the start's
+        // connection drops, and then reports the session as exited 125 without a PID (§1.6).
+        // One still in flight at the deadline finishes in the background.
+        let mut create = self.spawn_create(id, argv);
+        let Ok(created) = tokio::time::timeout_at(deadline, &mut create).await else {
+            // Nothing has started; a session created late is removed unstarted.
+            let runtime = self.clone();
+            tokio::spawn(async move {
+                if let Ok(session) = joined(create.await) {
+                    runtime.sessions.remove(&runtime.socket, session).await;
+                }
+            });
+            let (exec, _ended) = RunningExec::new();
+            return Ok(ExecOutcome::TimedOut {
+                output: ExecOutput::default(),
+                exec,
+            });
+        };
+        let session = joined(created)?;
+        let mut start = self.spawn_start(id, &session);
+        let Ok(started) = tokio::time::timeout_at(deadline, &mut start).await else {
+            tracing::debug!(container = %id, %session, "exec start timed out");
+            return Ok(self.timed_out(session, ExecStart::Pending(start), ExecOutput::default()));
+        };
+        let (mut reader, tail) = match joined(started) {
+            Ok(attached) => attached,
+            Err(err) => {
+                self.remove_later(session);
+                return Err(err);
+            }
+        };
+        let code = match tokio::time::timeout_at(deadline, &mut reader).await {
+            Ok(_) => self.exit_code(&call, &session, deadline).await,
+            Err(_) => Ok(None),
+        };
+        let output = tail.lock().expect("never poisoned").snapshot();
+        let code = match code {
+            Ok(Some(code)) => code,
+            Ok(None) => {
+                tracing::debug!(container = %id, %session, "exec timed out");
+                return Ok(self.timed_out(session, ExecStart::Started(reader), output));
+            }
+            Err(err) => {
+                self.remove_later(session);
+                return Err(err);
+            }
+        };
+        self.remove_later(session);
+        if code != 0 {
+            // The deadline bounds this too; without an answer the exit stands as it is.
+            if let Ok(info) = tokio::time::timeout_at(deadline, self.inspect(id)).await
+                && !info?.state.is_running()
+            {
+                return Err(RuntimeError::NotRunning {
+                    name: id.to_string(),
+                });
+            }
+        }
+        Ok(ExecOutcome::finished(code, output))
+    }
+
     /// Reads the log through the compat `logs` endpoint, with timestamps, and joins podman's
     /// frames into lines (see [`ContainerLog`]). Dropping the stream closes the request, so a
     /// followed log stops being read as soon as its reader goes away.
@@ -842,6 +948,444 @@ impl ContainerRuntime for PodmanRuntime {
                 stream::iter(lines)
             })
             .boxed()
+    }
+}
+
+/// The task reading an attached exec's output into the tail; it finishes when the output
+/// closes, whether because the exec ended or because the stream failed.
+type ExecReader = JoinHandle<()>;
+
+/// An attached exec: its reader and the tail it reads into.
+type Attached = (ExecReader, Arc<Mutex<OutputTail>>);
+
+/// How far a timed-out exec got.
+enum ExecStart {
+    /// The start request was still in flight at the timeout.
+    Pending(JoinHandle<Result<Attached, RuntimeError>>),
+    Started(ExecReader),
+}
+
+/// The result of a task this module spawned; a panic in it carries on in the caller.
+fn joined<T>(result: Result<T, tokio::task::JoinError>) -> T {
+    result.unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()))
+}
+
+impl PodmanRuntime {
+    /// How often a timed-out exec is inspected while it still runs.
+    const EXEC_ENDED_POLL: Duration = Duration::from_secs(1);
+
+    /// [`Self::create_exec`] as a task of its own, so the deadline never cuts it off.
+    fn spawn_create(
+        &self,
+        id: &ContainerId,
+        argv: Argv<'_>,
+    ) -> JoinHandle<Result<String, RuntimeError>> {
+        let runtime = self.clone();
+        let container = id.to_string();
+        let argv = argv.as_ref().to_vec();
+        tokio::spawn(async move {
+            let call = Call::new(Operation::Exec, ObjectKind::Container, &container);
+            runtime.create_exec(&call, Argv::try_from(&argv[..])?).await
+        })
+    }
+
+    /// [`Self::start_exec`] as a task of its own, so the deadline never cuts it off.
+    fn spawn_start(
+        &self,
+        id: &ContainerId,
+        exec: &str,
+    ) -> JoinHandle<Result<Attached, RuntimeError>> {
+        let runtime = self.clone();
+        let container = id.to_string();
+        let exec = exec.to_owned();
+        tokio::spawn(async move {
+            let call = Call::new(Operation::Exec, ObjectKind::Container, &container);
+            runtime.start_exec(&call, &exec).await
+        })
+    }
+
+    /// Creates an exec session running `argv` and returns its id.
+    async fn create_exec(&self, call: &Call<'_>, argv: Argv<'_>) -> Result<String, RuntimeError> {
+        let created = self
+            .docker
+            .create_exec(call.name, ExecRequest(argv))
+            .await
+            .map_err(|err| call.error(err))?;
+        Ok(created.id)
+    }
+
+    /// Starts the exec session `exec` attached, and the task that reads its output into the
+    /// returned tail.
+    async fn start_exec(&self, call: &Call<'_>, exec: &str) -> Result<Attached, RuntimeError> {
+        let options = StartExecOptions {
+            detach: false,
+            tty: false,
+            output_capacity: None,
+        };
+        let started =
+            self.docker
+                .start_exec(exec, Some(options))
+                .await
+                .map_err(|err| match err {
+                    // The session went between create and start, with its container.
+                    BollardError::DockerResponseServerError {
+                        status_code: 404, ..
+                    } => RuntimeError::NotRunning {
+                        name: call.name.to_owned(),
+                    },
+                    other => call.error(other),
+                })?;
+        let StartExecResults::Attached { mut output, input } = started else {
+            return Err(RuntimeError::Api {
+                operation: Operation::Exec,
+                message: format!("container {}: podman started the exec detached", call.name),
+            });
+        };
+        // No stdin: closing our end tells nobody anything, but holding it serves no one.
+        drop(input);
+        let tail = Arc::new(Mutex::new(OutputTail::default()));
+        let reader = tokio::spawn({
+            let tail = Arc::clone(&tail);
+            let exec = exec.to_owned();
+            async move {
+                while let Some(frame) = output.next().await {
+                    match frame {
+                        Ok(
+                            LogOutput::StdOut { message }
+                            | LogOutput::StdErr { message }
+                            | LogOutput::Console { message },
+                        ) => tail.lock().expect("never poisoned").push(&message),
+                        Ok(LogOutput::StdIn { .. }) => {}
+                        Err(err) => {
+                            // The exec may still run; exec inspect tells.
+                            tracing::debug!(%exec, error = %err, "exec output ended with an error");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        Ok((reader, tail))
+    }
+
+    /// The exit code of an exec whose output has closed, read from exec inspect until `until`
+    /// (see [`ExitPoll`]); `None` when it still runs then.
+    async fn exit_code(
+        &self,
+        call: &Call<'_>,
+        exec: &str,
+        until: Instant,
+    ) -> Result<Option<i64>, RuntimeError> {
+        let mut poll = ExitPoll::new(call, exec, until);
+        loop {
+            let Ok(inspect) = tokio::time::timeout_at(until, self.docker.inspect_exec(exec)).await
+            else {
+                return Ok(None);
+            };
+            match poll.step(inspect, Instant::now()) {
+                ControlFlow::Break(code) => return code,
+                ControlFlow::Continue(wait) => tokio::time::sleep(wait).await,
+            }
+        }
+    }
+
+    /// The outcome of an exec that is, or may be, still running at its timeout: a background
+    /// task ([`Self::end_timed_out`]) holds the [`RunningExec`]'s guard until it has ended.
+    fn timed_out(&self, exec: String, start: ExecStart, output: ExecOutput) -> ExecOutcome {
+        let (running, guard) = RunningExec::new();
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            runtime.end_timed_out(exec, start, guard).await;
+        });
+        ExecOutcome::TimedOut {
+            output,
+            exec: running,
+        }
+    }
+
+    /// Waits for a pending start, ends a timed-out exec if it can, waits until it has ended
+    /// (killed, finished, or gone with its container), removes the session and then drops
+    /// `guard`, which tells the [`RunningExec`] watchers.
+    async fn end_timed_out(self, exec: String, start: ExecStart, guard: ExecGuard) {
+        let reader = match start {
+            ExecStart::Started(reader) => reader,
+            ExecStart::Pending(start) => match joined(start.await) {
+                Ok((reader, _)) => reader,
+                Err(err) => {
+                    tracing::debug!(%exec, error = %err, "a timed-out exec never started");
+                    self.sessions.remove(&self.socket, exec).await;
+                    return;
+                }
+            },
+        };
+        if self.end_exec(&exec).await {
+            tracing::debug!(%exec, "ended a timed-out exec");
+        }
+        // A panicked reader has no output left to read either.
+        let _ = reader.await;
+        // The output also closes when its stream fails, while the exec may run on.
+        while self.exec_runs(&exec).await {
+            tokio::time::sleep(Self::EXEC_ENDED_POLL).await;
+        }
+        self.sessions.remove(&self.socket, exec).await;
+        drop(guard);
+    }
+
+    /// Tries to end the exec ([`Self::kill_exec`]); whether it signalled it.
+    async fn end_exec(&self, exec: &str) -> bool {
+        self.kill_exec(exec).await.unwrap_or_else(|err| {
+            tracing::info!(
+                %exec,
+                error = %err,
+                "cannot end a timed-out exec; it runs until it ends or its container stops"
+            );
+            false
+        })
+    }
+
+    /// Whether exec inspect says the session still runs. A session that is gone does not; any
+    /// other failure counts as running, so an exec is never taken for ended without podman
+    /// saying so.
+    async fn exec_runs(&self, exec: &str) -> bool {
+        match self.docker.inspect_exec(exec).await {
+            Ok(inspect) => inspect.running == Some(true),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => false,
+            Err(err) => {
+                tracing::debug!(%exec, error = %err, "cannot inspect a timed-out exec");
+                true
+            }
+        }
+    }
+
+    /// Signals a running exec's process group (architecture §5.5): the PID is read while the
+    /// session runs, pinned with a pidfd, and checked again against the session before
+    /// anything is signalled, so a PID reused after the exec ended is never touched. `false`
+    /// when the session was not running.
+    async fn kill_exec(&self, exec: &str) -> io::Result<bool> {
+        let running = |inspect: &ExecInspectResponse| {
+            (inspect.running == Some(true))
+                .then_some(inspect.pid)
+                .flatten()
+        };
+        let inspect = self
+            .docker
+            .inspect_exec(exec)
+            .await
+            .map_err(io::Error::other)?;
+        let Some(pid) = running(&inspect) else {
+            return Ok(false);
+        };
+        let context = |what: &'static str| {
+            move |err: io::Error| io::Error::new(err.kind(), format!("{what} PID {pid}: {err}"))
+        };
+        let process = ExecProcess::open(pid).map_err(context("cannot open its"))?;
+        let again = self
+            .docker
+            .inspect_exec(exec)
+            .await
+            .map_err(io::Error::other)?;
+        if running(&again) != Some(process.pid()) {
+            return Ok(false);
+        }
+        process
+            .terminate()
+            .await
+            .map_err(context("cannot signal"))?;
+        Ok(true)
+    }
+
+    /// Removes the finished session `exec` in the background, so a probe never waits on it.
+    fn remove_later(&self, exec: String) {
+        let sessions = Arc::clone(&self.sessions);
+        let socket = self.socket.clone();
+        tokio::spawn(async move { sessions.remove(&socket, exec).await });
+    }
+}
+
+/// Reading a finished exec's exit code from successive exec inspects, until a deadline. Podman
+/// may report an exec `Running` for a moment after its output closed, and for as long as it
+/// really runs when the output stream failed instead; a session that is gone went with its
+/// container (a stop, restart or removal).
+struct ExitPoll<'a> {
+    call: &'a Call<'a>,
+    exec: &'a str,
+    until: Instant,
+    wait: Duration,
+}
+
+impl<'a> ExitPoll<'a> {
+    /// The first wait between inspects, doubled after each up to [`Self::MAX_WAIT`].
+    const FIRST_WAIT: Duration = Duration::from_millis(20);
+    const MAX_WAIT: Duration = Duration::from_millis(250);
+
+    fn new(call: &'a Call<'a>, exec: &'a str, until: Instant) -> Self {
+        Self {
+            call,
+            exec,
+            until,
+            wait: Self::FIRST_WAIT,
+        }
+    }
+
+    /// What one inspect, answered at `now`, decides: the exit code, `None` when the exec still
+    /// runs at the deadline, an error, or how long to wait before inspecting again.
+    fn step(
+        &mut self,
+        inspect: Result<ExecInspectResponse, BollardError>,
+        now: Instant,
+    ) -> ControlFlow<Result<Option<i64>, RuntimeError>, Duration> {
+        let (call, exec) = (self.call, self.exec);
+        match inspect {
+            Ok(inspect) if inspect.running != Some(true) => ControlFlow::Break(
+                inspect
+                    .exit_code
+                    .map(Some)
+                    .ok_or_else(|| RuntimeError::Api {
+                        operation: Operation::Exec,
+                        message: format!("container {}: exec {exec} has no exit code", call.name),
+                    }),
+            ),
+            Ok(_) if now >= self.until => ControlFlow::Break(Ok(None)),
+            Ok(_) => {
+                let wait = self.wait.min(self.until - now);
+                self.wait = (self.wait * 2).min(Self::MAX_WAIT);
+                ControlFlow::Continue(wait)
+            }
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => ControlFlow::Break(Err(RuntimeError::NotRunning {
+                name: call.name.to_owned(),
+            })),
+            Err(err) => ControlFlow::Break(Err(call.error(err))),
+        }
+    }
+}
+
+/// The compat exec create body: `argv` without a shell, with stdout and stderr attached and no
+/// stdin or TTY. `Env`, `User`, `WorkingDir` and `Privileged` are left out, so the command runs
+/// as the container's user, with its environment, in its working directory.
+struct ExecRequest<'a>(Argv<'a>);
+
+impl From<ExecRequest<'_>> for ExecConfig {
+    fn from(ExecRequest(argv): ExecRequest<'_>) -> Self {
+        Self {
+            attach_stdin: Some(false),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(false),
+            cmd: Some(argv.as_ref().to_vec()),
+            ..Self::default()
+        }
+    }
+}
+
+/// Removing finished exec sessions through libpod's `POST /libpod/exec/{id}/remove`, a raw HTTP
+/// call over the podman socket next to bollard (architecture §5.5). Best effort: podman removes
+/// a finished compat session itself after `exit_command_delay` (300 s by default), which bounds
+/// them anyway, so a podman without the route (before 4.9) is no error.
+#[derive(Debug, Default)]
+struct ExecSessions {
+    /// Sessions whose removal failed, retried with the next removal.
+    pending: Mutex<Vec<String>>,
+    /// Set once podman has answered that it has no such route.
+    unsupported: AtomicBool,
+}
+
+impl ExecSessions {
+    /// The libpod API version in the path. Podman serves libpod routes only under a version
+    /// prefix (an unversioned path is a plain-text 404, like a missing route) and accepts any
+    /// version it supports; 4.0.0 is the oldest libpod API with the v4 layout.
+    const LIBPOD_API: &str = "v4.0.0";
+    /// How long one removal may take.
+    const TIMEOUT: Duration = Duration::from_secs(10);
+    /// The most failed removals kept for a retry; older ones are left to podman.
+    const MAX_PENDING: usize = 64;
+
+    /// Removes `exec`, and any session whose removal failed before. Runs in the background
+    /// ([`PodmanRuntime::remove_later`]): a slow podman delays only this.
+    async fn remove(&self, socket: &Path, exec: String) {
+        if self.unsupported.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut sessions = std::mem::take(&mut *self.pending.lock().expect("never poisoned"));
+        sessions.push(exec);
+        let mut failed = Vec::new();
+        for session in sessions {
+            match Self::request(socket, &session).await {
+                SessionRemoval::Removed | SessionRemoval::Gone => {}
+                SessionRemoval::Unsupported => {
+                    tracing::info!(
+                        "podman cannot remove exec sessions (before 4.9); it removes finished \
+                         ones itself after exit_command_delay"
+                    );
+                    self.unsupported.store(true, Ordering::Relaxed);
+                    return;
+                }
+                SessionRemoval::Failed(reason) => {
+                    tracing::debug!(exec = %session, %reason, "cannot remove an exec session; retrying later");
+                    failed.push(session);
+                }
+            }
+        }
+        let mut pending = self.pending.lock().expect("never poisoned");
+        pending.extend(failed);
+        let excess = pending.len().saturating_sub(Self::MAX_PENDING);
+        pending.drain(..excess);
+    }
+
+    /// One `POST /v4.0.0/libpod/exec/{id}/remove`, as HTTP/1.1 with `Connection: close`.
+    async fn request(socket: &Path, exec: &str) -> SessionRemoval {
+        let request = format!(
+            "POST /{}/libpod/exec/{exec}/remove HTTP/1.1\r\nHost: d\r\n\
+             Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+            Self::LIBPOD_API
+        );
+        let exchange = async {
+            let mut stream = tokio::net::UnixStream::connect(socket).await?;
+            stream.write_all(request.as_bytes()).await?;
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await?;
+            std::io::Result::Ok(response)
+        };
+        match tokio::time::timeout(Self::TIMEOUT, exchange).await {
+            Ok(Ok(response)) => SessionRemoval::from(String::from_utf8_lossy(&response).as_ref()),
+            Ok(Err(err)) => SessionRemoval::Failed(err.to_string()),
+            Err(_) => SessionRemoval::Failed("podman did not answer in time".to_owned()),
+        }
+    }
+}
+
+/// What podman answered to an exec session removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionRemoval {
+    Removed,
+    /// A JSON 404 with cause `no such exec session`: podman's own cleanup, or a container
+    /// restart or removal, got there first.
+    Gone,
+    /// A plain-text 404 `Not Found`: podman has no such route (before 4.9).
+    Unsupported,
+    Failed(String),
+}
+
+/// Reads a raw HTTP/1.1 response: its status line and, for a 404, whether the body is libpod's
+/// JSON error or the router's plain text.
+impl From<&str> for SessionRemoval {
+    fn from(response: &str) -> Self {
+        let status = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok());
+        let body = response.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+        match status {
+            Some(200..=299) => Self::Removed,
+            Some(404) if body.contains("no such exec session") => Self::Gone,
+            Some(404) => Self::Unsupported,
+            Some(status) => Self::Failed(format!("HTTP {status}: {}", body.trim())),
+            None => Self::Failed("not an HTTP response".to_owned()),
+        }
     }
 }
 
@@ -1455,6 +1999,269 @@ mod tests {
     }
 
     #[test]
+    fn create_body_turns_podmans_own_healthcheck_off() {
+        // Every container, whatever its spec: hoster runs all checks itself (ADR-0056).
+        for spec in [spec_for("notes", "web"), spec_for("notes", "db")] {
+            let health = ContainerCreateBody::from(&spec).healthcheck.unwrap();
+            assert_eq!(health.test, Some(vec!["NONE".to_owned()]));
+            assert_eq!(health.interval, None);
+            assert_eq!(health.timeout, None);
+            assert_eq!(health.retries, None);
+            assert_eq!(health.start_period, None);
+            assert_eq!(health.start_interval, None);
+        }
+    }
+
+    #[test]
+    fn exec_request_runs_argv_without_shell_stdin_or_tty() {
+        let argv = vec!["pg_isready".to_owned(), "-U".to_owned(), "app".to_owned()];
+        let config = ExecConfig::from(ExecRequest(Argv::try_from(&argv[..]).unwrap()));
+        assert_eq!(config.cmd, Some(argv));
+        assert_eq!(config.attach_stdin, Some(false));
+        assert_eq!(config.attach_stdout, Some(true));
+        assert_eq!(config.attach_stderr, Some(true));
+        assert_eq!(config.tty, Some(false));
+        // The container's user, environment and working directory.
+        assert_eq!(config.user, None);
+        assert_eq!(config.env, None);
+        assert_eq!(config.working_dir, None);
+        assert_eq!(config.privileged, None);
+    }
+
+    #[test]
+    fn exec_on_a_stopped_container_is_not_running() {
+        let server = |status_code, message: &str| BollardError::DockerResponseServerError {
+            status_code,
+            message: message.into(),
+        };
+        let call = Call::new(Operation::Exec, ObjectKind::Container, "c");
+        let not_running = RuntimeError::NotRunning { name: "c".into() };
+        // podman 6.1.4, verbatim.
+        assert_eq!(
+            call.error(server(
+                500,
+                "can only create exec sessions on running containers: container state improper"
+            )),
+            not_running
+        );
+        assert_eq!(
+            call.error(server(409, "Container c is not running")),
+            not_running
+        );
+        assert_eq!(
+            call.error(server(404, "no container with name or ID \"c\" found")),
+            RuntimeError::NotFound {
+                kind: ObjectKind::Container,
+                name: "c".into()
+            }
+        );
+        // Other failures that merely mention "not running" are no container state.
+        for message in ["boom", "conmon for exec session x is not running"] {
+            assert!(
+                matches!(
+                    call.error(server(500, message)),
+                    RuntimeError::Api {
+                        operation: Operation::Exec,
+                        ..
+                    }
+                ),
+                "{message}"
+            );
+        }
+    }
+
+    fn exec_inspect(running: bool, exit_code: Option<i64>) -> ExecInspectResponse {
+        ExecInspectResponse {
+            running: Some(running),
+            exit_code,
+            ..ExecInspectResponse::default()
+        }
+    }
+
+    #[test]
+    fn exit_poll_waits_for_podman_to_settle() {
+        let call = Call::new(Operation::Exec, ObjectKind::Container, "c");
+        let start = Instant::now();
+        let until = start + Duration::from_secs(1);
+        let mut poll = ExitPoll::new(&call, "x", until);
+        // Running for a moment after the output closed, then exited; the waits grow.
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            let ControlFlow::Continue(wait) = poll.step(Ok(exec_inspect(true, None)), start) else {
+                panic!("still running before the deadline");
+            };
+            waits.push(wait);
+        }
+        assert_eq!(
+            waits,
+            [20, 40, 80, 160, 250, 250].map(Duration::from_millis),
+            "the waits double up to the cap"
+        );
+        assert_eq!(
+            poll.step(Ok(exec_inspect(false, Some(3))), start),
+            ControlFlow::Break(Ok(Some(3)))
+        );
+
+        // No wait reaches past the deadline, and still running at it is no exit code.
+        let mut poll = ExitPoll::new(&call, "x", until);
+        let late = until - Duration::from_millis(5);
+        assert_eq!(
+            poll.step(Ok(exec_inspect(true, None)), late),
+            ControlFlow::Continue(Duration::from_millis(5))
+        );
+        assert_eq!(
+            poll.step(Ok(exec_inspect(true, None)), until),
+            ControlFlow::Break(Ok(None))
+        );
+    }
+
+    #[test]
+    fn exit_poll_reports_a_gone_session_as_not_running() {
+        let call = Call::new(Operation::Exec, ObjectKind::Container, "c");
+        let now = Instant::now();
+        let mut poll = ExitPoll::new(&call, "x", now + Duration::from_secs(1));
+        let gone = BollardError::DockerResponseServerError {
+            status_code: 404,
+            message: "no such exec session".into(),
+        };
+        assert_eq!(
+            poll.step(Err(gone), now),
+            ControlFlow::Break(Err(RuntimeError::NotRunning { name: "c".into() }))
+        );
+        assert!(matches!(
+            poll.step(Ok(exec_inspect(false, None)), now),
+            ControlFlow::Break(Err(RuntimeError::Api {
+                operation: Operation::Exec,
+                ..
+            }))
+        ));
+        let broken = BollardError::DockerResponseServerError {
+            status_code: 500,
+            message: "boom".into(),
+        };
+        assert!(matches!(
+            poll.step(Err(broken), now),
+            ControlFlow::Break(Err(RuntimeError::Api { .. }))
+        ));
+    }
+
+    /// A stand-in podman socket for session removal: it answers each connection with the next
+    /// of `responses`, then with a 500, and records each request line.
+    fn removal_socket(
+        dir: &tempfile::TempDir,
+        responses: &[&'static str],
+    ) -> (PathBuf, Arc<Mutex<Vec<String>>>) {
+        let path = dir.path().join("podman.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut responses: std::collections::VecDeque<_> = responses.iter().copied().collect();
+        tokio::spawn({
+            let requests = Arc::clone(&requests);
+            async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 512];
+                    while !request.ends_with(b"{}") {
+                        let read = stream.read(&mut buffer).await.unwrap();
+                        assert_ne!(read, 0, "the request was cut short");
+                        request.extend_from_slice(&buffer[..read]);
+                    }
+                    let line = String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned();
+                    requests.lock().unwrap().push(line);
+                    let response = responses
+                        .pop_front()
+                        .unwrap_or("HTTP/1.1 500 Internal Server Error\r\n\r\nbusy");
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+            }
+        });
+        (path, requests)
+    }
+
+    const REMOVED: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    const BUSY: &str = "HTTP/1.1 500 Internal Server Error\r\n\r\nbusy";
+
+    fn removal_of(exec: &str) -> String {
+        format!("POST /v4.0.0/libpod/exec/{exec}/remove HTTP/1.1")
+    }
+
+    #[tokio::test]
+    async fn a_failed_session_removal_is_retried_with_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let (socket, requests) = removal_socket(&dir, &[BUSY, REMOVED, REMOVED]);
+        let sessions = ExecSessions::default();
+        sessions.remove(&socket, "a".into()).await;
+        assert_eq!(*sessions.pending.lock().unwrap(), ["a"]);
+        sessions.remove(&socket, "b".into()).await;
+        assert!(sessions.pending.lock().unwrap().is_empty());
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [removal_of("a"), removal_of("a"), removal_of("b")]
+        );
+    }
+
+    #[tokio::test]
+    async fn at_most_the_newest_failed_removals_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (socket, requests) = removal_socket(&dir, &[]);
+        let sessions = ExecSessions::default();
+        *sessions.pending.lock().unwrap() = (0..ExecSessions::MAX_PENDING)
+            .map(|i| format!("s{i}"))
+            .collect();
+        sessions.remove(&socket, "new".into()).await;
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            ExecSessions::MAX_PENDING + 1
+        );
+        let pending = sessions.pending.lock().unwrap();
+        assert_eq!(pending.len(), ExecSessions::MAX_PENDING);
+        assert_eq!(pending.first().map(String::as_str), Some("s1"));
+        assert_eq!(pending.last().map(String::as_str), Some("new"));
+    }
+
+    #[tokio::test]
+    async fn a_podman_without_the_route_is_never_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_found = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot Found\n";
+        let (socket, requests) = removal_socket(&dir, &[not_found]);
+        let sessions = ExecSessions::default();
+        sessions.remove(&socket, "a".into()).await;
+        sessions.remove(&socket, "b".into()).await;
+        assert_eq!(*requests.lock().unwrap(), [removal_of("a")]);
+        assert!(sessions.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_removal_tells_gone_from_unsupported() {
+        // podman 6.1.4's answers, verbatim (headers abridged).
+        let removed = "HTTP/1.1 200 OK\r\nApi-Version: 1.44\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(SessionRemoval::from(removed), SessionRemoval::Removed);
+        let gone = "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n\r\n\
+                    {\"cause\":\"no such exec session\",\"message\":\"no exec session with ID x \
+                    found: no such exec session\",\"response\":404}";
+        assert_eq!(SessionRemoval::from(gone), SessionRemoval::Gone);
+        let missing_route = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; \
+                             charset=utf-8\r\nContent-Length: 10\r\n\r\nNot Found\n";
+        assert_eq!(
+            SessionRemoval::from(missing_route),
+            SessionRemoval::Unsupported
+        );
+        let busy = "HTTP/1.1 500 Internal Server Error\r\n\r\n{\"cause\":\"busy\"}";
+        assert!(
+            matches!(SessionRemoval::from(busy), SessionRemoval::Failed(reason) if reason.contains("HTTP 500"))
+        );
+        assert!(matches!(
+            SessionRemoval::from(""),
+            SessionRemoval::Failed(_)
+        ));
+    }
+
+    #[test]
     fn inspect_and_summary_convert_to_container_info() {
         let inspect: ContainerInspectResponse = serde_json::from_value(serde_json::json!({
             "Id": "abc",
@@ -1639,7 +2446,7 @@ mod tests {
         )
     }
 
-    /// Removes every container and network labelled with `stack`.
+    /// Removes every container, network and image labelled with `stack`.
     async fn clean_up(runtime: &PodmanRuntime, stack: &Name) {
         let filter = HashMap::from([("label", vec![format!("{}={stack}", label::STACK)])]);
         let options = ListContainersOptionsBuilder::new()
@@ -1655,6 +2462,17 @@ mod tests {
             .build();
         for network in runtime.docker.list_networks(Some(options)).await.unwrap() {
             let _ = runtime.docker.remove_network(&network.name.unwrap()).await;
+        }
+        // Only images a test committed carry a test stack's label.
+        let options = bollard::query_parameters::ListImagesOptionsBuilder::new()
+            .filters(&filter)
+            .build();
+        for image in runtime.docker.list_images(Some(options)).await.unwrap() {
+            let force = RemoveImageOptionsBuilder::new().force(true).build();
+            let _ = runtime
+                .docker
+                .remove_image(&image.id, Some(force), None)
+                .await;
         }
     }
 
@@ -1986,6 +2804,357 @@ mod tests {
         if let Err(err) = result {
             std::panic::resume_unwind(err.into_panic());
         }
+    }
+
+    /// A running busybox container of a fresh stack, for the exec tests.
+    async fn running_sleeper(runtime: &PodmanRuntime, stack: &Name) -> ContainerId {
+        runtime
+            .ensure_network(&NetworkSpec::for_stack(stack))
+            .await
+            .unwrap();
+        runtime
+            .pull_image(&run_image())
+            .await
+            .expect("pull busybox");
+        let mut spec = spec_for(stack.as_ref(), "sleeper");
+        spec.command = Some(vec!["sleep".into(), "600".into()]);
+        spec.stop_timeout = Duration::from_secs(1);
+        let id = runtime.create_container(&spec).await.unwrap();
+        runtime.start(&id).await.unwrap();
+        id
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|&a| a.to_owned()).collect()
+    }
+
+    /// The exec sessions podman still keeps for a container, once the background removals
+    /// have had a few seconds.
+    async fn exec_sessions(runtime: &PodmanRuntime, id: &ContainerId) -> Vec<String> {
+        let settled = Instant::now() + Duration::from_secs(5);
+        loop {
+            let sessions = runtime
+                .docker
+                .inspect_container(id.as_ref(), None)
+                .await
+                .unwrap()
+                .exec_ids
+                .unwrap_or_default();
+            if sessions.is_empty() || Instant::now() >= settled {
+                return sessions;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Runs `body` against a fresh stack on real podman and cleans the stack up afterwards,
+    /// also when `body` panics.
+    async fn with_stack<F, Fut>(body: F)
+    where
+        F: FnOnce(PodmanRuntime, Name) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let Some(runtime) = real_podman().await else {
+            return;
+        };
+        let stack = unique_stack();
+        let result = tokio::spawn(body(runtime.clone(), stack.clone())).await;
+        clean_up(&runtime, &stack).await;
+        if let Err(err) = result {
+            std::panic::resume_unwind(err.into_panic());
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_reports_exit_codes_output_and_cannot_run() {
+        with_stack(|runtime, stack| async move {
+            let id = running_sleeper(&runtime, &stack).await;
+            let timeout = Duration::from_secs(20);
+
+            let passed = runtime.exec(&id, &argv(&["true"]), timeout).await.unwrap();
+            assert!(passed.passed(), "{passed:?}");
+
+            let printed = runtime
+                .exec(
+                    &id,
+                    &argv(&["sh", "-c", "echo out; echo err >&2; exit 3"]),
+                    timeout,
+                )
+                .await
+                .unwrap();
+            let ExecOutcome::Exited { code: 3, output } = &printed else {
+                panic!("{printed:?}");
+            };
+            assert!(output.as_ref().contains("out\n"), "{output}");
+            assert!(output.as_ref().contains("err\n"), "{output}");
+
+            // Runs as the container's user, with its environment, without a shell.
+            let env = runtime
+                .exec(
+                    &id,
+                    &argv(&["sh", "-c", "id -u; echo \"$PATH\"; echo $0"]),
+                    timeout,
+                )
+                .await
+                .unwrap();
+            assert!(env.passed(), "{env:?}");
+            assert!(env.output().as_ref().starts_with("0\n/"), "{env:?}");
+
+            for (args, needle) in [
+                (&["pg_isready"][..], "executable file not found"),
+                (&["/etc/passwd"][..], "permission denied"),
+                (&["/etc"][..], "is a directory"),
+            ] {
+                let outcome = runtime.exec(&id, &argv(args), timeout).await.unwrap();
+                let ExecOutcome::CannotRun { reason, output, .. } = &outcome else {
+                    panic!("{args:?}: {outcome:?}");
+                };
+                assert!(reason.contains(needle), "{args:?}: {reason}");
+                assert!(!output.as_ref().contains("unixpacket"), "{output}");
+            }
+            // A shell's 127 is the command's own failure.
+            let shell = runtime
+                .exec(&id, &argv(&["sh", "-c", "pg_isready"]), timeout)
+                .await
+                .unwrap();
+            assert!(
+                matches!(shell, ExecOutcome::Exited { code: 127, .. }),
+                "{shell:?}"
+            );
+
+            // Every finished session was removed.
+            assert_eq!(exec_sessions(&runtime, &id).await, Vec::<String>::new());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_exec_is_killed_with_its_group() {
+        with_stack(|runtime, stack| async move {
+            let id = running_sleeper(&runtime, &stack).await;
+            let started = Instant::now();
+            let outcome = runtime
+                .exec(
+                    &id,
+                    &argv(&["sh", "-c", "echo begun; sleep 300 & sleep 301"]),
+                    Duration::from_secs(1),
+                )
+                .await
+                .unwrap();
+            let elapsed = started.elapsed();
+            assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+            let ExecOutcome::TimedOut { output, exec } = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(output.as_ref(), "begun\n");
+            tokio::time::timeout(Duration::from_secs(15), exec.ended())
+                .await
+                .expect("the exec is killed");
+            // Neither the shell nor the backgrounded sleep survived it.
+            let left = runtime
+                .exec(
+                    &id,
+                    &argv(&["sh", "-c", "ps -o args | grep '^sleep 30[01]'"]),
+                    Duration::from_secs(10),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(left, ExecOutcome::Exited { code: 1, .. }),
+                "{left:?}"
+            );
+            assert_eq!(exec_sessions(&runtime, &id).await, Vec::<String>::new());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_exec_cut_off_at_any_point_is_ended_and_removed() {
+        with_stack(|runtime, stack| async move {
+            let id = running_sleeper(&runtime, &stack).await;
+            // From before the create answers to while the command runs.
+            for millis in [0, 5, 20, 50, 100, 300] {
+                let outcome = runtime
+                    .exec(&id, &argv(&["sleep", "30"]), Duration::from_millis(millis))
+                    .await
+                    .unwrap();
+                let ExecOutcome::TimedOut { exec, .. } = outcome else {
+                    panic!("{millis} ms: {outcome:?}");
+                };
+                tokio::time::timeout(Duration::from_secs(15), exec.ended())
+                    .await
+                    .unwrap_or_else(|_| panic!("{millis} ms: the exec is never ended"));
+            }
+            let left = runtime
+                .exec(
+                    &id,
+                    &argv(&["sh", "-c", "ps -o args | grep '^sleep 30$'"]),
+                    Duration::from_secs(10),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(left, ExecOutcome::Exited { code: 1, .. }),
+                "{left:?}"
+            );
+            assert_eq!(exec_sessions(&runtime, &id).await, Vec::<String>::new());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exec_needs_a_running_container() {
+        with_stack(|runtime, stack| async move {
+            let id = running_sleeper(&runtime, &stack).await;
+            let timeout = Duration::from_secs(20);
+            // The container stops while the command runs.
+            let stopper = tokio::spawn({
+                let runtime = runtime.clone();
+                let id = id.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
+                }
+            });
+            let err = runtime
+                .exec(&id, &argv(&["sleep", "30"]), timeout)
+                .await
+                .unwrap_err();
+            stopper.await.unwrap();
+            assert_eq!(
+                err,
+                RuntimeError::NotRunning {
+                    name: id.to_string()
+                }
+            );
+            // Stopped: refused before anything runs.
+            let err = runtime
+                .exec(&id, &argv(&["true"]), timeout)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                RuntimeError::NotRunning {
+                    name: id.to_string()
+                }
+            );
+            runtime.remove(&id).await.unwrap();
+            assert!(matches!(
+                runtime.exec(&id, &argv(&["true"]), timeout).await,
+                Err(RuntimeError::NotFound {
+                    kind: ObjectKind::Container,
+                    ..
+                })
+            ));
+        })
+        .await;
+    }
+
+    /// A docker-format image that declares a HEALTHCHECK must not get podman's timer check in a
+    /// container hoster created; one created without `Healthcheck NONE` does, which shows the
+    /// image's check is real.
+    #[tokio::test]
+    async fn podman_never_runs_an_images_healthcheck() {
+        use bollard::models::ContainerConfig;
+        use bollard::query_parameters::CommitContainerOptionsBuilder;
+
+        with_stack(|runtime, stack| async move {
+            let id = running_sleeper(&runtime, &stack).await;
+            runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
+            // Compat commit writes a docker-format image, which keeps the HEALTHCHECK.
+            let repository = format!("localhost/{stack}-healthcheck");
+            let options = CommitContainerOptionsBuilder::new()
+                .container(id.as_ref())
+                .repo(&repository)
+                .tag("latest")
+                .build();
+            let config = ContainerConfig {
+                cmd: Some(argv(&["sleep", "600"])),
+                healthcheck: Some(HealthConfig {
+                    test: Some(argv(&["CMD-SHELL", "touch /tmp/image-check-ran"])),
+                    interval: Some(1_000_000_000),
+                    timeout: Some(1_000_000_000),
+                    retries: Some(1),
+                    ..HealthConfig::default()
+                }),
+                labels: Some(HashMap::from([(label::STACK.into(), stack.to_string())])),
+                ..ContainerConfig::default()
+            };
+            runtime
+                .docker
+                .commit_container(options, config)
+                .await
+                .expect("commit an image with a HEALTHCHECK");
+            let tagged = format!("{repository}:latest");
+            let image = runtime.docker.inspect_image(&tagged).await.unwrap();
+            let digest = image
+                .repo_digests
+                .iter()
+                .flatten()
+                .find_map(|d| d.split_once('@').map(|(_, digest)| digest.to_owned()))
+                .expect("a committed image has a digest");
+            {
+                let pinned: PinnedImage = format!("{repository}@{digest}").parse().unwrap();
+                let mut spec = spec_for(stack.as_ref(), "checked");
+                spec.image = pinned;
+                spec.stop_timeout = Duration::from_secs(1);
+                let ours = runtime.create_container(&spec).await.unwrap();
+                runtime.start(&ours).await.unwrap();
+
+                let mut control = ContainerCreateBody::from(&spec_for(stack.as_ref(), "control"));
+                control.image = Some(tagged.clone());
+                control.cmd = None;
+                control.healthcheck = None;
+                let name = format!("hoster-{stack}-control-g1");
+                let created = runtime
+                    .docker
+                    .create_container(
+                        Some(CreateContainerOptionsBuilder::new().name(&name).build()),
+                        control,
+                    )
+                    .await
+                    .unwrap();
+                let control = ContainerId::from(created.id);
+                runtime.start(&control).await.unwrap();
+
+                let ran = argv(&["test", "-e", "/tmp/image-check-ran"]);
+                let timeout = Duration::from_secs(10);
+                let mut control_ran = false;
+                for _ in 0..50 {
+                    if runtime
+                        .exec(&control, &ran, timeout)
+                        .await
+                        .unwrap()
+                        .passed()
+                    {
+                        control_ran = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                assert!(control_ran, "podman ran the image's check without NONE");
+                let ours_ran = runtime.exec(&ours, &ran, timeout).await.unwrap();
+                assert!(
+                    matches!(ours_ran, ExecOutcome::Exited { code: 1, .. }),
+                    "podman ran the image's check: {ours_ran:?}"
+                );
+                let raw = runtime
+                    .docker
+                    .inspect_container(ours.as_ref(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    raw.config.and_then(|c| c.healthcheck).and_then(|h| h.test),
+                    Some(argv(&["NONE"]))
+                );
+                assert_eq!(raw.state.and_then(|s| s.health), None);
+                runtime.remove(&ours).await.unwrap();
+                runtime.remove(&control).await.unwrap();
+            }
+            // `clean_up` removes the image: it carries the stack label of the container it
+            // was committed from.
+        })
+        .await;
     }
 
     fn stdout(text: &str) -> LogOutput {

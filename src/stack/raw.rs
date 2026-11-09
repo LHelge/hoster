@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use toml::Spanned;
 
+use super::dependency::Graph;
 use super::{
     DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH, DEFAULT_STOP_TIMEOUT, DeployAuth, Diagnostic,
     ExpectStatus, FieldPath, HealthCheck, Host, ImageRef, Location, Name, NormalizedPrefix,
@@ -66,6 +67,8 @@ struct RawService {
     #[serde(default)]
     update: UpdateStrategy,
     #[serde(default)]
+    depends_on: Vec<Str>,
+    #[serde(default)]
     stop_timeout: Option<Str>,
     #[serde(default)]
     user: Option<Str>,
@@ -108,6 +111,8 @@ struct RawHealth {
     http: Option<Spanned<RawHttpProbe>>,
     #[serde(default)]
     tcp: Option<Spanned<RawTcpProbe>>,
+    #[serde(default)]
+    exec: Option<Spanned<Vec<Str>>>,
     #[serde(default)]
     interval: Option<Str>,
     #[serde(default)]
@@ -309,12 +314,19 @@ impl RawStack {
                 "a stack needs at least one service",
             );
         }
+        Self::check_dependency_cycles(v, &services_path, self.services.get_ref());
+        let keys: BTreeSet<String> = self.services.get_ref().keys().cloned().collect();
         let mut services = BTreeMap::new();
         let mut all_valid = true;
         for (key, raw) in self.services.into_inner() {
             let path = services_path.key(&key);
             let service_name: Option<Name> = v.parse_at(&path, &key, raw.span());
-            let service = raw.into_inner().validate(v, &path, name.as_ref());
+            let context = ServiceContext {
+                stack: name.as_ref(),
+                key: &key,
+                services: &keys,
+            };
+            let service = raw.into_inner().validate(v, &path, context);
             match (service_name, service) {
                 (Some(service_name), Some(service)) => {
                     services.insert(service_name, service);
@@ -330,6 +342,51 @@ impl RawStack {
             services: all_valid.then_some(services)?,
         })
     }
+
+    /// Reports each dependency cycle once, at the `depends_on` entry of its smallest member
+    /// that starts it. Unknown names and self references are the services' own errors.
+    fn check_dependency_cycles(
+        v: &mut Validator<'_>,
+        services_path: &FieldPath,
+        services: &BTreeMap<String, Spanned<RawService>>,
+    ) {
+        let graph = Graph::new(services.iter().map(|(key, raw)| {
+            let deps = raw
+                .get_ref()
+                .depends_on
+                .iter()
+                .map(|d| d.get_ref().as_str());
+            (key.as_str(), deps.filter(move |d| d != key))
+        }));
+        for cycle in graph.cycles() {
+            let (start, next) = (cycle[0], cycle[1 % cycle.len()]);
+            let entries = &services[start].get_ref().depends_on;
+            let Some((i, entry)) = entries
+                .iter()
+                .enumerate()
+                .find(|(_, d)| d.get_ref() == next)
+            else {
+                continue;
+            };
+            let chain: Vec<&str> = cycle.iter().chain([&start]).copied().collect();
+            v.error(
+                &services_path.key(start).key("depends_on").index(i),
+                entry.span(),
+                format!("dependency cycle: {}", chain.join(" → ")),
+            );
+        }
+    }
+}
+
+/// What a service's validation needs to know about the stack around it.
+#[derive(Clone, Copy)]
+struct ServiceContext<'a> {
+    /// The stack's name, when it is valid.
+    stack: Option<&'a Name>,
+    /// This service's key.
+    key: &'a str,
+    /// Every service key of the stack, valid or not.
+    services: &'a BTreeSet<String>,
 }
 
 impl RawDeploy {
@@ -397,8 +454,9 @@ impl RawService {
         self,
         v: &mut Validator<'_>,
         path: &FieldPath,
-        stack: Option<&Name>,
+        context: ServiceContext<'_>,
     ) -> Option<Service> {
+        let stack = context.stack;
         let mut valid = true;
 
         let image: Option<ImageRef> = v.parse(&path.key("image"), &self.image);
@@ -533,6 +591,35 @@ impl RawService {
             volumes.insert(key, target.into_inner());
         }
 
+        let mut depends_on = BTreeSet::new();
+        let mut listed = BTreeSet::new();
+        for (i, dep) in self.depends_on.iter().enumerate() {
+            let dep_path = path.key("depends_on").index(i);
+            let dep_name = dep.get_ref();
+            // The duplicate check comes first, so a repeated unknown or self entry reports its
+            // problem once and each later copy as a duplicate.
+            let problem = if !listed.insert(dep_name) {
+                Some(format!("`{dep_name}` is listed more than once"))
+            } else if dep_name == context.key {
+                Some("a service cannot depend on itself".to_owned())
+            } else if !context.services.contains(dep_name) {
+                Some(format!(
+                    "unknown service `{dep_name}`: `depends_on` names services of this stack"
+                ))
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                v.error(&dep_path, dep.span(), problem);
+                valid = false;
+            } else if let Ok(dep_name) = dep_name.parse::<Name>() {
+                depends_on.insert(dep_name);
+            } else {
+                // The service key itself is invalid, and reported there.
+                valid = false;
+            }
+        }
+
         let raw_route_count = self.routes.len();
         let mut routes = Vec::with_capacity(raw_route_count);
         for (i, route) in self.routes.into_iter().enumerate() {
@@ -544,22 +631,16 @@ impl RawService {
 
         let health = match self.health {
             None => Some(None),
-            Some(health) if raw_route_count == 0 => {
-                v.error(
-                    &path.key("health"),
-                    health.span(),
-                    "`health` is not allowed on a service without routes; such services are \
-                     healthy after running for 5 s",
-                );
-                None
-            }
             // Some routes are invalid and already reported; port checks against the rest
             // would only add noise.
             Some(_) if routes.len() != raw_route_count => None,
-            Some(health) => health
-                .into_inner()
-                .validate(v, &path.key("health"), &routes)
-                .map(Some),
+            Some(health) => {
+                let span = health.span();
+                health
+                    .into_inner()
+                    .validate(v, &path.key("health"), span, &routes)
+                    .map(Some)
+            }
         };
 
         let stop_timeout = v
@@ -580,6 +661,7 @@ impl RawService {
         valid.then_some(())?;
         Some(Service {
             image: image?,
+            depends_on,
             track,
             command: self.command,
             entrypoint: self.entrypoint,
@@ -693,6 +775,7 @@ impl RawHealth {
         self,
         v: &mut Validator<'_>,
         path: &FieldPath,
+        span: Range<usize>,
         routes: &[Route],
     ) -> Option<HealthCheck> {
         // Probes target a container port that has an allocated loopback port, i.e. a route port.
@@ -717,8 +800,24 @@ impl RawHealth {
             }
         };
 
-        let probe = match (self.http, self.tcp) {
-            (Some(http), None) => {
+        let routed = !routes.is_empty();
+        // ADR-0056 Decision 4: a service without routes has no loopback port, so `exec` is the
+        // only probe it can declare.
+        let needs_route = |v: &mut Validator<'_>, key: &str, span: Range<usize>| -> Option<Probe> {
+            v.error(
+                &path.key(key),
+                span,
+                format!(
+                    "`{key}` probes need a route; a service without routes can only use `exec`, \
+                     e.g. exec = [\"pg_isready\", \"-U\", \"app\"]"
+                ),
+            );
+            None
+        };
+        let probe = match (self.http, self.tcp, self.exec) {
+            (Some(http), None, None) if !routed => needs_route(v, "http", http.span()),
+            (None, Some(tcp), None) if !routed => needs_route(v, "tcp", tcp.span()),
+            (Some(http), None, None) => {
                 let http_path = path.key("http");
                 let http = http.into_inner();
                 let probe_path = match &http.path {
@@ -761,23 +860,45 @@ impl RawHealth {
                     _ => None,
                 }
             }
-            (None, Some(tcp)) => {
+            (None, Some(tcp), None) => {
                 let port = probe_port(v, path.key("tcp").key("port"), &tcp.get_ref().port);
                 port.map(|port| Probe::Tcp { port })
             }
-            (Some(http), Some(_)) => {
-                v.error(
-                    path,
-                    http.span(),
-                    "set exactly one of `http` or `tcp`, not both",
-                );
+            (None, None, Some(exec)) => Self::exec_probe(v, &path.key("exec"), exec),
+            (None, None, None) => match default_port {
+                Some(port) => Some(Probe::Http {
+                    path: DEFAULT_HEALTH_PATH.to_owned(),
+                    port,
+                    expect_status: ExpectStatus::default(),
+                }),
+                None => {
+                    v.error(
+                        path,
+                        span,
+                        "a service without routes needs `exec` in its `health` table; without \
+                         `health` it is healthy after running for 5 s",
+                    );
+                    None
+                }
+            },
+            (http, tcp, exec) => {
+                let second = [
+                    http.map(|p| ("http", p.span())),
+                    tcp.map(|p| ("tcp", p.span())),
+                    exec.map(|p| ("exec", p.span())),
+                ]
+                .into_iter()
+                .flatten()
+                .nth(1);
+                if let Some((key, span)) = second {
+                    v.error(
+                        &path.key(key),
+                        span,
+                        "set at most one of `http`, `tcp` or `exec`",
+                    );
+                }
                 None
             }
-            (None, None) => default_port.map(|port| Probe::Http {
-                path: DEFAULT_HEALTH_PATH.to_owned(),
-                port,
-                expect_status: ExpectStatus::default(),
-            }),
         };
 
         let interval = v.positive_duration(path, "interval", &self.interval);
@@ -804,6 +925,56 @@ impl RawHealth {
             timeout: timeout?,
             healthy_after: healthy_after?,
             start_period: start_period?,
+        })
+    }
+
+    /// A non-empty argv whose first element, the program, is not blank.
+    fn exec_probe(
+        v: &mut Validator<'_>,
+        path: &FieldPath,
+        exec: Spanned<Vec<Str>>,
+    ) -> Option<Probe> {
+        let span = exec.span();
+        let command = exec.into_inner();
+        let Some(program) = command.first() else {
+            v.error(
+                path,
+                span,
+                "must name the command and its arguments, e.g. \
+                 [\"pg_isready\", \"-U\", \"app\"]",
+            );
+            return None;
+        };
+        let mut valid = true;
+        let program_text = program.get_ref();
+        if program_text.trim().is_empty() {
+            v.error(
+                &path.index(0),
+                program.span(),
+                "the command must not be empty",
+            );
+            valid = false;
+        } else if program_text.trim() != program_text.as_str() {
+            v.error(
+                &path.index(0),
+                program.span(),
+                "the command must not start or end with whitespace: \
+                 it is run without a shell",
+            );
+            valid = false;
+        }
+        for (i, arg) in command.iter().enumerate() {
+            if arg.get_ref().contains('\0') {
+                v.error(
+                    &path.index(i),
+                    arg.span(),
+                    "must not contain a NUL character",
+                );
+                valid = false;
+            }
+        }
+        valid.then(|| Probe::Exec {
+            command: command.into_iter().map(Spanned::into_inner).collect(),
         })
     }
 }

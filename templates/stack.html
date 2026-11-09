@@ -69,9 +69,9 @@
     {%- for service in stack.services.rows %}
     <tbody>
       <tr>
-        <td><span class="mono service-name">{{ service.name }}</span>{% if let Some(container) = service.container %}<code class="service-container"><span class="visually-hidden">container </span>{{ container }}</code>{% endif %}</td>
+        <td><span class="mono service-name">{{ service.name }}</span>{% if let Some(container) = service.container %}<code class="service-container"><span class="visually-hidden">container </span>{{ container }}</code>{% endif %}{% if !service.depends_on.is_empty() %}<span class="service-deps">depends on {{ service.depends_on.join(", ") }}</span>{% endif %}</td>
         <td><code class="wrap">{{ service.image }}</code>{% if service.ci_built %} <span class="tag">CI-built</span>{% endif %}{% if let Some(digest) = service.digest %}<code class="service-digest" title="{{ digest }}">{% if let Some(short) = service.short_digest %}{{ short }}{% endif %}</code>{% else %}<span class="service-digest">no digest</span>{% endif %}</td>
-        <td>{{ service.state }}<span class="visually-hidden">: {{ service.state_detail }}</span></td>
+        <td>{{ service.state }}<span class="visually-hidden">: {{ service.state_detail }}</span>{% if let Some(check) = service.check %}<span class="service-check" title="{{ check.why }}"><span class="visually-hidden">health check </span>{{ check.check }} <span class="service-check-source">· {{ check.source }}</span></span>{% endif %}</td>
         <td class="num">{{ service.restarts }}</td>
         <td class="mono nowrap">{{ service.port }}</td>
         <td class="num">{% if let Some(generation) = service.generation %}{{ generation }}{% else %}—{% endif %}</td>

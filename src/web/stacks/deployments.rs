@@ -11,7 +11,10 @@
 //!
 //! `GET …/deployments/{id}` shows one deployment under the same header, its breadcrumb ending in
 //! `/deployments/<id>`: state and duration, cancel (before `Switching`, ADR-0040) and redeploy,
-//! the failure, the target digests, the webhook's provenance and the transitions. A running
+//! the failure, the target digests, the webhook's provenance and the transitions. Notes the
+//! deployment wrote within a state (start waves, the check each service gets, probe results;
+//! ADR-0056) span the From and To columns and carry a `wave`, `check` or `probe` tag, and an
+//! exec probe's output tail is collapsed under its result. A running
 //! deployment's page follows it over SSE (`GET …/deployments/{id}/events`): the stream sends the
 //! status partial at once, again whenever the orchestrator reports the deployment moved on
 //! `ui_events` (or the receiver lagged), and ends with an `end` event once the deployment is
@@ -34,7 +37,8 @@ use tokio::sync::broadcast;
 use super::frame::{StackHeader, Tab};
 use super::list::{Ago, Commit, Source};
 use super::{DeployForm, Outcome, ShortDigest, Stacks, When};
-use crate::orchestrator::{self, OrchestratorError, UiEvent};
+use crate::health::ProbeOutput;
+use crate::orchestrator::{self, NoteKind, OrchestratorError, UiEvent};
 use crate::stats::Elapsed;
 use crate::store::{Deployment, DeploymentEvent, DeploymentId, DeploymentState};
 use crate::web::auth::{Auth, Session};
@@ -675,21 +679,33 @@ impl DeploymentView {
     }
 }
 
-/// One state transition.
+/// One state transition, or a note the deployment wrote in its state.
 #[derive(Debug)]
 struct EventView {
     from: String,
     to: String,
+    /// A note within `to`, not a move to it.
+    note: bool,
+    /// What kind of note it is, when it is one the deploy writes about its progress.
+    kind: Option<NoteKind>,
     message: String,
+    /// An exec probe's output tail, shown collapsed.
+    output: Option<String>,
     at: String,
 }
 
 impl From<&DeploymentEvent> for EventView {
     fn from(event: &DeploymentEvent) -> Self {
+        let message = event.message.as_deref().unwrap_or_default();
+        let note = event.from == Some(event.to);
+        let ProbeOutput { text, output } = ProbeOutput::from(message);
         Self {
             from: event.from.map(|s| s.to_string()).unwrap_or_default(),
             to: event.to.to_string(),
-            message: event.message.clone().unwrap_or_default(),
+            note,
+            kind: note.then(|| NoteKind::try_from(text).ok()).flatten(),
+            message: text.to_owned(),
+            output,
             at: When(event.at).to_string(),
         }
     }
