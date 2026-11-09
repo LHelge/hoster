@@ -977,6 +977,223 @@ async fn rejections_are_kept_per_known_stack_newest_first_and_capped() {
     assert!(!store.record_rejection(&ghost).await.unwrap());
 }
 
+fn event(kind: EventKind, severity: Severity, stack: Option<&str>) -> NewEvent {
+    let event = NewEvent::new(kind, severity, format!("{kind} event")).subject("api");
+    match stack {
+        Some(stack) => event.stack(stack).meta("abc1234"),
+        None => event,
+    }
+}
+
+#[tokio::test]
+async fn events_are_stored_as_their_text_and_read_back() {
+    let (_dir, store) = open().await;
+    for kind in EventKind::ALL {
+        for severity in Severity::ALL {
+            let recorded = store
+                .record_event(&event(kind, severity, Some("notes")))
+                .await
+                .unwrap();
+            let (kind_text, severity_text): (String, String) =
+                sqlx::query_as("SELECT kind, severity FROM events WHERE id = ?")
+                    .bind(recorded.id)
+                    .fetch_one(&store.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(kind_text, kind.to_string());
+            assert_eq!(severity_text, severity.to_string());
+        }
+    }
+    let unscoped = store
+        .record_event(&event(EventKind::HosterStarted, Severity::Info, None))
+        .await
+        .unwrap();
+    let page = store.event_page(&EventQuery::default()).await.unwrap();
+    assert_eq!(page.events[0], unscoped);
+    assert_eq!(unscoped.stack, None);
+    assert_eq!(unscoped.meta, None);
+    assert_eq!(unscoped.subject.as_deref(), Some("api"));
+    assert_eq!(unscoped.message, "hoster_started event");
+}
+
+#[tokio::test]
+async fn events_page_newest_first_and_filter() {
+    let (_dir, store) = open().await;
+    let at = Timestamp::now();
+    let mut recorded = Vec::new();
+    // Two events share every timestamp, so the cursor must tell them apart by id.
+    for (i, (kind, severity, stack)) in [
+        (EventKind::DeployStarted, Severity::Info, Some("notes")),
+        (EventKind::DeploySucceeded, Severity::Success, Some("notes")),
+        (
+            EventKind::ContainerRestarted,
+            Severity::Warning,
+            Some("blog"),
+        ),
+        (EventKind::DeployFailed, Severity::Error, Some("blog")),
+        (EventKind::CertificateFailed, Severity::Error, None),
+        (EventKind::HosterStarted, Severity::Info, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = at + Duration::from_millis(i as u64 / 2);
+        let e = store
+            .record_event_at(&event(kind, severity, stack), at)
+            .await
+            .unwrap();
+        recorded.push(e);
+    }
+    let newest_first: Vec<_> = recorded.iter().rev().cloned().collect();
+
+    // Every event, paged two at a time.
+    let mut query = EventQuery {
+        limit: 2,
+        ..EventQuery::default()
+    };
+    let mut seen = Vec::new();
+    loop {
+        let page = store.event_page(&query).await.unwrap();
+        assert!(page.events.len() <= 2);
+        seen.extend(page.events);
+        match page.next {
+            Some(next) => query.before = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, newest_first);
+    // A cursor survives its text form.
+    let first = store
+        .event_page(&EventQuery {
+            limit: 3,
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap();
+    let cursor: EventCursor = first.next.unwrap().to_string().parse().unwrap();
+    let rest = store
+        .event_page(&EventQuery {
+            before: Some(cursor),
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(rest.events, newest_first[3..]);
+    assert_eq!(rest.next, None);
+    // A zero limit still returns a page and a way on, not what reads as the end of the log.
+    let zero = store
+        .event_page(&EventQuery {
+            limit: 0,
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(zero.events, newest_first[..1]);
+    assert!(zero.next.is_some());
+
+    let ids = |page: EventPage| page.events.into_iter().map(|e| e.id).collect::<Vec<_>>();
+    let by_stack = store
+        .event_page(&EventQuery {
+            stack: Some("blog".into()),
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(ids(by_stack), [recorded[3].id, recorded[2].id]);
+    let by_kind = store
+        .event_page(&EventQuery {
+            kinds: [EventKind::DeployStarted, EventKind::HosterStarted].into(),
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(ids(by_kind), [recorded[5].id, recorded[0].id]);
+    let severe = store
+        .event_page(&EventQuery {
+            min_severity: Severity::Warning,
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(severe),
+        [recorded[4].id, recorded[3].id, recorded[2].id]
+    );
+    let combined = store
+        .event_page(&EventQuery {
+            stack: Some("blog".into()),
+            kinds: [EventKind::DeployFailed, EventKind::DeployStarted].into(),
+            min_severity: Severity::Error,
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(ids(combined), [recorded[3].id]);
+}
+
+#[tokio::test]
+async fn events_inside_a_transaction_are_stored_only_if_it_commits() {
+    let (_dir, store) = open().await;
+    let new = event(EventKind::StackApplied, Severity::Info, Some("notes"));
+    let mut tx = store.begin().await.unwrap();
+    Store::insert_event(&mut tx, &new, Timestamp::now())
+        .await
+        .unwrap();
+    drop(tx);
+    let page = store.event_page(&EventQuery::default()).await.unwrap();
+    assert!(page.events.is_empty());
+    let mut tx = store.begin().await.unwrap();
+    let kept = Store::insert_event(&mut tx, &new, Timestamp::now())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let page = store.event_page(&EventQuery::default()).await.unwrap();
+    assert_eq!(page.events, [kept]);
+}
+
+#[tokio::test]
+async fn events_of_a_removed_stack_are_kept() {
+    let (_dir, store) = open().await;
+    store.add_revision("notes", "x").await.unwrap();
+    store
+        .record_event(&event(
+            EventKind::StackRemoved,
+            Severity::Info,
+            Some("notes"),
+        ))
+        .await
+        .unwrap();
+    assert!(store.remove_stack("notes").await.unwrap());
+    let page = store
+        .event_page(&EventQuery {
+            stack: Some("notes".into()),
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.events.len(), 1);
+}
+
+#[tokio::test]
+async fn pruning_deletes_only_events_older_than_the_cutoff() {
+    let (_dir, store) = open().await;
+    let cutoff = Timestamp::now();
+    let new = event(EventKind::HosterStarted, Severity::Info, None);
+    store
+        .record_event_at(&new, cutoff - Duration::from_millis(1))
+        .await
+        .unwrap();
+    let at_cutoff = store.record_event_at(&new, cutoff).await.unwrap();
+    let after = store
+        .record_event_at(&new, cutoff + Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(store.prune_events(cutoff).await.unwrap(), 1);
+    let page = store.event_page(&EventQuery::default()).await.unwrap();
+    assert_eq!(page.events, [after, at_cutoff]);
+    assert_eq!(store.prune_events(cutoff).await.unwrap(), 0);
+}
+
 /// Every migration is reversible and every down script restores its predecessor's schema exactly
 /// (ADR-0052): what lets a newer binary roll the database back for an older one.
 mod migrations {
@@ -1101,6 +1318,8 @@ mod migrations {
                 actor, run_id, at)
             VALUES ('notes', 'ref', 'o/r', '1', 'refs/heads/x', 'me', '43', 1);
         INSERT INTO images VALUES ('docker.io/library/postgres', 'sha256:cc', 1);
+        INSERT INTO events (at, kind, severity, stack, subject, message, meta)
+            VALUES (1, 'deploy_succeeded', 'success', 'gone', 'api', 'deployed', 'abc1234');
     ";
 
     #[tokio::test]

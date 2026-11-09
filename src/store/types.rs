@@ -1,6 +1,6 @@
 //! The values the [`Store`](super::Store) reads and writes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -528,6 +528,337 @@ pub struct SecretEntry {
     pub updated_at: Timestamp,
 }
 
+/// Primary key of an [`Event`] in the event log (ADR-0055).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, sqlx::Type)]
+#[sqlx(transparent)]
+pub struct EventId(i64);
+
+impl fmt::Display for EventId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// What an [`Event`] reports (ADR-0055 §2). Stored as its [`Display`](fmt::Display) text, e.g.
+/// `deploy_succeeded`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, sqlx::Type)]
+#[sqlx(rename_all = "snake_case")]
+pub enum EventKind {
+    /// A deployment started; carries its source and, if known, the commit sha.
+    DeployStarted,
+    /// A deployment went live.
+    DeploySucceeded,
+    /// A deployment failed or was rejected.
+    DeployFailed,
+    /// A deployment redeployed an earlier one (ADR-0041).
+    DeployRolledBack,
+    /// The reconciler restarted a container (exit code, OOM if podman reports it).
+    ContainerRestarted,
+    /// A service entered crash loop (ADR-0028).
+    CrashLoopEntered,
+    /// A service left crash loop.
+    CrashLoopLeft,
+    /// A live service's health changed (ADR-0038).
+    HealthChanged,
+    /// A certificate was issued for a host for the first time.
+    CertificateIssued,
+    /// A certificate was renewed.
+    CertificateRenewed,
+    /// Issuing or renewing a certificate failed (the reason and next retry).
+    CertificateFailed,
+    /// A routed host's DNS does not point at this server.
+    DnsMismatch,
+    /// A stack file was applied.
+    StackApplied,
+    /// A stack was removed.
+    StackRemoved,
+    /// A secret was set (its name only, never the value).
+    SecretSet,
+    /// A secret was deleted (its name only).
+    SecretDeleted,
+    /// hoster started.
+    HosterStarted,
+    /// hoster updated itself to a new version (ADR-0052).
+    HosterUpdated,
+    /// hoster rolled back to its previous version (ADR-0052).
+    HosterRolledBack,
+}
+
+impl EventKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 19] = [
+        Self::DeployStarted,
+        Self::DeploySucceeded,
+        Self::DeployFailed,
+        Self::DeployRolledBack,
+        Self::ContainerRestarted,
+        Self::CrashLoopEntered,
+        Self::CrashLoopLeft,
+        Self::HealthChanged,
+        Self::CertificateIssued,
+        Self::CertificateRenewed,
+        Self::CertificateFailed,
+        Self::DnsMismatch,
+        Self::StackApplied,
+        Self::StackRemoved,
+        Self::SecretSet,
+        Self::SecretDeleted,
+        Self::HosterStarted,
+        Self::HosterUpdated,
+        Self::HosterRolledBack,
+    ];
+
+    /// The text stored in the `kind` column. It must match the `#[sqlx(rename_all)]` encoding,
+    /// since `event_page` filters on it; `events_are_stored_as_their_text_and_read_back` pins
+    /// the two together.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeployStarted => "deploy_started",
+            Self::DeploySucceeded => "deploy_succeeded",
+            Self::DeployFailed => "deploy_failed",
+            Self::DeployRolledBack => "deploy_rolled_back",
+            Self::ContainerRestarted => "container_restarted",
+            Self::CrashLoopEntered => "crash_loop_entered",
+            Self::CrashLoopLeft => "crash_loop_left",
+            Self::HealthChanged => "health_changed",
+            Self::CertificateIssued => "certificate_issued",
+            Self::CertificateRenewed => "certificate_renewed",
+            Self::CertificateFailed => "certificate_failed",
+            Self::DnsMismatch => "dns_mismatch",
+            Self::StackApplied => "stack_applied",
+            Self::StackRemoved => "stack_removed",
+            Self::SecretSet => "secret_set",
+            Self::SecretDeleted => "secret_deleted",
+            Self::HosterStarted => "hoster_started",
+            Self::HosterUpdated => "hoster_updated",
+            Self::HosterRolledBack => "hoster_rolled_back",
+        }
+    }
+}
+
+impl fmt::Display for EventKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Text that names no [`EventKind`] or [`Severity`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {what} {text:?}")]
+pub struct UnknownEventText {
+    what: &'static str,
+    text: String,
+}
+
+/// As [`Display`](fmt::Display) writes it, e.g. in a filter's query string.
+impl std::str::FromStr for EventKind {
+    type Err = UnknownEventText;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == s)
+            .ok_or_else(|| UnknownEventText {
+                what: "event kind",
+                text: s.to_owned(),
+            })
+    }
+}
+
+/// How an [`Event`] reads in the UI: its tone dot. Ordered from least to most severe, so a
+/// filter can ask for "at least" one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, sqlx::Type)]
+#[sqlx(rename_all = "snake_case")]
+pub enum Severity {
+    #[default]
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl Severity {
+    /// Every severity, least severe first.
+    pub const ALL: [Self; 4] = [Self::Info, Self::Success, Self::Warning, Self::Error];
+
+    /// The text stored in the `severity` column. It must match the `#[sqlx(rename_all)]`
+    /// encoding, since `event_page` filters on it; `events_are_stored_as_their_text_and_read_back`
+    /// pins the two together.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Success => "success",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// As [`Display`](fmt::Display) writes it.
+impl std::str::FromStr for Severity {
+    type Err = UnknownEventText;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|severity| severity.as_str() == s)
+            .ok_or_else(|| UnknownEventText {
+                what: "severity",
+                text: s.to_owned(),
+            })
+    }
+}
+
+/// An event to record in the event log (ADR-0055). The message is the readable line; it must
+/// never contain a secret's value (secret events carry the name only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEvent {
+    pub kind: EventKind,
+    pub severity: Severity,
+    /// The stack it concerns, if any.
+    pub stack: Option<String>,
+    /// The service, host or deployment it links to, if any.
+    pub subject: Option<String>,
+    pub message: String,
+    /// The short mono line: sha, digest, exit code, version.
+    pub meta: Option<String>,
+}
+
+impl NewEvent {
+    /// An event of `kind` with no stack, subject or meta.
+    pub fn new(kind: EventKind, severity: Severity, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            severity,
+            stack: None,
+            subject: None,
+            message: message.into(),
+            meta: None,
+        }
+    }
+
+    /// The event, about `stack`.
+    pub fn stack(mut self, stack: impl Into<String>) -> Self {
+        self.stack = Some(stack.into());
+        self
+    }
+
+    /// The event, linking to `subject`.
+    pub fn subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    /// The event, with `meta` as its mono line.
+    pub fn meta(mut self, meta: impl Into<String>) -> Self {
+        self.meta = Some(meta.into());
+        self
+    }
+}
+
+/// A recorded event of the event log (ADR-0055).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Event {
+    pub id: EventId,
+    pub at: Timestamp,
+    pub kind: EventKind,
+    pub severity: Severity,
+    pub stack: Option<String>,
+    pub subject: Option<String>,
+    pub message: String,
+    pub meta: Option<String>,
+}
+
+impl Event {
+    /// Where a page of events older than this one starts.
+    pub fn cursor(&self) -> EventCursor {
+        EventCursor {
+            at: self.at,
+            id: self.id,
+        }
+    }
+}
+
+/// A position in the event log, newest first: a page that starts at it holds only the events
+/// older than the event it was taken from. Written as `<at>.<id>`, e.g. in a "more" link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventCursor {
+    pub(super) at: Timestamp,
+    pub(super) id: EventId,
+}
+
+impl fmt::Display for EventCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.at.0, self.id)
+    }
+}
+
+/// Text that is not an [`EventCursor`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid event cursor {0:?}")]
+pub struct InvalidEventCursor(String);
+
+impl std::str::FromStr for EventCursor {
+    type Err = InvalidEventCursor;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invalid = || InvalidEventCursor(s.to_owned());
+        let (at, id) = s.split_once('.').ok_or_else(invalid)?;
+        Ok(Self {
+            at: Timestamp(at.parse().map_err(|_| invalid())?),
+            id: EventId(id.parse().map_err(|_| invalid())?),
+        })
+    }
+}
+
+/// Which events a page of the event log shows. The default is the first page of every event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventQuery {
+    /// Only the events of this stack.
+    pub stack: Option<String>,
+    /// Only events of these kinds; every kind when empty.
+    pub kinds: BTreeSet<EventKind>,
+    /// Only events at least this severe.
+    pub min_severity: Severity,
+    /// Only events older than this position.
+    pub before: Option<EventCursor>,
+    /// At most this many events; clamped to `1..=`[`EventQuery::MAX`].
+    pub limit: u32,
+}
+
+impl EventQuery {
+    /// How many events a page holds unless asked otherwise.
+    pub const PAGE: u32 = 50;
+    /// The most events one page holds, whatever `limit` asks for.
+    pub const MAX: u32 = 500;
+}
+
+impl Default for EventQuery {
+    fn default() -> Self {
+        Self {
+            stack: None,
+            kinds: BTreeSet::new(),
+            min_severity: Severity::Info,
+            before: None,
+            limit: Self::PAGE,
+        }
+    }
+}
+
+/// One page of the event log, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EventPage {
+    pub events: Vec<Event>,
+    /// Where the next (older) page starts, if there are older events matching the query.
+    pub next: Option<EventCursor>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +877,33 @@ mod tests {
             ContentHash::of("").as_ref(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn event_kinds_and_severities_round_trip_through_their_text() {
+        for kind in EventKind::ALL {
+            assert_eq!(kind.to_string().parse::<EventKind>(), Ok(kind));
+        }
+        for severity in Severity::ALL {
+            assert_eq!(severity.to_string().parse::<Severity>(), Ok(severity));
+        }
+        assert!("deploy".parse::<EventKind>().is_err());
+        assert!("fatal".parse::<Severity>().is_err());
+        assert!(Severity::Info < Severity::Success);
+        assert!(Severity::Warning < Severity::Error);
+    }
+
+    #[test]
+    fn event_cursors_round_trip_through_their_text() {
+        let cursor = EventCursor {
+            at: Timestamp(1_700_000_000_123),
+            id: EventId(42),
+        };
+        assert_eq!(cursor.to_string(), "1700000000123.42");
+        assert_eq!(cursor.to_string().parse(), Ok(cursor));
+        for bad in ["", "12", "a.1", "1.b", "1.2.3"] {
+            assert!(bad.parse::<EventCursor>().is_err(), "{bad}");
+        }
     }
 
     #[test]

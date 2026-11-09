@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO events (at, kind, severity, stack, subject, message, meta)\n               VALUES (?, ?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id: EventId\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: EventId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7d52eac7a5a8f895192c44da590abaedf1950a9e82210687ea73971c8f45e9bf"
+}

@@ -1,14 +1,15 @@
 ---
 id: nbj
 title: "Event log store: events table, typed Event, EventLog recorder and 30-day retention"
-status: open
+status: done
 priority: P2
 created: "2026-11-09T14:04:38.460806483Z"
-updated: "2026-11-09T14:04:38.460806483Z"
+updated: "2026-11-09T15:14:50.909350431Z"
 tags:
   - store
   - observability
 parent: "4qj"
+attempts: 1
 ---
 
 ## Summary
