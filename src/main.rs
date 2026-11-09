@@ -28,6 +28,7 @@ mod web;
 #[cfg(test)]
 mod e2e_tests;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -37,6 +38,7 @@ use crate::config::{Config, ConfigError};
 use crate::doctor::Doctor;
 use crate::installation::BuildInfo;
 use crate::logging::{LogFormat, Logging};
+use crate::stack::StackSchema;
 use crate::store::Store;
 use crate::supervisor::Supervisor;
 use crate::update::{CommandError, RollbackCommand, Terminal, Uid, UpdateCommand, Updater};
@@ -105,6 +107,16 @@ enum Command {
     /// Return to the previous installed version, undoing the database migrations it does not
     /// know (their data is lost). Run as the hoster user.
     Rollback(RollbackCommand),
+    /// Work with stack files. Needs no configuration.
+    #[command(subcommand)]
+    Stack(StackCommand),
+}
+
+#[derive(Debug, PartialEq, Eq, Subcommand)]
+enum StackCommand {
+    /// Print the JSON Schema of the stack file format, for editors with TOML schema support
+    /// (published at https://docs.hoster.lhelge.se/stack.schema.json).
+    Schema,
 }
 
 #[derive(Debug, PartialEq, Eq, Subcommand)]
@@ -132,6 +144,17 @@ impl Command {
             Command::Version { json } => {
                 println!("{}", Self::version(json)?);
                 Ok(())
+            }
+            Command::Stack(StackCommand::Schema) => {
+                // `print!` would panic when the reader goes away early (`… | head`).
+                let mut stdout = std::io::stdout().lock();
+                match stdout
+                    .write_all(StackSchema::get().as_ref().as_bytes())
+                    .and_then(|()| stdout.flush())
+                {
+                    Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+                    _ => Ok(()),
+                }
             }
             Command::Run => Supervisor::new(config?).run().await,
             Command::Doctor { json } => {
@@ -364,6 +387,23 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn parses_stack_schema() {
+        assert_eq!(
+            parse(&["stack", "schema"]),
+            Command::Stack(StackCommand::Schema)
+        );
+        assert!(Cli::try_parse_from(["hoster", "stack"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn stack_schema_needs_no_config() {
+        Command::Stack(StackCommand::Schema)
+            .execute(Err(ConfigError::NoConfigDir), None)
+            .await
+            .expect("prints the schema without a config");
     }
 
     #[test]

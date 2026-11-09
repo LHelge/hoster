@@ -2,142 +2,321 @@
 //!
 //! Every raw type has a `validate` method that reports problems to a [`Validator`] and returns
 //! the model value when its own part was valid, so one run reports all errors.
+//!
+//! The raw types also derive the stack file's JSON Schema (`schema.rs`): their field docs are
+//! what editors show on hover, so they are written for stack file authors. `Spanned` fields name
+//! their schema with `schema_with`, since the span wrapper is invisible in the file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::str::FromStr;
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use toml::Spanned;
 
 use super::dependency::Graph;
+use super::schema::Field;
 use super::{
     DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH, DEFAULT_STOP_TIMEOUT, DeployAuth, Diagnostic,
     ExpectStatus, FieldPath, HealthCheck, Host, ImageRef, Location, Name, NormalizedPrefix,
     ParsedStack, Probe, Route, RouteTimeouts, SUPPORTED_VERSION, Service, Stack, StackError,
     UpdateStrategy,
 };
+use crate::health;
 
 type Str = Spanned<String>;
 type Int = Spanned<i64>;
 
-#[derive(Debug, Deserialize)]
+/// A hoster stack file (`<stack>.stack.toml`): one or more services deployed together on one
+/// podman network. See https://docs.hoster.lhelge.se/wiki/stack-format/.
+///
+/// The schema checks each field on its own. hoster checks the rules that need more than one value
+/// when the stack is applied: a (host, prefix) used twice within the stack or by another stack;
+/// `depends_on` cycles, unknown services or a service naming itself; secrets of another stack; a
+/// name set in both `env` and `secrets`; a mount path used twice; a tag or digest on images other
+/// than CI-built `ghcr.io` ones, and `track` only on those; `http` and `tcp` checks only on
+/// routed services, against a route's port; a timings-only `health` table only on routed
+/// services. It also rejects durations that overflow or whose fraction is not a whole number of
+/// nanoseconds, such as `"0.001h"`.
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(title = "hoster stack file")]
 pub(super) struct RawStack {
+    /// Schema version of the stack file. Must be `1`.
+    #[schemars(schema_with = "Field::version")]
     version: Int,
+    /// Stack name, unique per hoster instance: a lowercase letter, then lowercase letters, digits
+    /// and `-`, at most 31 characters. Used in podman object names (`hoster-<name>`).
+    #[schemars(schema_with = "Field::name")]
     name: Str,
+    /// Upper bound for draining the old containers' in-flight requests after a deploy (ADR-0017),
+    /// as a duration such as `"30s"`.
     #[serde(default)]
+    #[schemars(
+        schema_with = "Field::duration",
+        extend("default" = Field::default_duration(DEFAULT_DRAIN_TIMEOUT))
+    )]
     drain_timeout: Option<Str>,
+    /// Who may deploy this stack through the webhook (ADR-0047). Without it, the stack can only
+    /// be deployed from the admin UI.
     #[serde(default)]
+    #[schemars(with = "RawDeploy")]
     deploy: Option<RawDeploy>,
+    /// The stack's services, at least one. Keys are service names (a lowercase letter, then
+    /// lowercase letters, digits and `-`, at most 31 characters) and DNS aliases on the stack
+    /// network.
+    #[schemars(schema_with = "Field::services::<RawService>")]
     services: Spanned<BTreeMap<String, Spanned<RawService>>>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Deploy authorization: which GitHub Actions OIDC tokens may deploy this stack through the
+/// webhook (ADR-0047).
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "Deploy")]
 struct RawDeploy {
+    /// GitHub's numeric repository id (stable across renames), compared with the token's
+    /// `repository_id` claim. `gh api repos/<owner>/<repo> --jq .id` prints it.
+    #[schemars(schema_with = "Field::repository_id")]
     repository_id: Int,
+    /// Glob patterns for the token's `ref`, at least one of which must match, e.g.
+    /// `["refs/tags/v*"]`. `*` matches within one path segment, `**` across segments. Omit to
+    /// allow any ref.
     #[serde(default)]
+    #[schemars(schema_with = "Field::refs")]
     refs: Option<Spanned<Vec<Str>>>,
+    /// Must equal the token's `environment` claim. Pair it with GitHub environment protection
+    /// rules.
     #[serde(default)]
+    #[schemars(schema_with = "Field::non_empty")]
     environment: Option<Str>,
+    /// Must equal the token's `job_workflow_ref` claim, e.g.
+    /// `"acme/notes/.github/workflows/release.yml@refs/heads/main"`.
     #[serde(default)]
+    #[schemars(schema_with = "Field::non_empty")]
     job_workflow_ref: Option<Str>,
 }
 
-#[derive(Debug, Deserialize)]
+/// One container of the stack.
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "Service")]
 struct RawService {
+    /// Image reference with an explicit registry. CI-built `ghcr.io` images omit the tag, e.g.
+    /// `"ghcr.io/acme/notes-api"`: their digest comes from the deploy. Third-party images need
+    /// `repo:tag`, `repo:tag@sha256:…` or `repo@sha256:…`; a tag is resolved to a digest when the
+    /// stack is applied (ADR-0025).
+    #[schemars(schema_with = "Field::image")]
     image: Str,
+    /// Tag the ghcr poller watches, e.g. `"main"` (ADR-0043). Only for CI-built `ghcr.io` images
+    /// without a tag or digest.
     #[serde(default)]
+    #[schemars(schema_with = "Field::tag")]
     track: Option<Str>,
+    /// Overrides the image's `CMD`.
     #[serde(default)]
+    #[schemars(schema_with = "Field::strings")]
     command: Option<Vec<String>>,
+    /// Overrides the image's `ENTRYPOINT`.
     #[serde(default)]
+    #[schemars(schema_with = "Field::strings")]
     entrypoint: Option<Vec<String>>,
+    /// Plain, non-secret environment variables. A routed service with exactly one container port
+    /// also gets `PORT=<that port>` unless it sets `PORT` itself (ADR-0051).
     #[serde(default)]
+    #[schemars(schema_with = "Field::env")]
     env: BTreeMap<String, Str>,
+    /// Environment variable name → secret name `<stack>/<name>` in hoster's encrypted secret
+    /// store (ADR-0029), e.g. `DATABASE_URL = "notes/database-url"`. The `<stack>` part must be
+    /// this stack's name, and a name must not be set in both `env` and `secrets`.
     #[serde(default)]
+    #[schemars(schema_with = "Field::secrets")]
     secrets: BTreeMap<String, Str>,
+    /// Named podman volume → absolute mount path, e.g. `data = "/data"` (ADR-0030). Volumes are
+    /// kept when the stack is removed. Each path may be used once.
     #[serde(default)]
+    #[schemars(schema_with = "Field::volumes")]
     volumes: BTreeMap<String, Str>,
+    /// Health check (ADR-0038, ADR-0056). Without it, a routed service is probed with
+    /// `GET /healthz` on its first route's port, and any other service counts as healthy once
+    /// running for 5 s.
     #[serde(default)]
+    #[schemars(with = "RawHealth")]
     health: Option<Spanned<RawHealth>>,
+    /// How the service is replaced on deploy (ADR-0039).
     #[serde(default)]
+    #[schemars(extend("default" = "start-first"))]
     update: UpdateStrategy,
+    /// Services of this stack that must pass their health check before this one starts, e.g.
+    /// `["db", "cache"]` (ADR-0056). Each names another service of the stack, at most once,
+    /// without cycles.
     #[serde(default)]
+    #[schemars(schema_with = "Field::depends_on")]
     depends_on: Vec<Str>,
+    /// SIGTERM → SIGKILL grace period when the container is stopped, as a duration such as
+    /// `"10s"`.
     #[serde(default)]
+    #[schemars(
+        schema_with = "Field::duration",
+        extend("default" = Field::default_duration(DEFAULT_STOP_TIMEOUT))
+    )]
     stop_timeout: Option<Str>,
+    /// `uid[:gid]` inside the container, each numeric or a name.
     #[serde(default)]
+    #[schemars(schema_with = "Field::user")]
     user: Option<Str>,
+    /// Read-only root filesystem.
     #[serde(default)]
+    #[schemars(extend("default" = false))]
     read_only: bool,
+    /// Routes from a (host, prefix) to a container port (ADR-0007). Without routes the service
+    /// publishes no ports.
     #[serde(default)]
     routes: Vec<RawRoute>,
 }
 
-#[derive(Debug, Deserialize)]
+/// A (host, prefix) → container port route (ADR-0007, ADR-0009, ADR-0010). A (host, prefix)
+/// must be unique within the stack and across stacks (ADR-0012).
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "Route")]
 struct RawRoute {
+    /// A lowercase fully qualified domain name without port, scheme or trailing dot, e.g.
+    /// `"notes.example.com"`. No wildcards or IP addresses. It must resolve to this server for
+    /// its certificate.
+    #[schemars(schema_with = "Field::host")]
     host: Str,
+    /// Path prefix the route matches on segment boundaries (`/api` matches `/api/x`, not
+    /// `/apix`). Starts with `/`, no trailing `/` except the root, no `?`, `#`, `%`, `//`, `.` or
+    /// `..` segments.
     #[serde(default)]
+    #[schemars(schema_with = "Field::prefix", extend("default" = "/"))]
     prefix: Option<Str>,
+    /// Remove the matched prefix before forwarding (ADR-0010). No effect on `/`.
     #[serde(default)]
+    #[schemars(with = "bool", extend("default" = false))]
     strip_prefix: Option<Spanned<bool>>,
+    /// Container port the app listens on, 1–65535. hoster publishes it on an allocated
+    /// `127.0.0.1` port; the app must bind `0.0.0.0` or `::`.
+    #[schemars(schema_with = "Field::port")]
     port: Int,
+    /// Proxy timeouts for this route (ADR-0011); unset ones use hoster's defaults.
     #[serde(default)]
     timeouts: RawTimeouts,
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// Per-route proxy timeouts (ADR-0011), as durations greater than zero such as `"60s"`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "Timeouts")]
 struct RawTimeouts {
+    /// Connecting to the container.
     #[serde(default)]
+    #[schemars(schema_with = "Field::positive_duration")]
     connect: Option<Str>,
+    /// Between reads of the response.
     #[serde(default)]
+    #[schemars(schema_with = "Field::positive_duration")]
     read: Option<Str>,
+    /// Between writes of the request.
     #[serde(default)]
+    #[schemars(schema_with = "Field::positive_duration")]
     write: Option<Str>,
+    /// Idle keep-alive connections.
     #[serde(default)]
+    #[schemars(schema_with = "Field::positive_duration")]
     idle: Option<Str>,
 }
 
-#[derive(Debug, Deserialize)]
+/// A health check (ADR-0038, ADR-0056): at most one of `http`, `tcp` and `exec`, plus timings.
+/// `http` and `tcp` need a route; a service without routes may only declare `exec`. A
+/// timings-only table on a routed service tunes the default `GET /healthz` probe.
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "Health")]
+#[schemars(extend("dependentSchemas" = {
+    "http": { "properties": { "tcp": false, "exec": false } },
+    "tcp": { "properties": { "http": false, "exec": false } },
+}))]
 struct RawHealth {
+    /// An HTTP `GET` from the host against the route's loopback port. Redirects are not
+    /// followed.
     #[serde(default)]
+    #[schemars(with = "RawHttpProbe")]
     http: Option<Spanned<RawHttpProbe>>,
+    /// A TCP connect from the host against the route's loopback port.
     #[serde(default)]
+    #[schemars(with = "RawTcpProbe")]
     tcp: Option<Spanned<RawTcpProbe>>,
+    /// A command run inside the container without a shell, e.g. `["pg_isready", "-U", "app"]`;
+    /// exit 0 passes. Use `["sh", "-c", "…"]` when it needs a shell.
     #[serde(default)]
+    #[schemars(schema_with = "Field::exec")]
     exec: Option<Spanned<Vec<Str>>>,
+    /// Time between probes, greater than zero.
     #[serde(default)]
+    #[schemars(
+        schema_with = "Field::positive_duration",
+        extend("default" = Field::default_duration(health::DEFAULT_INTERVAL))
+    )]
     interval: Option<Str>,
+    /// How long one probe may take, greater than zero. Default `"2s"`, `"5s"` for `exec`.
     #[serde(default)]
+    #[schemars(schema_with = "Field::positive_duration")]
     timeout: Option<Str>,
+    /// Consecutive successful probes needed to count as healthy.
     #[serde(default)]
+    #[schemars(
+        schema_with = "Field::positive_integer",
+        extend("default" = health::DEFAULT_HEALTHY_AFTER)
+    )]
     healthy_after: Option<Int>,
+    /// How long a deploy waits for the service to become healthy before it aborts, greater than
+    /// zero.
     #[serde(default)]
+    #[schemars(
+        schema_with = "Field::positive_duration",
+        extend("default" = Field::default_duration(health::DEFAULT_START_PERIOD))
+    )]
     start_period: Option<Str>,
 }
 
-#[derive(Debug, Deserialize)]
+/// An HTTP health probe.
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "HttpProbe")]
 struct RawHttpProbe {
+    /// Request path, sent as written: starts with `/`, with spaces, control and non-ASCII
+    /// characters percent-encoded.
     #[serde(default)]
+    #[schemars(
+        schema_with = "Field::health_path",
+        extend("default" = DEFAULT_HEALTH_PATH)
+    )]
     path: Option<Str>,
+    /// Container port to probe; must be the port of one of the service's routes. Defaults to
+    /// the first route's port.
     #[serde(default)]
+    #[schemars(schema_with = "Field::port")]
     port: Option<Int>,
+    /// Healthy status codes: a class such as `"2xx"` or one code such as `"204"`. Default
+    /// 2xx–3xx.
     #[serde(default)]
+    #[schemars(schema_with = "Field::expect_status")]
     expect_status: Option<Str>,
 }
 
-#[derive(Debug, Deserialize)]
+/// A TCP health probe.
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "TcpProbe")]
 struct RawTcpProbe {
+    /// Container port to probe; must be the port of one of the service's routes. Defaults to
+    /// the first route's port.
     #[serde(default)]
+    #[schemars(schema_with = "Field::port")]
     port: Option<Int>,
 }
 

@@ -7,6 +7,8 @@
 //! private span-carrying types, then semantic validation that collects *every* problem instead
 //! of stopping at the first. Each [`Diagnostic`] names the TOML line/column and the field path.
 //!
+//! The same raw types generate the stack file's JSON Schema ([`StackSchema`]) for editors.
+//!
 //! Checks that need other stacks or hoster's configuration (route collisions, ADR-0012; the
 //! reserved admin host) are not done here; they live with the routing table.
 
@@ -19,6 +21,7 @@ mod diagnostic;
 mod image;
 mod raw;
 mod route;
+mod schema;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -29,6 +32,7 @@ pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
 pub use image::{Digest, ImageRef, PinnedImage};
 pub use route::{Host, NormalizedPrefix};
+pub use schema::StackSchema;
 
 /// Default upper bound for draining old upstreams (ADR-0017).
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -155,11 +159,15 @@ impl Service {
 }
 
 /// How a service is replaced on deploy (ADR-0039).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateStrategy {
+    /// Start the new container and switch traffic once it is healthy: no downtime, but old and
+    /// new run side by side for a moment.
     #[default]
     StartFirst,
+    /// Stop the old container before starting the new one, for services that cannot run twice
+    /// (e.g. a database on a volume): a short outage answered with 503 + `Retry-After`.
     StopFirst,
 }
 

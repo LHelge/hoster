@@ -13,6 +13,8 @@
 //! Pingora reaches the app on a 0600 Unix socket in the state directory (ADR-0031); a loopback
 //! TCP listener (`web.dev_listen`) exists for local development only.
 //!
+//! The stack file JSON Schema is served at [`StackSchema::ADMIN_PATH`] for editors.
+//!
 //! Every response carries strict security headers ([`SecurityHeaders`]). All scripts, styles and
 //! icons are embedded and served from `/assets/` (see `assets.rs`), so the CSP needs no exceptions.
 
@@ -51,6 +53,7 @@ use crate::config::Config;
 use crate::installation::Installation;
 use crate::orchestrator::Orchestrator;
 use crate::runtime::ContainerRuntime;
+use crate::stack::StackSchema;
 use crate::stats::Stats;
 use crate::store::Store;
 use crate::supervisor::ShutdownRequest;
@@ -327,6 +330,7 @@ impl WebApp {
             .route("/hooks/deploy", post(Webhook::deploy))
             .layer(Extension(self.webhook.clone()))
             .route("/healthz", get(WebApp::healthz))
+            .route(StackSchema::ADMIN_PATH, get(WebApp::stack_schema))
             .route("/assets/{file}", get(Assets::serve))
             .merge(Auth::routes())
             .layer(Extension(self.shell.clone()))
@@ -342,6 +346,18 @@ impl WebApp {
     /// Liveness probe; unauthenticated and never cached.
     async fn healthz() -> impl IntoResponse {
         ([(header::CACHE_CONTROL, "no-store")], "ok\n")
+    }
+
+    /// The stack file JSON Schema, for editors pointed at this host instead of the docs site.
+    /// Public like the assets: it describes the file format and nothing of this instance.
+    async fn stack_schema() -> impl IntoResponse {
+        (
+            [
+                (header::CONTENT_TYPE, "application/schema+json"),
+                (header::CACHE_CONTROL, "public, max-age=3600"),
+            ],
+            StackSchema::get().as_ref(),
+        )
     }
 
     async fn not_found() -> impl IntoResponse {

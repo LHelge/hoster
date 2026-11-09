@@ -1,0 +1,407 @@
+{
+  "$id": "https://docs.hoster.lhelge.se/stack.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "hoster stack file",
+  "description": "A hoster stack file (`<stack>.stack.toml`): one or more services deployed together on one\npodman network. See https://docs.hoster.lhelge.se/wiki/stack-format/.\n\nThe schema checks each field on its own. hoster checks the rules that need more than one value\nwhen the stack is applied: a (host, prefix) used twice within the stack or by another stack;\n`depends_on` cycles, unknown services or a service naming itself; secrets of another stack; a\nname set in both `env` and `secrets`; a mount path used twice; a tag or digest on images other\nthan CI-built `ghcr.io` ones, and `track` only on those; `http` and `tcp` checks only on\nrouted services, against a route's port; a timings-only `health` table only on routed\nservices. It also rejects durations that overflow or whose fraction is not a whole number of\nnanoseconds, such as `\"0.001h\"`.",
+  "type": "object",
+  "properties": {
+    "deploy": {
+      "description": "Who may deploy this stack through the webhook (ADR-0047). Without it, the stack can only\nbe deployed from the admin UI.",
+      "$ref": "#/$defs/Deploy"
+    },
+    "drain_timeout": {
+      "description": "Upper bound for draining the old containers' in-flight requests after a deploy (ADR-0017),\nas a duration such as `\"30s\"`.",
+      "type": "string",
+      "default": "30s",
+      "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+    },
+    "name": {
+      "description": "Stack name, unique per hoster instance: a lowercase letter, then lowercase letters, digits\nand `-`, at most 31 characters. Used in podman object names (`hoster-<name>`).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,30}$"
+    },
+    "services": {
+      "description": "The stack's services, at least one. Keys are service names (a lowercase letter, then\nlowercase letters, digits and `-`, at most 31 characters) and DNS aliases on the stack\nnetwork.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Service"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]{0,30}$"
+      }
+    },
+    "version": {
+      "description": "Schema version of the stack file. Must be `1`.",
+      "type": "integer",
+      "const": 1
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "name",
+    "services"
+  ],
+  "$defs": {
+    "Deploy": {
+      "description": "Deploy authorization: which GitHub Actions OIDC tokens may deploy this stack through the\nwebhook (ADR-0047).",
+      "type": "object",
+      "properties": {
+        "environment": {
+          "description": "Must equal the token's `environment` claim. Pair it with GitHub environment protection\nrules.",
+          "type": "string",
+          "pattern": "[^\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]"
+        },
+        "job_workflow_ref": {
+          "description": "Must equal the token's `job_workflow_ref` claim, e.g.\n`\"acme/notes/.github/workflows/release.yml@refs/heads/main\"`.",
+          "type": "string",
+          "pattern": "[^\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]"
+        },
+        "refs": {
+          "description": "Glob patterns for the token's `ref`, at least one of which must match, e.g.\n`[\"refs/tags/v*\"]`. `*` matches within one path segment, `**` across segments. Omit to\nallow any ref.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^refs/"
+          },
+          "minItems": 1
+        },
+        "repository_id": {
+          "description": "GitHub's numeric repository id (stable across renames), compared with the token's\n`repository_id` claim. `gh api repos/<owner>/<repo> --jq .id` prints it.",
+          "type": "integer",
+          "maximum": 9223372036854775807,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository_id"
+      ]
+    },
+    "Health": {
+      "description": "A health check (ADR-0038, ADR-0056): at most one of `http`, `tcp` and `exec`, plus timings.\n`http` and `tcp` need a route; a service without routes may only declare `exec`. A\ntimings-only table on a routed service tunes the default `GET /healthz` probe.",
+      "type": "object",
+      "properties": {
+        "exec": {
+          "description": "A command run inside the container without a shell, e.g. `[\"pg_isready\", \"-U\", \"app\"]`;\nexit 0 passes. Use `[\"sh\", \"-c\", \"…\"]` when it needs a shell.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\x00]*$"
+          },
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "type": "string",
+              "pattern": "^[^\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\x00]([^\\x00]*[^\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\x00])?$"
+            }
+          ]
+        },
+        "healthy_after": {
+          "description": "Consecutive successful probes needed to count as healthy.",
+          "type": "integer",
+          "default": 1,
+          "maximum": 4294967295,
+          "minimum": 1
+        },
+        "http": {
+          "description": "An HTTP `GET` from the host against the route's loopback port. Redirects are not\nfollowed.",
+          "$ref": "#/$defs/HttpProbe"
+        },
+        "interval": {
+          "description": "Time between probes, greater than zero.",
+          "type": "string",
+          "default": "1s",
+          "not": {
+            "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)?[A-Za-zµ]+[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+          },
+          "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        },
+        "start_period": {
+          "description": "How long a deploy waits for the service to become healthy before it aborts, greater than\nzero.",
+          "type": "string",
+          "default": "30s",
+          "not": {
+            "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)?[A-Za-zµ]+[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+          },
+          "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        },
+        "tcp": {
+          "description": "A TCP connect from the host against the route's loopback port.",
+          "$ref": "#/$defs/TcpProbe"
+        },
+        "timeout": {
+          "description": "How long one probe may take, greater than zero. Default `\"2s\"`, `\"5s\"` for `exec`.",
+          "type": "string",
+          "not": {
+            "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)?[A-Za-zµ]+[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+          },
+          "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        }
+      },
+      "additionalProperties": false,
+      "dependentSchemas": {
+        "http": {
+          "properties": {
+            "exec": false,
+            "tcp": false
+          }
+        },
+        "tcp": {
+          "properties": {
+            "exec": false,
+            "http": false
+          }
+        }
+      }
+    },
+    "HttpProbe": {
+      "description": "An HTTP health probe.",
+      "type": "object",
+      "properties": {
+        "expect_status": {
+          "description": "Healthy status codes: a class such as `\"2xx\"` or one code such as `\"204\"`. Default\n2xx–3xx.",
+          "type": "string",
+          "examples": [
+            "2xx",
+            "204"
+          ],
+          "pattern": "^([1-5]xx|[1-5][0-9][0-9])$"
+        },
+        "path": {
+          "description": "Request path, sent as written: starts with `/`, with spaces, control and non-ASCII\ncharacters percent-encoded.",
+          "type": "string",
+          "default": "/healthz",
+          "pattern": "^/[!-~]*$"
+        },
+        "port": {
+          "description": "Container port to probe; must be the port of one of the service's routes. Defaults to\nthe first route's port.",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "Route": {
+      "description": "A (host, prefix) → container port route (ADR-0007, ADR-0009, ADR-0010). A (host, prefix)\nmust be unique within the stack and across stacks (ADR-0012).",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "A lowercase fully qualified domain name without port, scheme or trailing dot, e.g.\n`\"notes.example.com\"`. No wildcards or IP addresses. It must resolve to this server for\nits certificate.",
+          "type": "string",
+          "maxLength": 253,
+          "not": {
+            "pattern": "\\.[0-9]+$"
+          },
+          "pattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+        },
+        "port": {
+          "description": "Container port the app listens on, 1–65535. hoster publishes it on an allocated\n`127.0.0.1` port; the app must bind `0.0.0.0` or `::`.",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 1
+        },
+        "prefix": {
+          "description": "Path prefix the route matches on segment boundaries (`/api` matches `/api/x`, not\n`/apix`). Starts with `/`, no trailing `/` except the root, no `?`, `#`, `%`, `//`, `.` or\n`..` segments.",
+          "type": "string",
+          "default": "/",
+          "pattern": "^(/|(/([A-Za-z0-9_~!$&'()*+,;=:@-][A-Za-z0-9_~!$&'()*+,;=:@.-]*|\\.[A-Za-z0-9_~!$&'()*+,;=:@-][A-Za-z0-9_~!$&'()*+,;=:@.-]*|\\.\\.[A-Za-z0-9_~!$&'()*+,;=:@.-]+))+)$"
+        },
+        "strip_prefix": {
+          "description": "Remove the matched prefix before forwarding (ADR-0010). No effect on `/`.",
+          "type": "boolean",
+          "default": false
+        },
+        "timeouts": {
+          "description": "Proxy timeouts for this route (ADR-0011); unset ones use hoster's defaults.",
+          "$ref": "#/$defs/Timeouts"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port"
+      ]
+    },
+    "Service": {
+      "description": "One container of the stack.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "Overrides the image's `CMD`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "depends_on": {
+          "description": "Services of this stack that must pass their health check before this one starts, e.g.\n`[\"db\", \"cache\"]` (ADR-0056). Each names another service of the stack, at most once,\nwithout cycles.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,30}$"
+          },
+          "uniqueItems": true
+        },
+        "entrypoint": {
+          "description": "Overrides the image's `ENTRYPOINT`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "description": "Plain, non-secret environment variables. A routed service with exactly one container port\nalso gets `PORT=<that port>` unless it sets `PORT` itself (ADR-0051).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        },
+        "health": {
+          "description": "Health check (ADR-0038, ADR-0056). Without it, a routed service is probed with\n`GET /healthz` on its first route's port, and any other service counts as healthy once\nrunning for 5 s.",
+          "$ref": "#/$defs/Health"
+        },
+        "image": {
+          "description": "Image reference with an explicit registry. CI-built `ghcr.io` images omit the tag, e.g.\n`\"ghcr.io/acme/notes-api\"`: their digest comes from the deploy. Third-party images need\n`repo:tag`, `repo:tag@sha256:…` or `repo@sha256:…`; a tag is resolved to a digest when the\nstack is applied (ADR-0025).",
+          "type": "string",
+          "pattern": "^(([a-z0-9.-]*\\.[a-z0-9.-]*|localhost)(:0*(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[0-9]{1,4}))?|[a-z0-9.-]+:0*(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[0-9]{1,4}))/[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[0-9a-f]{64})?$"
+        },
+        "read_only": {
+          "description": "Read-only root filesystem.",
+          "type": "boolean",
+          "default": false
+        },
+        "routes": {
+          "description": "Routes from a (host, prefix) to a container port (ADR-0007). Without routes the service\npublishes no ports.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Route"
+          }
+        },
+        "secrets": {
+          "description": "Environment variable name → secret name `<stack>/<name>` in hoster's encrypted secret\nstore (ADR-0029), e.g. `DATABASE_URL = \"notes/database-url\"`. The `<stack>` part must be\nthis stack's name, and a name must not be set in both `env` and `secrets`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,30}/[A-Za-z0-9._-]+$"
+          },
+          "default": {},
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        },
+        "stop_timeout": {
+          "description": "SIGTERM → SIGKILL grace period when the container is stopped, as a duration such as\n`\"10s\"`.",
+          "type": "string",
+          "default": "10s",
+          "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        },
+        "track": {
+          "description": "Tag the ghcr poller watches, e.g. `\"main\"` (ADR-0043). Only for CI-built `ghcr.io` images\nwithout a tag or digest.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+        },
+        "update": {
+          "description": "How the service is replaced on deploy (ADR-0039).",
+          "$ref": "#/$defs/UpdateStrategy",
+          "default": "start-first"
+        },
+        "user": {
+          "description": "`uid[:gid]` inside the container, each numeric or a name.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]*)?$"
+        },
+        "volumes": {
+          "description": "Named podman volume → absolute mount path, e.g. `data = \"/data\"` (ADR-0030). Volumes are\nkept when the stack is removed. Each path may be used once.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(/([^/:,.\\x00-\\x1f\\x7f-\\x9f][^/:,\\x00-\\x1f\\x7f-\\x9f]*|\\.[^/:,.\\x00-\\x1f\\x7f-\\x9f][^/:,\\x00-\\x1f\\x7f-\\x9f]*|\\.\\.[^/:,\\x00-\\x1f\\x7f-\\x9f]+))+$"
+          },
+          "default": {},
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9-]{0,30}$"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "image"
+      ]
+    },
+    "TcpProbe": {
+      "description": "A TCP health probe.",
+      "type": "object",
+      "properties": {
+        "port": {
+          "description": "Container port to probe; must be the port of one of the service's routes. Defaults to\nthe first route's port.",
+          "type": "integer",
+          "maximum": 65535,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "Timeouts": {
+      "description": "Per-route proxy timeouts (ADR-0011), as durations greater than zero such as `\"60s\"`.",
+      "type": "object",
+      "properties": {
+        "connect": {
+          "description": "Connecting to the container.",
+          "type": "string",
+          "not": {
+            "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)?[A-Za-zµ]+[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+          },
+          "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        },
+        "idle": {
+          "description": "Idle keep-alive connections.",
+          "type": "string",
+          "not": {
+            "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)?[A-Za-zµ]+[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+          },
+          "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        },
+        "read": {
+          "description": "Between reads of the response.",
+          "type": "string",
+          "not": {
+            "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)?[A-Za-zµ]+[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+          },
+          "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        },
+        "write": {
+          "description": "Between writes of the request.",
+          "type": "string",
+          "not": {
+            "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*0[0\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)?[A-Za-zµ]+[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+          },
+          "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "UpdateStrategy": {
+      "description": "How a service is replaced on deploy (ADR-0039).",
+      "oneOf": [
+        {
+          "description": "Start the new container and switch traffic once it is healthy: no downtime, but old and\nnew run side by side for a moment.",
+          "type": "string",
+          "const": "start-first"
+        },
+        {
+          "description": "Stop the old container before starting the new one, for services that cannot run twice\n(e.g. a database on a volume): a short outage answered with 503 + `Retry-After`.",
+          "type": "string",
+          "const": "stop-first"
+        }
+      ]
+    }
+  }
+}
