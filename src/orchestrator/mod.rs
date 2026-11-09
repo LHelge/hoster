@@ -1542,8 +1542,18 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .deployment(id)
                 .await?
                 .ok_or(OrchestratorError::UnknownDeployment(id))?;
-            if deployment.state.is_terminal() || !self.holds(&deployment.stack, id) {
+            if deployment.state.is_terminal() {
                 return Ok(deployment);
+            }
+            if !self.holds(&deployment.stack, id) {
+                // It may have ended and let go of its slot since the record was read, which
+                // would make this copy a state it has already left. The slot is let go after
+                // the last state is stored, so a second read is what it ended as.
+                return self
+                    .store
+                    .deployment(id)
+                    .await?
+                    .ok_or(OrchestratorError::UnknownDeployment(id));
             }
             notified.await;
         }

@@ -4,10 +4,11 @@
 //! this runs offline.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -73,7 +74,8 @@ impl FakePodman {
 /// A scratch directory with a minimal valid hoster.toml and a [`FakePodman`], removed on drop.
 struct Sandbox {
     dir: PathBuf,
-    /// The proxy's plain-HTTP listen address: a loopback port that was free a moment ago.
+    /// The proxy's plain-HTTP listen address: a loopback port that was free a moment ago, from
+    /// [`Sandbox::free_port`].
     http: SocketAddr,
     /// The proxy's TLS listen address, chosen the same way.
     https: SocketAddr,
@@ -81,6 +83,11 @@ struct Sandbox {
 
 impl Sandbox {
     fn new(name: &str) -> Self {
+        Self::with_busy_http(name).0
+    }
+
+    /// A sandbox whose HTTP port is taken: by the returned listener, for as long as it lives.
+    fn with_busy_http(name: &str) -> (Self, TcpListener) {
         let dir = std::env::temp_dir().join(format!("hoster-it-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -99,11 +106,29 @@ impl Sandbox {
         std::fs::create_dir_all(&credentials).unwrap();
         std::fs::write(credentials.join("github_client_id"), "test-client\n").unwrap();
         std::fs::write(credentials.join("github_client_secret"), "test-secret\n").unwrap();
-        // Both listeners are held at once, so the two ports differ.
-        let bind = || TcpListener::bind("127.0.0.1:0").unwrap();
-        let (http, https) = (bind(), bind());
-        let (http, https) = (http.local_addr().unwrap(), https.local_addr().unwrap());
-        Sandbox { dir, http, https }
+        let (busy, https) = (Self::free_port(), Self::free_port());
+        let (http, https) = (busy.local_addr().unwrap(), https.local_addr().unwrap());
+        (Sandbox { dir, http, https }, busy)
+    }
+
+    /// A listener on a loopback port no other sandbox of this run was given.
+    ///
+    /// The port is not one the kernel picks (`127.0.0.1:0`): hoster binds it only after the
+    /// listener is dropped, and until then the kernel may hand a port from its ephemeral range
+    /// to any socket the tests running beside this one open, an outgoing connection included.
+    /// Ports below that range are only taken by who asks for them by number, which here is
+    /// this function, counting up from a start that differs between test processes.
+    fn free_port() -> TcpListener {
+        const RANGE: std::ops::Range<u16> = 10_000..20_000;
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        let start = (std::process::id() % 500) as u16 * 20;
+        loop {
+            let offset = start.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed));
+            let port = RANGE.start + offset % (RANGE.end - RANGE.start);
+            if let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+                return listener;
+            }
+        }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -332,8 +357,7 @@ fn proxy_answers_404_and_sigterm_drains_within_the_grace_period() {
 
 #[test]
 fn a_busy_http_port_fails_startup_in_step_7() {
-    let sandbox = Sandbox::new("busy");
-    let _busy = TcpListener::bind(sandbox.http).unwrap();
+    let (sandbox, _busy) = Sandbox::with_busy_http("busy");
     let output = sandbox.command().output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
