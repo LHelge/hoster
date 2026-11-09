@@ -173,15 +173,20 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
 
 ### 5.4 Day-to-day operations in the web UI
 
+Every page shares one layout: a sidebar with the navigation (Dashboard, Stacks, Certificates,
+Settings, System) that stacks above the content on narrow screens, in Catppuccin Latte or Mocha
+after the browser's colour scheme (ADR-0054).
+
 | Page | What you see and do |
 |---|---|
 | **Dashboard** | Request, error-rate, latency, stack and certificate figures; warnings; every stack with its status, healthy services, latency, error shares, restarts and last deploy; the certificates closest to expiry. Live updates through HTMX. |
-| **Stack** | Services, routes, generations. Apply a new revision of the stack file (with diff), manage secrets, see the `[deploy]` rule and recently rejected webhook attempts with their token claims, redeploy, remove the stack (volumes kept unless explicitly deleted). |
-| **Deployments** | History per stack, with state transitions and failure reasons. "Redeploy this one" acts as rollback (ADR-0041). |
-| **Logs** | Tail and follow logs per container. |
-| **Certificates** | Hosts, issuer, expiry, last ACME error, DNS check. |
-| **Settings** | Registry credentials. |
-| **System** | Running version, target and schema; installed current and previous versions. "Check for updates" asks GitHub for the latest stable release only when clicked and shows its notes; **Update** installs it and restarts hoster. Rollback is `hoster rollback` over SSH (ADR-0052). |
+| **Stacks** | Every stack as a card, filterable by status. **New stack** applies a stack file after showing its plan and pre-flight checks. |
+| **Stack** | Separate tabs under one header with Redeploy and Re-resolve tags (ADR-0054). *Overview*: traffic figures, services with their containers, generations, uptime and ports, routes, volumes, deploying explicit digests, applying a new revision of the stack file (with diff), the `[deploy]` rule's recently rejected webhook attempts with their token claims, and the danger zone to remove the stack (volumes kept unless explicitly deleted). *Logs*: tail and follow logs per container. *Environment*: env vars and write-only secrets. *Deployments*: history with state transitions and failure reasons; "Redeploy this one" ("Roll back to this one" for an older revision) acts as rollback (ADR-0041). |
+| **Certificates** | Hosts, issuer, expiry, last ACME error, DNS check; check all DNS and retry all failing at once. |
+| **Settings** | Sections for general, registries, deploy webhook, reverse proxy and certificates. Registry credentials are edited here; the others show the effective configuration, whose source stays `hoster.toml` (ADR-0027). |
+| **System** | Running version, target and schema; installed current and previous versions; host facts. "Check for updates" asks GitHub for the latest stable release only when clicked and shows its notes; **Update** installs it and restarts hoster. Rollback is `hoster rollback` over SSH (ADR-0052). |
+
+`/containers` redirects to `/stacks`: containers and their logs live on their stack's pages.
 
 There is no break-glass login: if GitHub login is unavailable, use SSH until it is back
 (ADR-0031). Running apps and the webhook are unaffected.

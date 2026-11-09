@@ -131,7 +131,7 @@ job_workflow_ref = "acme/notes/.github/workflows/release.yml@refs/heads/main"  #
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `repository_id` | integer | yes | Compared with the OIDC token's `repository_id` claim. The stack page shows the claims of rejected attempts, which helps find it. |
+| `repository_id` | integer | yes | Compared with the OIDC token's `repository_id` claim. The Refused webhook deploys table on the stack's overview tab shows the claims of rejected attempts, which helps find it. |
 | `refs` | array of string | no | Globs: `*` matches within one path segment, `**` across segments. At least one must match `ref`. |
 | `environment` | string | no | Exact match on the `environment` claim. Pair it with GitHub environment protection rules (required reviewers, tag-only deployment). |
 | `job_workflow_ref` | string | no | Exact match. Use it to require a specific reusable or release workflow. |
