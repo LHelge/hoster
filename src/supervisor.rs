@@ -23,7 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap, DnsCheck, PublicAddresses};
 use crate::config::{Config, ProxyConfig};
-use crate::orchestrator::{Orchestrator, Settings, TagResolver};
+use crate::installation::Version;
+use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
 use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
 use crate::registry::{Poller, RegistryClient, StoredCredentials};
@@ -589,6 +590,16 @@ impl Startup for Supervisor {
             Phase::StateStore => {
                 let store = Store::open(&self.config.state_dir).await?;
                 tracing::info!(path = %store.path().display(), "state store ready");
+                // Once per process start (ADR-0055). No page is open yet to announce it to.
+                if let Err(err) = store
+                    .record_event(&HosterEvents::started(&Version::running()))
+                    .await
+                {
+                    tracing::warn!(
+                        error = format!("{:#}", anyhow::Error::from(err)),
+                        "cannot record the start in the event log"
+                    );
+                }
                 let secrets = SecretStore::open(
                     store.clone(),
                     &self.config.secret_key_file,

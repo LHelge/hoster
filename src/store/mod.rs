@@ -177,6 +177,30 @@ impl Store {
         Ok(Self { pool, path })
     }
 
+    /// Opens the existing database under `state_dir` for writing, without creating or
+    /// migrating it: for `hoster update` and `hoster rollback` to record their event
+    /// (ADR-0055) in a database the running hoster, or a stopped one, owns.
+    pub async fn open_existing(state_dir: &Path) -> Result<Self> {
+        let path = state_dir.join(Self::FILE_NAME);
+        if !path.is_file() {
+            return Err(StoreError::Missing(path));
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .journal_mode(SqliteJournalMode::Wal)
+            .foreign_keys(true)
+            .busy_timeout(Self::BUSY_TIMEOUT);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|source| StoreError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(Self { pool, path })
+    }
+
     /// Writes a consistent snapshot of the database to `dest` with `VACUUM INTO` (ADR-0030).
     /// Safe while hoster runs: the snapshot is one read transaction, so it sees every committed
     /// write before it and none after.
@@ -318,6 +342,18 @@ impl Store {
             .into()
     }
 
+    /// The schema version of this binary's migration named `description` (`events` for
+    /// `0008_events`), so tests can target a schema relative to it rather than to the newest.
+    #[cfg(test)]
+    pub(crate) fn migration_version(description: &str) -> SchemaVersion {
+        MIGRATOR
+            .iter()
+            .find(|m| m.migration_type.is_up_migration() && m.description == description)
+            .map(|m| m.version)
+            .unwrap_or_else(|| panic!("no migration named {description:?}"))
+            .into()
+    }
+
     /// How many of this binary's migrations undoing the schema from `from` down to `to` reverts:
     /// those newer than `to` and no newer than `from` (what `hoster rollback` warns about).
     pub fn migrations_between(to: SchemaVersion, from: SchemaVersion) -> usize {
@@ -356,24 +392,7 @@ impl Store {
     /// Each down script runs in its own transaction, so a failure leaves the database at the
     /// last migration that was undone; the caller restores its snapshot.
     pub async fn undo_migrations(state_dir: &Path, target: SchemaVersion) -> Result<SchemaVersion> {
-        let path = state_dir.join(Self::FILE_NAME);
-        if !path.is_file() {
-            return Err(StoreError::Missing(path));
-        }
-        let options = SqliteConnectOptions::new()
-            .filename(&path)
-            .journal_mode(SqliteJournalMode::Wal)
-            .foreign_keys(true)
-            .busy_timeout(Self::BUSY_TIMEOUT);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .map_err(|source| StoreError::Open {
-                path: path.clone(),
-                source,
-            })?;
-        let store = Self { pool, path };
+        let store = Self::open_existing(state_dir).await?;
         let result = async {
             store.check_integrity().await?;
             MIGRATOR
@@ -530,16 +549,46 @@ impl Store {
         toml: &str,
         images: &DigestSet,
     ) -> Result<StackRevision> {
-        let now = Timestamp::now();
-        let hash = ContentHash::of(toml);
         let mut tx = self.begin().await?;
+        let revision =
+            Self::add_pinned_revision_in(&mut tx, stack, toml, images, Timestamp::now()).await?;
+        tx.commit().await?;
+        Ok(revision)
+    }
+
+    /// [`add_pinned_revision`](Self::add_pinned_revision), recording the event `event` builds
+    /// from the new revision in the event log (ADR-0055) in the same transaction.
+    pub async fn add_pinned_revision_recorded(
+        &self,
+        stack: &str,
+        toml: &str,
+        images: &DigestSet,
+        event: impl FnOnce(&StackRevision) -> NewEvent,
+    ) -> Result<(StackRevision, Event)> {
+        let now = Timestamp::now();
+        let mut tx = self.begin().await?;
+        let revision = Self::add_pinned_revision_in(&mut tx, stack, toml, images, now).await?;
+        let recorded = Self::insert_event(&mut tx, &event(&revision), now).await?;
+        tx.commit().await?;
+        Ok((revision, recorded))
+    }
+
+    /// The revision insert on `conn`, inside the caller's transaction.
+    async fn add_pinned_revision_in(
+        conn: &mut SqliteConnection,
+        stack: &str,
+        toml: &str,
+        images: &DigestSet,
+        now: Timestamp,
+    ) -> Result<StackRevision> {
+        let hash = ContentHash::of(toml);
         sqlx::query!(
             "INSERT INTO stacks (name, created_at, updated_at) VALUES (?1, ?2, ?2)
              ON CONFLICT (name) DO UPDATE SET updated_at = excluded.updated_at, removed_at = NULL",
             stack,
             now,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
         let revision = sqlx::query_as!(
             StackRevision,
@@ -555,7 +604,7 @@ impl Store {
             hash,
             now,
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
         for (service, digest) in images {
             sqlx::query!(
@@ -564,10 +613,9 @@ impl Store {
                 service,
                 digest,
             )
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
         }
-        tx.commit().await?;
         Ok(revision)
     }
 
@@ -613,26 +661,53 @@ impl Store {
     /// removed. Its revisions and deployment history are kept; applying the stack again revives
     /// it. Returns whether a stack of that name existed and was not removed yet.
     pub async fn remove_stack(&self, name: &str) -> Result<bool> {
+        let mut tx = self.begin().await?;
+        let removed = Self::remove_stack_in(&mut tx, name, Timestamp::now()).await?;
+        tx.commit().await?;
+        Ok(removed)
+    }
+
+    /// [`remove_stack`](Self::remove_stack), recording `event` in the event log (ADR-0055) in
+    /// the same transaction: the event is stored if and only if the stack was removed. `None`
+    /// when there was no such stack.
+    pub async fn remove_stack_recorded(
+        &self,
+        name: &str,
+        event: &NewEvent,
+    ) -> Result<Option<Event>> {
         let now = Timestamp::now();
         let mut tx = self.begin().await?;
+        if !Self::remove_stack_in(&mut tx, name, now).await? {
+            return Ok(None);
+        }
+        let recorded = Self::insert_event(&mut tx, event, now).await?;
+        tx.commit().await?;
+        Ok(Some(recorded))
+    }
+
+    /// The removal on `conn`, inside the caller's transaction.
+    async fn remove_stack_in(
+        conn: &mut SqliteConnection,
+        name: &str,
+        now: Timestamp,
+    ) -> Result<bool> {
         let done = sqlx::query!(
             "UPDATE stacks SET removed_at = ?1, updated_at = ?1
              WHERE name = ?2 AND removed_at IS NULL",
             now,
             name,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
         if done.rows_affected() == 0 {
             return Ok(false);
         }
         sqlx::query!("DELETE FROM services WHERE stack = ?", name)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
         sqlx::query!("DELETE FROM port_allocations WHERE stack = ?", name)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
-        tx.commit().await?;
         Ok(true)
     }
 

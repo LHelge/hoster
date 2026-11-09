@@ -38,6 +38,7 @@ use super::{DeploymentView, Outcome, StackView, Stacks, When};
 use crate::orchestrator::{SecretChange, StackSecret, StackStatus};
 use crate::secrets::SecretValue;
 use crate::stack::Stack;
+use crate::web::auth::Session;
 use crate::web::pages::{Layout, Page, Section, Shell};
 
 /// The set form: a name within the stack, the value, and the name confirmed after review.
@@ -123,6 +124,7 @@ impl Stacks {
     /// redeployed, or, once confirmed, stores the secret and redeploys them (ADR-0049).
     pub async fn save_secret(
         Extension(stacks): Extension<Stacks>,
+        Extension(session): Extension<Session>,
         Path(stack): Path<String>,
         Form(form): Form<SecretForm>,
     ) -> Response {
@@ -156,7 +158,11 @@ impl Stacks {
             })
             .into_response();
         }
-        match stacks.0.set_secret(&stack, name, &value).await {
+        match stacks
+            .0
+            .set_secret(&stack, name, &value, &session.login().into())
+            .await
+        {
             Ok(change) => EnvironmentPage::outcome(&stack, "Saved", &change),
             Err(err) => Outcome::from(err).into_response(),
         }
@@ -167,6 +173,7 @@ impl Stacks {
     /// with the form to type it in.
     pub async fn delete_secret(
         Extension(stacks): Extension<Stacks>,
+        Extension(session): Extension<Session>,
         Path(stack): Path<String>,
         Form(form): Form<DeleteSecretForm>,
     ) -> Response {
@@ -210,7 +217,11 @@ impl Stacks {
                 Some(_) => {}
             }
         }
-        match stacks.0.delete_secret(&stack, name).await {
+        match stacks
+            .0
+            .delete_secret(&stack, name, &session.login().into())
+            .await
+        {
             Ok(change) => EnvironmentPage::outcome(&stack, "Deleted", &change),
             Err(err) => Outcome::from(err).into_response(),
         }

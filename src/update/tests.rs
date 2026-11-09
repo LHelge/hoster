@@ -1,6 +1,6 @@
 use super::fake::*;
 use super::*;
-use crate::store::{DeploymentSource, NewDeployment};
+use crate::store::{DeploymentSource, EventKind, EventQuery, NewDeployment};
 use tempfile::TempDir;
 
 // -------------------------------------------------------------------------------------------
@@ -540,4 +540,146 @@ fn systemctl_gets_a_runtime_dir_only_when_the_session_has_none() {
         SystemdUserService::fallback_runtime_dir(Some(OsStr::new("/run/user/1001")), 1001),
         None
     );
+}
+
+// -------------------------------------------------------------------------------------------
+// event log (ADR-0055)
+// -------------------------------------------------------------------------------------------
+
+impl Host {
+    /// The hoster events in the database, as (kind, meta), oldest first.
+    async fn hoster_events(&self) -> Vec<(EventKind, String)> {
+        let store = self.store().await;
+        let query = EventQuery {
+            kinds: [EventKind::HosterUpdated, EventKind::HosterRolledBack].into(),
+            ..EventQuery::default()
+        };
+        let mut events = store.event_page(&query).await.unwrap().events;
+        store.close().await;
+        events.reverse();
+        events
+            .into_iter()
+            .map(|e| (e.kind, e.meta.unwrap_or_default()))
+            .collect()
+    }
+}
+
+/// The schema this binary migrates to, which has the event log.
+fn events_schema() -> i64 {
+    Store::expected_schema_version().into()
+}
+
+/// The schema just before the migration that creates the event log.
+fn before_events_schema() -> i64 {
+    i64::from(Store::migration_version("events")) - 1
+}
+
+#[tokio::test]
+async fn an_update_records_the_versions_after_the_switch_but_not_in_the_snapshot() {
+    let host = Host::new(&[("0.1.0", events_schema())]).await;
+    let source = FakeReleases::default().publish_binary("0.2.0", script("0.2.0", events_schema()));
+    let outcome = host.updater(source, "0.1.0").update(None).await.unwrap();
+    assert_eq!(
+        host.hoster_events().await,
+        [(EventKind::HosterUpdated, "v0.1.0 → v0.2.0".to_owned())]
+    );
+    // The snapshot is the state before the update: restoring it forgets the update.
+    let UpdateOutcome::Switched {
+        snapshot: Some(snapshot),
+        ..
+    } = outcome
+    else {
+        panic!("not switched with a snapshot: {outcome:?}");
+    };
+    let restored = TempDir::new().unwrap();
+    fs::copy(&snapshot, restored.path().join(Store::FILE_NAME)).unwrap();
+    let store = Store::open_read_only(restored.path()).await.unwrap();
+    assert!(
+        store
+            .event_page(&EventQuery::default())
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    store.close().await;
+}
+
+#[tokio::test]
+async fn a_refused_or_needless_update_records_nothing() {
+    let host = Host::new(&[("0.2.0", events_schema())]).await;
+    let source =
+        || FakeReleases::default().publish_binary("0.2.0", script("0.2.0", events_schema()));
+    host.updater(source(), "0.2.0").update(None).await.unwrap();
+    host.deployments.0.store(1, Ordering::SeqCst);
+    let source = FakeReleases::default().publish_binary("0.3.0", script("0.3.0", events_schema()));
+    assert!(host.updater(source, "0.2.0").update(None).await.is_err());
+    assert!(host.hoster_events().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_rollback_records_the_versions() {
+    let host = Host::new(&[("0.1.0", events_schema()), ("0.2.0", events_schema())]).await;
+    host.updater(FakeReleases::default(), "0.2.0")
+        .rollback()
+        .await
+        .unwrap();
+    assert_eq!(
+        host.hoster_events().await,
+        [(EventKind::HosterRolledBack, "v0.2.0 → v0.1.0".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn a_rollback_to_a_schema_without_the_event_log_takes_the_event_with_it() {
+    let host = Host::new(&[
+        ("0.1.0", before_events_schema()),
+        ("0.2.0", events_schema()),
+    ])
+    .await;
+    // A witness outside the schema sees every event written while the table still exists.
+    host.sql(
+        "CREATE TABLE witness (kind TEXT NOT NULL, meta TEXT);
+         CREATE TRIGGER events_witness AFTER INSERT ON events
+         BEGIN INSERT INTO witness VALUES (new.kind, new.meta); END;",
+    )
+    .await;
+    host.updater(FakeReleases::default(), "0.2.0")
+        .rollback()
+        .await
+        .unwrap();
+    assert_eq!(
+        i64::from(host.schema().await),
+        before_events_schema(),
+        "rolled back past the event log"
+    );
+    assert_eq!(
+        host.count("SELECT count(*) FROM sqlite_schema WHERE name = 'events'")
+            .await,
+        0
+    );
+    // The event was written before the down-migration dropped the table.
+    assert_eq!(
+        host.count("SELECT count(*) FROM witness WHERE meta = 'v0.2.0 → v0.1.0'")
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_failed_rollback_leaves_no_rollback_event() {
+    let host = Host::new(&[("0.1.0", 4), ("0.2.0", events_schema())]).await;
+    // As in `a_failed_undo_restores_the_snapshot_and_keeps_current`: 0005's down script fails.
+    host.sql(
+        "INSERT INTO stacks (name, last_generation, created_at, updated_at) VALUES ('notes', 0, 1, 1);
+         CREATE INDEX stacks_by_removal ON stacks (removed_at);",
+    )
+    .await;
+    assert!(
+        host.updater(FakeReleases::default(), "0.2.0")
+            .rollback()
+            .await
+            .is_err()
+    );
+    assert!(host.hoster_events().await.is_empty());
 }

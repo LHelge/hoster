@@ -11,10 +11,12 @@ use tokio_util::sync::CancellationToken;
 use super::{CANCELLED, STACK_REMOVED, UiEvent};
 use crate::acme::DnsMismatch;
 use crate::health::{HealthChange, HealthStatus};
+use crate::installation::Version;
 use crate::runtime::{ContainerInfo, ContainerState, ServiceGeneration};
 use crate::store::{
     Deployment, DeploymentId, DeploymentSource, DeploymentState, Event, EventKind, EventPage,
-    EventQuery, NewEvent, Severity, ShortDigest, ShortSha, Store, StoreError, Timestamp,
+    EventQuery, NewEvent, Severity, ShortDigest, ShortSha, StackRevision, Store, StoreError,
+    Timestamp,
 };
 
 /// Records events in the store and announces them on `ui_events`. Cheap to clone; every
@@ -412,6 +414,221 @@ impl<'a> CertEvents<'a> {
     }
 }
 
+/// Who did an operator action, as the event log names them (ADR-0055): the GitHub handle the
+/// admin signed in with (ADR-0031). An action without one (a test, a future CLI) is recorded
+/// without a "by".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Operator(String);
+
+impl From<&str> for Operator {
+    fn from(login: &str) -> Self {
+        Self(login.to_owned())
+    }
+}
+
+impl From<String> for Operator {
+    fn from(login: String) -> Self {
+        Self(login)
+    }
+}
+
+/// `@login`, as GitHub writes a handle.
+impl fmt::Display for Operator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "@{}", self.0)
+    }
+}
+
+/// The operator events of one stack (ADR-0055 §2): a revision applied, the stack removed (with
+/// whether its volumes went too), and a secret of it set or deleted, by name only. Each names
+/// the operator who did it, if known, at the end of its meta line.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OperatorEvents<'a> {
+    stack: &'a str,
+    by: Option<&'a Operator>,
+}
+
+impl<'a> OperatorEvents<'a> {
+    /// The events of `stack`, done by `by`.
+    pub(super) fn new(stack: &'a str, by: Option<&'a Operator>) -> Self {
+        Self { stack, by }
+    }
+
+    /// `revision` was applied as the stack's active one.
+    pub(super) fn applied(&self, revision: &StackRevision) -> NewEvent {
+        self.event(
+            EventKind::StackApplied,
+            Severity::Info,
+            format!("Applied revision {} of {}", revision.revision, self.stack),
+        )
+        .subject(format!("/stacks/{}", self.stack))
+        .meta(self.meta([
+            format!("revision {}", revision.revision),
+            ShortDigest(revision.hash.as_ref()).to_string(),
+        ]))
+    }
+
+    /// The stack was removed; `volumes` are the named volumes deleted with it, if the removal
+    /// asked for that. The stack's page is gone, so the event links nowhere.
+    pub(super) fn removed(&self, delete_volumes: bool, volumes: &[String]) -> NewEvent {
+        let (severity, message, detail) = match (delete_volumes, volumes) {
+            (false, _) => (
+                Severity::Info,
+                format!("Removed {}; its volumes were kept", self.stack),
+                "volumes kept".to_owned(),
+            ),
+            (true, []) => (
+                Severity::Info,
+                format!("Removed {}", self.stack),
+                "no volumes".to_owned(),
+            ),
+            (true, volumes) => (
+                Severity::Warning,
+                format!("Removed {} and deleted its volumes", self.stack),
+                format!("volumes deleted: {}", volumes.join(", ")),
+            ),
+        };
+        self.event(EventKind::StackRemoved, severity, message)
+            .meta(self.meta([detail]))
+    }
+
+    /// The kept volumes of the stack, removed earlier, were deleted (ADR-0030's separate
+    /// action), or `None` when it had none left to delete.
+    pub(super) fn volumes_deleted(&self, volumes: &[String]) -> Option<NewEvent> {
+        (!volumes.is_empty()).then(|| {
+            self.event(
+                EventKind::StackRemoved,
+                Severity::Warning,
+                format!("Deleted the kept volumes of {}", self.stack),
+            )
+            .meta(self.meta([format!("volumes deleted: {}", volumes.join(", "))]))
+        })
+    }
+
+    /// The stack's secret `name` was set; `replaced` when it existed before. Never the value.
+    pub(super) fn secret_set(&self, name: &str, replaced: bool) -> NewEvent {
+        let verb = if replaced { "Replaced" } else { "Set" };
+        self.secret(EventKind::SecretSet, format!("{verb} the secret {name}"))
+    }
+
+    /// The stack's secret `name` was deleted.
+    pub(super) fn secret_deleted(&self, name: &str) -> NewEvent {
+        self.secret(
+            EventKind::SecretDeleted,
+            format!("Deleted the secret {name}"),
+        )
+    }
+
+    fn secret(&self, kind: EventKind, what: String) -> NewEvent {
+        self.event(kind, Severity::Info, format!("{what} of {}", self.stack))
+            .subject(format!("/stacks/{}/environment", self.stack))
+            .meta(self.meta([format!("scope {}", self.stack)]))
+    }
+
+    fn event(&self, kind: EventKind, severity: Severity, message: String) -> NewEvent {
+        NewEvent::new(kind, severity, message).stack(self.stack)
+    }
+
+    /// `parts`, then who did it, as one mono line.
+    fn meta(&self, parts: impl IntoIterator<Item = String>) -> String {
+        parts
+            .into_iter()
+            .chain(self.by.map(|by| format!("by {by}")))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+/// The events of one registry credential of Settings → Registries (ADR-0025): set, replaced
+/// or deleted. A credential is a secret in the same store as a stack's (ADR-0029), so these
+/// are secret events, but of no stack; they name the host, never the username or token, and
+/// link to the registries page.
+#[derive(Debug, Clone, Copy)]
+pub struct RegistryEvents<'a> {
+    host: &'a str,
+    by: Option<&'a Operator>,
+}
+
+impl<'a> RegistryEvents<'a> {
+    /// The page the events link to.
+    const SUBJECT: &'static str = "/settings/registries";
+
+    /// The events of the credential for `host`, done by `by`.
+    pub fn new(host: &'a str, by: Option<&'a Operator>) -> Self {
+        Self { host, by }
+    }
+
+    /// The credential was stored; `replaced` when one existed before.
+    pub fn set(&self, replaced: bool) -> NewEvent {
+        let verb = if replaced { "Replaced" } else { "Set" };
+        self.event(
+            EventKind::SecretSet,
+            format!("{verb} the registry credential for {}", self.host),
+        )
+    }
+
+    /// The credential was deleted.
+    pub fn deleted(&self) -> NewEvent {
+        self.event(
+            EventKind::SecretDeleted,
+            format!("Deleted the registry credential for {}", self.host),
+        )
+    }
+
+    fn event(&self, kind: EventKind, message: String) -> NewEvent {
+        let by = self.by.map(|by| format!(" · by {by}")).unwrap_or_default();
+        NewEvent::new(kind, Severity::Info, message)
+            .subject(Self::SUBJECT)
+            .meta(format!("scope registry{by}"))
+    }
+}
+
+/// The events of hoster itself (ADR-0055 §2): it started, it updated itself, or it rolled
+/// back to its previous version (ADR-0052). They belong to no stack and link to the System
+/// page; the meta line holds the versions.
+#[derive(Debug, Clone, Copy)]
+pub struct HosterEvents;
+
+impl HosterEvents {
+    /// The page the events link to.
+    const SUBJECT: &'static str = "/system";
+
+    /// hoster `version` started (once per process start).
+    pub fn started(version: &Version) -> NewEvent {
+        NewEvent::new(
+            EventKind::HosterStarted,
+            Severity::Info,
+            format!("hoster {version} started"),
+        )
+        .subject(Self::SUBJECT)
+        .meta(version.to_string())
+    }
+
+    /// `current` switched from `from` to `to`, done `by` the operator who asked for it from the
+    /// System page, if any; the restart that follows runs `to`.
+    pub fn updated(from: &Version, to: &Version, by: Option<&Operator>) -> NewEvent {
+        let by = by.map(|by| format!(" · by {by}")).unwrap_or_default();
+        NewEvent::new(
+            EventKind::HosterUpdated,
+            Severity::Success,
+            format!("Updated hoster to {to}"),
+        )
+        .subject(Self::SUBJECT)
+        .meta(format!("{from} → {to}{by}"))
+    }
+
+    /// `hoster rollback` returns from `from` to the previous version `to`.
+    pub fn rolled_back(from: &Version, to: &Version) -> NewEvent {
+        NewEvent::new(
+            EventKind::HosterRolledBack,
+            Severity::Warning,
+            format!("Rolled hoster back to {to}"),
+        )
+        .subject(Self::SUBJECT)
+        .meta(format!("{from} → {to}"))
+    }
+}
+
 /// Addresses as a comma-separated list, or "none".
 struct Addresses<'a>(&'a [IpAddr]);
 
@@ -491,6 +708,58 @@ mod tests {
         let events = webhook_deploy(now);
         let succeeded = events.succeeded(now + Duration::from_secs(90));
         assert_eq!(succeeded.message, "Deployed notes in 1m 30s");
+    }
+
+    #[test]
+    fn hoster_events_name_their_versions_and_link_to_the_system_page() {
+        let started = HosterEvents::started(&"0.3.0".parse().unwrap());
+        assert_eq!(started.kind, EventKind::HosterStarted);
+        assert_eq!(started.message, "hoster v0.3.0 started");
+        assert_eq!(started.meta.as_deref(), Some("v0.3.0"));
+        assert_eq!(started.stack, None);
+        assert_eq!(started.subject.as_deref(), Some("/system"));
+        let (from, to) = ("0.2.0".parse().unwrap(), "0.3.0".parse().unwrap());
+        let updated = HosterEvents::updated(&from, &to, None);
+        assert_eq!(updated.message, "Updated hoster to v0.3.0");
+        assert_eq!(updated.meta.as_deref(), Some("v0.2.0 → v0.3.0"));
+        let by = Operator::from("octocat");
+        let updated = HosterEvents::updated(&from, &to, Some(&by));
+        assert_eq!(
+            updated.meta.as_deref(),
+            Some("v0.2.0 → v0.3.0 · by @octocat")
+        );
+        let rolled_back = HosterEvents::rolled_back(&to, &from);
+        assert_eq!(rolled_back.severity, Severity::Warning);
+        assert_eq!(rolled_back.message, "Rolled hoster back to v0.2.0");
+        assert_eq!(rolled_back.meta.as_deref(), Some("v0.3.0 → v0.2.0"));
+    }
+
+    #[test]
+    fn an_operator_reads_as_a_github_handle() {
+        assert_eq!(Operator::from("octocat").to_string(), "@octocat");
+    }
+
+    #[test]
+    fn registry_events_name_the_host_and_belong_to_no_stack() {
+        let by = Operator::from("octocat");
+        let set = RegistryEvents::new("ghcr.io", Some(&by)).set(false);
+        assert_eq!(set.kind, EventKind::SecretSet);
+        assert_eq!(set.message, "Set the registry credential for ghcr.io");
+        assert_eq!(set.stack, None);
+        assert_eq!(set.subject.as_deref(), Some("/settings/registries"));
+        assert_eq!(set.meta.as_deref(), Some("scope registry · by @octocat"));
+        let replaced = RegistryEvents::new("ghcr.io", None).set(true);
+        assert_eq!(
+            replaced.message,
+            "Replaced the registry credential for ghcr.io"
+        );
+        assert_eq!(replaced.meta.as_deref(), Some("scope registry"));
+        let deleted = RegistryEvents::new("ghcr.io", Some(&by)).deleted();
+        assert_eq!(deleted.kind, EventKind::SecretDeleted);
+        assert_eq!(
+            deleted.message,
+            "Deleted the registry credential for ghcr.io"
+        );
     }
 
     #[tokio::test]

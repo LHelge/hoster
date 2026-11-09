@@ -29,7 +29,7 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use thiserror::Error;
 
 use crate::config::Credentials;
-use crate::store::{SealedSecret, SecretEntry, Store, StoreError, Timestamp};
+use crate::store::{Event, NewEvent, SealedSecret, SecretEntry, Store, StoreError, Timestamp};
 
 /// The systemd credential that supplies the key instead of the key file (ADR-0029).
 pub const KEY_CREDENTIAL: &str = "secret_key";
@@ -350,8 +350,34 @@ impl SecretStore {
         }
     }
 
-    /// Sets (or replaces) the secret `name`. Returns its new version.
+    /// Sets (or replaces) the secret `name` without recording it. Returns its new version.
+    /// Only tests write unrecorded: every production write goes through
+    /// [`set_recorded`](Self::set_recorded) (ADR-0055).
+    #[cfg(test)]
     pub async fn set(&self, name: &SecretName, value: &SecretValue) -> Result<SecretVersion> {
+        let sealed = self.seal(name, value)?;
+        self.store.put_secret(&sealed).await?;
+        tracing::info!(secret = %name, "secret set");
+        Ok(SecretVersion::from(&sealed))
+    }
+
+    /// Sets (or replaces) the secret `name`, recording `event` in the event log in the same
+    /// transaction (ADR-0055). The event must name the secret, never its value. Returns the new
+    /// version and the stored event.
+    pub async fn set_recorded(
+        &self,
+        name: &SecretName,
+        value: &SecretValue,
+        event: &NewEvent,
+    ) -> Result<(SecretVersion, Event)> {
+        let sealed = self.seal(name, value)?;
+        let recorded = self.store.put_secret_recorded(&sealed, event).await?;
+        tracing::info!(secret = %name, "secret set");
+        Ok((SecretVersion::from(&sealed), recorded))
+    }
+
+    /// `value` sealed as the secret `name`, with a fresh nonce, stamped now.
+    fn seal(&self, name: &SecretName, value: &SecretValue) -> Result<SealedSecret> {
         let mut nonce = [0; NONCE_LEN];
         getrandom::fill(&mut nonce).expect("the OS random number generator works");
         let ciphertext = self
@@ -365,25 +391,41 @@ impl SecretStore {
             )
             .map_err(|_| SecretError::Encrypt(name.to_string()))?;
         let now = Timestamp::now();
-        let sealed = SealedSecret {
+        Ok(SealedSecret {
             name: name.to_string(),
             nonce: nonce.to_vec(),
             ciphertext,
             created_at: now,
             updated_at: now,
-        };
-        self.store.put_secret(&sealed).await?;
-        tracing::info!(secret = %name, "secret set");
-        Ok(SecretVersion::from(&sealed))
+        })
     }
 
-    /// Removes the secret `name`. Returns whether it existed.
+    /// Removes the secret `name` without recording it. Returns whether it existed. Only tests
+    /// write unrecorded (see [`set`](Self::set)).
+    #[cfg(test)]
     pub async fn remove(&self, name: &SecretName) -> Result<bool> {
         let removed = self.store.remove_secret(name.as_ref()).await?;
         if removed {
             tracing::info!(secret = %name, "secret removed");
         }
         Ok(removed)
+    }
+
+    /// Removes the secret `name`, recording `event` in the event log in the same transaction
+    /// (ADR-0055), if and only if the secret existed. `None` when it did not.
+    pub async fn remove_recorded(
+        &self,
+        name: &SecretName,
+        event: &NewEvent,
+    ) -> Result<Option<Event>> {
+        let recorded = self
+            .store
+            .remove_secret_recorded(name.as_ref(), event)
+            .await?;
+        if recorded.is_some() {
+            tracing::info!(secret = %name, "secret removed");
+        }
+        Ok(recorded)
     }
 
     /// Every secret's name and last change, by name. Values are never listed.

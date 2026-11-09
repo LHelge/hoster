@@ -50,7 +50,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::installation::{BuildInfo, Installation, InstallationError, Version};
-use crate::store::{SchemaVersion, Store, StoreError};
+use crate::orchestrator::{HosterEvents, Operator};
+use crate::store::{NewEvent, SchemaVersion, Store, StoreError};
 
 #[allow(
     unused_imports,
@@ -415,6 +416,16 @@ impl Updater {
     /// Installs and switches to `version`, or to the latest stable release when `None`. See the
     /// module documentation for the sequence; the caller restarts hoster afterwards.
     pub async fn update(&self, version: Option<&Version>) -> Result<UpdateOutcome> {
+        self.update_by(version, None).await
+    }
+
+    /// [`update`](Self::update), recorded in the event log as done by `by` (ADR-0055): the
+    /// System page's update names the signed-in operator; `hoster update` names nobody.
+    pub async fn update_by(
+        &self,
+        version: Option<&Version>,
+        by: Option<&Operator>,
+    ) -> Result<UpdateOutcome> {
         self.refuse_while_deploying().await?;
         let release = match version {
             Some(version) => self.source.release(version).await?,
@@ -460,6 +471,8 @@ impl Updater {
             Vec::new()
         });
         tracing::info!(from = %running, %to, "switched to the new version; restart to run it");
+        // Written by this binary before it hands over: the new one cannot tell it was updated.
+        self.record(HosterEvents::updated(&running, &to, by)).await;
         Ok(UpdateOutcome::Switched {
             from: running,
             to,
@@ -563,6 +576,29 @@ impl Updater {
         Ok(Some(path))
     }
 
+    /// Records `event` in the event log of the database under the state directory (ADR-0055),
+    /// if there is one. A failed write is logged at `warn` and otherwise ignored: the update or
+    /// rollback it describes goes ahead regardless. Open pages are not told; hoster restarts
+    /// next, and they load the feed again.
+    async fn record(&self, event: NewEvent) {
+        let recorded = async {
+            let store = Store::open_existing(&self.state_dir).await?;
+            let recorded = store.record_event(&event).await;
+            store.close().await;
+            recorded
+        }
+        .await;
+        match recorded {
+            // No database, nothing to record.
+            Ok(_) | Err(StoreError::Missing(_)) => {}
+            Err(err) => tracing::warn!(
+                error = format!("{:#}", anyhow::Error::from(err)),
+                kind = %event.kind,
+                "cannot record the event"
+            ),
+        }
+    }
+
     /// The schema the database is at; `None` when there is no database.
     async fn database_schema(&self) -> Result<Option<SchemaVersion>> {
         if !self.state_dir.join(Store::FILE_NAME).is_file() {
@@ -663,6 +699,10 @@ impl Updater {
             self.installation.switch(previous)?;
             return Ok(None);
         };
+        // Before migrating down: undoing to a schema without the event log drops the event
+        // with it, and a failed undo restores the snapshot, which does not hold it either.
+        self.record(HosterEvents::rolled_back(current, previous))
+            .await;
         let undone = match Store::undo_migrations(&self.state_dir, target).await {
             Ok(reached) if reached == target => Ok(()),
             Ok(reached) => Err(UpdateError::UndoIncomplete {
