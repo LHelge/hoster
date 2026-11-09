@@ -1,10 +1,10 @@
 # git-cliff configuration (https://git-cliff.org): release notes from Conventional Commits.
 #
 # The release workflow (.github/workflows/release.yml) renders the notes for `<previous tag>..<tag>`
-# and uses them as the GitHub release body; `scripts/release.sh prepare` puts the same preview in
-# the release PR. There is no CHANGELOG.md: the GitHub releases are the record (ADR-0052).
+# and uses them as the GitHub release body. There is no CHANGELOG.md: the GitHub releases are the
+# record (ADR-0052).
 #
-# Preview what the next release would say:  git cliff --unreleased
+# If git-cliff is installed, preview what the next release would say:  git cliff --unreleased
 
 [changelog]
 # The GitHub release title already carries the version, so the body is just the grouped commits.

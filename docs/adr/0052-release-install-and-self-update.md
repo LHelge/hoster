@@ -158,8 +158,15 @@ required. `scripts/release.sh` therefore cannot commit the version bump and push
 Releasing takes two steps:
 
 1. `release.sh prepare X.Y.Z` opens a `release/vX.Y.Z` PR containing the `chore(release)` bump,
-   with the git-cliff preview as its body.
+   with the git-cliff preview as its body (dropped on 2026-11-09, see below).
 2. After that PR is merged, `release.sh tag X.Y.Z` tags the merged commit on `main` and pushes
    only the tag.
 
 The tag is created after merging because GitHub's rebase merge rewrites commit SHAs.
+
+## Correction (2026-11-09)
+
+`release.sh prepare` no longer renders a git-cliff preview into the release PR's body, so cutting a
+release needs only `git`, `cargo` and `gh` locally. The PR body says how to finish the release.
+The release notes are unchanged: the release workflow still renders them with the pinned git-cliff
+and `cliff.toml` when the tag is pushed, and they are the GitHub release's body as before.

@@ -81,16 +81,17 @@ While `DATABASE_URL` is set the macros check against that database instead of `.
 ### Cutting a release
 
 `main` is protected, so a release goes through a PR and the tag is pushed after it is merged
-(ADR-0052). `scripts/release.sh` needs `gh` (logged in) and [git-cliff](https://git-cliff.org).
+(ADR-0052). `scripts/release.sh` needs `gh` (logged in). The release notes are rendered by the
+release workflow when the tag is pushed, so nothing else is needed locally.
 
 Each release also gets a post on the docs site's [Releases](https://docs.hoster.lhelge.se/blog/)
 page: `site/content/blog/YYYY-MM-DD_hoster-X-Y-Z.md` with `slug: hoster-X-Y-Z` and
-`tags: [release]`, written for users from the git-cliff preview (what changed, and what to know
-before updating). The docs site is only deployed by a release tag, so merge the post in its own
+`tags: [release]`, written for users from the commits since the last tag (what changed, and what
+to know before updating). The docs site is only deployed by a release tag, so merge the post in its own
 `docs:` PR before running `prepare`; the slug is what links the post to its GitHub release.
 
 ```sh
-git cliff --unreleased                 # preview the release notes for the commits since the last tag
+git log --oneline "$(git describe --tags --abbrev=0)"..main   # what the release contains
 # ... merge the release post (site/content/blog/) through a docs PR ...
 scripts/release.sh prepare 0.2.0       # on a clean, up-to-date main: opens the release/v0.2.0 PR
 # ... CI passes, rebase-merge the PR on GitHub ...
@@ -101,14 +102,14 @@ scripts/release.sh tag 0.2.0           # tags the merged chore(release) commit, 
 `prepare` refuses unless `main` is clean and equal to `origin/main` and the version is valid
 SemVer above the one in `Cargo.toml` (the first release, `prepare 0.1.0`, may keep the version
 already there as long as it was never tagged; its release commit is empty). It bumps `Cargo.toml`
-and `Cargo.lock`, commits `chore(release): v0.2.0`, pushes the branch and opens a PR whose body is
-the git-cliff preview. If it fails before pushing, it switches back to `main` and deletes the local
+and `Cargo.lock`, commits `chore(release): v0.2.0`, pushes the branch and opens a PR whose body says
+how to finish the release. If it fails before pushing, it switches back to `main` and deletes the local
 release branch; if the PR can't be opened after the push, it says how to finish or drop the branch.
 `tag` refuses unless local `main` equals `origin/main`, its tip is that commit and `Cargo.toml`
 says the version; it asks before pushing (`--yes` skips the prompt). The tag is created only after
 merging because GitHub's rebase merge gives the commit a new SHA. A version with a pre-release
 suffix (`0.2.0-rc.1`) becomes a GitHub pre-release. `scripts/test-release.sh` exercises both steps
-against a local bare remote with `gh` and git-cliff stubbed.
+against a local bare remote with `gh` stubbed.
 
 ## Releases
 
