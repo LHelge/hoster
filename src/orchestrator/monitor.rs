@@ -1,16 +1,18 @@
 //! Continuous health monitoring of live services (ADR-0038, "after a deploy").
 //!
 //! [`Orchestrator::run_health_monitor`] probes the current generation of every service with its
-//! resolved [`Check`] (declared `health` table or the defaults), every 10–30 s
-//! ([`MonitorSettings`]). Each status change — `Healthy`, `Unhealthy` or `CrashLooping`, the
-//! last one taken from the reconciler (ADR-0028) — is logged, kept as in-process statistics
-//! (ADR-0045, shown by [`Orchestrator::status`]) and sent on `ui_events` as
-//! [`UiEvent::Health`]. A move between healthy and unhealthy is also written to the event log
-//! (ADR-0055) with the probe detail; a flapping service writes one event per real transition,
-//! never one per probe. Nothing is restarted here.
+//! resolved [`Check`] (declared `health` table, `exec` included, or the defaults), every 10–30 s
+//! ([`MonitorSettings`]). An exec check runs in the generation's container and reports its exit
+//! code only; its output goes to deployment events alone (ADR-0056). Each status change —
+//! `Healthy`, `Unhealthy` or `CrashLooping`, the last one taken from the reconciler (ADR-0028) —
+//! is logged, kept as in-process statistics (ADR-0045, shown by [`Orchestrator::status`]) and
+//! sent on `ui_events` as [`UiEvent::Health`]. A move between healthy and unhealthy is also
+//! written to the event log (ADR-0055) with the probe detail; a flapping service writes one
+//! event per real transition, never one per probe. Nothing is restarted here.
 //!
 //! Stacks with an active deployment or a removal are left alone (their last status is kept):
-//! the deployment owns their containers and runs its own checks.
+//! the deployment owns their containers and runs its own checks. One that a deployment or
+//! removal takes while its probes run has that pass's results dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -21,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::event_log::ServiceEvents;
 use super::{Orchestrator, Result, UiEvent};
-use crate::health::{Check, HealthChange, HealthStats, HealthStatus, Liveness};
-use crate::runtime::{ContainerRuntime, ContainerState, ServiceGeneration};
+use crate::health::{Check, HealthChange, HealthStats, HealthStatus, Liveness, Probes};
+use crate::runtime::{ContainerId, ContainerRuntime, ContainerState, ServiceGeneration};
 use crate::stack::{Name, Stack};
 
 /// What the monitor remembers of one live generation.
@@ -40,17 +42,20 @@ pub(super) type Watchlist = BTreeMap<ServiceGeneration, Watched>;
 struct Job {
     key: ServiceGeneration,
     check: Result<Check, String>,
-    /// The state of the generation's container, if it has one.
-    container: Option<ContainerState>,
+    /// The generation's container and its state, if it has one; an exec check runs in it.
+    container: Option<(ContainerId, ContainerState)>,
 }
 
 impl Job {
-    async fn run(&self, prober: &dyn crate::health::Prober) -> std::result::Result<String, String> {
+    async fn run<R: ContainerRuntime>(
+        &self,
+        probes: &Probes<'_, R>,
+    ) -> std::result::Result<String, String> {
         let check = self.check.as_ref().map_err(Clone::clone)?;
-        match self.container {
+        match &self.container {
             None => Err("the current generation has no container".to_owned()),
-            Some(state) if !state.is_running() => Err(format!("the container is {state}")),
-            Some(_) => check.live(prober).await,
+            Some((_, state)) if !state.is_running() => Err(format!("the container is {state}")),
+            Some((id, _)) => check.live(probes, id).await,
         }
     }
 }
@@ -128,9 +133,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     self.restart_stats(&stack.name, &pointer.service, pointer.generation);
                 let due = {
                     let mut watchlist = self.watchlist();
-                    let healthy_after = check.as_ref().map_or(1, Check::healthy_after);
                     let watched = watchlist.entry(key.clone()).or_insert_with(|| Watched {
-                        liveness: Liveness::new(healthy_after),
+                        liveness: check
+                            .as_ref()
+                            .map_or_else(|_| Liveness::new(1), Liveness::from),
                         next: now,
                     });
                     if restarts.crash_looping {
@@ -155,7 +161,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     let container = containers
                         .iter()
                         .find(|c| ServiceGeneration::try_from(*c).as_ref() == Ok(&key))
-                        .map(|c| c.state);
+                        .map(|c| (c.id.clone(), c.state));
                     jobs.push(Job {
                         key,
                         check: check.map_err(|err| err.to_string()),
@@ -165,11 +171,22 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
         }
 
-        let prober = &*self.prober;
-        let results = join_all(jobs.iter().map(|job| job.run(prober))).await;
+        let probes = Probes::new(&*self.runtime, &*self.prober, &self.execs);
+        let results = join_all(jobs.iter().map(|job| job.run(&probes))).await;
+        // A deployment or removal that started while the probes ran owns the containers now:
+        // its stack's results say nothing about the generation it is replacing.
+        let taken: BTreeSet<&str> = jobs
+            .iter()
+            .map(|job| job.key.stack.as_ref())
+            .filter(|stack| self.is_busy(stack) || self.is_removing(stack))
+            .collect();
         {
             let mut watchlist = self.watchlist();
             for (job, result) in jobs.iter().zip(results) {
+                if taken.contains(job.key.stack.as_ref()) {
+                    held.insert(job.key.stack.to_string());
+                    continue;
+                }
                 if let Some(watched) = watchlist.get_mut(&job.key)
                     && let Some(change) = watched.liveness.observe(now, result)
                 {

@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::config::PortRange;
 use crate::health::Check;
-use crate::runtime::{ContainerInfo, ContainerState, FakeRuntime, Operation};
+use crate::runtime::{ContainerInfo, ContainerState, ExecOutcome, FakeRuntime, Operation};
 use crate::secrets::{SecretKey, SecretName};
 use crate::stack::ImageRef;
 
@@ -1538,6 +1538,154 @@ port = 9090
     assert!(volume_kept, "the volume survives stack removal");
 }
 
+/// Exec health checks on a real rootless podman (ADR-0056): `db` (no routes) becomes ready a
+/// moment after it starts, `app` (routed) also needs its port; the monitor runs the same checks
+/// in the live containers, and a check podman cannot run fails a deploy at once. Run with
+/// `TEST_HOSTER_PODMAN=1 cargo test`.
+#[tokio::test]
+async fn exec_checks_on_real_podman() {
+    use crate::registry::Anonymous;
+    use crate::runtime::{PodmanRuntime, PodmanSocket};
+
+    if !std::env::var("TEST_HOSTER_PODMAN").is_ok_and(|v| v == "1") {
+        eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to deploy on rootless podman");
+        return;
+    }
+    let stack = |db_check: &str| {
+        format!(
+            r#"
+version = 1
+name = "hosterexecrxt"
+
+[services.db]
+image = "docker.io/library/busybox:1.37"
+command = ["sh", "-c", "sleep 2 && touch /tmp/ready && exec sleep 3600"]
+stop_timeout = "1s"
+
+[services.db.health]
+exec = {db_check}
+interval = "500ms"
+start_period = "20s"
+
+[services.app]
+image = "docker.io/library/busybox:1.37"
+command = ["sh", "-c", "mkdir -p /www && exec httpd -f -p 8080 -h /www"]
+stop_timeout = "1s"
+
+[services.app.health]
+exec = ["true"]
+
+[[services.app.routes]]
+host = "app.hoster.test"
+port = 8080
+"#
+        )
+    };
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(&dir.path().join("state")).await.unwrap();
+    let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(std::path::PathBuf::from);
+    let runtime = Arc::new(
+        PodmanRuntime::connect(&PodmanSocket::from_env(socket.as_deref()))
+            .await
+            .expect("connect to rootless podman"),
+    );
+    let orchestrator = Orchestrator::new(
+        store.clone(),
+        Arc::clone(&runtime),
+        Arc::new(RegistryClient::new(Arc::new(Anonymous)).unwrap()),
+        PortAllocator::new(store.clone(), PortRange::try_from(28120..=28135).unwrap()),
+        SecretStore::new(store.clone(), &SecretKey::generate()),
+        Settings::default(),
+        Arc::default(),
+    );
+
+    let started = tokio::time::Instant::now();
+    let applied = orchestrator
+        .apply(&stack(r#"["sh", "-c", "test -f /tmp/ready"]"#))
+        .await
+        .unwrap();
+    let first = orchestrator
+        .wait(applied.deployment.unwrap().deployment)
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    let first_notes: Vec<String> = store
+        .events(first.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| e.message)
+        .collect();
+    let live = orchestrator
+        .monitor_at(tokio::time::Instant::now())
+        .await
+        .unwrap();
+
+    let started = tokio::time::Instant::now();
+    let broken = orchestrator
+        .apply(&stack(r#"["pg_isready", "-U", "postgres"]"#))
+        .await
+        .unwrap();
+    let second = orchestrator
+        .wait(broken.deployment.unwrap().deployment)
+        .await
+        .unwrap();
+    let failed_after = started.elapsed();
+    let removed = orchestrator
+        .remove(RemoveStack::keeping_volumes("hosterexecrxt"))
+        .await;
+
+    assert_eq!(first.state, S::Live, "{first:?} {first_notes:#?}");
+    assert!(
+        took >= Duration::from_secs(2),
+        "db became ready after 2 s: {took:?}"
+    );
+    let has = |text: &str| first_notes.iter().any(|n| n.contains(text));
+    assert!(
+        has(r#"checking db with exec: sh -c "test -f /tmp/ready", declared in health.exec"#),
+        "{first_notes:#?}"
+    );
+    assert!(
+        has("health probe exec: sh -c \"test -f /tmp/ready\": exit 1"),
+        "{first_notes:#?}"
+    );
+    assert!(
+        has("health check exec: true and TCP connect to container port 8080"),
+        "{first_notes:#?}"
+    );
+    let mut healthy: Vec<_> = live
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::Health {
+                service,
+                to,
+                detail,
+                ..
+            } => Some((service.as_str(), *to, detail.as_str())),
+            _ => None,
+        })
+        .collect();
+    healthy.sort_by_key(|h| h.0);
+    assert_eq!(
+        healthy,
+        [
+            ("app", HealthStatus::Healthy, "exit 0; TCP: connected"),
+            ("db", HealthStatus::Healthy, "exit 0"),
+        ]
+    );
+    assert_eq!(second.state, S::Failed, "{second:?}");
+    let error = second.error.as_deref().unwrap();
+    assert!(
+        error.contains("`health.exec` cannot run: `pg_isready`: executable file not found"),
+        "{error}"
+    );
+    assert!(
+        failed_after < Duration::from_secs(20),
+        "at once: {failed_after:?}"
+    );
+    assert_eq!(removed.unwrap().containers, 2);
+}
+
 #[tokio::test]
 async fn apply_ensures_certificates_before_deploying_and_remove_forgets_them() {
     use crate::acme::{AcmeCommand, AcmeEvent};
@@ -1885,4 +2033,128 @@ async fn refused_webhook_attempts_show_in_the_stack_status() {
     let status = h.orchestrator.status().await.unwrap();
     assert_eq!(status[0].rejections, [rejection]);
     assert!(h.store.rejections("ghost", 10).await.unwrap().is_empty());
+}
+
+/// A stack whose services declare exec checks: `db` without routes, `app` routed (so its exec
+/// check also connects to container port 8080).
+pub(super) const SHOP: &str = r#"
+version = 1
+name = "shop"
+
+[services.db]
+image = "docker.io/library/postgres:17"
+secrets = { POSTGRES_PASSWORD = "shop/db-password" }
+
+[services.db.health]
+exec = ["pg_isready", "-U", "postgres"]
+interval = "10ms"
+timeout = "20ms"
+
+[services.app]
+image = "docker.io/library/shop:1"
+
+[[services.app.routes]]
+host = "shop.example.com"
+port = 8080
+
+[services.app.health]
+exec = ["/bin/check"]
+interval = "10ms"
+"#;
+
+#[tokio::test]
+async fn deploys_run_exec_checks_and_name_them() {
+    let h = harness().await;
+    h.set_secret("shop/db-password", "hunter22").await;
+    h.runtime.script_exec(
+        "-db-",
+        [
+            Ok(ExecOutcome::finished(
+                2,
+                "no response; password hunter22 rejected\n".into(),
+            )),
+            Ok(ExecOutcome::finished(0, "accepting connections\n".into())),
+        ],
+    );
+    let applied = h.apply(SHOP).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, DeploymentState::Live, "{deployment:?}");
+
+    // Both execs ran in their containers; app's TCP part went through the prober.
+    let execs = h.runtime.execs();
+    assert_eq!(
+        execs
+            .iter()
+            .filter(|(c, _)| c == "hoster-shop-db-g1")
+            .count(),
+        2
+    );
+    assert!(execs.contains(&(
+        "hoster-shop-app-g1".to_owned(),
+        vec!["/bin/check".to_owned()]
+    )));
+    assert!(
+        h.prober
+            .take_probes()
+            .iter()
+            .any(|p| p.starts_with("TCP connect to container port 8080 ")),
+    );
+
+    let notes: Vec<_> = h
+        .notes(deployment.id)
+        .await
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    let has = |text: &str| notes.iter().any(|n| n.contains(text));
+    assert!(
+        has("checking db with exec: pg_isready -U postgres, declared in health.exec"),
+        "{notes:#?}"
+    );
+    assert!(
+        has("checking app with exec: /bin/check and TCP connect to container port 8080"),
+        "{notes:#?}"
+    );
+    assert!(
+        has("health probe exec: pg_isready -U postgres: exit 2, output \
+             \"no response; password <redacted> rejected\""),
+        "{notes:#?}"
+    );
+    assert!(!notes.iter().any(|n| n.contains("hunter22")), "{notes:#?}");
+}
+
+#[tokio::test]
+async fn an_exec_check_that_cannot_run_fails_the_deploy_at_once() {
+    let h = harness().await;
+    h.set_secret("shop/db-password", "hunter22").await;
+    h.runtime.script_exec(
+        "-db-",
+        [Ok(ExecOutcome::finished(
+            127,
+            "Error: runc: exec failed: unable to start container process: exec: \
+             \"pg_isready\": executable file not found in $PATH: OCI runtime attempted to \
+             invoke a command that was not found\n"
+                .into(),
+        ))],
+    );
+    let applied = h.apply(SHOP).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, DeploymentState::Failed);
+    assert!(
+        deployment
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("`health.exec` cannot run: `pg_isready`: executable file not found in $PATH"),
+        "{deployment:?}"
+    );
+    assert_eq!(
+        h.runtime
+            .execs()
+            .iter()
+            .filter(|(c, _)| c == "hoster-shop-db-g1")
+            .count(),
+        1,
+        "not retried"
+    );
 }

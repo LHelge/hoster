@@ -41,7 +41,6 @@ impl AsRef<[String]> for Argv<'_> {
 
 /// How one exec in a container ended.
 #[derive(Debug, Clone)]
-#[allow(dead_code, reason = "consumed by the exec health check")]
 pub enum ExecOutcome {
     /// The command ran and exited with `code`; 0 is a pass.
     Exited { code: i64, output: ExecOutput },
@@ -63,7 +62,6 @@ pub enum ExecOutcome {
     },
 }
 
-#[allow(dead_code, reason = "consumed by the exec health check")]
 impl ExecOutcome {
     /// Podman's exit codes for "the command could not be invoked" (125) and "found but not
     /// executable" / "not found" (126, 127). A shell or script returns 126/127 too, for an inner
@@ -203,13 +201,11 @@ impl RunningExec {
     }
 
     /// Whether the exec is still running.
-    #[allow(dead_code, reason = "consumed by the exec health check")]
     pub fn is_running(&self) -> bool {
         self.0.has_changed().is_ok()
     }
 
     /// Resolves once the exec has ended.
-    #[allow(dead_code, reason = "consumed by the exec health check")]
     pub async fn ended(&self) {
         let mut receiver = self.0.clone();
         // Nothing is ever sent: `changed` only returns once the guard is dropped.

@@ -73,7 +73,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::{Notify, RwLock, Semaphore, broadcast};
 
-use crate::health::{HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
+use crate::health::{ExecSlots, HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
 use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError, TrackedService};
 use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
@@ -518,6 +518,8 @@ pub struct Orchestrator<R> {
     watchlist: Mutex<monitor::Watchlist>,
     /// Carries out the health probes, of deployments and of the health monitor.
     prober: Arc<dyn Prober>,
+    /// Keeps exec probes of one container apart and counts its abandoned ones (ADR-0056).
+    execs: ExecSlots,
     /// Status changes for open UI pages (architecture §3.3 #5).
     ui_events: broadcast::Sender<UiEvent>,
     /// Records events and announces them on `ui_events` (ADR-0055).
@@ -710,6 +712,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             reconciler: Mutex::default(),
             watchlist: Mutex::default(),
             prober,
+            execs: ExecSlots::default(),
             ui_events,
             events,
         })

@@ -123,7 +123,12 @@ exec API without a shell, as the container's user and with its environment. Exit
 other exit (a shell's 126 or 127 included) is an ordinary failure. If podman cannot execute the
 program at all, a deploy aborts at once with podman's error. Use `exec = ["sh", "-c", "…"]` when
 the check needs a shell. On a routed service an `exec` check also requires a TCP connect to the
-first route's port. Its output tail, secrets redacted, is recorded in the deployment's events.
+first route's port. Its output tail (the last 256 characters, secret values redacted) is
+recorded in the deployment's events. A probe fails at `timeout` whether or not the command has
+ended; hoster then ends it if it can, and otherwise leaves it to finish. With three such checks
+still running in a container, a deploy waits for one of them to end (until `start_period` runs
+out) and the monitor reports the service unhealthy ("check stuck") without starting another.
+Exec probes of one container never overlap.
 
 Unset timings default to `interval = "1s"`, `timeout = "2s"` (`"5s"` for `exec`),
 `healthy_after = 1` and `start_period = "30s"`. A timings-only `health` table, without a probe,
@@ -131,8 +136,12 @@ is allowed only on a routed service, where it tunes the default HTTP probe.
 
 `path` is sent as written, so spaces, control and non-ASCII characters must be percent-encoded.
 HTTP probes do not follow redirects, so a 3xx answer is the result. A deploy aborts as soon as the
-container exits during the check. Probe results (each change, and the verdict) are recorded as
-deployment events.
+container exits during the check. Each deployment's events name the check a service gets and
+why (e.g. "checking db with exec: pg_isready -U app, declared in health.exec"), then its probe
+results (each change, and the verdict). After a deploy, the health monitor probes live services
+with the same check every 10–30 s; for `exec` it records the exit code only, never the output, and
+a program podman cannot execute makes the service unhealthy. The stack overview shows the check
+in effect next to its last result.
 
 ## 2.5 Deploy authorization (ADR-0047)
 

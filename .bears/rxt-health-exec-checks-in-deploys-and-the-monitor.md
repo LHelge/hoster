@@ -1,10 +1,10 @@
 ---
 id: rxt
 title: "Health: exec checks in deploys and the monitor"
-status: open
+status: done
 priority: P1
 created: "2026-11-09T17:22:55.298379490Z"
-updated: "2026-11-09T18:50:08.895046519Z"
+updated: "2026-11-09T21:08:24.881257784Z"
 tags:
   - health
   - orchestrator
@@ -12,6 +12,7 @@ depends_on:
   - "3rr"
   - p6e
 parent: qq9
+attempts: 1
 ---
 
 ## Summary

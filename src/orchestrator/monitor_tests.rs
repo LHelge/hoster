@@ -8,10 +8,10 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::tests::{FakeProber, Harness, harness};
+use super::tests::{FakeProber, Harness, SHOP, harness};
 use super::*;
 use crate::config::PortRange;
-use crate::runtime::{ContainerState, FakeRuntime, Operation, RuntimeError};
+use crate::runtime::{ContainerState, ExecOutcome, FakeRuntime, Operation, RuntimeError};
 use crate::store::{EventKind, EventQuery, Severity};
 
 use HealthStatus as H;
@@ -424,6 +424,42 @@ async fn a_held_stack_keeps_its_status_and_is_looked_at_again_a_refresh_later() 
     );
 }
 
+#[tokio::test]
+async fn results_of_a_stack_taken_while_its_probes_run_are_dropped() {
+    let (_h, orchestrator, prober) = monitored().await;
+    let mut ui = orchestrator.subscribe();
+    let start = Instant::now();
+    // api's probe hangs (as a slow exec would) and would report a failure.
+    prober.answer(8080, Err("HTTP 503, expected 2xx-3xx"));
+    prober.hold(8080);
+    let pass = tokio::spawn({
+        let orchestrator = Arc::clone(&orchestrator);
+        async move { orchestrator.monitor_at(start).await }
+    });
+    prober.probed(8080).await;
+
+    // A removal starts while the probes are in flight: it owns the containers now.
+    orchestrator
+        .lock()
+        .slots
+        .entry("notes".into())
+        .or_default()
+        .removing = true;
+    prober.release(8080);
+    let events = pass.await.unwrap().unwrap();
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(ui.try_recv().unwrap_err(), TryRecvError::Empty);
+    for service in ["api", "storage", "web"] {
+        let stats = health(&orchestrator, service).await;
+        assert_eq!(stats.status, H::Unknown, "{service}");
+        assert_eq!((stats.probes, &stats.last), (0, &None), "{service}");
+    }
+    // The held stack stays watched and is looked at again a refresh later at the earliest.
+    assert_eq!(orchestrator.watchlist().len(), 3);
+    let next = orchestrator.next_probe().unwrap();
+    assert!(next >= start + MonitorSettings::default().min_interval);
+}
+
 /// A pass that fails (podman unreachable) is retried a refresh later, not at once.
 #[tokio::test]
 async fn a_failing_pass_does_not_spin_the_loop() {
@@ -455,4 +491,116 @@ async fn a_failing_pass_does_not_spin_the_loop() {
     task.await.unwrap();
     let passes = lists() - before;
     assert!((1..=8).contains(&passes), "{passes} passes in 1 s");
+}
+
+#[tokio::test]
+async fn the_monitor_runs_exec_checks_in_the_live_container() {
+    let h = harness().await;
+    h.set_secret("shop/db-password", "hunter22").await;
+    let applied = h.apply(SHOP).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, DeploymentState::Live, "{deployment:?}");
+    let orchestrator = &h.orchestrator;
+    let deploy_execs = h.runtime.execs().len();
+    h.prober.take_probes();
+    let start = Instant::now();
+    let at = |secs: u64| start + Duration::from_secs(secs);
+
+    let first = orchestrator.monitor_at(at(0)).await.unwrap();
+    assert_eq!(
+        changes(&first),
+        [
+            ("app", H::Unknown, H::Healthy),
+            ("db", H::Unknown, H::Healthy)
+        ]
+    );
+    let execs = h.runtime.execs()[deploy_execs..].to_vec();
+    assert_eq!(execs.len(), 2, "{execs:?}");
+    assert!(execs.contains(&(
+        "hoster-shop-db-g1".to_owned(),
+        ["pg_isready", "-U", "postgres"].map(str::to_owned).to_vec()
+    )));
+    let probes = h.prober.take_probes();
+    assert_eq!(probes.len(), 1, "app's TCP part only: {probes:?}");
+    assert!(probes[0].starts_with("TCP connect to container port 8080 "));
+
+    let stats = health(orchestrator, "db").await;
+    assert_eq!(stats.last.as_deref(), Some("exit 0"));
+    assert_eq!(
+        stats.check.as_deref(),
+        Some("exec: pg_isready -U postgres, declared in health.exec")
+    );
+    assert_eq!(
+        stats.detail().as_deref(),
+        Some("exit 0 · exec: pg_isready -U postgres, declared in health.exec")
+    );
+    let app = health(orchestrator, "app").await;
+    assert_eq!(app.last.as_deref(), Some("exit 0; TCP: HTTP 200"));
+
+    // A failing exec: unhealthy with its exit code, never its output.
+    h.runtime.script_exec(
+        "-db-",
+        [Ok(ExecOutcome::finished(2, "password hunter22\n".into()))],
+    );
+    let failing = orchestrator.monitor_at(at(15)).await.unwrap();
+    assert_eq!(changes(&failing), [("db", H::Healthy, H::Unhealthy)]);
+    assert!(matches!(
+        &failing[..],
+        [UiEvent::Health { detail, .. }] if detail == "exit 2"
+    ));
+
+    // podman cannot run it any more: unhealthy with the reason.
+    h.runtime.script_exec(
+        "-db-",
+        [Ok(ExecOutcome::finished(
+            127,
+            "Error: runc: exec failed: unable to start container process: exec: \
+             \"pg_isready\": executable file not found in $PATH: OCI runtime attempted to \
+             invoke a command that was not found\n"
+                .into(),
+        ))],
+    );
+    assert!(orchestrator.monitor_at(at(30)).await.unwrap().is_empty());
+    assert_eq!(
+        health(orchestrator, "db").await.last.as_deref(),
+        Some("`health.exec` cannot run: `pg_isready`: executable file not found in $PATH")
+    );
+
+    // A timed-out exec fails; at three still running, the monitor starts no fourth.
+    let mut guards = Vec::new();
+    let mut hung = Vec::new();
+    for _ in 0..3 {
+        let (exec, guard) = crate::runtime::RunningExec::new();
+        guards.push(guard);
+        hung.push(Ok(ExecOutcome::TimedOut {
+            output: crate::runtime::ExecOutput::default(),
+            exec,
+        }));
+    }
+    hung.push(Ok(ExecOutcome::finished(0, "".into())));
+    h.runtime.script_exec("-db-", hung);
+    let db_execs = || {
+        h.runtime
+            .execs()
+            .iter()
+            .filter(|(c, _)| c == "hoster-shop-db-g1")
+            .count()
+    };
+    for n in 0..3 {
+        orchestrator.monitor_at(at(45 + 15 * n)).await.unwrap();
+        assert_eq!(
+            health(orchestrator, "db").await.last.as_deref(),
+            Some("no result within 20ms")
+        );
+    }
+    let before = db_execs();
+    orchestrator.monitor_at(at(90)).await.unwrap();
+    assert_eq!(db_execs(), before, "no exec at the cap");
+    assert_eq!(
+        health(orchestrator, "db").await.last.as_deref(),
+        Some("check stuck: 3 checks still running")
+    );
+    drop(guards);
+    orchestrator.monitor_at(at(105)).await.unwrap();
+    assert_eq!(health(orchestrator, "db").await.status, H::Healthy);
 }
