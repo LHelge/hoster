@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request replaces the run in progress. Runs on main are never cancelled:
+# each one writes the caches the next runs (and the release workflow) restore.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -32,8 +38,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Install cargo-nextest
+        run: scripts/install-nextest.sh
+
+      # The streaming test sends 1 GiB each way, which takes longer than every other test
+      # together. A pull request sends 256 MiB, checked against the same 128 MiB memory bound;
+      # main and the release build keep the full size (an empty value is the default).
       - name: Test
-        run: cargo test --all-targets --locked
+        env:
+          TEST_HOSTER_PROXY_STREAM_BYTES: ${{ github.event_name == 'pull_request' && '268435456' || '' }}
+        run: cargo nextest run --profile ci --all-targets --locked
 
   # The documentation site (site/, published by release.yml). aphid fails the build on a broken
   # [[wiki-link]], so a moved or renamed page breaks the PR rather than the site.
@@ -69,10 +83,13 @@ jobs:
 
       # ADR-0017 end to end: hoster's orchestrator and proxy in-process against real podman,
       # deploying under continuous load (src/e2e_tests.rs).
+      - name: Install cargo-nextest
+        run: scripts/install-nextest.sh
+
       - name: End-to-end deploy under load
         env:
           TEST_HOSTER_PODMAN: "1"
-        run: cargo test --locked e2e_tests -- --nocapture
+        run: cargo nextest run --profile ci --locked --no-capture e2e_tests
 
   systemd:
     name: systemd unit and sysctl drop-in
@@ -171,15 +188,40 @@ jobs:
       - name: Check
         run: cargo +"$MSRV" check --all-targets --locked
 
+  # The slowest job by far (fat LTO), so a pull request only builds when it touches what decides
+  # whether the build is static: the dependencies, the toolchain, the build script, the checks
+  # themselves or a workflow. Other pull requests pass the job without building, and the push
+  # to main builds every time, which also writes the cache the release workflow restores. The
+  # job is a required check, so it reports either way; the skipping is per step.
   static:
     name: static musl release build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A pull request is checked out as its merge commit; its first parent is the base.
+          fetch-depth: 2
+
+      - name: Does this run need the build?
+        id: needed
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          build=true
+          if [ "$EVENT" = pull_request ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            printf '%s\n' "$changed"
+            if ! grep -qE '^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|build\.rs|\.cargo/|\.github/workflows/|scripts/check-no-aws-lc\.sh|scripts/check-release-binary\.sh)' <<<"$changed"; then
+              build=false
+              echo "::notice::no build input changed; the static build runs when this is on main"
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
 
       # rust-toolchain.toml lists the musl target. musl-tools provides musl-gcc for the C parts of
       # dependencies (ring, bundled libsqlite3).
       - name: Install toolchain and musl-tools
+        if: steps.needed.outputs.build == 'true'
         run: |
           rustup toolchain install
           sudo apt-get update
@@ -191,15 +233,19 @@ jobs:
       # Shared with the release workflow's x86_64 build; a tag run can only restore caches
       # written on main, and this job writes them.
       - uses: Swatinem/rust-cache@v2
+        if: steps.needed.outputs.build == 'true'
         with:
           shared-key: release-x86_64-unknown-linux-musl
 
       # ADR-0037: ring is the only crypto provider; aws-lc-rs must stay out of the tree.
       - name: No aws-lc-rs in the dependency tree
+        if: steps.needed.outputs.build == 'true'
         run: scripts/check-no-aws-lc.sh
 
       - name: Build
+        if: steps.needed.outputs.build == 'true'
         run: cargo build --release --locked --target x86_64-unknown-linux-musl
 
       - name: Check binary is static
+        if: steps.needed.outputs.build == 'true'
         run: scripts/check-release-binary.sh target/x86_64-unknown-linux-musl/release/hoster

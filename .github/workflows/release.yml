@@ -99,14 +99,13 @@ jobs:
           shared-key: release-${{ matrix.target }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Format
-        run: cargo fmt --all --check
+      - name: Install cargo-nextest
+        run: scripts/install-nextest.sh
 
-      - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
+      # Formatting and lints are CI's: the tagged commit is on main, where they passed. The
+      # tests run again because this is the only place they run on aarch64.
       - name: Test
-        run: cargo test --all-targets --locked
+        run: cargo nextest run --profile ci --all-targets --locked
 
       # ADR-0037: ring is the only crypto provider; aws-lc-rs must stay out of the tree.
       - name: No aws-lc-rs in the dependency tree

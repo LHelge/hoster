@@ -28,14 +28,20 @@ The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on first us
 
 ```sh
 cargo build                                   # builds the `hoster` binary
-cargo test                                    # unit tests (offline; no podman needed)
+cargo nextest run                             # tests (offline; no podman needed)
 cargo fmt --check                             # formatting
 cargo clippy --all-targets -- -D warnings     # lints
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same format, lint and test steps on every push and pull
-request, checks that `.sqlx/` is up to date, and checks that the static musl release build links
-statically.
+Tests run with [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`, or your
+package manager; settings in `.config/nextest.toml`). `cargo test` runs the same tests if you
+don't have it.
+
+CI (`.github/workflows/ci.yml`) runs the same format, lint and test steps on every pull request
+and every push to `main`, checks that `.sqlx/` is up to date, and checks that the static musl
+release build links statically. Two things are lighter on a pull request than on `main`: the
+static build only runs when the pull request touches the dependencies, the toolchain, `build.rs`
+or a workflow, and the proxy's streaming test sends 256 MiB instead of 1 GiB.
 
 ### Tests against real podman
 
@@ -49,8 +55,8 @@ stream, or on v3 ever answering. CI runs it in the `podman` job; locally:
 
 ```sh
 systemctl --user start podman.socket
-TEST_HOSTER_PODMAN=1 cargo test e2e_tests -- --nocapture   # just the end-to-end test
-TEST_HOSTER_PODMAN=1 cargo test                             # every podman test (pulls from ghcr)
+TEST_HOSTER_PODMAN=1 cargo nextest run --no-capture e2e_tests   # just the end-to-end test
+TEST_HOSTER_PODMAN=1 cargo nextest run                           # every podman test (pulls from ghcr)
 ```
 
 ### State store queries (sqlx)
