@@ -29,6 +29,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::event_log::DeployEvents;
 use super::{Orchestrator, Result};
 use crate::runtime::{
     ContainerInfo, ContainerRuntime, ContainerState, NetworkSpec, ObjectKind, RuntimeError,
@@ -337,7 +338,16 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             to = %to,
             "resolving interrupted deployment"
         );
-        self.persist(&deployment.stack, deployment.id, to, Some(message))
+        // A committed deployment's success was written with its commit. An uncommitted one
+        // that was accepted gets its failure here, in the transaction that ends it, so a crash
+        // during recovery cannot write it twice; one still `Received` or `Queued` never started.
+        let started = !matches!(
+            deployment.state,
+            DeploymentState::Received | DeploymentState::Queued
+        );
+        let event = (to == DeploymentState::Failed && started)
+            .then(|| DeployEvents::from(deployment).failed(Some(message)));
+        self.persist(&deployment.stack, deployment.id, to, Some(message), event)
             .await?;
         Ok(to)
     }

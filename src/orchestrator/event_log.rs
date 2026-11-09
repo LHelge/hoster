@@ -1,13 +1,17 @@
 //! The [`EventLog`] handle (ADR-0055): producers record an event through it, and it tells the
 //! open UI pages once the event is stored. The log never depends on a page keeping up.
 
+use std::fmt;
 use std::time::Duration;
 
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use super::UiEvent;
-use crate::store::{Event, EventPage, EventQuery, NewEvent, Store, StoreError, Timestamp};
+use super::{CANCELLED, STACK_REMOVED, UiEvent};
+use crate::store::{
+    Deployment, DeploymentId, DeploymentSource, DeploymentState, Event, EventKind, EventPage,
+    EventQuery, NewEvent, Severity, ShortDigest, ShortSha, Store, StoreError, Timestamp,
+};
 
 /// Records events in the store and announces them on `ui_events`. Cheap to clone; every
 /// producer (orchestrator, reconciler, ACME task, web handlers, update flow) holds one.
@@ -74,6 +78,175 @@ impl EventLog {
     }
 }
 
+/// The deploy events of one deployment (ADR-0055 §2): a line when it is accepted and one for
+/// its outcome, never one per transition (those stay in `deployment_events`). Each links to
+/// the deployment's page and carries its source and, for a webhook deploy, the commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeployEvents {
+    id: DeploymentId,
+    stack: String,
+    source: DeploymentSource,
+    /// The commit sha, when the trigger names one (the webhook's OIDC claims).
+    sha: Option<String>,
+    created_at: Timestamp,
+    /// When the deployment was accepted (its move to `Validating`): what its duration is
+    /// measured from, so time spent `Queued` behind another deployment does not count.
+    accepted_at: Option<Timestamp>,
+    /// The earlier deployment a rollback redeploys (ADR-0041).
+    rollback_of: Option<DeploymentId>,
+}
+
+impl From<&Deployment> for DeployEvents {
+    fn from(deployment: &Deployment) -> Self {
+        Self {
+            id: deployment.id,
+            stack: deployment.stack.clone(),
+            source: deployment.source,
+            sha: deployment.provenance.as_ref().map(|p| p.sha.clone()),
+            created_at: deployment.created_at,
+            accepted_at: None,
+            rollback_of: None,
+        }
+    }
+}
+
+impl DeployEvents {
+    /// The events of a deployment that rolls back to `earlier`, if it does.
+    pub(super) fn rolling_back(mut self, earlier: Option<DeploymentId>) -> Self {
+        self.rollback_of = earlier;
+        self
+    }
+
+    /// The event a deployment's move to `to` writes, if it writes one: started on accepting
+    /// it (`Validating`, with the `services` it deploys and their digests), failed on
+    /// `Failed` or `Rejected` (with `reason`), and a warning on `LiveWithWarnings` (with the
+    /// cleanup problem). Success is written at the commit point ([`Self::succeeded`]), not by
+    /// a transition. The move to `Validating` also marks the moment the deployment was
+    /// accepted, which [`Self::succeeded`] measures from.
+    pub(super) fn on<'a>(
+        &mut self,
+        to: DeploymentState,
+        reason: Option<&str>,
+        services: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Option<NewEvent> {
+        match to {
+            DeploymentState::Validating => {
+                self.accepted_at = Some(Timestamp::now());
+                Some(self.started(services))
+            }
+            DeploymentState::Failed | DeploymentState::Rejected => Some(self.failed(reason)),
+            DeploymentState::LiveWithWarnings => Some(self.live_with_warnings(reason)),
+            _ => None,
+        }
+    }
+
+    /// The deployment was accepted, to deploy `services` (name, digest).
+    fn started<'a>(&self, services: impl IntoIterator<Item = (&'a str, &'a str)>) -> NewEvent {
+        let message = match self.rollback_of {
+            Some(earlier) => format!("Rolling back {} to deployment #{earlier}", self.stack),
+            None => format!("Deploying {}", self.stack),
+        };
+        let services: Vec<String> = services
+            .into_iter()
+            .map(|(service, digest)| format!("{service} {}", ShortDigest(digest)))
+            .collect();
+        let meta = self.meta(Some(services.join(", ")).filter(|s| !s.is_empty()));
+        self.event(EventKind::DeployStarted, Severity::Info, message)
+            .meta(meta)
+    }
+
+    /// The deployment committed at `now`: a rollback reads as one, with its target. Its
+    /// duration runs from when it was accepted, or from its creation if that is not known.
+    pub(super) fn succeeded(&self, now: Timestamp) -> NewEvent {
+        let since = self.accepted_at.unwrap_or(self.created_at);
+        let millis = now.as_millis().saturating_sub(since.as_millis());
+        let took = Took(Duration::from_millis(u64::try_from(millis).unwrap_or(0)));
+        let (kind, message) = match self.rollback_of {
+            Some(earlier) => (
+                EventKind::DeployRolledBack,
+                format!(
+                    "Rolled back {} to deployment #{earlier} in {took}",
+                    self.stack
+                ),
+            ),
+            None => (
+                EventKind::DeploySucceeded,
+                format!("Deployed {} in {took}", self.stack),
+            ),
+        };
+        self.event(kind, Severity::Success, message)
+            .meta(self.meta(None))
+    }
+
+    /// The deployment is live, but cleaning up the generation it replaced failed because of
+    /// `reason`: old containers or ports may be left behind for the operator to deal with.
+    fn live_with_warnings(&self, reason: Option<&str>) -> NewEvent {
+        let what = self.what();
+        let message = match reason {
+            Some(reason) => format!("{what} live with warnings: {reason}"),
+            None => format!("{what} live with warnings"),
+        };
+        let kind = match self.rollback_of {
+            Some(_) => EventKind::DeployRolledBack,
+            None => EventKind::DeploySucceeded,
+        };
+        self.event(kind, Severity::Warning, message)
+            .meta(self.meta(None))
+    }
+
+    /// The deployment failed or was rejected because of `reason`. Cancelling it and removing
+    /// its stack are things an operator did, so they read as warnings, not errors.
+    pub(super) fn failed(&self, reason: Option<&str>) -> NewEvent {
+        let what = self.what();
+        let (severity, message) = match reason {
+            Some(CANCELLED) => (Severity::Warning, format!("{what} cancelled")),
+            Some(STACK_REMOVED) => (Severity::Warning, format!("{what} ended: stack removed")),
+            Some(reason) => (Severity::Error, format!("{what} failed: {reason}")),
+            None => (Severity::Error, format!("{what} failed")),
+        };
+        self.event(EventKind::DeployFailed, severity, message)
+            .meta(self.meta(None))
+    }
+
+    /// "Deployment of X", or "Rollback of X to deployment #N".
+    fn what(&self) -> String {
+        match self.rollback_of {
+            Some(earlier) => format!("Rollback of {} to deployment #{earlier}", self.stack),
+            None => format!("Deployment of {}", self.stack),
+        }
+    }
+
+    fn event(&self, kind: EventKind, severity: Severity, message: String) -> NewEvent {
+        NewEvent::new(kind, severity, message)
+            .stack(&self.stack)
+            .subject(format!("/stacks/{}/deployments/{}", self.stack, self.id))
+    }
+
+    /// The mono line: the source, the commit if known, then `extra`.
+    fn meta(&self, extra: Option<String>) -> String {
+        let sha = self.sha.as_deref().map(|sha| ShortSha(sha).to_string());
+        [Some(self.source.as_ref().to_owned()), sha, extra]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+/// How long a deployment took: whole seconds, or milliseconds under one.
+struct Took(Duration);
+
+impl fmt::Display for Took {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rounded = if self.0 < Duration::from_secs(1) {
+            Duration::from_millis(self.0.subsec_millis().into())
+        } else {
+            Duration::from_secs(self.0.as_secs())
+        };
+        humantime::format_duration(rounded).fmt(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
@@ -86,6 +259,41 @@ mod tests {
         let store = Store::open(dir.path()).await.unwrap();
         let (tx, rx) = broadcast::channel(16);
         (dir, EventLog::new(store, tx), rx)
+    }
+
+    fn webhook_deploy(created_at: Timestamp) -> DeployEvents {
+        DeployEvents {
+            id: DeploymentId::from(7),
+            stack: "notes".into(),
+            source: DeploymentSource::Webhook,
+            sha: Some("0f3c5e1a9d2b7c4e8f6a1b3d5c7e9f0a2b4c6d8e".into()),
+            created_at,
+            accepted_at: None,
+            rollback_of: None,
+        }
+    }
+
+    #[test]
+    fn the_meta_holds_the_source_and_the_short_sha() {
+        let event = webhook_deploy(Timestamp::now()).failed(None);
+        assert_eq!(event.meta.as_deref(), Some("webhook · 0f3c5e1"));
+    }
+
+    #[test]
+    fn success_is_timed_from_acceptance_not_from_queueing() {
+        let now = Timestamp::now();
+        let mut events = webhook_deploy(now - Duration::from_secs(600));
+        events.on(DeploymentState::Validating, None, []);
+        let succeeded = events.succeeded(events.accepted_at.unwrap() + Duration::from_secs(20));
+        assert_eq!(succeeded.message, "Deployed notes in 20s");
+    }
+
+    #[test]
+    fn success_without_acceptance_is_timed_from_creation() {
+        let now = Timestamp::now();
+        let events = webhook_deploy(now);
+        let succeeded = events.succeeded(now + Duration::from_secs(90));
+        assert_eq!(succeeded.message, "Deployed notes in 1m 30s");
     }
 
     #[tokio::test]

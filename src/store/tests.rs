@@ -1495,3 +1495,48 @@ async fn restore_replaces_the_database_with_a_snapshot() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+#[tokio::test]
+async fn deploy_events_are_written_with_their_transition_and_commit_or_not_at_all() {
+    let (_dir, store) = open().await;
+    store.add_revision("notes", "x").await.unwrap();
+    let d = deployment(&store, "notes").await;
+    let started = event(EventKind::DeployStarted, Severity::Info, Some("notes"));
+    let recorded = store
+        .transition_recorded(d.id, DeploymentState::Validating, None, &started)
+        .await
+        .unwrap();
+    assert_eq!(recorded.kind, EventKind::DeployStarted);
+    let succeeded = event(EventKind::DeploySucceeded, Severity::Success, Some("notes"));
+    let committed = store
+        .commit_recorded(d.id, &[pointer("api", 1, None)], &[], &succeeded)
+        .await
+        .unwrap();
+    assert_eq!(committed.kind, EventKind::DeploySucceeded);
+    assert!(
+        store
+            .deployment(d.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .committed_at
+            .is_some()
+    );
+
+    // A transition or commit that fails stores no event.
+    let ghost = DeploymentId::from(999);
+    assert!(
+        store
+            .transition_recorded(ghost, DeploymentState::Failed, Some("boom"), &started)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .commit_recorded(ghost, &[pointer("api", 2, None)], &[], &succeeded)
+            .await
+            .is_err()
+    );
+    let page = store.event_page(&EventQuery::default()).await.unwrap();
+    assert_eq!(page.events, [committed, recorded]);
+}

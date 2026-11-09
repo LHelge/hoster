@@ -13,7 +13,7 @@ use crate::config::PortRange;
 use crate::runtime::{
     ContainerId, ContainerSpec, ContainerState, FakeRuntime, Labels, Operation, ServiceGeneration,
 };
-use crate::store::{NewDeployment, ServicePointer};
+use crate::store::{EventKind, EventQuery, NewDeployment, ServicePointer, Severity};
 
 use DeploymentState as S;
 
@@ -137,7 +137,12 @@ async fn interrupted(h: &Harness, state: DeploymentState) -> (Deployment, u16) {
                     ports: [(8080, port)].into(),
                     ..api
                 };
-                h.store.commit(record.id, &[pointer], &[]).await.unwrap();
+                let succeeded = event_log::DeployEvents::from(&record)
+                    .succeeded(crate::store::Timestamp::now());
+                h.store
+                    .commit_recorded(record.id, &[pointer], &[], &succeeded)
+                    .await
+                    .unwrap();
             }
             _ => {}
         }
@@ -183,6 +188,51 @@ async fn interrupted_before_starting_fails_and_releases_its_reservations() {
             h.generations().await,
             [("api".into(), 2), ("storage".into(), 1), ("web".into(), 2)]
         );
+    }
+}
+
+/// The deploy events (ADR-0055) of deployment `id`, oldest first.
+async fn deploy_events(h: &Harness, id: DeploymentId) -> Vec<(EventKind, Severity)> {
+    let subject = format!("/stacks/notes/deployments/{id}");
+    let mut events: Vec<_> = h
+        .store
+        .event_page(&EventQuery {
+            stack: Some("notes".into()),
+            limit: EventQuery::MAX,
+            ..EventQuery::default()
+        })
+        .await
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.subject.as_deref() == Some(subject.as_str()))
+        .map(|e| (e.kind, e.severity))
+        .collect();
+    events.reverse();
+    events
+}
+
+#[tokio::test]
+async fn recovery_writes_an_interrupted_deployments_outcome_exactly_once() {
+    // Before the commit the recovery fails the deployment and writes that; after it, the
+    // success the commit wrote stands and recovery writes nothing.
+    for (state, outcome) in [
+        (S::Validating, (EventKind::DeployFailed, Severity::Error)),
+        (S::Starting, (EventKind::DeployFailed, Severity::Error)),
+        (S::Draining, (EventKind::DeploySucceeded, Severity::Success)),
+    ] {
+        let h = bootstrapped().await;
+        let (deployment, _) = interrupted(&h, state).await;
+        restarted(&h, RestartPolicy::default())
+            .recover()
+            .await
+            .unwrap();
+        // A second restart finds nothing unfinished and writes nothing more.
+        restarted(&h, RestartPolicy::default())
+            .recover()
+            .await
+            .unwrap();
+        assert_eq!(deploy_events(&h, deployment.id).await, [outcome], "{state}");
     }
 }
 

@@ -263,6 +263,46 @@ impl fmt::Display for DeploymentSource {
     }
 }
 
+/// The source's stored name (as `#[sqlx(rename_all = "snake_case")]` writes it), which the
+/// event log shows too.
+impl AsRef<str> for DeploymentSource {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Webhook => "webhook",
+            Self::Poller => "poller",
+            Self::Apply => "apply",
+            Self::Manual => "manual",
+            Self::Rollback => "rollback",
+        }
+    }
+}
+
+/// A digest shortened for tables and the event log: `sha256:` and the first 12 hex digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortDigest<'a>(pub &'a str);
+
+impl fmt::Display for ShortDigest<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (algorithm, hex) = self.0.split_once(':').unwrap_or(("", self.0));
+        let short = hex.get(..12).unwrap_or(hex);
+        if algorithm.is_empty() {
+            f.write_str(short)
+        } else {
+            write!(f, "{algorithm}:{short}")
+        }
+    }
+}
+
+/// A commit sha shortened for the event log: its first 7 hex digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortSha<'a>(pub &'a str);
+
+impl fmt::Display for ShortSha<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.get(..7).unwrap_or(self.0))
+    }
+}
+
 /// Target image digests of a deployment, by service name.
 pub type DigestSet = BTreeMap<String, String>;
 

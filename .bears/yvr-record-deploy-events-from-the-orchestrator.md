@@ -1,16 +1,17 @@
 ---
 id: yvr
 title: Record deploy events from the orchestrator
-status: open
+status: done
 priority: P2
 created: "2026-11-09T14:05:07.877849210Z"
-updated: "2026-11-09T14:05:07.877849210Z"
+updated: "2026-11-09T15:31:46.667556203Z"
 tags:
   - orchestrator
   - observability
 depends_on:
   - nbj
 parent: "4qj"
+attempts: 1
 ---
 
 ## Summary

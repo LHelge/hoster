@@ -50,6 +50,8 @@ use crate::store::{
     Timestamp, WebhookRejection,
 };
 
+pub(super) use crate::store::ShortDigest;
+
 /// What the stack pages need from the orchestrator. Dyn-compatible, so the app holds the real
 /// orchestrator (any runtime) or a fake in tests behind one `Arc`.
 #[async_trait::async_trait]
@@ -785,21 +787,6 @@ impl From<String> for Problem {
             path: String::new(),
             message,
             source: None,
-        }
-    }
-}
-
-/// A digest shortened for tables: `sha256:` and the first 12 hex digits.
-pub(super) struct ShortDigest<'a>(pub(super) &'a str);
-
-impl fmt::Display for ShortDigest<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (algorithm, hex) = self.0.split_once(':').unwrap_or(("", self.0));
-        let short = hex.get(..12).unwrap_or(hex);
-        if algorithm.is_empty() {
-            f.write_str(short)
-        } else {
-            write!(f, "{algorithm}:{short}")
         }
     }
 }
