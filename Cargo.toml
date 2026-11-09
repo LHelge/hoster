@@ -2,9 +2,9 @@
 name = "hoster"
 version = "0.3.0"
 edition = "2024"
-# MSRV: sqlx 0.9 (ADR-0022) needs 1.94; Pingora 0.9.1 needs 1.85. The development toolchain is
-# pinned in rust-toolchain.toml.
-rust-version = "1.94"
+# The minimum is the toolchain pinned in rust-toolchain.toml: CI builds and checks with that
+# version only. Raise both together.
+rust-version = "1.99"
 description = "Single-binary deployment orchestrator for one VPS: rootless podman, embedded proxy with ACME, zero-downtime deploys"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
