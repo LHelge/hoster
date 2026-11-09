@@ -12,6 +12,7 @@ mod health;
 mod installation;
 mod instance;
 mod logging;
+mod notify;
 mod orchestrator;
 mod ports;
 mod proxy;

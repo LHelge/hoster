@@ -1,16 +1,17 @@
 ---
 id: pzp
 title: Notification provider trait and the Resend provider
-status: open
+status: done
 priority: P3
 created: "2026-11-09T23:22:59.512324730Z"
-updated: "2026-11-09T23:22:59.512324730Z"
+updated: "2026-11-09T23:53:52.857368898Z"
 tags:
   - notify
   - third-party
 depends_on:
   - rja
 parent: c5s
+attempts: 1
 ---
 
 ## Summary
