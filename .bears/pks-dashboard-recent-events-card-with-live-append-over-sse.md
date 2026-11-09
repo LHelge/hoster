@@ -1,10 +1,10 @@
 ---
 id: pks
 title: Dashboard "Recent events" card with live append over SSE
-status: open
+status: done
 priority: P2
 created: "2026-11-09T14:05:24.837685697Z"
-updated: "2026-11-09T14:05:24.837685697Z"
+updated: "2026-11-09T16:36:12.797950567Z"
 tags:
   - web
   - ui
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - nbj
 parent: "4qj"
+attempts: 1
 ---
 
 ## Summary

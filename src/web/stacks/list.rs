@@ -487,7 +487,7 @@ pub struct Ago(pub Duration);
 
 impl Ago {
     /// The time from `then` to `now`; zero when the clock went backwards.
-    pub(super) fn since(then: Timestamp, now: SystemTime) -> Self {
+    pub(in crate::web) fn since(then: Timestamp, now: SystemTime) -> Self {
         Ago(now
             .duration_since(SystemTime::from(then))
             .unwrap_or_default())

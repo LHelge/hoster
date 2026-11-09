@@ -48,7 +48,7 @@ use crate::secrets::{SecretError, SecretValue};
 use crate::stack::{Diagnostic, StackError};
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
-    Timestamp, WebhookRejection,
+    EventPage, EventQuery, Timestamp, WebhookRejection,
 };
 
 pub(super) use crate::store::ShortDigest;
@@ -124,6 +124,9 @@ pub trait StackControl: Send + Sync + 'static {
 
     /// See [`Orchestrator::subscribe`].
     fn subscribe(&self) -> broadcast::Receiver<UiEvent>;
+
+    /// One page of the event log (ADR-0055); see [`crate::orchestrator::EventLog::page`].
+    async fn event_page(&self, query: &EventQuery) -> Result<EventPage, OrchestratorError>;
 
     /// See [`Orchestrator::reresolve_preview`].
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError>;
@@ -241,6 +244,10 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         Orchestrator::subscribe(self)
     }
 
+    async fn event_page(&self, query: &EventQuery) -> Result<EventPage, OrchestratorError> {
+        Ok(self.event_log().page(query).await?)
+    }
+
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {
         Orchestrator::reresolve_preview(self, stack).await
     }
@@ -297,6 +304,14 @@ impl Stacks {
     /// The [`UiEvent`]s sent from now on; see [`Orchestrator::subscribe`].
     pub(super) fn subscribe(&self) -> broadcast::Receiver<UiEvent> {
         self.0.subscribe()
+    }
+
+    /// One page of the event log; see [`StackControl::event_page`].
+    pub(super) async fn event_page(
+        &self,
+        query: &EventQuery,
+    ) -> Result<EventPage, OrchestratorError> {
+        self.0.event_page(query).await
     }
 
     /// The stack called `name`.
@@ -841,7 +856,7 @@ mod overview;
 
 use apply::{ApplyFailed, ApplyPage, Attempt, PreviewView, ReresolveView};
 pub use deployments::DeploymentView;
-pub(super) use list::{Condition, LastDeploy, TrafficLine};
+pub(super) use list::{Ago, Condition, LastDeploy, TrafficLine};
 pub(super) use overview::StackView;
 
 #[cfg(test)]

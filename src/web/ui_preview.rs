@@ -49,7 +49,8 @@ use crate::stack::RouteTimeouts;
 use crate::stats::{CertExpiry, RequestOutcome};
 use crate::store::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentOutcome, DeploymentSource,
-    DeploymentState, DigestSet, Provenance, RevisionId, StackRevision, Timestamp, WebhookRejection,
+    DeploymentState, DigestSet, Event, EventId, EventKind, Provenance, RevisionId, Severity,
+    StackRevision, Timestamp, WebhookRejection,
 };
 use crate::supervisor::ShutdownRequest;
 use crate::update::fake::{FakeReleases, Host, script};
@@ -566,6 +567,87 @@ impl Fixtures {
             (
                 Self::deployment("shop", 14, DeploymentState::Live, DAY),
                 Vec::new(),
+            ),
+        ]
+    }
+
+    /// The event log: one event of each severity, with and without a page or a meta line.
+    fn events() -> Vec<Event> {
+        let event = |id: i64, age: Duration, kind, severity, message: &str| Event {
+            id: EventId::from(id),
+            at: ago(age),
+            kind,
+            severity,
+            stack: None,
+            subject: None,
+            message: message.into(),
+            meta: None,
+        };
+        vec![
+            Event {
+                stack: Some("notes".into()),
+                subject: Some("/stacks/notes/deployments/41".into()),
+                meta: Some("a91f3c2 · webhook · ghcr.io/acme/notes-api".into()),
+                ..event(
+                    6,
+                    Duration::from_secs(40),
+                    EventKind::DeployStarted,
+                    Severity::Info,
+                    "notes deploy started",
+                )
+            },
+            Event {
+                stack: Some("shop".into()),
+                subject: Some("/stacks/shop".into()),
+                meta: Some("exit 137, OOM killed · restart 4".into()),
+                ..event(
+                    5,
+                    11 * Duration::from_secs(60),
+                    EventKind::ContainerRestarted,
+                    Severity::Warning,
+                    "shop: web restarted",
+                )
+            },
+            Event {
+                subject: Some("/certificates".into()),
+                meta: Some("HTTP-01 · next try in 1 h".into()),
+                ..event(
+                    4,
+                    2 * HOUR,
+                    EventKind::CertificateFailed,
+                    Severity::Error,
+                    "Renewing the certificate for wiki.example.net failed",
+                )
+            },
+            Event {
+                stack: Some("notes".into()),
+                subject: Some("/stacks/notes/deployments/40".into()),
+                meta: Some("4e0b7d1 · webhook · 41 s".into()),
+                ..event(
+                    3,
+                    5 * HOUR,
+                    EventKind::DeploySucceeded,
+                    Severity::Success,
+                    "notes deployed",
+                )
+            },
+            Event {
+                subject: Some("/system".into()),
+                meta: Some("v0.4.0".into()),
+                ..event(
+                    2,
+                    DAY,
+                    EventKind::HosterStarted,
+                    Severity::Info,
+                    "hoster started",
+                )
+            },
+            event(
+                1,
+                3 * DAY,
+                EventKind::SecretSet,
+                Severity::Info,
+                "octocat set the secret notes/db",
             ),
         ]
     }
@@ -1174,6 +1256,7 @@ async fn ui_preview() {
     let mut app = TestApp::new().await;
     *app.stacks.stacks.lock().unwrap() = Fixtures::stacks();
     *app.stacks.deployments.lock().unwrap() = Fixtures::deployments();
+    *app.stacks.log.lock().unwrap() = Fixtures::events();
     // A volume of shop's that an earlier revision declared and the active one dropped.
     *app.stacks.earlier_volumes.lock().unwrap() = vec!["hoster-shop-redis".into()];
     // notes' secrets: set some days ago, so their rows say when.

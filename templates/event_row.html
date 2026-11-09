@@ -1,0 +1,10 @@
+<li class="event-row">
+  <time class="event-time" datetime="{{ at }}" title="{{ at }}">{{ ago }}</time>
+  <span class="dot event-dot dot-{{ self.tone() }}" aria-hidden="true"></span>
+  <div class="event-text">
+    <span class="event-message"><span class="visually-hidden">{{ severity }}: </span>{% if let Some(href) = href %}<a href="{{ href }}">{{ message }}</a>{% else %}{{ message }}{% endif %}</span>
+    {%- if let Some(meta) = meta %}
+    <span class="event-meta">{{ meta }}</span>
+    {%- endif %}
+  </div>
+</li>

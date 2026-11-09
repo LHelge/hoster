@@ -166,6 +166,8 @@ pub struct FakeStacks {
     pub earlier_volumes: Mutex<Vec<String>>,
     /// Who did each operator action (apply, re-resolve, remove, secrets), in order.
     pub operators: Mutex<Vec<Operator>>,
+    /// The event log, in any order.
+    pub log: Mutex<Vec<crate::store::Event>>,
 }
 
 impl Default for FakeStacks {
@@ -183,6 +185,7 @@ impl Default for FakeStacks {
             events: broadcast::channel(16).0,
             earlier_volumes: Mutex::new(Vec::new()),
             operators: Mutex::new(Vec::new()),
+            log: Mutex::new(Vec::new()),
         }
     }
 }
@@ -444,6 +447,23 @@ impl StackControl for FakeStacks {
 
     fn subscribe(&self) -> broadcast::Receiver<UiEvent> {
         self.events.subscribe()
+    }
+
+    /// Like the store: the query's stack, newest first, at most its limit (no paging).
+    async fn event_page(&self, query: &EventQuery) -> Result<EventPage, OrchestratorError> {
+        let mut events: Vec<_> = self
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| query.stack.is_none() || e.stack == query.stack)
+            .filter(|e| query.kinds.is_empty() || query.kinds.contains(&e.kind))
+            .filter(|e| e.severity >= query.min_severity)
+            .cloned()
+            .collect();
+        events.sort_by_key(|e| std::cmp::Reverse((e.at, e.id)));
+        events.truncate(query.limit as usize);
+        Ok(EventPage { events, next: None })
     }
 
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {

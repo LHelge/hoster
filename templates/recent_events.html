@@ -1,0 +1,19 @@
+<section class="card" id="{{ self.id() }}" aria-labelledby="recent-events-title">
+  <header class="card-head">
+    <h2 id="recent-events-title">Recent events</h2>
+  </header>
+  {%- if self.unreadable() %}
+  <p class="card-body muted">The events cannot be read right now.</p>
+  {%- else %}
+  {%- let rows = self.rows() %}
+  {%- if rows.is_empty() %}
+  <p class="card-body muted">No events yet. Deploys, restarts, certificates and operator actions show up here as they happen.</p>
+  {%- else %}
+  <ol class="events-feed">
+    {%- for row in rows %}
+    {{ row|safe }}
+    {%- endfor %}
+  </ol>
+  {%- endif %}
+  {%- endif %}
+</section>
