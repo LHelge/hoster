@@ -1,6 +1,6 @@
 # ADR-0024: hoster configuration is a TOML file with env overrides; secrets kept out of it
 
-- Status: Accepted (resolves OQ-27)
+- Status: Accepted (resolves OQ-27; amended by ADR-0058: settings changed at run time live in SQLite)
 - Date: 2026-11-07
 
 ## Context

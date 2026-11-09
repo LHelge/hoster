@@ -298,6 +298,7 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 | **ACME task** | orchestrator runtime, single task | Account lifecycle, issuance, renewal. Writes `CertMap` and `ChallengeMap`. Persists account and certs to disk. |
 | **Registry client** | orchestrator runtime | Generic OCI distribution client (ADR-0025): token discovery from `WWW-Authenticate`, `HEAD` manifest → digest. Per-registry-host credentials. Used by the poller and for resolving third-party tags at stack apply. |
 | **Digest poller** | orchestrator runtime | Periodically resolves tracked ghcr tags to digests. Calls `orchestrator.deploy` only when a tag's observed digest changes (ADR-0043). |
+| **Notifier** | orchestrator runtime | Mails the operator about problems and recoveries (ADR-0058). Reads the event log (§11) past a persisted cursor, woken by `ui_events` and a one-minute timer; selects, de-duplicates and rate-limits; delivers through a mail `Provider` (Resend) with a short retry, and records `NotificationFailed` when it gives up. Idle until notifications are configured in Settings. |
 | **Admin web UI + webhook (Axum)** | orchestrator runtime | One Axum app (ADR-0021).<br/>• **UI:** Askama-rendered pages with vendored HTMX 4 (embedded in the binary). GitHub OAuth login, restricted to `HOSTER_ADMIN_GITHUB`. SQLite sessions and CSRF tokens (ADR-0031).<br/>• **Webhook:** `/hooks/deploy`, authenticated with a GitHub Actions OIDC token (signature via a cached JWKS, `iss`, `aud`, expiry, single-use `jti`) and authorized by the stack's `[deploy]` rule (ADR-0047).<br/>• **Wiring:** calls `Orchestrator` methods directly and renders their typed results. Live views (deploy progress, logs) stream through SSE or HTMX polling. |
 | **GitHub OAuth client** | orchestrator runtime | Authorization-code + PKCE flow against github.com. Compares the login handle case-insensitively with `HOSTER_ADMIN_GITHUB` (ADR-0031). |
 | **:80 service** | Pingora | Answers `/.well-known/acme-challenge/<token>` from `ChallengeMap`. Redirects every other request to `https://` with 308. |
@@ -311,7 +312,7 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 ```
 process hoster
 ├── main thread ── #[tokio::main] orchestrator runtime (multi-thread, N workers)
-│                  supervisor, orchestrator, deploy tasks, ACME, poller, API, reconciler
+│                  supervisor, orchestrator, deploy tasks, ACME, poller, API, reconciler, notifier
 └── "pingora" std::thread ── pingora_core::server::Server::run(RunArgs{ custom watcher })
                  ├── Pingora "Server" runtime (1 thread): main loop, awaits our ShutdownSignalWatch
                  ├── ":80" service runtime  (ServerConf.threads or per-service override)
@@ -365,7 +366,7 @@ where a boundary needs them:
 | 2 | `acme_events` | `mpsc::Sender<AcmeEvent>` | ACME task → Orchestrator | `Issued { host, not_after }`, `Failed { host, error, retry_at }`, `DnsMismatch { host, observed, expected }` (advisory, ADR-0051). The orchestrator records them and fans them out on `ui_events` (#5), so each channel has one producer. Used for status ("TLS pending") in the UI; deploys never wait on certificates (ADR-0036). |
 | 3 | `pingora_shutdown` | `watch::Sender<Option<ShutdownSignal>>` | Supervisor → Pingora "Server" runtime | Read by our `ShutdownSignalWatch` impl. SIGTERM becomes `GracefulTerminate`, a second SIGTERM or SIGINT becomes `FastShutdown`. |
 | 4 | `pingora_phase` | `broadcast::Receiver<ExecutionPhase>` | Pingora → Supervisor | `Running`, followed by a successful connect to the listener (§1.1), means the listeners are bound and the ACME task may start. An early `Terminated` means Pingora died, and the supervisor exits non-zero. |
-| 5 | `ui_events` | `broadcast::Sender<UiEvent>` | Orchestrator → Axum SSE handlers | Deploy progress, health changes, cert events (relayed from #2) and newly recorded events of the event log (§11), pushed to open UI pages (HTMX SSE). Lagging receivers just re-render from current state. |
+| 5 | `ui_events` | `broadcast::Sender<UiEvent>` | Orchestrator → Axum SSE handlers, notifier | Deploy progress, health changes, cert events (relayed from #2) and newly recorded events of the event log (§11), pushed to open UI pages (HTMX SSE). Lagging receivers just re-render from current state. The notifier (ADR-0058) uses it only as a wake-up and reads the events themselves from the store. |
 | 6 | `shutdown` | `CancellationToken` (tokio-util) | Supervisor → all orchestrator tasks | Cooperative cancellation. Deploy tasks stop at the next safe point (§5.4). |
 
 ```mermaid

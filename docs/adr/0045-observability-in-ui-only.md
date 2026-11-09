@@ -1,6 +1,6 @@
 # ADR-0045: Observability lives in the web UI only (no metrics endpoint, no alerting) in v1
 
-- Status: Accepted (resolves OQ-26)
+- Status: Accepted (resolves OQ-26; amended by ADR-0055 and by ADR-0058, which adds email notifications)
 - Date: 2026-11-07
 
 ## Decision

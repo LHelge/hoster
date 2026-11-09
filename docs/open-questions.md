@@ -423,3 +423,7 @@ Found on the first real install (Ubuntu 26.04, v0.1.0). The `unit_sandbox` check
 **Recommendation.** D. It gives the strongest sandbox on every distribution, it drops the
 low-ports-for-everyone sysctl, and it doesn't weaken host defaults. Until then, A, which is the
 current state. B is a reasonable stopgap if the owner wants the sandbox on Ubuntu now.
+
+## OQ-37: Notifications: channel, provider, configuration and which events
+
+**Resolved 2026-11-10 → [ADR-0058](adr/0058-email-notifications.md): Email on problems and recoveries through a provider trait (Resend first); run-time settings in SQLite; a notifier over the event log.**
