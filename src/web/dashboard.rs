@@ -14,13 +14,17 @@
 //!   removed stacks.
 //! - **Certificates**: the hosts soonest to expire with a days-left meter (out of 90) and their
 //!   status, every host needing attention among them, and how many more are valid.
+//! - **Recent events**: the newest events of the event log (ADR-0055), as [`RecentEvents`].
 //!
 //! The page renders server-side and works without JavaScript. Everything under the header is
 //! one partial, [`Overview`]: the page holds it in a live region that follows `GET /events` over
 //! SSE. The stream sends the partial again whenever the orchestrator reports a change on
 //! `ui_events` (a health change, a certificate issued or failed, a deployment moving) or the
 //! receiver lagged, and at least every [`OverviewEvents::REFRESH`] for what no event reports
-//! (traffic, restart counts, a removed stack, certificates nearing expiry with time). It ends
+//! (traffic, restart counts, a removed stack, certificates nearing expiry with time). A burst of
+//! nothing but newly recorded events ([`UiEvent::Event`]) sends only the Recent events card, with
+//! them added to the one the stream sent last, as an `<hx-partial>` that replaces just that card
+//! ([`RecentEvents::partial`]); the overview's other parts do not change with it. It ends
 //! with an `end` event when the session ends (after replacing the overview with a notice, so a
 //! page signed out elsewhere does not keep showing a stale status as if it were live) or the
 //! orchestrator is gone, which closes the connection.
@@ -45,6 +49,7 @@ use tokio::sync::broadcast;
 
 use super::auth::{Auth, Session};
 use super::certificates::{CertGlance, Certificates};
+use super::events::RecentEvents;
 use super::icons::Icon;
 use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::{Condition, DeploymentView, LastDeploy, StackView, Stacks, TrafficLine};
@@ -54,6 +59,7 @@ use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus, UiEvent};
 use crate::routing::Owner;
 use crate::stack::Stack;
 use crate::stats::{CertExpiry, Counts, DeployStats, Elapsed, Stats, StatusClass, TrafficSnapshot};
+use crate::store::{Event as LoggedEvent, EventKind};
 
 /// The dashboard: the live overview.
 #[derive(Template)]
@@ -150,7 +156,8 @@ impl OverviewEvents {
 
     /// The overview now, then once per burst of changes (or [`Self::REFRESH`]), until the
     /// orchestrator is gone or `cut` resolves (the session ended, which sends
-    /// [`Self::SIGNED_OUT`] first); then `end`.
+    /// [`Self::SIGNED_OUT`] first); then `end`. A burst of only recorded events sends the
+    /// Recent events card alone, from the one sent last.
     fn stream(
         self,
         events: broadcast::Receiver<UiEvent>,
@@ -161,13 +168,27 @@ impl OverviewEvents {
             Update(Event),
             Stop(Option<Event>),
         }
-        let updates = stream::unfold(Some((self, events, true)), |state| async move {
-            let (this, mut events, first) = state?;
-            if !first && !Self::changed(&mut events).await {
-                return None;
-            }
-            let event = this.render().await;
-            Some((event, Some((this, events, false))))
+        // The state holds the card last sent, `None` before the first update.
+        let updates = stream::unfold(Some((self, events, None)), |state| async move {
+            let (this, mut events, recent): (Self, _, Option<RecentEvents>) = state?;
+            let (event, recent) = match recent {
+                None => this.render().await,
+                Some(mut recent) => match Self::changed(&mut events).await {
+                    Change::Closed => return None,
+                    Change::Events(new) => {
+                        if recent.add(new) {
+                            let card = recent.partial(SystemTime::now());
+                            (Event::default().data(card), recent)
+                        } else {
+                            // The card could not read the events before, so it has none to
+                            // add to.
+                            this.render().await
+                        }
+                    }
+                    Change::All => this.render().await,
+                },
+            };
+            Some((event, Some((this, events, Some(recent)))))
         });
         let merged = stream::select(
             updates
@@ -194,33 +215,68 @@ impl OverviewEvents {
 
     /// Waits for the next change (or at most [`Self::REFRESH`]), then takes every change
     /// already queued with it, so a burst (a deployment's transitions, a round of health
-    /// probes) renders once. `false` once the orchestrator is gone: nothing changes any more.
-    async fn changed(events: &mut broadcast::Receiver<UiEvent>) -> bool {
+    /// probes) renders once. A lagged receiver may have missed events, so it re-reads all.
+    async fn changed(events: &mut broadcast::Receiver<UiEvent>) -> Change {
+        let mut recorded = Vec::new();
+        let mut all = false;
         match tokio::time::timeout(Self::REFRESH, events.recv()).await {
             // Nothing reported a change, but time passed (certificate expiry, restarts).
-            Err(_) => return true,
-            Ok(Ok(_) | Err(broadcast::error::RecvError::Lagged(_))) => {}
-            Ok(Err(broadcast::error::RecvError::Closed)) => return false,
+            Err(_) => return Change::All,
+            Ok(Ok(UiEvent::Event(event))) => {
+                all |= Self::changes_overview(event.kind);
+                recorded.push(event);
+            }
+            Ok(Ok(_) | Err(broadcast::error::RecvError::Lagged(_))) => all = true,
+            Ok(Err(broadcast::error::RecvError::Closed)) => return Change::Closed,
         }
         loop {
             match events.try_recv() {
-                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
-                Err(broadcast::error::TryRecvError::Empty) => return true,
-                Err(broadcast::error::TryRecvError::Closed) => return false,
+                Ok(UiEvent::Event(event)) => {
+                    all |= Self::changes_overview(event.kind);
+                    recorded.push(event);
+                }
+                Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => all = true,
+                Err(broadcast::error::TryRecvError::Empty) if all => return Change::All,
+                Err(broadcast::error::TryRecvError::Empty) => return Change::Events(recorded),
+                Err(broadcast::error::TryRecvError::Closed) => return Change::Closed,
             }
         }
     }
 
-    async fn render(&self) -> Event {
-        let readings = Readings::gather(&self.stacks, &self.stats, &self.certificates).await;
-        let html = Overview::new(readings, SystemTime::now())
-            .render()
-            .unwrap_or_else(|err| {
-                tracing::error!(error = %err, "rendering the dashboard overview failed");
-                String::new()
-            });
-        Event::default().data(html)
+    /// Whether an event of `kind` is the only report of a change elsewhere on the overview
+    /// (the restart counts, a stack's condition, a removed stack's row), so it needs a fresh
+    /// read rather than the card alone.
+    fn changes_overview(kind: EventKind) -> bool {
+        matches!(
+            kind,
+            EventKind::ContainerRestarted
+                | EventKind::CrashLoopEntered
+                | EventKind::CrashLoopLeft
+                | EventKind::StackRemoved
+        )
     }
+
+    /// The whole overview, read now, and its Recent events card for the next events.
+    async fn render(&self) -> (Event, RecentEvents) {
+        let readings = Readings::gather(&self.stacks, &self.stats, &self.certificates).await;
+        let overview = Overview::new(readings, SystemTime::now());
+        let html = overview.render().unwrap_or_else(|err| {
+            tracing::error!(error = %err, "rendering the dashboard overview failed");
+            String::new()
+        });
+        (Event::default().data(html), overview.recent)
+    }
+}
+
+/// What a burst of [`UiEvent`]s changed on the overview.
+#[derive(Debug)]
+enum Change {
+    /// Something only a fresh read shows: a state change, time passing, a lagged receiver.
+    All,
+    /// Only these events were recorded, oldest first.
+    Events(Vec<LoggedEvent>),
+    /// The orchestrator is gone: nothing changes any more.
+    Closed,
 }
 
 /// What the overview is made from, read at one moment.
@@ -235,14 +291,18 @@ struct Readings {
     /// The certificates the proxy serves, for the expiry warnings.
     served: Vec<CertExpiry>,
     certificates: CertGlance,
+    /// The newest events, or why they cannot be read.
+    events: Result<Vec<LoggedEvent>, String>,
 }
 
 impl Readings {
     async fn gather(stacks: &Stacks, stats: &Stats, certificates: &Certificates) -> Self {
-        let (status, deployments, glance) = tokio::join!(
+        let query = RecentEvents::query();
+        let (status, deployments, glance, events) = tokio::join!(
             stacks.status(),
             stats.deployments(),
             certificates.glance(SystemTime::now()),
+            stacks.event_page(&query),
         );
         Readings {
             stacks: status.map_err(|err| {
@@ -259,6 +319,10 @@ impl Readings {
             }),
             served: stats.certificates(),
             certificates: glance,
+            events: events.map(|page| page.events).map_err(|err| {
+                tracing::warn!(error = %err, "cannot read the event log for the dashboard");
+                format!("Cannot show the recent events: {err}.")
+            }),
         }
     }
 }
@@ -271,12 +335,13 @@ impl Default for Readings {
             deployments: Ok(Vec::new()),
             served: Vec::new(),
             certificates: CertGlance::default(),
+            events: Ok(Vec::new()),
         }
     }
 }
 
-/// Everything under the dashboard's header: the tiles, the warnings, the stacks and the
-/// certificates. The live region's content.
+/// Everything under the dashboard's header: the tiles, the warnings, the stacks, the
+/// certificates and the recent events. The live region's content.
 #[derive(Debug, Default, Template)]
 #[template(path = "dashboard_overview.html")]
 pub struct Overview {
@@ -290,6 +355,7 @@ pub struct Overview {
     /// The requests no stack row counts.
     other: Vec<OtherTraffic>,
     certificates: CertGlance,
+    recent: RecentEvents,
     /// What could not be read.
     problems: Vec<String>,
 }
@@ -303,12 +369,14 @@ impl Overview {
             deployments,
             served,
             certificates,
+            events,
         } = readings;
         let mut problems = Vec::new();
         // `None` when the stacks cannot be read: then which of them exist is not known.
         let known = stacks.map_err(|problem| problems.push(problem)).ok();
         let stacks = known.as_deref().unwrap_or_default();
         let deployments = deployments.map_err(|problem| problems.push(problem)).ok();
+        let recent = RecentEvents::new(events.map_err(|problem| problems.push(problem)).ok(), now);
         let rows: Vec<StackRow> = stacks
             .iter()
             .map(|status| {
@@ -336,6 +404,7 @@ impl Overview {
             stacks: rows,
             summary,
             certificates,
+            recent,
             problems,
         }
     }

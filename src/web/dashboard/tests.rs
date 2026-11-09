@@ -15,7 +15,7 @@ use crate::stack::RouteTimeouts;
 use crate::stats::{RequestOutcome, Traffic};
 use crate::store::{
     ContentHash, Deployment, DeploymentId, DeploymentOutcome, DeploymentSource, DeploymentState,
-    DigestSet, RevisionId, StackRevision, Timestamp,
+    DigestSet, EventId, EventKind, RevisionId, Severity, StackRevision, Timestamp,
 };
 use crate::web::auth::tests::TestApp;
 use crate::web::stacks::tests::body;
@@ -670,17 +670,97 @@ async fn bursts_of_events_render_once() {
             })
             .unwrap();
     }
-    assert!(OverviewEvents::changed(&mut events).await);
+    assert!(matches!(
+        OverviewEvents::changed(&mut events).await,
+        Change::All
+    ));
     assert!(events.try_recv().is_err(), "the burst was taken whole");
     drop(sender);
-    assert!(!OverviewEvents::changed(&mut events).await);
+    assert!(matches!(
+        OverviewEvents::changed(&mut events).await,
+        Change::Closed
+    ));
+}
+
+/// Event `id` of the event log, recorded now.
+fn logged(id: i64, message: &str) -> LoggedEvent {
+    LoggedEvent {
+        id: EventId::from(id),
+        at: Timestamp::now(),
+        kind: EventKind::StackApplied,
+        severity: Severity::Info,
+        stack: Some("blog".into()),
+        subject: Some("/stacks/blog".into()),
+        message: message.into(),
+        meta: None,
+    }
+}
+
+#[tokio::test]
+async fn a_burst_of_recorded_events_changes_only_the_events() {
+    let (sender, mut events) = broadcast::channel(16);
+    for id in 1..=2 {
+        sender
+            .send(UiEvent::Event(logged(id, "applied blog")))
+            .unwrap();
+    }
+    match OverviewEvents::changed(&mut events).await {
+        Change::Events(new) => assert_eq!(
+            new.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [EventId::from(1), EventId::from(2)]
+        ),
+        other => panic!("{other:?}"),
+    }
+    // With anything else in the burst, the whole overview is read again.
+    sender
+        .send(UiEvent::Event(logged(3, "applied blog")))
+        .unwrap();
+    sender
+        .send(UiEvent::Deployment {
+            stack: "blog".into(),
+            id: DeploymentId::from(1),
+            state: DeploymentState::Pulling,
+        })
+        .unwrap();
+    assert!(matches!(
+        OverviewEvents::changed(&mut events).await,
+        Change::All
+    ));
+    // A restart is the only report of the new restart count, so it reads everything too.
+    sender
+        .send(UiEvent::Event(LoggedEvent {
+            kind: EventKind::ContainerRestarted,
+            ..logged(4, "restarted blog/web")
+        }))
+        .unwrap();
+    assert!(matches!(
+        OverviewEvents::changed(&mut events).await,
+        Change::All
+    ));
+}
+
+#[tokio::test]
+async fn a_lagged_receiver_reads_the_events_again() {
+    let (sender, mut events) = broadcast::channel(1);
+    for id in 1..=3 {
+        sender
+            .send(UiEvent::Event(logged(id, "applied blog")))
+            .unwrap();
+    }
+    assert!(matches!(
+        OverviewEvents::changed(&mut events).await,
+        Change::All
+    ));
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_quiet_stream_renders_again_after_the_refresh_interval() {
     let (_sender, mut events) = broadcast::channel::<UiEvent>(16);
     let started = tokio::time::Instant::now();
-    assert!(OverviewEvents::changed(&mut events).await);
+    assert!(matches!(
+        OverviewEvents::changed(&mut events).await,
+        Change::All
+    ));
     assert_eq!(started.elapsed(), OverviewEvents::REFRESH);
 }
 
@@ -816,6 +896,81 @@ async fn the_stream_sends_the_overview_again_on_every_change() {
     assert!(
         text.starts_with(&format!("data: {}", OverviewEvents::SIGNED_OUT)),
         "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_recorded_event_sends_only_the_recent_events_card_with_it_on_top() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    *app.stacks.stacks.lock().unwrap() = vec![blog()];
+    app.stacks
+        .log
+        .lock()
+        .unwrap()
+        .push(logged(1, "applied blog revision 1"));
+
+    let html = compact(&body(app.get("/", Some(&browser.cookie)).await).await);
+    assert!(
+        html.contains(
+            r#"<section class="card" id="recent-events" aria-labelledby="recent-events-title">"#
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<a href="/stacks/blog">applied blog revision 1</a>"#),
+        "{html}"
+    );
+
+    let response = app.get("/events", Some(&browser.cookie)).await;
+    let mut stream = response.into_body();
+    let mut text = String::new();
+    read_until(&mut stream, &mut text, "\n\n").await;
+    assert!(text.contains("applied blog revision 1"), "{text}");
+
+    // The event is recorded, then announced.
+    let event = logged(2, "applied blog revision 2");
+    app.stacks.log.lock().unwrap().push(event.clone());
+    app.stacks.events.send(UiEvent::Event(event)).unwrap();
+    text.clear();
+    read_until(&mut stream, &mut text, "\n\n").await;
+    assert!(
+        text.starts_with(r##"data: <hx-partial hx-target="#recent-events" hx-swap="outerHTML">"##),
+        "{text}"
+    );
+    assert!(!text.contains("Key figures"), "only the card: {text}");
+    let newest = text.find("applied blog revision 2").expect(&text);
+    assert!(
+        newest < text.find("applied blog revision 1").expect(&text),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_overview_shows_the_recent_events_or_why_not() {
+    let html = Overview::new(Readings::default(), SystemTime::now())
+        .render()
+        .unwrap();
+    assert!(html.contains("No events yet."), "{html}");
+
+    let html = Overview::new(
+        Readings {
+            events: Err("Cannot show the recent events: disk I/O error.".into()),
+            ..Readings::default()
+        },
+        SystemTime::now(),
+    )
+    .render()
+    .unwrap();
+    assert!(
+        html.contains(
+            r#"<p class="flash flash-error">Cannot show the recent events: disk I/O error.</p>"#
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains("The events cannot be read right now."),
+        "{html}"
     );
 }
 

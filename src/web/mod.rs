@@ -20,6 +20,7 @@ mod auth;
 mod certificates;
 mod containers;
 mod dashboard;
+mod events;
 mod icons;
 mod pages;
 mod settings;

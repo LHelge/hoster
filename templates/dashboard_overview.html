@@ -81,6 +81,7 @@
       {%- endif %}
     {%- endfor %}</p>
 </section>
+<div class="card-pair">
 <section class="card" aria-labelledby="certs-title">
   <header class="card-head">
     <h2 id="certs-title">Certificates <span class="card-count">· {{ certificates.total }} {% if certificates.total == 1 %}host{% else %}hosts{% endif %}</span></h2>
@@ -107,3 +108,5 @@
   <p class="card-foot">+ {{ certificates.more_valid }} more valid · renewed with a third of their lifetime left</p>
   {%- endif %}
 </section>
+{{ recent|safe }}
+</div>

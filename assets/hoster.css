@@ -1246,6 +1246,15 @@ th:has(> .dash-flag) { min-width: 12rem; }
 .glance-left { color: var(--text-2); font: 12px/1.4 var(--mono); white-space: nowrap; }
 .glance li > .glance-left.muted { grid-column: 1 / -1; color: var(--muted); }
 
+/* Event feeds (src/web/events.rs): one row per event, newest first; the dashboard's card. */
+ol.events-feed { margin: 0; padding: 6px 0; list-style: none; }
+.event-row { display: grid; grid-template-columns: 5.5rem auto minmax(0, 1fr); align-items: start; gap: 12px; padding: 9px 18px; }
+.event-time { padding-top: 1px; color: var(--muted); font: 12px/1.5 var(--mono); white-space: nowrap; }
+.dot.event-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 2px; }
+.event-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.event-message { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.event-meta { color: var(--muted); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+
 /* System (src/web/system.rs): a version card beside the update card, then the host's facts. */
 .system-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; margin: 0 0 16px; }
 .system-row > .card { margin: 0; min-width: 0; }
