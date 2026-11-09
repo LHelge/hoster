@@ -24,9 +24,11 @@ use serde::Deserialize;
 
 pub use self::effective::EffectiveConfig;
 use self::effective::{ConfigSection, Shown};
+use super::auth::Session;
 use super::certificates::CertificateControl;
 use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::{Outcome, When};
+use crate::orchestrator::{EventLog, Operator};
 use crate::registry::{
     CredentialError, RegistryCheck, RegistryClient, RegistryCredential, RegistryEntry,
     RegistryError, RegistryHost, StoredCredentials,
@@ -224,15 +226,17 @@ pub trait RegistryControl: Send + Sync + 'static {
     /// Every stored credential, without its token.
     async fn list(&self) -> Result<Vec<RegistryEntry>, CredentialError>;
 
-    /// Stores (or replaces) the credential for `host`.
+    /// Stores (or replaces) the credential for `host`, recorded in the event log as done by
+    /// `by` (ADR-0055).
     async fn set(
         &self,
         host: &RegistryHost,
         credential: &RegistryCredential,
+        by: &Operator,
     ) -> Result<(), CredentialError>;
 
-    /// Removes the credential for `host`; whether there was one.
-    async fn remove(&self, host: &RegistryHost) -> Result<bool, CredentialError>;
+    /// Removes the credential for `host`, recorded as done by `by`; whether there was one.
+    async fn remove(&self, host: &RegistryHost, by: &Operator) -> Result<bool, CredentialError>;
 
     /// Tests access to `host`; see [`RegistryClient::check`].
     async fn check(&self, host: &RegistryHost) -> Result<RegistryCheck, RegistryError>;
@@ -245,31 +249,59 @@ pub struct RegistryAccess {
     pub client: Arc<RegistryClient>,
 }
 
+impl RegistryAccess {
+    /// The registries page's control: this access, announcing each change it records on
+    /// `events` to the open pages.
+    pub(super) fn recorded(self, events: EventLog) -> RecordedRegistries {
+        RecordedRegistries {
+            access: self,
+            events,
+        }
+    }
+}
+
+/// [`RegistryAccess`] with the event log its changes are announced on (production).
+#[derive(Debug, Clone)]
+pub(super) struct RecordedRegistries {
+    access: RegistryAccess,
+    events: EventLog,
+}
+
 #[async_trait::async_trait]
-impl RegistryControl for RegistryAccess {
+impl RegistryControl for RecordedRegistries {
     async fn list(&self) -> Result<Vec<RegistryEntry>, CredentialError> {
-        self.credentials.list().await
+        self.access.credentials.list().await
     }
 
     async fn set(
         &self,
         host: &RegistryHost,
         credential: &RegistryCredential,
+        by: &Operator,
     ) -> Result<(), CredentialError> {
-        self.credentials.set(host, credential).await?;
+        let event = self
+            .access
+            .credentials
+            .set(host, credential, Some(by))
+            .await?;
+        self.events.announce(event);
         // Tokens obtained with the old credential must not outlive it.
-        self.client.forget_registry(host.as_ref());
+        self.access.client.forget_registry(host.as_ref());
         Ok(())
     }
 
-    async fn remove(&self, host: &RegistryHost) -> Result<bool, CredentialError> {
-        let removed = self.credentials.remove(host).await?;
-        self.client.forget_registry(host.as_ref());
-        Ok(removed)
+    async fn remove(&self, host: &RegistryHost, by: &Operator) -> Result<bool, CredentialError> {
+        let removed = self.access.credentials.remove(host, Some(by)).await?;
+        self.access.client.forget_registry(host.as_ref());
+        let Some(event) = removed else {
+            return Ok(false);
+        };
+        self.events.announce(event);
+        Ok(true)
     }
 
     async fn check(&self, host: &RegistryHost) -> Result<RegistryCheck, RegistryError> {
-        self.client.check(host.as_ref()).await
+        self.access.client.check(host.as_ref()).await
     }
 }
 
@@ -330,6 +362,7 @@ impl Registries {
     /// `POST /settings/registries`: stores the credential for a host. Redeploys nothing.
     pub async fn save(
         Extension(registries): Extension<Registries>,
+        Extension(session): Extension<Session>,
         Form(form): Form<CredentialForm>,
     ) -> Response {
         let host = match HostForm::host(&form.host) {
@@ -346,7 +379,11 @@ impl Registries {
             .into_response();
         }
         let credential = RegistryCredential::new(username, token);
-        match registries.0.set(&host, &credential).await {
+        match registries
+            .0
+            .set(&host, &credential, &session.login().into())
+            .await
+        {
             Ok(()) => Outcome::success(format!(
                 "Saved the credential for {host}. Pulls and tag lookups use it from now on; \
                  nothing was redeployed."
@@ -360,13 +397,14 @@ impl Registries {
     /// `POST /settings/registries/delete`.
     pub async fn delete(
         Extension(registries): Extension<Registries>,
+        Extension(session): Extension<Session>,
         Form(form): Form<HostForm>,
     ) -> Response {
         let host = match HostForm::host(&form.host) {
             Ok(host) => host,
             Err(outcome) => return outcome.into_response(),
         };
-        match registries.0.remove(&host).await {
+        match registries.0.remove(&host, &session.login().into()).await {
             Ok(true) => Outcome::success(format!(
                 "Deleted the credential for {host}; it is accessed anonymously from now on."
             ))

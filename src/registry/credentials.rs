@@ -13,8 +13,9 @@ use std::str::FromStr;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 
+use crate::orchestrator::{Operator, RegistryEvents};
 use crate::secrets::{SecretError, SecretName, SecretStore, SecretValue};
-use crate::store::Timestamp;
+use crate::store::{Event, Timestamp};
 
 /// A username and secret (for ghcr: any username and a classic PAT with `read:packages`).
 ///
@@ -227,13 +228,16 @@ impl From<SecretStore> for StoredCredentials {
 }
 
 impl StoredCredentials {
-    /// Stores (or replaces) the credential for `host`. The username must not contain `:`, and
-    /// neither part may be empty or span lines.
+    /// Stores (or replaces) the credential for `host`, recorded in the event log in the same
+    /// transaction as done by `by` (ADR-0055): the host only, never the username or token.
+    /// Returns the recorded event, for the caller to announce. The username must not contain
+    /// `:`, and neither part may be empty or span lines.
     pub async fn set(
         &self,
         host: &RegistryHost,
         credential: &RegistryCredential,
-    ) -> Result<(), CredentialError> {
+        by: Option<&Operator>,
+    ) -> Result<Event, CredentialError> {
         let invalid = |reason: &str| CredentialError::Invalid {
             registry: host.to_string(),
             reason: reason.to_owned(),
@@ -249,21 +253,37 @@ impl StoredCredentials {
         if parsed != *credential {
             return Err(invalid("enter a username and a token, each on one line"));
         }
-        self.secrets
-            .set(&host.secret_name(), &sealable)
+        let store_error = |source| CredentialError::Store {
+            registry: host.to_string(),
+            source,
+        };
+        let name = host.secret_name();
+        let replaced = self
+            .secrets
+            .version(name.as_ref())
             .await
-            .map_err(|source| CredentialError::Store {
-                registry: host.to_string(),
-                source,
-            })?;
+            .map_err(store_error)?
+            .is_some();
+        let event = RegistryEvents::new(host.as_ref(), by).set(replaced);
+        let (_, event) = self
+            .secrets
+            .set_recorded(&name, &sealable, &event)
+            .await
+            .map_err(store_error)?;
         tracing::info!(registry = %host, "registry credential stored");
-        Ok(())
+        Ok(event)
     }
 
-    /// Removes the credential for `host`. Returns whether there was one.
-    pub async fn remove(&self, host: &RegistryHost) -> Result<bool, CredentialError> {
+    /// Removes the credential for `host`, recorded in the event log as done by `by`. Returns
+    /// the recorded event, or `None` when there was no credential (and nothing is recorded).
+    pub async fn remove(
+        &self,
+        host: &RegistryHost,
+        by: Option<&Operator>,
+    ) -> Result<Option<Event>, CredentialError> {
+        let event = RegistryEvents::new(host.as_ref(), by).deleted();
         self.secrets
-            .remove(&host.secret_name())
+            .remove_recorded(&host.secret_name(), &event)
             .await
             .map_err(|source| CredentialError::Store {
                 registry: host.to_string(),
@@ -351,7 +371,7 @@ mod tests {
 
     use super::*;
     use crate::secrets::SecretKey;
-    use crate::store::Store;
+    use crate::store::{EventKind, EventQuery, Store};
 
     const TOKEN: &str = "ghp_supersecrettoken";
 
@@ -423,13 +443,18 @@ mod tests {
         assert!(credentials.lookup("ghcr.io").await.unwrap().is_none());
 
         credentials
-            .set(&host("ghcr.io"), &RegistryCredential::new("bot", TOKEN))
+            .set(
+                &host("ghcr.io"),
+                &RegistryCredential::new("bot", TOKEN),
+                None,
+            )
             .await
             .unwrap();
         credentials
             .set(
                 &host("localhost:5000"),
                 &RegistryCredential::new("dev", "pw"),
+                None,
             )
             .await
             .unwrap();
@@ -453,7 +478,11 @@ mod tests {
 
         // Replacing keeps one entry; removing drops it.
         credentials
-            .set(&host("ghcr.io"), &RegistryCredential::new("bot2", "new"))
+            .set(
+                &host("ghcr.io"),
+                &RegistryCredential::new("bot2", "new"),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -465,9 +494,76 @@ mod tests {
                 .secret(),
             "new"
         );
-        assert!(credentials.remove(&host("ghcr.io")).await.unwrap());
-        assert!(!credentials.remove(&host("ghcr.io")).await.unwrap());
+        assert!(
+            credentials
+                .remove(&host("ghcr.io"), None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            credentials
+                .remove(&host("ghcr.io"), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(credentials.lookup("ghcr.io").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn setting_and_deleting_a_credential_is_recorded_without_its_token() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(&dir.path().join("state")).await.unwrap();
+        let credentials =
+            StoredCredentials::from(SecretStore::new(store.clone(), &SecretKey::generate()));
+        let by = Operator::from("octocat");
+        let ghcr = host("ghcr.io");
+        let set = credentials
+            .set(&ghcr, &RegistryCredential::new("bot", TOKEN), Some(&by))
+            .await
+            .unwrap();
+        assert_eq!(set.kind, EventKind::SecretSet);
+        assert_eq!(set.message, "Set the registry credential for ghcr.io");
+        let replaced = credentials
+            .set(
+                &ghcr,
+                &RegistryCredential::new("bot", "ghp_replacementtoken"),
+                Some(&by),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            replaced.message,
+            "Replaced the registry credential for ghcr.io"
+        );
+        let deleted = credentials.remove(&ghcr, Some(&by)).await.unwrap().unwrap();
+        assert_eq!(deleted.kind, EventKind::SecretDeleted);
+        assert_eq!(deleted.stack, None);
+        assert_eq!(deleted.subject.as_deref(), Some("/settings/registries"));
+        assert_eq!(
+            deleted.meta.as_deref(),
+            Some("scope registry · by @octocat")
+        );
+        // Deleting a credential that is not there records nothing.
+        assert!(
+            credentials
+                .remove(&ghcr, Some(&by))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let stored = store
+            .event_page(&EventQuery::default())
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(stored, [deleted, replaced, set]);
+        let all = format!("{stored:?}");
+        for secret in [TOKEN, "ghp_replacementtoken"] {
+            assert!(!all.contains(secret), "{secret} in {all}");
+        }
     }
 
     #[tokio::test]
@@ -480,7 +576,10 @@ mod tests {
             RegistryCredential::new("bot", ""),
             RegistryCredential::new("bot", format!("{TOKEN}\nmore")),
         ] {
-            let err = credentials.set(&host("ghcr.io"), &bad).await.unwrap_err();
+            let err = credentials
+                .set(&host("ghcr.io"), &bad, None)
+                .await
+                .unwrap_err();
             assert!(matches!(err, CredentialError::Invalid { .. }), "{err:?}");
             assert!(!err.to_string().contains(TOKEN), "{err}");
         }

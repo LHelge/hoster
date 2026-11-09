@@ -5,6 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, header};
 
 use super::*;
+use crate::orchestrator::Operator;
 use crate::web::auth::tests::{ORIGIN, TestApp, header as response_header};
 use crate::web::stacks::tests::{Call, FORM, SECRET_VALUE, body, encoded, post};
 
@@ -262,6 +263,7 @@ async fn saving_first_lists_the_services_to_redeploy_then_stores_on_confirmation
             format!("{SECRET_VALUE}\nline2")
         )]
     );
+    assert_eq!(app.stacks.operators(), [Operator::from("octocat")]);
 }
 
 #[tokio::test]
@@ -391,6 +393,7 @@ async fn deleting_a_referenced_secret_needs_its_name_typed() {
         app.stacks.calls(),
         [Call::DeleteSecret("notes".into(), "db".into())]
     );
+    assert_eq!(app.stacks.operators(), [Operator::from("octocat")]);
 }
 
 #[tokio::test]

@@ -42,7 +42,9 @@
 //! The event log (`event_log`, ADR-0055): producers record deploy outcomes, restarts,
 //! certificate outcomes and operator actions through [`EventLog`]
 //! ([`Orchestrator::event_log`]), which stores each one and announces it on `ui_events`; its
-//! retention task deletes events older than 30 days ([`EventLog::run_retention`]).
+//! retention task deletes events older than 30 days ([`EventLog::run_retention`]). The admin UI
+//! makes its operator actions through [`Orchestrator::by`], so their events name the signed-in
+//! handle; hoster's own start, update and rollback are [`HosterEvents`].
 
 #![allow(
     dead_code,
@@ -76,7 +78,7 @@ use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError, TrackedService};
 use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
 use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, VolumeMount, label};
-use crate::secrets::{SecretError, SecretStore};
+use crate::secrets::{SecretError, SecretStore, SecretValue};
 use crate::stack::{
     DeployCaller, Diagnostic, Digest, ImageRef, Name, PinnedImage, Stack, StackError,
 };
@@ -88,7 +90,8 @@ use crate::store::{
 use certs::CertHosts;
 pub use certs::CertStatus;
 use engine::{Run, Target};
-pub use event_log::EventLog;
+use event_log::OperatorEvents;
+pub use event_log::{EventLog, HosterEvents, Operator, RegistryEvents};
 pub use gc::GcSettings;
 use machine::Event;
 pub use plan::PlanError;
@@ -380,6 +383,54 @@ pub struct RemoveOutcome {
     pub containers: usize,
     /// The named volumes deleted; empty unless the request asked for it (ADR-0030).
     pub volumes: Vec<String>,
+}
+
+/// The operator actions of an [`Orchestrator`], done by one [`Operator`]
+/// ([`Orchestrator::by`]): each behaves like the orchestrator method of the same name and
+/// names the operator in the event it records (ADR-0055).
+pub struct Acting<'a, R> {
+    orchestrator: &'a Arc<Orchestrator<R>>,
+    operator: &'a Operator,
+}
+
+impl<R: ContainerRuntime> Acting<'_, R> {
+    /// See [`Orchestrator::apply`].
+    pub async fn apply(&self, toml: &str) -> Result<ApplyOutcome> {
+        self.orchestrator.apply_by(toml, Some(self.operator)).await
+    }
+
+    /// See [`Orchestrator::reresolve`].
+    pub async fn reresolve(&self, stack: &str, expected: u32) -> Result<Option<ApplyOutcome>> {
+        self.orchestrator
+            .reresolve_by(stack, expected, Some(self.operator))
+            .await
+    }
+
+    /// See [`Orchestrator::remove`].
+    pub async fn remove(&self, request: RemoveStack) -> Result<RemoveOutcome> {
+        self.orchestrator
+            .remove_by(request, Some(self.operator))
+            .await
+    }
+
+    /// See [`Orchestrator::set_secret`].
+    pub async fn set_secret(
+        &self,
+        stack: &str,
+        name: &str,
+        value: &SecretValue,
+    ) -> Result<SecretChange> {
+        self.orchestrator
+            .set_secret_by(stack, name, value, Some(self.operator))
+            .await
+    }
+
+    /// See [`Orchestrator::delete_secret`].
+    pub async fn delete_secret(&self, stack: &str, name: &str) -> Result<SecretChange> {
+        self.orchestrator
+            .delete_secret_by(stack, name, Some(self.operator))
+            .await
+    }
 }
 
 /// One stack as [`Orchestrator::status`] reports it.
@@ -769,8 +820,22 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// revision and redeploys every service whose (digest, config hash) changes.
     #[tracing::instrument(skip_all)]
     pub async fn apply(self: &Arc<Self>, toml: &str) -> Result<ApplyOutcome> {
+        self.apply_by(toml, None).await
+    }
+
+    /// [`apply`](Self::apply), recorded in the event log as done by `by`.
+    async fn apply_by(self: &Arc<Self>, toml: &str, by: Option<&Operator>) -> Result<ApplyOutcome> {
         let prepared = self.prepare(toml).await?;
-        self.store_and_redeploy(toml, prepared).await
+        self.store_and_redeploy(toml, prepared, by).await
+    }
+
+    /// The operator actions (apply, re-resolve, remove, secrets), recorded in the event log as
+    /// done by `operator` (ADR-0055): what the admin UI calls, with the signed-in handle.
+    pub fn by<'a>(self: &'a Arc<Self>, operator: &'a Operator) -> Acting<'a, R> {
+        Acting {
+            orchestrator: self,
+            operator,
+        }
     }
 
     /// What "re-resolve tags" (ADR-0025) would do for `stack`: its active revision previewed
@@ -792,6 +857,16 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         stack: &str,
         expected: u32,
     ) -> Result<Option<ApplyOutcome>> {
+        self.reresolve_by(stack, expected, None).await
+    }
+
+    /// [`reresolve`](Self::reresolve), recorded in the event log as done by `by`.
+    async fn reresolve_by(
+        self: &Arc<Self>,
+        stack: &str,
+        expected: u32,
+        by: Option<&Operator>,
+    ) -> Result<Option<ApplyOutcome>> {
         let revision = self.active_revision(stack).await?;
         let changed = |active: u32| OrchestratorError::RevisionChanged {
             stack: stack.to_owned(),
@@ -811,7 +886,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         if prepared.images == self.store.revision_images(revision.id).await? {
             return Ok(None);
         }
-        self.store_and_redeploy(&revision.toml, prepared)
+        self.store_and_redeploy(&revision.toml, prepared, by)
             .await
             .map(Some)
     }
@@ -825,11 +900,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self.store.latest_revision(stack).await?.ok_or_else(unknown)
     }
 
-    /// Stores a prepared stack file as the active revision and redeploys what changes.
+    /// Stores a prepared stack file as the active revision and redeploys what changes. The
+    /// revision's applied event (done `by`, ADR-0055) is stored with it.
     async fn store_and_redeploy(
         self: &Arc<Self>,
         toml: &str,
         prepared: Prepared,
+        by: Option<&Operator>,
     ) -> Result<ApplyOutcome> {
         let Prepared {
             definition,
@@ -839,8 +916,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             noop,
         } = prepared;
         let name = definition.name.to_string();
-        let revision = self.store.add_pinned_revision(&name, toml, &images).await?;
+        let (revision, event) = self
+            .store
+            .add_pinned_revision_recorded(&name, toml, &images, |revision| {
+                OperatorEvents::new(&name, by).applied(revision)
+            })
+            .await?;
         tracing::info!(stack = %name, revision = revision.revision, "applied stack revision");
+        self.events.announce(event);
         // Certificates are requested now, before any image is deployed (ADR-0036).
         self.lock().certs.apply(&definition);
         let deployment = if noop && !self.is_busy(&name) {
@@ -1109,13 +1192,24 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// that was removed earlier with its volumes kept, it deletes just those volumes.
     #[tracing::instrument(skip(self), fields(stack = %request.stack))]
     pub async fn remove(self: &Arc<Self>, request: RemoveStack) -> Result<RemoveOutcome> {
+        self.remove_by(request, None).await
+    }
+
+    /// [`remove`](Self::remove), recorded in the event log as done by `by`. The removal event
+    /// is stored with the removal itself; the stack has no foreign key in the event log, so its
+    /// events outlive it (ADR-0055).
+    async fn remove_by(
+        self: &Arc<Self>,
+        request: RemoveStack,
+        by: Option<&Operator>,
+    ) -> Result<RemoveOutcome> {
         request.check()?;
         let stack = request.stack.as_str();
         let unknown = || OrchestratorError::UnknownStack(stack.to_owned());
         let name: Name = stack.parse().map_err(|_| unknown())?;
         if self.store.stack(stack).await?.is_none() {
             if request.delete_volumes && !self.store.revisions(stack).await?.is_empty() {
-                return self.remove_leftover_volumes(&name).await;
+                return self.remove_leftover_volumes(&name, by).await;
             }
             return Err(unknown());
         }
@@ -1179,7 +1273,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         } else {
             Vec::new()
         };
-        self.store.remove_stack(stack).await?;
+        let event = OperatorEvents::new(stack, by).removed(request.delete_volumes, &volumes);
+        if let Some(event) = self.store.remove_stack_recorded(stack, &event).await? {
+            self.events.announce(event);
+        }
         {
             // The routes go with the slot, in one critical section.
             let mut state = self.lock();
@@ -1201,7 +1298,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
     /// Deletes the kept volumes of a stack that is removed already. The stack's slot is marked
     /// as being removed meanwhile, so an apply cannot start a deployment that mounts them.
-    async fn remove_leftover_volumes(&self, stack: &Name) -> Result<RemoveOutcome> {
+    async fn remove_leftover_volumes(
+        &self,
+        stack: &Name,
+        by: Option<&Operator>,
+    ) -> Result<RemoveOutcome> {
         {
             let mut state = self.lock();
             let slot = state.slots.entry(stack.to_string()).or_default();
@@ -1221,6 +1322,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self.reconciled(stack.as_ref()).await;
         let volumes = self.remove_volumes(stack).await?;
         tracing::info!(%stack, volumes = volumes.len(), "deleted the volumes of a removed stack");
+        if let Some(event) = OperatorEvents::new(stack.as_ref(), by).volumes_deleted(&volumes) {
+            self.events.record(event).await;
+        }
         Ok(RemoveOutcome {
             containers: 0,
             volumes,
@@ -1762,6 +1866,8 @@ mod deploy_events_tests;
 mod gc_tests;
 #[cfg(test)]
 mod monitor_tests;
+#[cfg(test)]
+mod operator_events_tests;
 #[cfg(test)]
 mod poller_tests;
 #[cfg(test)]

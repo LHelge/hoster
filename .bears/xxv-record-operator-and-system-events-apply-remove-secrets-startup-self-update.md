@@ -1,10 +1,10 @@
 ---
 id: xxv
 title: "Record operator and system events: apply/remove, secrets, startup, self-update"
-status: open
+status: done
 priority: P2
 created: "2026-11-09T14:05:07.931510925Z"
-updated: "2026-11-09T14:05:07.931510925Z"
+updated: "2026-11-09T16:17:01.322695875Z"
 tags:
   - orchestrator
   - update
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - nbj
 parent: "4qj"
+attempts: 1
 ---
 
 ## Summary

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::engine::Target;
-use super::{DeployOutcome, Orchestrator, OrchestratorError, Result};
+use super::{DeployOutcome, Operator, OperatorEvents, Orchestrator, OrchestratorError, Result};
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretName, SecretValue};
 use crate::stack::Stack;
@@ -75,18 +75,32 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
     /// Sets (or replaces) the secret `name` of `stack` and redeploys the services that
     /// reference it (ADR-0049). The value is never logged.
-    #[tracing::instrument(skip(self, value))]
     pub async fn set_secret(
         self: &Arc<Self>,
         stack: &str,
         name: &str,
         value: &SecretValue,
     ) -> Result<SecretChange> {
-        let secret = Self::secret_name(stack, name)?;
+        self.set_secret_by(stack, name, value, None).await
+    }
+
+    /// [`set_secret`](Self::set_secret), recorded in the event log (by name, never the value)
+    /// as done by `by` (ADR-0055).
+    #[tracing::instrument(skip(self, value))]
+    pub(super) async fn set_secret_by(
+        self: &Arc<Self>,
+        stack: &str,
+        name: &str,
+        value: &SecretValue,
+        by: Option<&Operator>,
+    ) -> Result<SecretChange> {
+        let (secret, short) = Self::secret_name(stack, name)?;
         let revision = self.active_revision(stack).await?;
         let definition: Stack = revision.toml.parse()?;
         let existed = self.secrets.version(secret.as_ref()).await?.is_some();
-        self.secrets.set(&secret, value).await?;
+        let event = OperatorEvents::new(stack, by).secret_set(short, existed);
+        let (_, event) = self.secrets.set_recorded(&secret, value, &event).await?;
+        self.events.announce(event);
         self.redeploy_for(revision, definition, secret, existed)
             .await
     }
@@ -95,22 +109,33 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// (ADR-0049). Those deploys fail until the secret is set again or the stack stops
     /// referencing it; the running containers keep serving meanwhile. The UI asks for a typed
     /// confirmation first.
-    #[tracing::instrument(skip(self))]
     pub async fn delete_secret(self: &Arc<Self>, stack: &str, name: &str) -> Result<SecretChange> {
-        let secret = Self::secret_name(stack, name)?;
+        self.delete_secret_by(stack, name, None).await
+    }
+
+    /// [`delete_secret`](Self::delete_secret), recorded in the event log as done by `by`
+    /// (ADR-0055). Deleting a secret that does not exist records nothing.
+    #[tracing::instrument(skip(self))]
+    pub(super) async fn delete_secret_by(
+        self: &Arc<Self>,
+        stack: &str,
+        name: &str,
+        by: Option<&Operator>,
+    ) -> Result<SecretChange> {
+        let (secret, short) = Self::secret_name(stack, name)?;
         let revision = self.active_revision(stack).await?;
         let definition: Stack = revision.toml.parse()?;
-        let existed = self.secrets.remove(&secret).await?;
-        if !existed {
+        let event = OperatorEvents::new(stack, by).secret_deleted(short);
+        let Some(event) = self.secrets.remove_recorded(&secret, &event).await? else {
             return Ok(SecretChange {
                 secret: secret.to_string(),
-                existed,
+                existed: false,
                 services: Vec::new(),
                 deployment: None,
             });
-        }
-        self.redeploy_for(revision, definition, secret, existed)
-            .await
+        };
+        self.events.announce(event);
+        self.redeploy_for(revision, definition, secret, true).await
     }
 
     /// Redeploys `revision` (the stack's active one, parsed as `definition`) for a change of
@@ -149,16 +174,18 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         Ok(self.active_revision(stack).await?.toml.parse()?)
     }
 
-    /// `<stack>/<name>`, where `name` is one segment as stack files may reference it.
-    fn secret_name(stack: &str, name: &str) -> Result<SecretName> {
-        let full = format!("{stack}/{}", name.trim());
-        if name.trim().contains('/') {
+    /// `<stack>/<name>`, where `name` is one segment as stack files may reference it, and that
+    /// segment as stored (trimmed): what the event log names the secret by.
+    fn secret_name<'n>(stack: &str, name: &'n str) -> Result<(SecretName, &'n str)> {
+        let short = name.trim();
+        let full = format!("{stack}/{short}");
+        if short.contains('/') {
             return Err(OrchestratorError::Secret(SecretError::InvalidName {
                 name: full,
                 reason: "the name within the stack must not contain `/`".to_owned(),
             }));
         }
-        Ok(full.parse()?)
+        Ok((full.parse()?, short))
     }
 
     /// Secret name → the services that reference it.

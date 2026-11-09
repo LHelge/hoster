@@ -42,6 +42,7 @@ impl RegistryControl for FakeRegistries {
         &self,
         host: &RegistryHost,
         credential: &RegistryCredential,
+        _by: &Operator,
     ) -> Result<(), CredentialError> {
         let mut stored = self.stored.lock().unwrap();
         stored.retain(|(h, _)| h != host);
@@ -49,7 +50,7 @@ impl RegistryControl for FakeRegistries {
         Ok(())
     }
 
-    async fn remove(&self, host: &RegistryHost) -> Result<bool, CredentialError> {
+    async fn remove(&self, host: &RegistryHost, _by: &Operator) -> Result<bool, CredentialError> {
         let mut stored = self.stored.lock().unwrap();
         let before = stored.len();
         stored.retain(|(h, _)| h != host);

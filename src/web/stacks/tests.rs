@@ -164,6 +164,8 @@ pub struct FakeStacks {
     pub events: broadcast::Sender<UiEvent>,
     /// Volumes only earlier revisions declared, by podman name (`hoster-<stack>-<volume>`).
     pub earlier_volumes: Mutex<Vec<String>>,
+    /// Who did each operator action (apply, re-resolve, remove, secrets), in order.
+    pub operators: Mutex<Vec<Operator>>,
 }
 
 impl Default for FakeStacks {
@@ -180,6 +182,7 @@ impl Default for FakeStacks {
             rejections: Mutex::new(Vec::new()),
             events: broadcast::channel(16).0,
             earlier_volumes: Mutex::new(Vec::new()),
+            operators: Mutex::new(Vec::new()),
         }
     }
 }
@@ -187,6 +190,15 @@ impl Default for FakeStacks {
 impl FakeStacks {
     fn record(&self, call: Call) {
         self.calls.lock().unwrap().push(call);
+    }
+
+    /// The operator action was done `by`.
+    fn acted(&self, by: &Operator) {
+        self.operators.lock().unwrap().push(by.clone());
+    }
+
+    pub fn operators(&self) -> Vec<Operator> {
+        self.operators.lock().unwrap().clone()
     }
 
     pub fn calls(&self) -> Vec<Call> {
@@ -227,8 +239,9 @@ impl StackControl for FakeStacks {
         })
     }
 
-    async fn apply(&self, toml: &str) -> Result<ApplyOutcome, OrchestratorError> {
+    async fn apply(&self, toml: &str, by: &Operator) -> Result<ApplyOutcome, OrchestratorError> {
         self.record(Call::Apply(toml.into()));
+        self.acted(by);
         let stack = Stack::parse(toml)?.stack.name.to_string();
         let changed = self.changed.lock().unwrap().clone();
         Ok(ApplyOutcome {
@@ -319,8 +332,13 @@ impl StackControl for FakeStacks {
         Ok(())
     }
 
-    async fn remove(&self, request: RemoveStack) -> Result<RemoveOutcome, OrchestratorError> {
+    async fn remove(
+        &self,
+        request: RemoveStack,
+        by: &Operator,
+    ) -> Result<RemoveOutcome, OrchestratorError> {
         self.record(Call::Remove(request.clone()));
+        self.acted(by);
         if self.current(&request.stack).is_none() {
             return Err(OrchestratorError::UnknownStack(request.stack));
         }
@@ -455,8 +473,10 @@ impl StackControl for FakeStacks {
         &self,
         stack: &str,
         expected: u32,
+        by: &Operator,
     ) -> Result<Option<ApplyOutcome>, OrchestratorError> {
         self.record(Call::Reresolve(stack.into(), expected));
+        self.acted(by);
         let status = self
             .current(stack)
             .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
@@ -492,7 +512,9 @@ impl StackControl for FakeStacks {
         stack: &str,
         name: &str,
         value: &SecretValue,
+        by: &Operator,
     ) -> Result<SecretChange, OrchestratorError> {
+        self.acted(by);
         self.record(Call::SetSecret(
             stack.into(),
             name.into(),
@@ -516,8 +538,10 @@ impl StackControl for FakeStacks {
         &self,
         stack: &str,
         name: &str,
+        by: &Operator,
     ) -> Result<SecretChange, OrchestratorError> {
         self.record(Call::DeleteSecret(stack.into(), name.into()));
+        self.acted(by);
         let current = self.secrets(stack).await?;
         let found = current
             .iter()
@@ -1258,6 +1282,8 @@ async fn confirming_applies_and_sends_the_browser_to_the_deployment() {
         "/stacks/notes/deployments/7"
     );
     assert_eq!(app.stacks.calls(), [Call::Apply(NOTES.into())]);
+    // The signed-in handle is who applied it, for the event log (ADR-0055).
+    assert_eq!(app.stacks.operators(), [Operator::from("octocat")]);
 
     // Nothing changes: applied, but nothing to follow.
     app.stacks.changed.lock().unwrap().clear();
@@ -1399,6 +1425,7 @@ async fn remove_needs_the_stack_name_typed() {
             Call::Remove(RemoveStack::deleting_volumes("notes", "notes")),
         ]
     );
+    assert_eq!(app.stacks.operators(), vec![Operator::from("octocat"); 2]);
 }
 
 #[tokio::test]

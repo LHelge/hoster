@@ -37,10 +37,11 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
+use super::auth::Session;
 use super::pages::{FlashKind, Layout, Page, Section, Shell};
 use crate::orchestrator::{
-    ApplyOutcome, ApplyPreview, DeployOutcome, Orchestrator, OrchestratorError, RemoveOutcome,
-    RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent, WebhookDeploy,
+    ApplyOutcome, ApplyPreview, DeployOutcome, Operator, Orchestrator, OrchestratorError,
+    RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent, WebhookDeploy,
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
@@ -67,8 +68,9 @@ pub trait StackControl: Send + Sync + 'static {
     /// What applying `toml` would do; see [`Orchestrator::preview`].
     async fn preview(&self, toml: &str) -> Result<ApplyPreview, OrchestratorError>;
 
-    /// Applies `toml` and redeploys what changes; see [`Orchestrator::apply`].
-    async fn apply(&self, toml: &str) -> Result<ApplyOutcome, OrchestratorError>;
+    /// Applies `toml` and redeploys what changes, done `by` the signed-in operator; see
+    /// [`Orchestrator::apply`].
+    async fn apply(&self, toml: &str, by: &Operator) -> Result<ApplyOutcome, OrchestratorError>;
 
     /// A manual deploy of `images` (CI-built services only); see [`Orchestrator::deploy`].
     async fn deploy(
@@ -87,8 +89,12 @@ pub trait StackControl: Send + Sync + 'static {
     async fn record_rejection(&self, rejection: &WebhookRejection)
     -> Result<(), OrchestratorError>;
 
-    /// See [`Orchestrator::remove`].
-    async fn remove(&self, request: RemoveStack) -> Result<RemoveOutcome, OrchestratorError>;
+    /// See [`Orchestrator::remove`]; done `by` the signed-in operator.
+    async fn remove(
+        &self,
+        request: RemoveStack,
+        by: &Operator,
+    ) -> Result<RemoveOutcome, OrchestratorError>;
 
     /// See [`Orchestrator::deployment`].
     async fn deployment(
@@ -122,29 +128,32 @@ pub trait StackControl: Send + Sync + 'static {
     /// See [`Orchestrator::reresolve_preview`].
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError>;
 
-    /// See [`Orchestrator::reresolve`].
+    /// See [`Orchestrator::reresolve`]; done `by` the signed-in operator.
     async fn reresolve(
         &self,
         stack: &str,
         expected: u32,
+        by: &Operator,
     ) -> Result<Option<ApplyOutcome>, OrchestratorError>;
 
     /// See [`Orchestrator::secrets`].
     async fn secrets(&self, stack: &str) -> Result<Vec<StackSecret>, OrchestratorError>;
 
-    /// See [`Orchestrator::set_secret`].
+    /// See [`Orchestrator::set_secret`]; done `by` the signed-in operator.
     async fn set_secret(
         &self,
         stack: &str,
         name: &str,
         value: &SecretValue,
+        by: &Operator,
     ) -> Result<SecretChange, OrchestratorError>;
 
-    /// See [`Orchestrator::delete_secret`].
+    /// See [`Orchestrator::delete_secret`]; done `by` the signed-in operator.
     async fn delete_secret(
         &self,
         stack: &str,
         name: &str,
+        by: &Operator,
     ) -> Result<SecretChange, OrchestratorError>;
 }
 
@@ -162,8 +171,8 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         Orchestrator::preview(self, toml).await
     }
 
-    async fn apply(&self, toml: &str) -> Result<ApplyOutcome, OrchestratorError> {
-        Orchestrator::apply(self, toml).await
+    async fn apply(&self, toml: &str, by: &Operator) -> Result<ApplyOutcome, OrchestratorError> {
+        self.by(by).apply(toml).await
     }
 
     async fn deploy(
@@ -188,8 +197,12 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         Orchestrator::record_rejection(self, rejection).await
     }
 
-    async fn remove(&self, request: RemoveStack) -> Result<RemoveOutcome, OrchestratorError> {
-        Orchestrator::remove(self, request).await
+    async fn remove(
+        &self,
+        request: RemoveStack,
+        by: &Operator,
+    ) -> Result<RemoveOutcome, OrchestratorError> {
+        self.by(by).remove(request).await
     }
 
     async fn deployment(
@@ -236,8 +249,9 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         &self,
         stack: &str,
         expected: u32,
+        by: &Operator,
     ) -> Result<Option<ApplyOutcome>, OrchestratorError> {
-        Orchestrator::reresolve(self, stack, expected).await
+        self.by(by).reresolve(stack, expected).await
     }
 
     async fn secrets(&self, stack: &str) -> Result<Vec<StackSecret>, OrchestratorError> {
@@ -249,16 +263,18 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         stack: &str,
         name: &str,
         value: &SecretValue,
+        by: &Operator,
     ) -> Result<SecretChange, OrchestratorError> {
-        Orchestrator::set_secret(self, stack, name, value).await
+        self.by(by).set_secret(stack, name, value).await
     }
 
     async fn delete_secret(
         &self,
         stack: &str,
         name: &str,
+        by: &Operator,
     ) -> Result<SecretChange, OrchestratorError> {
-        Orchestrator::delete_secret(self, stack, name).await
+        self.by(by).delete_secret(stack, name).await
     }
 }
 
@@ -322,9 +338,10 @@ impl Stacks {
     /// sends the browser to the deployment, or says that nothing needed redeploying.
     pub async fn apply(
         Extension(stacks): Extension<Stacks>,
+        Extension(session): Extension<Session>,
         StackFile(toml): StackFile,
     ) -> Response {
-        match stacks.0.apply(&toml).await {
+        match stacks.0.apply(&toml, &session.login().into()).await {
             Ok(outcome) => Self::applied(outcome),
             Err(err) => {
                 ApplyFailed::new(Attempt::Apply, Outcome::from(err).quoting(&toml)).into_response()
@@ -352,10 +369,15 @@ impl Stacks {
     /// redeploys the services they move (ADR-0025, ADR-0049).
     pub async fn reresolve(
         Extension(stacks): Extension<Stacks>,
+        Extension(session): Extension<Session>,
         Path(name): Path<String>,
         Form(form): Form<ReresolveForm>,
     ) -> Response {
-        match stacks.0.reresolve(&name, form.revision).await {
+        match stacks
+            .0
+            .reresolve(&name, form.revision, &session.login().into())
+            .await
+        {
             Ok(Some(outcome)) => Self::applied(outcome),
             Ok(None) => Outcome::success(format!(
                 "Every tag of {name} still resolves to the digest it runs; nothing changed."
@@ -427,6 +449,7 @@ impl Stacks {
     /// keeping its volumes unless asked to delete them (ADR-0030).
     pub async fn remove(
         Extension(stacks): Extension<Stacks>,
+        Extension(session): Extension<Session>,
         Path(name): Path<String>,
         Form(form): Form<RemoveForm>,
     ) -> Response {
@@ -443,7 +466,7 @@ impl Stacks {
         } else {
             RemoveStack::keeping_volumes(&name)
         };
-        match stacks.0.remove(request).await {
+        match stacks.0.remove(request, &session.login().into()).await {
             Ok(removed) => {
                 let volumes = if removed.volumes.is_empty() {
                     if form.delete_volumes.is_some() {

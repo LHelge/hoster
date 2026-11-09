@@ -189,6 +189,7 @@ impl WebApp {
             admin_host: config.admin_host.to_string().to_ascii_lowercase(),
             directory: AcmeDirectory::from(config.acme.directory_url.as_str()),
         };
+        let registry = registry.recorded(orchestrator.event_log());
         Ok(WebApp::new(
             auth,
             runtime,

@@ -318,6 +318,16 @@ async fn updating_switches_and_requests_a_graceful_shutdown() {
         shutdown.is_requested(),
         "the supervisor is asked to restart"
     );
+    // The event log names the signed-in operator who updated (ADR-0055).
+    let store = host.store().await;
+    let query = crate::store::EventQuery {
+        kinds: [crate::store::EventKind::HosterUpdated].into(),
+        ..Default::default()
+    };
+    let events = store.event_page(&query).await.unwrap().events;
+    store.close().await;
+    let metas: Vec<_> = events.iter().map(|e| e.meta.as_deref()).collect();
+    assert_eq!(metas, [Some("v0.1.0 → v0.2.0 · by @octocat")]);
 }
 
 #[tokio::test]

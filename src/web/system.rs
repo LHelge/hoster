@@ -27,10 +27,12 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use self::host::Fact;
+use super::auth::Session;
 use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::Outcome;
 use super::ui::Uptime;
 use crate::installation::Version;
+use crate::orchestrator::Operator;
 use crate::supervisor::ShutdownRequest;
 use crate::update::{
     InstalledVersions, SourceError, UpdateCheck, UpdateError, UpdateOutcome, Updater,
@@ -208,6 +210,7 @@ impl System {
     /// hoster down gracefully so systemd starts it.
     pub async fn update(
         Extension(system): Extension<System>,
+        Extension(session): Extension<Session>,
         Form(form): Form<UpdateForm>,
     ) -> Response {
         let version: Version = match form.version.trim().parse() {
@@ -233,7 +236,8 @@ impl System {
                 return Outcome::error(StatusCode::CONFLICT, blocked.to_string()).into_response();
             }
         }
-        match system.updater().update(Some(&version)).await {
+        let by = Operator::from(session.login());
+        match system.updater().update_by(Some(&version), Some(&by)).await {
             Ok(UpdateOutcome::UpToDate { running }) => Outcome::success(format!(
                 "hoster {running} is already running; nothing to do."
             ))
