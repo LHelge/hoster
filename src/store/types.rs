@@ -833,6 +833,14 @@ impl Event {
     }
 }
 
+#[cfg(test)]
+impl Event {
+    /// Whether a page that starts at `cursor` holds this event, as the store pages; for fakes.
+    pub(crate) fn is_older_than(&self, cursor: EventCursor) -> bool {
+        (self.at, self.id) < (cursor.at, cursor.id)
+    }
+}
+
 /// A position in the event log, newest first: a page that starts at it holds only the events
 /// older than the event it was taken from. Written as `<at>.<id>`, e.g. in a "more" link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

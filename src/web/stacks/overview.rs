@@ -3,13 +3,14 @@
 //!
 //! The overview opens with the stack's KPI tiles and its slowest routes, from hoster's
 //! in-process statistics (ADR-0045), then shows the services with their containers, the routes
-//! and named volumes of the active revision, the form that deploys
-//! explicit digests to the CI-built services, a link to apply a new revision, the refused
-//! webhook deploys (ADR-0047) and, last, the danger zone: removing the stack once its name is
-//! typed (ADR-0030). The danger zone says what goes (containers, network, routes) and what stays
-//! (revisions, history, and the volumes unless they are ticked for deletion), and lists the
-//! volumes ticking deletes: those of every revision, as [`Orchestrator::volumes`] finds them,
-//! with where the active revision mounts each.
+//! and named volumes of the active revision, the stack's Recent events (ADR-0055, kept live by
+//! their own stream at `/stacks/{name}/events`, [`StackFeed`]), the form that deploys explicit
+//! digests to the CI-built services, a link to apply a new revision, the refused webhook deploys
+//! (ADR-0047) and, last, the danger zone: removing the stack once its name is typed (ADR-0030).
+//! The danger zone says what goes (containers, network, routes) and what stays (revisions,
+//! history, and the volumes unless they are ticked for deletion), and lists the volumes ticking
+//! deletes: those of every revision, as [`Orchestrator::volumes`] finds them, with where the
+//! active revision mounts each.
 //!
 //! The tiles, the slowest routes and the routes card are built in `figures.rs`; the services
 //! table, which lists the stack's containers too, in `services.rs`.
@@ -20,10 +21,11 @@ mod figures;
 mod services;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use askama::Template;
 use axum::Extension;
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 
 use self::figures::{Figures, Readings, RouteRow, SlowRoute};
@@ -39,7 +41,9 @@ use crate::runtime::VolumeMount;
 use crate::stack::Stack;
 use crate::stats::{Elapsed, Stats};
 use crate::store::WebhookRejection;
+use crate::web::auth::{Auth, Session};
 use crate::web::containers::Containers;
+use crate::web::events::{RecentEvents, StackFeed};
 use crate::web::pages::{Layout, Page, Section, Shell};
 use crate::web::ui::Kpi;
 
@@ -57,7 +61,9 @@ impl Stacks {
             Ok(status) => status,
             Err(outcome) => return outcome.page(layout),
         };
-        let volumes = match stacks.0.volumes(&name).await {
+        let feed = StackFeed::new(stacks.clone(), &name);
+        let (volumes, events) = tokio::join!(stacks.0.volumes(&name), feed.read());
+        let volumes = match volumes {
             Ok(volumes) => volumes,
             Err(err) => return Outcome::from(err).page(layout),
         };
@@ -72,9 +78,31 @@ impl Stacks {
         Page(StackPage {
             layout,
             header: stacks.header(&status, Tab::Overview).await,
-            stack: StackView::new(&status, volumes, containers, &Readings::of(&stats).await),
+            stack: StackView::new(
+                &status,
+                volumes,
+                containers,
+                events,
+                &Readings::of(&stats).await,
+            ),
         })
         .into_response()
+    }
+
+    /// `GET /stacks/{name}/events`: the overview's Recent events card as `text/event-stream`,
+    /// sent again as the stack's events are recorded, until the session ends.
+    pub async fn events(
+        State(auth): State<Arc<Auth>>,
+        Extension(stacks): Extension<Stacks>,
+        Extension(session): Extension<Session>,
+        Path(name): Path<String>,
+    ) -> Response {
+        // Subscribed before the stack is looked up, so no event between the two is missed.
+        let events = stacks.subscribe();
+        if let Err(outcome) = stacks.find(&name).await {
+            return outcome.into_response();
+        }
+        StackFeed::new(stacks, &name).respond(events, auth, session)
     }
 }
 
@@ -108,6 +136,8 @@ pub struct StackView {
     slowest: Vec<SlowRoute>,
     /// The routes of the active revision, for the routes card.
     route_rows: Vec<RouteRow>,
+    /// The stack's newest events.
+    events: RecentEvents,
     now: std::time::SystemTime,
 }
 
@@ -122,6 +152,11 @@ impl StackView {
 
     pub fn remove_url(&self) -> String {
         format!("{}/remove", self.url)
+    }
+
+    /// The stream that keeps the Recent events card live.
+    pub fn events_url(&self) -> String {
+        StackFeed::url(&self.name)
     }
 
     /// The services that take their digest from deploys.
@@ -162,11 +197,13 @@ impl StackView {
 
 impl StackView {
     /// The overview of `status`, whose revisions declare `volumes` (podman names), with its
-    /// `containers` (or why they cannot be listed) and the figures of `readings`.
+    /// `containers` (or why they cannot be listed), `events` as its Recent events card and the
+    /// figures of `readings`.
     fn new(
         status: &StackStatus,
         volumes: BTreeSet<String>,
         containers: Result<StackContainers, String>,
+        events: RecentEvents,
         readings: &Readings,
     ) -> Self {
         let stack = status.revision.toml.parse::<Stack>().ok();
@@ -177,6 +214,7 @@ impl StackView {
             kpis: figures.kpis,
             slowest: figures.slowest,
             route_rows: figures.routes,
+            events,
             url: Self::url(&status.name),
             name: status.name.clone(),
             deployable: services.rows.iter().any(|s| s.ci_built),
@@ -297,6 +335,7 @@ mod tests {
             &notes_status(),
             BTreeSet::new(),
             Ok(StackContainers::default()),
+            RecentEvents::of_stack("notes", Some(Vec::new()), std::time::SystemTime::now()),
             &Readings::default(),
         );
         assert_eq!(view.service_names(), "api, storage");

@@ -449,7 +449,8 @@ impl StackControl for FakeStacks {
         self.events.subscribe()
     }
 
-    /// Like the store: the query's stack, newest first, at most its limit (no paging).
+    /// Like the store: the query's events, newest first, a page of at most its limit from its
+    /// cursor, with where the next page starts.
     async fn event_page(&self, query: &EventQuery) -> Result<EventPage, OrchestratorError> {
         let mut events: Vec<_> = self
             .log
@@ -459,11 +460,14 @@ impl StackControl for FakeStacks {
             .filter(|e| query.stack.is_none() || e.stack == query.stack)
             .filter(|e| query.kinds.is_empty() || query.kinds.contains(&e.kind))
             .filter(|e| e.severity >= query.min_severity)
+            .filter(|e| query.before.is_none_or(|cursor| e.is_older_than(cursor)))
             .cloned()
             .collect();
         events.sort_by_key(|e| std::cmp::Reverse((e.at, e.id)));
-        events.truncate(query.limit as usize);
-        Ok(EventPage { events, next: None })
+        let limit = query.limit.clamp(1, EventQuery::MAX) as usize;
+        let next = (events.len() > limit).then(|| events[limit - 1].cursor());
+        events.truncate(limit);
+        Ok(EventPage { events, next })
     }
 
     async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview, OrchestratorError> {

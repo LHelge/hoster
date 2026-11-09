@@ -1,10 +1,10 @@
 ---
 id: "4ft"
 title: Per-stack event feed and the Events page; document the event log
-status: open
+status: done
 priority: P2
 created: "2026-11-09T14:05:41.564105124Z"
-updated: "2026-11-09T14:05:41.564105124Z"
+updated: "2026-11-09T17:09:51.319380329Z"
 tags:
   - web
   - ui
@@ -13,6 +13,7 @@ tags:
 depends_on:
   - pks
 parent: "4qj"
+attempts: 1
 ---
 
 ## Summary

@@ -1254,6 +1254,19 @@ ol.events-feed { margin: 0; padding: 6px 0; list-style: none; }
 .event-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .event-message { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .event-meta { color: var(--muted); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+/* The Events page (src/web/events/page.rs): two filter rows and the stack form, then the feed
+   with its older/newest links. */
+.event-filters { display: flex; flex-direction: column; gap: 10px; margin: 0 0 18px; }
+.event-filters .filters { margin: 0; }
+.event-stack-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font: 12px/1.4 var(--mono); }
+.event-stack-filter label { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+.event-stack-filter input { width: 14rem; max-width: 100%; min-height: 30px; padding: 4px 8px; font: 12px/1.4 var(--mono); }
+.event-stack-filter button { min-height: 30px; padding: 0 12px; font: 500 12px/1.2 var(--mono); }
+.event-pager { display: flex; justify-content: space-between; gap: 12px; font-family: var(--mono); }
+.event-pager a[rel="next"] { margin-left: auto; }
+@media (max-width: 760px) {
+  .event-stack-filter input, .event-stack-filter button { min-height: 44px; }
+}
 
 /* System (src/web/system.rs): a version card beside the update card, then the host's facts. */
 .system-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; margin: 0 0 16px; }

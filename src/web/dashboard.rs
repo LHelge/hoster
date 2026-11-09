@@ -297,7 +297,7 @@ struct Readings {
 
 impl Readings {
     async fn gather(stacks: &Stacks, stats: &Stats, certificates: &Certificates) -> Self {
-        let query = RecentEvents::query();
+        let query = RecentEvents::query(None);
         let (status, deployments, glance, events) = tokio::join!(
             stacks.status(),
             stats.deployments(),

@@ -1349,6 +1349,7 @@ async fn ui_preview() {
         ("/settings/proxy", "Settings: reverse proxy"),
         ("/settings/certificates", "Settings: certificates (ACME)"),
         ("/system", "System"),
+        ("/activity", "Events"),
         (
             "/containers/hoster-legacy-web-g3/logs",
             "Container logs: leftover of a removed stack",
@@ -1364,6 +1365,16 @@ async fn ui_preview() {
     preview.write(
         "states/stacks-degraded.html",
         "Stacks: degraded only",
+        &html,
+    );
+
+    // The Events page filtered to one stack's warnings and worse.
+    let html = session
+        .get("/activity?stack=shop&severity=warning", StatusCode::OK)
+        .await;
+    preview.write(
+        "states/events-shop-warnings.html",
+        "Events: shop, warnings and worse",
         &html,
     );
 
@@ -1584,6 +1595,7 @@ async fn ui_preview() {
         ),
         ("/settings/registries", "Empty: registries"),
         ("/system", "Empty: system (not an installed layout)"),
+        ("/activity", "Empty: no events"),
     ] {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("empty", url), label, &html);

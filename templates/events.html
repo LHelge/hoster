@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Events{% endblock %}
+{% block heading %}Events{% endblock %}
+{% block actions %}<span class="card-note">kept 30 days</span>{% endblock %}
+{% block content %}
+<div class="event-filters">
+  <nav class="filters" aria-label="Kind filter">
+    {%- for link in groups %}
+    <a class="filter" href="{{ link.href }}"{% if link.current %} aria-current="page"{% endif %}>{{ link.label }}</a>
+    {%- endfor %}
+  </nav>
+  <nav class="filters" aria-label="Severity filter">
+    {%- for link in severities %}
+    <a class="filter" href="{{ link.href }}"{% if link.current %} aria-current="page"{% endif %}>{{ link.label }}</a>
+    {%- endfor %}
+  </nav>
+  <form class="event-stack-filter" method="get" action="{{ self.path() }}">
+    {%- for (name, value) in self.kept() %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+    {%- endfor %}
+    <label>stack <input type="text" name="stack" value="{{ self.stack() }}" list="event-stacks" placeholder="every stack" autocomplete="off" spellcheck="false"></label>
+    <datalist id="event-stacks">
+      {%- for name in stacks %}
+      <option value="{{ name }}">
+      {%- endfor %}
+    </datalist>
+    <button type="submit">Show</button>
+    {%- if let Some(href) = self.all_stacks() %}
+    <a href="{{ href }}">every stack</a>
+    {%- endif %}
+  </form>
+</div>
+
+<section class="card" aria-labelledby="events-title">
+  <header class="card-head">
+    <h2 id="events-title">{% if let Some(stack) = filters.stack %}Events of {{ stack }}{% else %}Every event{% endif %}</h2>
+    <span class="card-note">newest first</span>
+  </header>
+  {%- if let Some(rows) = rows %}
+  {%- if rows.is_empty() %}
+  <p class="card-body muted">{% if newest.is_some() %}No older events.{% else if self.unfiltered().is_some() %}No events match these filters.{% else %}No events yet. Deploys, restarts, certificates and operator actions show up here as they happen.{% endif %}{% if let Some(href) = self.unfiltered() %} <a href="{{ href }}">Show every event</a>{% endif %}</p>
+  {%- else %}
+  <ol class="events-feed">
+    {%- for row in rows %}
+    {{ row|safe }}
+    {%- endfor %}
+  </ol>
+  {%- endif %}
+  {%- else %}
+  <p class="card-body card-error">The events cannot be read right now.</p>
+  {%- endif %}
+  {%- if older.is_some() || newest.is_some() %}
+  <nav class="card-foot event-pager" aria-label="Pages">
+    {%- if let Some(href) = newest %}<a href="{{ href }}">← newest</a>{% endif %}
+    {%- if let Some(href) = older %}<a href="{{ href }}" rel="next">older →</a>{% endif %}
+  </nav>
+  {%- endif %}
+</section>
+{% endblock %}

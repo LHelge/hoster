@@ -23,8 +23,8 @@ use super::icons::Icon;
 use super::stacks::StackControl;
 use crate::store::Timestamp;
 
-/// A section of the admin UI, each in the sidebar's navigation. The containers and their logs
-/// belong to the stacks (ADR-0054).
+/// A section of the admin UI, each but [`Section::Events`] in the sidebar's navigation. The
+/// containers and their logs belong to the stacks (ADR-0054).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Dashboard,
@@ -32,6 +32,9 @@ pub enum Section {
     Certificates,
     Settings,
     System,
+    /// The Events page (ADR-0055): the design gives it no navigation entry, so it is reached
+    /// from the Recent events cards of the dashboard and the stack pages.
+    Events,
 }
 
 impl Section {
@@ -51,6 +54,7 @@ impl Section {
             Section::Certificates => "/certificates",
             Section::Settings => "/settings/general",
             Section::System => "/system",
+            Section::Events => super::events::EventsPage::PATH,
         }
     }
 
@@ -62,6 +66,7 @@ impl Section {
             Section::Certificates => "certificates",
             Section::Settings => "settings",
             Section::System => "system",
+            Section::Events => "activity",
         }
     }
 
@@ -72,6 +77,8 @@ impl Section {
             Section::Certificates => Icon::Certificates,
             Section::Settings => Icon::Settings,
             Section::System => Icon::System,
+            // Not in the navigation; the dashboard's, which it belongs with.
+            Section::Events => Icon::Dashboard,
         }
     }
 }
@@ -84,6 +91,7 @@ impl fmt::Display for Section {
             Section::Certificates => "Certificates",
             Section::Settings => "Settings",
             Section::System => "System",
+            Section::Events => "Events",
         })
     }
 }

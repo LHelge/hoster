@@ -2,10 +2,10 @@
 id: "4qj"
 title: Event log and recent-events feed
 type: epic
-status: open
+status: done
 priority: P3
 created: "2026-11-08T18:22:29.995791074Z"
-updated: "2026-11-09T14:05:41.583618260Z"
+updated: "2026-11-09T17:09:51.319608570Z"
 tags:
   - design-followup
   - observability

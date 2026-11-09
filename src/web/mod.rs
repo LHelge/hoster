@@ -1,10 +1,11 @@
 //! The Axum app (ADR-0021): admin UI routes, GitHub OAuth and sessions (ADR-0031), the live
 //! dashboard with hoster's in-process statistics (ADR-0045, read through [`Stats`], see
-//! `dashboard.rs`), container logs (ADR-0044, see `containers.rs`), the certificates page
-//! (ADR-0036, ADR-0051, see `certificates.rs`), the stack pages with their secrets (ADR-0027,
-//! ADR-0029, ADR-0049, see `stacks.rs`), Settings: Registries (ADR-0025) and read-only views of
-//! the configuration (ADR-0024, see `settings.rs`), the deploy webhook (ADR-0042, ADR-0047, see
-//! `webhook.rs`), and the System page with self-update (ADR-0052, see `system.rs`).
+//! `dashboard.rs`), the event log's feeds and Events page (ADR-0055, see `events.rs`), container
+//! logs (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
+//! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029, ADR-0049, see
+//! `stacks.rs`), Settings: Registries (ADR-0025) and read-only views of the configuration
+//! (ADR-0024, see `settings.rs`), the deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`), and
+//! the System page with self-update (ADR-0052, see `system.rs`).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
 //! binds the [`Listen`] address and serves until the root cancellation token is cancelled.
@@ -60,6 +61,7 @@ use self::auth::Auth;
 use self::certificates::{AcmeDirectory, CertificateAccess, CertificateControl, Certificates};
 use self::containers::{ContainerSource, Containers};
 use self::dashboard::Dashboard;
+use self::events::EventsPage;
 pub(crate) use self::icons::Icon;
 use self::pages::ShellSource;
 use self::settings::{EffectiveConfig, Registries, RegistryControl, Settings};
@@ -240,10 +242,12 @@ impl WebApp {
         Router::new()
             .route("/", get(Dashboard::show))
             .route(Dashboard::EVENTS, get(Dashboard::events))
+            .route(EventsPage::PATH, get(EventsPage::page))
             .route("/stacks", get(Stacks::list))
             .route("/stacks/{name}", get(Stacks::show))
             .layer(Extension(self.stats.clone()))
             .route("/stacks/{name}/logs", get(Stacks::logs))
+            .route("/stacks/{name}/events", get(Stacks::events))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))
             .route(

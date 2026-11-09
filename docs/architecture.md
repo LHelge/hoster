@@ -276,7 +276,7 @@ where a boundary needs them:
 | 2 | `acme_events` | `mpsc::Sender<AcmeEvent>` | ACME task → Orchestrator | `Issued { host, not_after }`, `Failed { host, error, retry_at }`, `DnsMismatch { host, observed, expected }` (advisory, ADR-0051). The orchestrator records them and fans them out on `ui_events` (#5), so each channel has one producer. Used for status ("TLS pending") in the UI; deploys never wait on certificates (ADR-0036). |
 | 3 | `pingora_shutdown` | `watch::Sender<Option<ShutdownSignal>>` | Supervisor → Pingora "Server" runtime | Read by our `ShutdownSignalWatch` impl. SIGTERM becomes `GracefulTerminate`, a second SIGTERM or SIGINT becomes `FastShutdown`. |
 | 4 | `pingora_phase` | `broadcast::Receiver<ExecutionPhase>` | Pingora → Supervisor | `Running`, followed by a successful connect to the listener (§1.1), means the listeners are bound and the ACME task may start. An early `Terminated` means Pingora died, and the supervisor exits non-zero. |
-| 5 | `ui_events` | `broadcast::Sender<UiEvent>` | Orchestrator → Axum SSE handlers | Deploy progress, health changes and cert events (relayed from #2), pushed to open UI pages (HTMX SSE). Lagging receivers just re-render from current state. |
+| 5 | `ui_events` | `broadcast::Sender<UiEvent>` | Orchestrator → Axum SSE handlers | Deploy progress, health changes, cert events (relayed from #2) and newly recorded events of the event log (§11), pushed to open UI pages (HTMX SSE). Lagging receivers just re-render from current state. |
 | 6 | `shutdown` | `CancellationToken` (tokio-util) | Supervisor → all orchestrator tasks | Cooperative cancellation. Deploy tasks stop at the next safe point (§5.4). |
 
 ```mermaid
@@ -667,3 +667,39 @@ assets/              vendored htmx 4.0.x + CSS (embedded via include_bytes!/rust
 
 The pure modules (`stack`, `routing`, the deploy state transition function) carry most of the unit
 tests. `runtime` gets integration tests against a real rootless podman, gated by an env var.
+
+## 11. Event log
+
+The event log (ADR-0055) is the queryable history behind the dashboard's Recent events card, the
+same card on each stack's overview, and the Events page at `/activity`.
+
+- **Table.** `events` in `hoster.db` (migration `0008_events`): `id`, `at` (ms since the epoch),
+  `kind` (the store's `EventKind` as text, e.g. `deploy_succeeded`), `severity` (`info`,
+  `success`, `warning`, `error`: the UI's tone dot), `stack` (nullable, **no foreign key**, so a
+  removed stack's events stay and can still be filtered by its name), `subject` (the page the event
+  links to), `message` and `meta` (the short mono line). Indexed by `at` and `(stack, at)`.
+  `Store::event_page` reads it newest first with an `(at, id)` cursor (`before`, written
+  `<at>.<id>`), filtered by stack, a set of kinds and a minimum severity; there is no offset
+  paging.
+- **Producers.** Every producer writes explicitly through the orchestrator's `EventLog` handle:
+  the orchestrator for deploy outcomes (started, succeeded, failed, rolled back), stack applies
+  and removals and secret changes; the reconciler for restarts and crash loops; the health
+  monitor for health changes; the orchestrator again for the ACME task's outcomes as it relays
+  them (issued, renewed, failed, DNS mismatch, §3.3 #2); the supervisor for `hoster started`; the update flow for self-update and rollback. When the event
+  describes a state change, the store writes it in the same transaction
+  (`Store::insert_event`), so a rolled-back change leaves no event. Secret events carry the
+  name only.
+- **Retention.** `EventLog::run_retention` deletes rows older than 30 days once at startup and
+  then daily. It is not configurable. Down-migrating drops the table and the history.
+- **The `UiEvent` hand-off.** After the write, `EventLog` sends `UiEvent::Event(event)` on
+  `ui_events` (§3.3 #5). The broadcast is only a nudge: the log never depends on a receiver
+  keeping up, and a lagged page reads the card from the store again. The dashboard stream
+  (`/events`) adds the new events to the card it last sent and sends only that card as an
+  `<hx-partial>`, unless the kind also changes another part of the overview (restarts, crash
+  loops, a removed stack). A stack overview's card has its own stream
+  (`/stacks/{name}/events`), which ignores other stacks' events and sends the card again with
+  the new ones on top.
+- **Events page.** `/activity` lists every event, 50 per page, with filters as query
+  parameters: `kind` (a group: `deploys`, `containers`, `certificates`, `operator`), `severity`
+  (the least severe shown), `stack` and the `before` cursor of the "older" link. It works without
+  JavaScript. Unknown filter values are ignored, as on `/stacks`; a malformed cursor is a 400.
