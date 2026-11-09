@@ -1,0 +1,475 @@
+/* hoster docs theme: the admin UI's design system (ADR-0054) for docs.hoster.lhelge.se.
+ *
+ * The @font-face rules and the colour tokens below are copied from assets/hoster.css, so the docs
+ * and the admin UI share one palette: Catppuccin Latte in light mode (hues darkened to 4.5:1),
+ * Mocha in dark mode, picked by prefers-color-scheme. Change them there first, then copy them
+ * here. The components (sidebar shell, crumb, cards, pills, tables) follow the admin UI's rules;
+ * the prose rules are the docs site's own, a little larger than the admin UI for long reading.
+ *
+ * JetBrains Mono for machine-derived text (code, paths, dates, labels, the crumb), system-ui for
+ * prose, as in the admin UI.
+ */
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/jetbrains-mono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/fonts/jetbrains-mono-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/fonts/jetbrains-mono-600.woff2") format("woff2");
+}
+
+/* Catppuccin Latte. */
+:root {
+  --bg: #e6e9ef;          /* mantle: the page */
+  --surface: #eff1f5;     /* base: cards, the header */
+  --inset: #ffffff;       /* inputs, code and logs, lighter than the card they sit in */
+  --hover: #dce0e8;       /* crust: hovered rows and ghost buttons */
+  --border: #ccd0da;      /* surface0 */
+  --divider: #dce0e8;     /* crust: lines inside a card */
+  --input-border: #7c7f93; /* overlay2: 3:1 on input and card (surface1 is 1.8:1) */
+  --text: #4c4f69;        /* text */
+  --text-2: #54576e;      /* between text and subtext1 */
+  --muted: #5c5f77;       /* subtext1: the dimmest text allowed (overlay2, subtext0 fail) */
+  --accent: #7420e3;      /* mauve #8839ef darkened from 3.9:1 (also on its 12% tint) */
+  --on-accent: #ffffff;
+  --link: #0a52e0;        /* blue #1e66f5 darkened from 3.6:1 */
+  --ok: #2c6e1d;          /* green #40a02b darkened from 2.5:1 */
+  --progress: #0a52e0;    /* blue #1e66f5 darkened from 3.6:1 */
+  --warn: #a53d01;        /* peach #fe640b darkened from 2.2:1 */
+  --fail: #ba0d33;        /* red #d20f39 darkened from 3.8:1 */
+  --p50: #116a6f;         /* teal #179299 darkened from 2.8:1 */
+  --p95: #855511;         /* yellow #df8e1d darkened from 2:1 */
+  color-scheme: light;
+}
+
+/* Catppuccin Mocha. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e2e;          /* base */
+    --surface: #181825;     /* mantle */
+    --inset: #11111b;       /* crust */
+    --hover: #313244;       /* surface0 */
+    --border: #313244;      /* surface0 */
+    --divider: #26263a;
+    --input-border: #6c7086; /* overlay0: 3:1 on input and card (surface1 is 2:1) */
+    --text: #cdd6f4;        /* text */
+    --text-2: #a6adc8;      /* subtext0 */
+    --muted: #9399b2;       /* overlay2: the dimmest text allowed (overlay0/1 fail) */
+    --accent: #cba6f7;      /* mauve */
+    --on-accent: #11111b;   /* crust */
+    --link: #89b4fa;        /* blue */
+    --ok: #a6e3a1;          /* green */
+    --progress: #89b4fa;    /* blue */
+    --warn: #fab387;        /* peach */
+    --fail: #f38ba8;        /* red */
+    --p50: #94e2d5;         /* teal */
+    --p95: #f9e2af;         /* yellow */
+    color-scheme: dark;
+  }
+}
+
+/* Tints: a status colour at about 10% over whatever is behind it, for pills and highlights. */
+:root {
+  --accent-tint: color-mix(in srgb, var(--accent) 12%, transparent);
+  --ok-tint: color-mix(in srgb, var(--ok) 10%, transparent);
+  --progress-tint: color-mix(in srgb, var(--progress) 10%, transparent);
+  --warn-tint: color-mix(in srgb, var(--warn) 10%, transparent);
+  --fail-tint: color-mix(in srgb, var(--fail) 10%, transparent);
+  --neutral-tint: color-mix(in srgb, var(--muted) 10%, transparent);
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --radius-card: 10px;
+  --radius-control: 8px;
+  --radius-pill: 10px;
+}
+
+/* Syntax highlighting (aphid's `hl-` classes), drawn from the same role tokens. */
+:root {
+  --hl-keyword: var(--accent);
+  --hl-string: var(--ok);
+  --hl-comment: var(--muted);
+  --hl-constant: var(--warn);
+  --hl-function: var(--link);
+  --hl-type: var(--p95);
+  --hl-tag: var(--p50);
+}
+
+/* ---- Base (as the admin UI) ---------------------------------------------------------------- */
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 16px; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre, kbd, .mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.icon { display: inline-block; width: 1em; height: 1em; flex-shrink: 0; vertical-align: -0.125em; }
+
+/* ---- Shell: a 232 px sidebar beside the page, stacked above it when narrow ----------------- */
+
+.shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+.sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 20px 12px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 8px; color: var(--text); }
+a.brand:hover { text-decoration: none; }
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: var(--radius-control);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.brand-mark .icon { width: 18px; height: 18px; }
+.brand-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.brand-name { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.brand-meta { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
+.nav { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.nav a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.nav a .icon { width: 18px; height: 18px; }
+.nav a:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.nav a[aria-current="page"] { background: var(--hover); color: var(--text); }
+.nav a[aria-current="page"] .icon { color: var(--accent); }
+
+/* The wiki's pages by category, under the main nav. */
+.side-groups { display: flex; flex-direction: column; gap: 16px; }
+.side-label {
+  margin: 0 0 6px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.side-group ul { margin: 0; padding: 0; list-style: none; }
+.side-group a {
+  display: block;
+  padding: 5px 10px;
+  border-left: 2px solid transparent;
+  border-radius: 0 6px 6px 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.side-group a:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.side-group a[aria-current="page"] { border-left-color: var(--accent); color: var(--text); font-weight: 500; }
+
+.side-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin-top: auto;
+  padding: 14px 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.side-foot a { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+.side-foot a:hover { color: var(--text); }
+.side-built { flex-basis: 100%; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.side-built a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+
+.content { min-width: 0; padding: 28px 32px 64px; }
+
+@media (max-width: 760px) {
+  .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .sidebar {
+    position: static;
+    height: auto;
+    gap: 14px;
+    padding: 14px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .nav { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+  .nav a { min-height: 36px; padding: 6px 10px; }
+  /* The wiki index lists every page, so the sidebar's copy would only push the page down. */
+  .side-groups { display: none; }
+  .side-foot { margin-top: 0; padding-top: 12px; }
+  .content { padding: 20px 16px 48px; }
+}
+
+/* ---- Page header: a ~/path crumb and the h1 ------------------------------------------------ */
+
+.page-head { margin: 0 0 22px; }
+.crumb { margin: 0; color: var(--muted); font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.crumb a {
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: var(--input-border);
+  text-underline-offset: 2px;
+}
+.crumb a:hover { color: var(--link); }
+h1 { margin: 4px 0 0; font-size: 26px; font-weight: 600; line-height: 1.25; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+h1 .pill { font-size: 16px; vertical-align: 4px; }
+.lede { max-width: 68ch; margin: 8px 0 0; color: var(--text-2); font-size: 15px; }
+.meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0 0; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.meta a { color: var(--text-2); }
+
+/* The article and, from 1200 px, its "On this page" list beside it. */
+.doc-layout { display: grid; grid-template-columns: minmax(0, 780px); gap: 48px; }
+.doc { min-width: 0; }
+.toc { display: none; }
+@media (min-width: 1200px) {
+  .doc-layout { grid-template-columns: minmax(0, 780px) 220px; }
+  .toc {
+    position: sticky;
+    top: 28px;
+    display: block;
+    align-self: start;
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
+    padding-top: 40px;
+  }
+}
+.toc ul { margin: 0; padding: 0; border-left: 1px solid var(--border); list-style: none; }
+.toc a { display: block; padding: 3px 10px; color: var(--text-2); font-size: 12.5px; line-height: 1.4; }
+.toc a:hover { color: var(--text); text-decoration: none; }
+.toc-h3 a { padding-left: 22px; }
+.toc-h4 a, .toc-h5 a, .toc-h6 a { display: none; }
+
+/* ---- Cards, pills, buttons (as the admin UI) ----------------------------------------------- */
+
+.card { margin: 0 0 1.25rem; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); }
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.card-head h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; }
+.card-body { margin: 0; padding: 14px 18px; }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.pill-ok { background: var(--ok-tint); color: var(--ok); }
+.pill-progress { background: var(--progress-tint); color: var(--progress); }
+.pill-warn { background: var(--warn-tint); color: var(--warn); }
+.pill-fail { background: var(--fail-tint); color: var(--fail); }
+.pill-neutral { background: var(--neutral-tint); color: var(--muted); }
+a.pill:hover { background: var(--accent-tint); color: var(--accent); text-decoration: none; }
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  font: 500 14px/1.2 var(--sans);
+  white-space: nowrap;
+}
+.button:hover { background: var(--hover); text-decoration: none; }
+.button.ghost { border-color: transparent; color: var(--text-2); }
+.button.current { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
+
+.tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
+.tag-index { margin-top: 0; }
+.tag-count { color: var(--text-2); }
+
+/* ---- Listings: release cards, wiki categories, pagination ---------------------------------- */
+
+.home-releases { max-width: 780px; }
+.section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 40px 0 12px; }
+.section-head h2, .section-title { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.section-head h2 { margin: 0; }
+.section-head a { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+
+.post-list { display: flex; flex-direction: column; gap: 12px; max-width: 780px; margin: 0 0 1.25rem; padding: 0; list-style: none; }
+.post-card { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 16px 18px; color: var(--text); }
+.post-card:hover { border-color: var(--input-border); text-decoration: none; }
+.post-card-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.post-card-title { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.post-card:hover .post-card-title { color: var(--accent); }
+.post-card-date, .post-card-meta { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.post-card-desc { color: var(--text-2); }
+
+.category-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; max-width: 1060px; }
+.category-card { margin: 0; }
+.category-card p { margin: 0 0 10px; font-size: 13px; }
+.category-icon { width: 18px; height: 18px; }
+.category-pages { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.category-pages a { display: inline-block; padding: 2px 0; }
+
+.pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 24px 0 0; }
+.pagination-pages { display: flex; gap: 4px; margin: 0; padding: 0; list-style: none; }
+
+.post-nav { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 40px 0 0; }
+.post-nav .card { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 14px 18px; color: var(--text); }
+.post-nav .card:hover { border-color: var(--input-border); text-decoration: none; }
+.post-nav-newer { grid-column: -2; text-align: right; }
+.post-nav-label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+.post-nav-newer .post-nav-label { justify-content: flex-end; }
+.post-nav-title { font-family: var(--mono); font-weight: 600; }
+
+.backlinks { margin-top: 40px; }
+.backlinks ul { display: flex; flex-direction: column; gap: 4px; list-style: none; }
+.post-hero { display: block; max-width: 100%; height: auto; margin: 0 0 24px; border-radius: var(--radius-card); }
+
+/* ---- Prose: rendered Markdown -------------------------------------------------------------- */
+
+.prose { max-width: 780px; font-size: 15px; line-height: 1.65; overflow-wrap: break-word; }
+.prose > :first-child { margin-top: 0; }
+.prose p, .prose ul, .prose ol, .prose dl, .prose blockquote, .prose table, .prose pre { margin: 0 0 1rem; }
+.prose ul, .prose ol { padding-left: 1.5rem; }
+.prose li { margin: 0.2rem 0; }
+.prose li > ul, .prose li > ol { margin: 0.2rem 0; }
+.prose h2, .prose h3, .prose h4, .prose h5 { font-weight: 600; line-height: 1.3; scroll-margin-top: 16px; }
+.prose h2 { margin: 2.5rem 0 0.85rem; padding-top: 1.25rem; border-top: 1px solid var(--border); font-size: 20px; letter-spacing: -0.01em; }
+.prose h3 { margin: 1.85rem 0 0.6rem; font-size: 16.5px; }
+.prose h4, .prose h5 { margin: 1.5rem 0 0.5rem; font-size: 15px; }
+.prose h2 + h3 { margin-top: 1rem; }
+.prose hr { margin: 2rem 0; border: 0; border-top: 1px solid var(--border); }
+.prose img { max-width: 100%; height: auto; border-radius: var(--radius-control); }
+.prose strong { font-weight: 600; }
+
+.prose :not(pre) > code {
+  padding: 0.1em 0.35em;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--inset);
+  font-size: 0.86em;
+  overflow-wrap: anywhere;
+}
+.prose pre {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--inset);
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.prose pre code { font-size: inherit; }
+
+.prose blockquote { margin-left: 0; padding: 0.1rem 0 0.1rem 1rem; border-left: 3px solid var(--border); color: var(--text-2); }
+
+/* Tables as the admin UI's: mono uppercase headers, a card around them, scrolling when wide. */
+.prose table {
+  display: block;
+  max-width: 100%;
+  width: max-content;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--surface);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.prose th {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.prose td { padding: 10px 14px; border-bottom: 1px solid var(--divider); vertical-align: top; }
+/* As in the admin UI: identifiers in cells stay whole; a wide table scrolls instead. */
+.prose td code { white-space: nowrap; overflow-wrap: normal; }
+.prose tbody tr:last-child > * { border-bottom: 0; }
+
+/* GitHub-style alerts, as the admin UI's flash messages. */
+.markdown-alert {
+  margin: 0 0 1rem;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--progress);
+  border-radius: var(--radius-control);
+  background: var(--progress-tint);
+}
+.markdown-alert > :last-child { margin-bottom: 0; }
+.markdown-alert-title { margin: 0 0 0.25rem; font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.markdown-alert-note .markdown-alert-title { color: var(--progress); }
+.markdown-alert-tip { border-left-color: var(--ok); background: var(--ok-tint); }
+.markdown-alert-tip .markdown-alert-title { color: var(--ok); }
+.markdown-alert-important { border-left-color: var(--accent); background: var(--accent-tint); }
+.markdown-alert-important .markdown-alert-title { color: var(--accent); }
+.markdown-alert-warning { border-left-color: var(--warn); background: var(--warn-tint); }
+.markdown-alert-warning .markdown-alert-title { color: var(--warn); }
+.markdown-alert-caution { border-left-color: var(--fail); background: var(--fail-tint); }
+.markdown-alert-caution .markdown-alert-title { color: var(--fail); }
+
+.wikilink.broken { color: var(--fail); border-bottom: 1px dashed var(--fail); cursor: help; }
+
+/* Syntax highlighting. aphid wraps every scope in a span; only these get a colour. */
+.hl-keyword, .hl-storage { color: var(--hl-keyword); }
+.hl-keyword.hl-operator, .hl-punctuation { color: var(--text-2); }
+.hl-string { color: var(--hl-string); }
+.hl-comment { color: var(--hl-comment); font-style: italic; }
+.hl-constant { color: var(--hl-constant); }
+.hl-entity.hl-name.hl-function, .hl-support.hl-function, .hl-variable.hl-function { color: var(--hl-function); }
+.hl-entity.hl-name.hl-type, .hl-support.hl-type { color: var(--hl-type); }
+.hl-entity.hl-name.hl-tag { color: var(--hl-tag); }
+.hl-variable.hl-parameter { color: var(--text); }
+/* TOML keys and table headers, the stack file's own syntax. */
+.hl-entity.hl-name.hl-tag.hl-toml, .hl-meta.hl-tag.hl-table { color: var(--hl-tag); }
+
+/* ---- Home ----------------------------------------------------------------------------------- */
+
+/* home.md is sections divided by `---`; give each its own space without card chrome. */
+.home-content h2 { margin-top: 0; padding-top: 0; border-top: 0; }
+.home-content hr { margin: 1.75rem 0; }
+.home-content > p:last-child a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border-radius: var(--radius-control); background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.home-content > p:last-child a:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); text-decoration: none; }

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block page_title %}Tags{% endblock page_title %}
+{% block nav_tags %} aria-current="page"{% endblock nav_tags %}
+
+{% block content %}
+<header class="page-head">
+    <p class="crumb"><a href="/">~</a>/tags</p>
+    <h1>Tags</h1>
+</header>
+{% if tags | length > 0 %}
+<ul class="tag-list tag-index">
+    {% for entry in tags %}
+    <li><a class="pill pill-neutral" href="/tags/{{ entry.slug }}/">#{{ entry.name }} <span class="tag-count">{{ entry.count }}</span></a></li>
+    {% endfor %}
+</ul>
+{% else %}
+<p class="muted">No tags yet.</p>
+{% endif %}
+{% endblock content %}

@@ -18,6 +18,8 @@ The documentation is ~45k tokens in total. Don't read it all; the Bears task is 
 The user-facing guides (install, stack format, deploying from CI, static sites, backup) are the
 aphid site in `site/content/wiki/`, published at https://docs.hoster.lhelge.se. Link between them
 with `[[slug]]` or `[[slug#anchor|text]]`; `aphid build` in `site/` fails on a broken one.
+`site/content/blog/` holds one post per release (README "Cutting a release"), and `site/theme/` is
+the site's own aphid theme, which copies the admin UI's tokens and fonts from `assets/`.
 `docs/` holds the internal design docs (ADRs, architecture, open questions, spikes).
 4. **Don't read** `docs/open-questions.md` unless you are raising a new question; it is history.
    `docs/architecture.md` §1 ("Verified against") is reference material for library behaviour,

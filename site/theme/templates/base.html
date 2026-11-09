@@ -1,0 +1,70 @@
+{% import "macros.html" as m %}<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block page_title %}{{ title }}{% endblock page_title %} · {{ site_title }}</title>
+    <link rel="stylesheet" href="/static/css/theme.css">
+    <link rel="preload" href="/static/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>
+    {{ favicon_tags | safe }}
+    <link rel="alternate" type="application/atom+xml" title="{{ site_title }} - Atom" href="{{ feed_atom_url }}">
+    <link rel="alternate" type="application/rss+xml" title="{{ site_title }} - RSS" href="{{ feed_rss_url }}">
+
+    {% set meta_title = title | default(value=site_title) %}
+    {% set meta_desc = description | default(value=site_description | default(value="")) %}
+    {% set meta_image = og_image | default(value=social_image_url | default(value="")) %}
+    {% if meta_desc %}<meta name="description" content="{{ meta_desc }}">{% endif %}
+
+    <meta property="og:type" content="{% block og_type %}website{% endblock og_type %}">
+    <meta property="og:site_name" content="{{ site_title }}">
+    <meta property="og:title" content="{{ meta_title }}">
+    {% if meta_desc %}<meta property="og:description" content="{{ meta_desc }}">{% endif %}
+    {% if canonical_url is defined %}<meta property="og:url" content="{{ canonical_url | safe }}">
+    <link rel="canonical" href="{{ canonical_url | safe }}">{% endif %}
+    {% if meta_image %}<meta property="og:image" content="{{ meta_image | safe }}">{% endif %}
+
+    <meta name="twitter:card" content="{% if meta_image %}summary_large_image{% else %}summary{% endif %}">
+    <meta name="twitter:title" content="{{ meta_title }}">
+    {% if meta_desc %}<meta name="twitter:description" content="{{ meta_desc }}">{% endif %}
+    {% if meta_image %}<meta name="twitter:image" content="{{ meta_image | safe }}">{% endif %}
+
+    {% block article_meta %}{% endblock article_meta %}
+</head>
+
+<body>
+<div class="shell">
+    <nav class="sidebar" aria-label="Main">
+        <a class="brand" href="/">
+            <span class="brand-mark">{{ m::icon(name="brand") }}</span>
+            <span class="brand-text">
+                <span class="brand-name">{{ site_title }}</span>
+                <span class="brand-meta">documentation</span>
+            </span>
+        </a>
+        <ul class="nav">
+            <li><a href="/"{% block nav_home %}{% endblock nav_home %}>{{ m::icon(name="home") }}Home</a></li>
+            <li><a href="/wiki/"{% block nav_docs %}{% endblock nav_docs %}>{{ m::icon(name="docs") }}Docs</a></li>
+            <li><a href="/blog/"{% block nav_blog %}{% endblock nav_blog %}>{{ m::icon(name="blog") }}Releases</a></li>
+            <li><a href="/tags/"{% block nav_tags %}{% endblock nav_tags %}>{{ m::icon(name="tag") }}Tags</a></li>
+            {%- for p in nav_pages %}
+            <li><a href="{{ p.url | safe }}"{% if url is defined and p.url == url %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+            {%- endfor %}
+        </ul>
+        {% block sidebar %}{% endblock sidebar %}
+        <div class="side-foot">
+            {%- for s in socials %}
+            <a href="{{ s.url }}">{% if s.platform == "GitHub" %}{{ m::icon(name="github") }}{% endif %}{{ s.platform }}</a>
+            {%- endfor %}
+            <a href="{{ feed_atom_url }}">{{ m::icon(name="rss") }}Feed</a>
+            <span class="side-built">built with <a href="https://github.com/LHelge/aphid">aphid</a></span>
+        </div>
+    </nav>
+
+    <main class="content">
+        {% block content %}{% endblock content %}
+    </main>
+</div>
+</body>
+
+</html>

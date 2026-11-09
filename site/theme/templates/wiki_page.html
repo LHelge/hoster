@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block nav_docs %} aria-current="page"{% endblock nav_docs %}
+{% block sidebar %}{{ m::wiki_groups(groups=wiki_categories, current=url) }}{% endblock sidebar %}
+
+{% block content %}
+<div class="doc-layout">
+<article class="doc">
+    <header class="page-head">
+        <p class="crumb"><a href="/">~</a>/<a href="/wiki/">wiki</a>/{{ url | trim_start_matches(pat="/wiki/") | trim_end_matches(pat="/") }}</p>
+        <h1>{{ title }}</h1>
+        <p class="meta"><span class="pill pill-neutral">{{ category }}</span>{% if updated %} · updated <time datetime="{{ updated }}">{{ updated }}</time>{% endif %}</p>
+        {% if tags %}{{ m::tags(list=tags) }}{% endif %}
+    </header>
+
+    <div class="prose">
+        {{ content | safe }}
+    </div>
+
+    {% if backlinks | length > 0 %}
+    <section class="card backlinks">
+        <div class="card-head"><h2>Pages that link here</h2></div>
+        <ul class="card-body">
+            {% for link in backlinks %}
+            <li><a href="{{ link.url | safe }}">{{ link.title }}</a></li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+</article>
+{{ m::toc(entries=toc) }}
+</div>
+{% endblock content %}

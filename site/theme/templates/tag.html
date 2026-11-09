@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block page_title %}#{{ tag }}{% endblock page_title %}
+{% block nav_tags %} aria-current="page"{% endblock nav_tags %}
+
+{% block content %}
+<header class="page-head">
+    <p class="crumb"><a href="/">~</a>/<a href="/tags/">tags</a>/{{ tag_slug }}</p>
+    <h1>#{{ tag }}</h1>
+</header>
+{% if blog_posts | length > 0 %}
+<section>
+    <h2 class="section-title">Releases</h2>
+    <ul class="post-list">
+        {% for post in blog_posts | sort(attribute="created") | reverse %}{{ m::post_card(post=post) }}{% endfor %}
+    </ul>
+</section>
+{% endif %}
+{% if wiki_pages | length > 0 %}
+<section class="card">
+    <div class="card-head"><h2>Docs</h2></div>
+    <ul class="card-body category-pages">
+        {% for page in wiki_pages %}
+        <li><a href="{{ page.url | safe }}">{{ page.title }}</a></li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+{% endblock content %}

@@ -83,8 +83,15 @@ While `DATABASE_URL` is set the macros check against that database instead of `.
 `main` is protected, so a release goes through a PR and the tag is pushed after it is merged
 (ADR-0052). `scripts/release.sh` needs `gh` (logged in) and [git-cliff](https://git-cliff.org).
 
+Each release also gets a post on the docs site's [Releases](https://docs.hoster.lhelge.se/blog/)
+page: `site/content/blog/YYYY-MM-DD_hoster-X-Y-Z.md` with `slug: hoster-X-Y-Z` and
+`tags: [release]`, written for users from the git-cliff preview (what changed, and what to know
+before updating). The docs site is only deployed by a release tag, so merge the post in its own
+`docs:` PR before running `prepare`; the slug is what links the post to its GitHub release.
+
 ```sh
 git cliff --unreleased                 # preview the release notes for the commits since the last tag
+# ... merge the release post (site/content/blog/) through a docs PR ...
 scripts/release.sh prepare 0.2.0       # on a clean, up-to-date main: opens the release/v0.2.0 PR
 # ... CI passes, rebase-merge the PR on GitHub ...
 git switch main && git pull --ff-only

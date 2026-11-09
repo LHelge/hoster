@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block page_title %}Releases{% endblock page_title %}
+{% block nav_blog %} aria-current="page"{% endblock nav_blog %}
+
+{% block content %}
+<header class="page-head">
+    <p class="crumb"><a href="/">~</a>/blog</p>
+    <h1>Releases</h1>
+    <p class="lede">What changed in each hoster release, and what to know before updating. The full
+        commit list for each is on <a href="https://github.com/LHelge/hoster/releases">GitHub</a>.</p>
+</header>
+<ul class="post-list">
+    {% for post in posts | sort(attribute="created") | reverse %}{{ m::post_card(post=post) }}{% endfor %}
+</ul>
+{% if pagination %}{% include "pagination.html" %}{% endif %}
+{% endblock content %}

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+
+{% block page_title %}Documentation{% endblock page_title %}
+{% block nav_docs %} aria-current="page"{% endblock nav_docs %}
+{% block sidebar %}{{ m::wiki_groups(groups=categories, current="") }}{% endblock sidebar %}
+
+{% block content %}
+<header class="page-head">
+    <p class="crumb"><a href="/">~</a>/wiki</p>
+    <h1>Documentation</h1>
+</header>
+{% if wiki_intro %}
+<div class="prose lede-prose">
+{{ wiki_intro.content | safe }}
+</div>
+{% endif %}
+<div class="category-grid">
+{% for category in categories %}
+<section class="card category-card">
+    <div class="card-head">
+        <h2>{% if category.icon %}<img class="category-icon" src="{{ category.icon | safe }}" alt="">{% endif %}{{ category.name }}</h2>
+        <span class="pill pill-neutral">{{ category.pages | length }}</span>
+    </div>
+    <div class="card-body">
+        {% if category.description %}<p class="muted">{{ category.description }}</p>{% endif %}
+        <ul class="category-pages">
+            {% for page in category.pages %}
+            <li><a href="{{ page.url | safe }}">{{ page.title }}</a></li>
+            {% endfor %}
+        </ul>
+    </div>
+</section>
+{% endfor %}
+</div>
+{% endblock content %}
