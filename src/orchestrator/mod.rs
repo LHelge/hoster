@@ -38,6 +38,11 @@
 //! Certificates (`certs`, ADR-0036): every apply tells the ACME task which hosts to ensure and
 //! which to forget ([`Orchestrator::connect_acme`]); the task's events are recorded and relayed
 //! on `ui_events` ([`Orchestrator::run_acme_events`], [`Orchestrator::certificates`]).
+//!
+//! The event log (`event_log`, ADR-0055): producers record deploy outcomes, restarts,
+//! certificate outcomes and operator actions through [`EventLog`]
+//! ([`Orchestrator::event_log`]), which stores each one and announces it on `ui_events`; its
+//! retention task deletes events older than 30 days ([`EventLog::run_retention`]).
 
 #![allow(
     dead_code,
@@ -46,6 +51,7 @@
 
 mod certs;
 mod engine;
+mod event_log;
 mod gc;
 pub mod machine;
 mod monitor;
@@ -82,6 +88,7 @@ use crate::store::{
 use certs::CertHosts;
 pub use certs::CertStatus;
 use engine::{Run, Target};
+pub use event_log::EventLog;
 pub use gc::GcSettings;
 use machine::Event;
 pub use plan::PlanError;
@@ -311,6 +318,8 @@ pub enum UiEvent {
         id: DeploymentId,
         state: DeploymentState,
     },
+    /// An event was recorded in the event log (ADR-0055); pages showing the feed append it.
+    Event(crate::store::Event),
 }
 
 /// How many `ui_events` a slow receiver may fall behind before it lags.
@@ -460,6 +469,8 @@ pub struct Orchestrator<R> {
     prober: Arc<dyn Prober>,
     /// Status changes for open UI pages (architecture §3.3 #5).
     ui_events: broadcast::Sender<UiEvent>,
+    /// Records events and announces them on `ui_events` (ADR-0055).
+    events: EventLog,
 }
 
 /// What the orchestrator's lock guards: only in-memory data, never held across an `.await`.
@@ -627,6 +638,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     ) -> Arc<Self> {
         let routes = Routes::new(routes, settings.reserved.clone(), settings.gap_retry_after);
         let pulls = Semaphore::new(settings.pull_limit.max(1));
+        let ui_events = broadcast::channel(UI_EVENTS_CAPACITY).0;
+        let events = EventLog::new(store.clone(), ui_events.clone());
         Arc::new(Self {
             store,
             runtime,
@@ -646,7 +659,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             reconciler: Mutex::default(),
             watchlist: Mutex::default(),
             prober,
-            ui_events: broadcast::channel(UI_EVENTS_CAPACITY).0,
+            ui_events,
+            events,
         })
     }
 
@@ -684,6 +698,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// Receives the [`UiEvent`]s sent from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<UiEvent> {
         self.ui_events.subscribe()
+    }
+
+    /// The event log (ADR-0055), for the producers outside the orchestrator and the pages
+    /// that show it.
+    pub fn event_log(&self) -> EventLog {
+        self.events.clone()
     }
 
     /// Sends `event` to the open UI pages, if there are any.

@@ -705,6 +705,12 @@ impl Startup for Supervisor {
                     Arc::clone(&orchestrator)
                         .run_garbage_collector(self.teardown.token.child_token()),
                 );
+                // Events older than 30 days are deleted now and daily (ADR-0055).
+                tokio::spawn(
+                    orchestrator
+                        .event_log()
+                        .run_retention(self.teardown.token.child_token()),
+                );
                 // Live services are probed from now on (ADR-0038).
                 tokio::spawn(
                     Arc::clone(&orchestrator).run_health_monitor(self.teardown.token.child_token()),

@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id: EventId\", at AS \"at: Timestamp\", kind AS \"kind: EventKind\",\n                      severity AS \"severity: Severity\", stack, subject, message, meta\n               FROM events\n               WHERE (?1 IS NULL OR stack = ?1)\n                 AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2)))\n                 AND severity IN (SELECT value FROM json_each(?3))\n                 AND (?4 IS NULL OR at < ?4 OR (at = ?4 AND id < ?5))\n               ORDER BY at DESC, id DESC\n               LIMIT ?6",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: EventId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "at: Timestamp",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "kind: EventKind",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "severity: Severity",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "severity"
+          }
+        }
+      },
+      {
+        "name": "stack",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "subject",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "subject"
+          }
+        }
+      },
+      {
+        "name": "message",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "message"
+          }
+        }
+      },
+      {
+        "name": "meta",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "meta"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "2a51aef201892649f73c28a748cceac9050d0566280667548fb9614f6f1dc6b7"
+}
