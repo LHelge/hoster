@@ -45,7 +45,7 @@ use crate::orchestrator::{
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
-use crate::stack::{Diagnostic, StackError};
+use crate::stack::{Counted, Diagnostic, StackError};
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
     EventPage, EventQuery, Timestamp, WebhookRejection,
@@ -493,10 +493,9 @@ impl Stacks {
                     format!("Deleted volumes: {}.", removed.volumes.join(", "))
                 };
                 Outcome::success(format!(
-                    "Removed stack {name} and its {} container{}. {volumes} Its revisions and \
-                     deployment history are kept.",
-                    removed.containers,
-                    if removed.containers == 1 { "" } else { "s" },
+                    "Removed stack {name} and its {}. {volumes} Its revisions and deployment \
+                     history are kept.",
+                    Counted(removed.containers, "container"),
                 ))
                 .with_link("/stacks".into(), "Back to the stacks")
                 .into_response()

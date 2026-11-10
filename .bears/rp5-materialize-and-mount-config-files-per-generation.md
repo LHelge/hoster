@@ -1,10 +1,10 @@
 ---
 id: rp5
-title: Materialize and mount config files per generation
+title: Upload config files into containers before start
 status: open
 priority: P2
 created: "2026-11-09T17:22:55.307159730Z"
-updated: "2026-11-09T17:22:55.307159730Z"
+updated: "2026-11-09T23:58:38.823017608Z"
 tags:
   - runtime
   - orchestrator
@@ -14,24 +14,35 @@ parent: xgf
 ---
 
 ## Summary
-Implement the mount mechanism the M12 ADR chose. Write each generation's files before container create, mount them read-only, and garbage-collect them with the generation.
+Implement ADR-0057 §3–§9 in the runtime and the engine: upload each service's `files` into its container between create and start, wire secret files through one secret-reference accessor, and require podman 5.4 for stacks with `files`. Files live in the container's layer, so there is no host directory, mount or GC of its own.
 
 ## Acceptance Criteria
-- [ ] A small deep type, e.g. `ConfigFiles` in the runtime or orchestrator, owns materialization. It writes atomically (temp + rename) into the ADR's location with `0700` directories and the declared `mode`, and resolves secret-backed files from the secret store at that moment. It returns the mounts to put on the `ContainerSpec`. Nothing else knows the directory layout.
-- [ ] `ContainerSpec` gets a typed file mount (not a free-form bind) that `podman.rs` maps to a read-only mount, with SELinux relabelling if the ADR requires it. A free-form host path stays impossible to express (ADR-0019).
-- [ ] The engine (`create_and_start` in `src/orchestrator/engine.rs`) materializes before create. An abort removes that generation's material.
-- [ ] GC (`src/orchestrator/gc.rs`) and the reconciler remove material of retired generations. Crash recovery (architecture §5.4) handles material left behind by an interrupted deploy.
-- [ ] Rollback to an earlier revision recreates that revision's file content.
-- [ ] Verified on live rootless podman, as root and as a non-root `user`: readable at the path, read-only, and owner / mode as documented.
+- [ ] `ContainerRuntime::image_volumes(&PinnedImage) -> Vec<String>` returns the image's `Config.Volumes`; the fake models it. In Pulling (architecture §5.1), a file equal to, under or an ancestor of an image volume fails the deploy.
+- [ ] `ContainerSpec` gains `files` (resolved content, mode and owner; no host path, `binds` stays `None`). `create_container` in `podman.rs` uploads them before it returns, as architecture §8 lays out: per path, `HEAD …/archive?path=` on the deepest existing ancestor resolves it through `linkTarget`; the volume, image-volume and reserved-path checks (ADR-0057 §2) run again on the resolved path, and the upload goes there. A path that is itself a symlink, dangling or not, fails naming the link.
+- [ ] Two tars, both sent with `noOverwriteDirNonDir=true`: the first holds `0:0 0755` entries for every missing parent of any file plus the files with an explicit or `0:0` owner; the second holds the container-user files and is sent with `copyUIDGID=true`. Defaults: `content` is `0:0 0444`, `secret` is `0400` owned by the container's user. Tar header ids are container ids.
+- [ ] On any upload failure the container is removed and the deploy fails with the text after podman's last `copier: put:` (else a generic message), never host paths or file content.
+- [ ] One `Service` accessor yields the secret references of env and files. Version collection, ADR-0049's redeploy on a secret change, the missing-secret check (`check_secrets` in `engine.rs`, rejecting by name and path, never a value), the reveal at create, and exec-output redaction all read from it. Redaction also covers each trimmed line (4+ characters) of a file secret. A file secret over 256 KiB fails the deploy; file secrets do not count towards the 1 MiB stack cap.
+- [ ] The config hash's secret-file entries carry the version from the accessor's collection, so changing a file secret redeploys only its service (ADR-0057 §7; the hash shape is nnq's).
+- [ ] Podman 5.4 or later: a stack with `files` is rejected at apply and a deployment of one fails in `Validating` on an older podman, naming the running and the required version, using the version `podman.rs` reads at connect. Stacks without `files` are unaffected. `hoster doctor` reports the podman version.
+- [ ] Verified on live podman (rootless 6.x; rootful 5.4 if available), as root and as a non-root `user`, with and without `read_only = true`: content at the path, owner / mode as documented, not writable by the non-root user, read-only with `read_only`, files survive a restart and go with the container.
+
+## Implementation Notes
+- Restarts and reboots (ADR-0028) keep the layer; container removal by GC, abort and the reconciler is the only cleanup, so `gc.rs` and crash recovery need no change.
+- A rollback recreates inline content from the revision; secret files get the current value (ADR-0041 Correction).
+- Keep the upload inside `podman.rs` behind `create_container`; the engine only fills `ContainerSpec.files`.
 
 ## Edge Cases
-- A secret deleted between apply and deploy → the deployment is rejected by name. Disk full while writing → abort cleanly. Container path in a read-only rootfs (`read_only = true`) → still works, since the mount sits on top of the rootfs.
+- Secret deleted between apply and deploy → rejected by name and path. Owner outside the subuid/subgid range → podman's `error setting ownership` is reduced to the `copier: put:` tail and the partial container is removed.
+- File over an image directory → `file exists` (no replace). Path under a symlinked ancestor into a volume (`/var/run/…` with a volume at `/run`) → caught by the re-check on the resolved path.
+- Path under `/run`, `/tmp` or `/var/tmp` with `read_only = true` → works (tmpfs refilled from the layer at start), but writable by root.
 
 ## Testing
-- Unit tests for layout, atomic write and GC with a temp dir; orchestrator tests with the fake runtime for abort, rollback and crash recovery; a podman-gated integration test.
+- Fake-runtime tests: image-volume rejection in Pulling, upload failure removes the container, version check in `Validating`, missing file secret, redaction of file-secret lines, file-secret change redeploys only its service.
+- Unit tests for tar layout (two tars, parent entries, owners, modes) and error extraction from a captured podman response.
+- A podman-gated integration test for the live checks above.
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## References
-- The M12 ADR (task 5jg); ADR-0019, ADR-0029, ADR-0041
-- `docs/architecture.md` §5.4, §8, §9
-- `src/runtime/mod.rs`, `src/runtime/podman.rs`, `src/orchestrator/engine.rs`, `src/orchestrator/gc.rs`, `src/orchestrator/reconcile.rs`, `src/secrets/`
+- ADR-0057 (§3–§9); ADR-0019, ADR-0028, ADR-0029, ADR-0041, ADR-0049
+- `docs/architecture.md` §1.7 (archive upload spike), §5.1 (Validating, Pulling), §5.5 (output redaction), §8 (Config files bullet), §9 (secrets at rest)
+- `src/runtime/mod.rs`, `src/runtime/podman.rs`, `src/runtime/fake.rs`, `src/orchestrator/engine.rs`, `src/orchestrator/plan.rs`, `src/orchestrator/stack_secrets.rs`, `src/health/mod.rs`, `src/doctor/mod.rs`, `src/web/stacks/apply.rs`

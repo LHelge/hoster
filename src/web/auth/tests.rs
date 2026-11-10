@@ -671,6 +671,8 @@ fn paths_are_classified() {
     assert_eq!(Access::from("/healthz"), Access::Public);
     assert_eq!(Access::from("/auth/login"), Access::Public);
     assert_eq!(Access::from("/assets/htmx.min.0123.js"), Access::Public);
+    assert_eq!(Access::from("/schema/stack-v1.json"), Access::Public);
+    assert_eq!(Access::from("/schemas"), Access::Admin);
     assert_eq!(Access::from("/authx"), Access::Admin);
     assert_eq!(Access::from("/hooksy"), Access::Admin);
     assert_eq!(Access::from("/"), Access::Admin);

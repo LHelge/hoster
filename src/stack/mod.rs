@@ -7,28 +7,35 @@
 //! private span-carrying types, then semantic validation that collects *every* problem instead
 //! of stopping at the first. Each [`Diagnostic`] names the TOML line/column and the field path.
 //!
+//! The same raw types generate the stack file's JSON Schema ([`StackSchema`]) for editors, and
+//! [`StackCheck`] runs the parse over files on disk for `hoster stack check`.
+//!
 //! Checks that need other stacks or hoster's configuration (route collisions, ADR-0012; the
 //! reserved admin host) are not done here; they live with the routing table.
 
 // The orchestrator and web UI that consume the model land in later tasks.
 #![allow(dead_code)]
 
+mod check;
 mod dependency;
 mod deploy;
 mod diagnostic;
 mod image;
 mod raw;
 mod route;
+mod schema;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+pub use check::StackCheck;
 pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
 pub use image::{Digest, ImageRef, PinnedImage};
 pub use route::{Host, NormalizedPrefix};
+pub use schema::StackSchema;
 
 /// Default upper bound for draining old upstreams (ADR-0017).
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -155,11 +162,15 @@ impl Service {
 }
 
 /// How a service is replaced on deploy (ADR-0039).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdateStrategy {
+    /// Start the new container and switch traffic once it is healthy: no downtime, but old and
+    /// new run side by side for a moment.
     #[default]
     StartFirst,
+    /// Stop the old container before starting the new one, for services that cannot run twice
+    /// (e.g. a database on a volume): a short outage answered with 503 + `Retry-After`.
     StopFirst,
 }
 
@@ -257,6 +268,18 @@ impl FromStr for ExpectStatus {
                 _ => Err(err()),
             },
         }
+    }
+}
+
+/// `n` things of a stack, with the noun in the plural unless `n` is 1: "1 service",
+/// "2 routes". Shared by the CLI's and the UI's summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counted(pub usize, pub &'static str);
+
+impl fmt::Display for Counted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self(n, noun) = self;
+        write!(f, "{n} {noun}{}", if *n == 1 { "" } else { "s" })
     }
 }
 

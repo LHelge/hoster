@@ -38,6 +38,7 @@ ring = "0.17.14"
 rustix = { version = "1.1.6", features = ["process", "event"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7.1"
+schemars = "1.2.3"
 sd-notify = "0.5.0"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -60,6 +61,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 figment = { version = "0.10.19", features = ["test"] }
 http-body-util = "0.1.5"
 insta = "1.49.0"
+jsonschema = { version = "0.61.0", default-features = false }
 nix = { version = "0.31.3", features = ["signal"] }
 proptest = "1.11.0"
 rcgen = "0.14.10"

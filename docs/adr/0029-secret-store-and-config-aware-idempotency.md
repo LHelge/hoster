@@ -1,6 +1,6 @@
 # ADR-0029: Encrypted hoster secret store injected as env; config changes redeploy explicitly
 
-- Status: Accepted (resolves OQ-02; refines ADR-0005); the optional "apply & redeploy" step is refined by ADR-0049: applying always redeploys
+- Status: Accepted (resolves OQ-02; refines ADR-0005); the optional "apply & redeploy" step is refined by ADR-0049: applying always redeploys; secrets can also be config files in the container's layer (not tmpfs) since ADR-0057
 - Date: 2026-11-07
 
 ## Context
