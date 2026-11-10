@@ -23,7 +23,9 @@ use futures_util::stream::BoxStream;
 
 use crate::registry::CredentialError;
 use crate::secrets::SecretValue;
-use crate::stack::{ByteSize, ContainerPath, DEFAULT_STOP_TIMEOUT, Name, PinnedImage, Stack};
+use crate::stack::{
+    ByteSize, ContainerPath, DEFAULT_STOP_TIMEOUT, Limits, Name, PinnedImage, Stack,
+};
 use crate::store::DeploymentId;
 
 #[allow(
@@ -442,6 +444,8 @@ pub struct ContainerSpec {
     pub tmpfs: BTreeMap<ContainerPath, ByteSize>,
     /// Run podman's init as PID 1.
     pub init: bool,
+    /// Resource limits; unset ones keep podman's defaults (ADR-0059 §2).
+    pub limits: Limits,
 }
 
 #[allow(
@@ -491,6 +495,7 @@ impl ContainerSpec {
             shm_size: None,
             tmpfs: BTreeMap::new(),
             init: false,
+            limits: Limits::default(),
         }
     }
 

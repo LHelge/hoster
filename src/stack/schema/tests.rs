@@ -588,6 +588,89 @@ fn sizes_agree() {
 }
 
 #[test]
+fn limits_agree() {
+    agrees_on_strings(
+        &with_app("limits = { memory = @@ }"),
+        &[
+            "8MiB",
+            "008MiB",
+            "7MiB",
+            "9MiB",
+            "10MiB",
+            "512MiB",
+            "1GiB",
+            "1GB",
+            "0GiB",
+            "8589934591GiB",
+            "9MB",
+            "8MB",
+            "10MB",
+            "8192KiB",
+            "8191KiB",
+            "8200KiB",
+            "8300KiB",
+            "9000KiB",
+            "10000KiB",
+            "8389KB",
+            "8388KB",
+            "8390KB",
+            "8400KB",
+            "9000KB",
+            "10000KB",
+            "8388608B",
+            "8388607B",
+            "8388609B",
+            "8388610B",
+            "8388700B",
+            "8389000B",
+            "8390000B",
+            "8400000B",
+            "9000000B",
+            "9999999B",
+            "10000000B",
+            "1048576B",
+            "1MiB",
+            "512m",
+            "512",
+            "",
+        ],
+    );
+    agrees(
+        &with_app("limits = { memory = @@ }"),
+        &["\"64MiB\"", "67108864", "true"],
+    );
+    agrees(
+        &with_app("limits = { pids = @@ }"),
+        &[
+            "1",
+            "512",
+            "4294967295",
+            "0",
+            "-1",
+            "4294967296",
+            "1.5",
+            "\"512\"",
+        ],
+    );
+    agrees(
+        &with_app("limits = { cpus = @@ }"),
+        &[
+            "0.01", "0.5", "1", "1.5", "2", "1024", "1024.0", "0.001", "0.0099", "0", "-1",
+            "1024.5", "1025", "nan", "inf", "-inf", "\"1.5\"", "true",
+        ],
+    );
+    agrees(
+        &with_app("[services.app.limits]\n@@"),
+        &[
+            "",
+            "memory = \"64MiB\"\npids = 64\ncpus = 0.5",
+            "cpu = 1",
+            "swap = \"0B\"",
+        ],
+    );
+}
+
+#[test]
 fn tmpfs_paths_agree() {
     // The value is a table key here, so `@@` is the quoted path.
     agrees_on_strings(
@@ -1106,6 +1189,7 @@ fn unknown_fields_are_rejected_at_every_level() {
         with_app("files = { \"/etc/a\" = { content = \"\", template = true } }"),
         with_app("[services.app.health]\nhttp = { method = \"HEAD\" }"),
         with_app("[services.app.health]\ntcp = { host = \"x\" }"),
+        with_app("limits = { memory_swap = \"1GiB\" }"),
         format!("{MINIMAL}\n[deploy]\nrepository_id = 1\nrepository = \"acme/app\"\n"),
     ] {
         assert!(Stack::parse(&source).is_err(), "parser accepts:\n{source}");

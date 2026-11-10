@@ -20,10 +20,10 @@ use super::dependency::Graph;
 use super::file::Overlap;
 use super::schema::Field;
 use super::{
-    ByteSize, ConfigFile, ContainerPath, DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH,
+    ByteSize, ConfigFile, ContainerPath, Cpus, DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH,
     DEFAULT_STOP_TIMEOUT, DeployAuth, Diagnostic, ExpectStatus, FieldPath, FileMode, FileOwner,
-    FileSource, HealthCheck, Host, ImageRef, Location, Name, NormalizedPrefix, ParsedStack, Probe,
-    Route, RouteTimeouts, SUPPORTED_VERSION, Service, Stack, StackError, UpdateStrategy,
+    FileSource, HealthCheck, Host, ImageRef, Limits, Location, Name, NormalizedPrefix, ParsedStack,
+    Probe, Route, RouteTimeouts, SUPPORTED_VERSION, Service, Stack, StackError, UpdateStrategy,
 };
 use crate::health;
 
@@ -205,10 +205,72 @@ struct RawService {
     #[serde(default)]
     #[schemars(extend("default" = false))]
     init: bool,
+    /// Resource limits (ADR-0059). Unset ones keep podman's defaults: no memory or CPU cap,
+    /// 2048 processes. The host's user manager must delegate the cgroup controller of each
+    /// limit set (`memory`, `pids`, `cpu`), or the stack is rejected.
+    #[serde(default)]
+    limits: RawLimits,
     /// Routes from a (host, prefix) to a container port (ADR-0007). Without routes the service
     /// publishes no ports.
     #[serde(default)]
     routes: Vec<RawRoute>,
+}
+
+/// Resource limits (ADR-0059). Shared memory, `tmpfs` and podman's own tmpfs mounts count
+/// against `memory`; `init` and `exec` health checks count against `pids`. During a start-first
+/// deploy the old and the new container run side by side, each with these limits.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "Limits")]
+struct RawLimits {
+    /// A hard memory limit with no swap, at least `"8MiB"`, e.g. `"512MiB"`. A container that
+    /// goes over it is OOM-killed. A size is a whole number and a unit: `B`, `KB`, `MB`, `GB`
+    /// (powers of 1000) or `KiB`, `MiB`, `GiB` (powers of 1024).
+    #[serde(default)]
+    #[schemars(schema_with = "Field::memory")]
+    memory: Option<Spanned<RawSize>>,
+    /// The most processes and threads the container may have at once, at least 1. Without it
+    /// podman's 2048.
+    #[serde(default)]
+    #[schemars(schema_with = "Field::positive_integer")]
+    pids: Option<Int>,
+    /// CPU time, in CPUs: `1.5` lets the container use one and a half CPUs' worth of time per
+    /// period. From 0.01 to 1024.
+    #[serde(default)]
+    #[schemars(schema_with = "Field::cpus")]
+    cpus: Option<Spanned<RawCpus>>,
+}
+
+/// A number of CPUs as TOML writes it, an integer (`2`) or a float (`1.5`).
+#[derive(Debug, Clone, Copy)]
+struct RawCpus(f64);
+
+impl<'de> Deserialize<'de> for RawCpus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = RawCpus;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a number of CPUs such as 1.5")
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<RawCpus, E> {
+                Ok(RawCpus(v))
+            }
+
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "integers past 2^53 are out of range anyway"
+            )]
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<RawCpus, E> {
+                Ok(RawCpus(v as f64))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 /// A size as a stack file writes it: a string such as `"512MiB"`, or a bare integer, which is
@@ -802,6 +864,84 @@ impl RawDeploy {
     }
 }
 
+impl RawLimits {
+    /// The limits, each within its bounds (ADR-0059 §2).
+    fn validate(&self, v: &mut Validator<'_>, path: &FieldPath) -> Option<Limits> {
+        let memory = match &self.memory {
+            Some(memory) => v
+                .size(&path.key("memory"), memory, Limits::MIN_MEMORY)
+                .map(Some),
+            None => Some(None),
+        };
+        let pids = match &self.pids {
+            Some(pids) => match u32::try_from(*pids.get_ref()) {
+                Ok(n) if n >= 1 => Some(Some(n)),
+                _ => {
+                    v.error(
+                        &path.key("pids"),
+                        pids.span(),
+                        format!(
+                            "invalid pids {}: must be from 1 to {}",
+                            pids.get_ref(),
+                            u32::MAX
+                        ),
+                    );
+                    None
+                }
+            },
+            None => Some(None),
+        };
+        let cpus = match &self.cpus {
+            Some(cpus) => Cpus::try_from(cpus.get_ref().0)
+                .map(Some)
+                .map_err(|e| v.error(&path.key("cpus"), cpus.span(), e))
+                .ok(),
+            None => Some(None),
+        };
+        Some(Limits {
+            memory: memory?,
+            pids: pids?,
+            cpus: cpus?,
+        })
+    }
+
+    /// Warns when `shm_size` and the `tmpfs` sizes together reach `memory`: their pages are
+    /// charged to the container's memory, so filling them could OOM-kill it (ADR-0059 §2).
+    fn warn_in_memory(
+        &self,
+        v: &mut Validator<'_>,
+        path: &FieldPath,
+        shm_size: Option<ByteSize>,
+        tmpfs: &BTreeMap<ContainerPath, ByteSize>,
+        limits: &Limits,
+    ) {
+        let (Some(memory), Some(raw)) = (limits.memory, &self.memory) else {
+            return;
+        };
+        let sizes = shm_size.into_iter().chain(tmpfs.values().copied());
+        let total = sizes.fold(0u64, |total, size| total.saturating_add(u64::from(size)));
+        if total < u64::from(memory) {
+            return;
+        }
+        let (what, reach) = match (shm_size.is_some(), tmpfs.is_empty()) {
+            (true, true) => ("`shm_size`", "reaches"),
+            (false, false) => ("the `tmpfs` sizes", "reach"),
+            _ => ("`shm_size` and the `tmpfs` sizes", "reach"),
+        };
+        let total = ByteSize::try_from(total)
+            .map_or_else(|_| format!("{total} bytes"), |size| size.to_string());
+        v.warn(
+            &path.key("memory"),
+            raw.span(),
+            format!(
+                "{what} ({total}) {reach} `memory` ({memory}): shared memory and tmpfs count \
+                 against the memory limit, so filling them leaves the app nothing and can get \
+                 the container OOM-killed"
+            ),
+        );
+    }
+}
+
 impl RawService {
     fn validate(
         self,
@@ -980,6 +1120,11 @@ impl RawService {
             None => Some(None),
         };
         let tmpfs = Self::validate_tmpfs(v, &path.key("tmpfs"), &self.tmpfs, &mount_paths, &files);
+        let limits = self.limits.validate(v, &path.key("limits"));
+        if let (Some(shm_size), Some(tmpfs), Some(limits)) = (&shm_size, &tmpfs, &limits) {
+            self.limits
+                .warn_in_memory(v, &path.key("limits"), *shm_size, tmpfs, limits);
+        }
 
         let mut depends_on = BTreeSet::new();
         let mut listed = BTreeSet::new();
@@ -1067,6 +1212,7 @@ impl RawService {
             shm_size: shm_size?,
             tmpfs: tmpfs?,
             init: self.init,
+            limits: limits?,
             routes,
         })
     }

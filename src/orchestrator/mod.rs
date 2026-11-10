@@ -75,6 +75,7 @@ use thiserror::Error;
 use tokio::sync::{Notify, RwLock, Semaphore, broadcast};
 
 use crate::health::{ExecSlots, HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
+use crate::machine::{Machine, Undelegated};
 use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError, TrackedService};
 use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
@@ -153,6 +154,9 @@ pub struct Settings {
     pub pull_limit: usize,
     /// Image retention and how often images are pruned (ADR-0041).
     pub gc: GcSettings,
+    /// The host, whose delegated cgroup controllers resource limits need and whose memory and
+    /// CPUs they are compared with (ADR-0059 §5).
+    pub machine: Machine,
 }
 
 impl Default for Settings {
@@ -167,6 +171,7 @@ impl Default for Settings {
             gap_retry_after: Duration::from_secs(5),
             pull_limit: 2,
             gc: GcSettings::default(),
+            machine: Machine::local(),
         }
     }
 }
@@ -201,6 +206,9 @@ pub enum OrchestratorError {
     /// The stack uses something this host's podman is too old for (ADR-0057 §9).
     #[error("{0}")]
     Unsupported(String),
+    /// A resource limit's cgroup controller is not delegated to hoster (ADR-0059 §5).
+    #[error(transparent)]
+    Undelegated(#[from] Undelegated),
     #[error("stack {0} has an active deployment")]
     StackBusy(String),
     #[error("stack {0} is being removed")]
@@ -790,7 +798,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// Checks a stack file with what hoster knows locally, for the editor's diagnostics while
     /// the admin types (ADR-0060). It runs the checks of [`preview`](Self::preview) that need no
     /// network: validation, a removal in progress, route collisions and the reserved admin host
-    /// (ADR-0012), and the podman version config files need (ADR-0057 §9). Tags are not
+    /// (ADR-0012), the podman version config files need (ADR-0057 §9), and resource limits
+    /// against the delegated cgroup controllers and the host's size (ADR-0059 §5). Tags are not
     /// resolved and nothing is stored. A secret the file references but that is not set yet is
     /// a warning, not an error: a new stack's secrets can only be set once it exists, and the
     /// deployment checks them again in `Validating`.
@@ -837,8 +846,19 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             );
             errors.push(at(path, message));
         }
+        if let Err(undelegated) = self.settings.machine.check_limits(stack) {
+            let message = undelegated.to_string();
+            errors.extend(undelegated.uses().into_iter().map(|(name, limit)| {
+                let path = services
+                    .key(name.as_ref())
+                    .key("limits")
+                    .key(limit.as_ref());
+                at(path, message.clone())
+            }));
+        }
 
         let mut warnings = parsed.warnings;
+        warnings.extend(self.limit_warnings(stack, toml));
         for (name, service) in &stack.services {
             let service_path = services.key(name.as_ref());
             for SecretRef { secret, usage } in service.secret_refs() {
@@ -1070,6 +1090,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self.check_routes(&definition).await?;
         self.check_engine(&definition)
             .map_err(OrchestratorError::Unsupported)?;
+        self.settings.machine.check_limits(&definition)?;
+        let mut warnings = parsed.warnings;
+        warnings.extend(self.limit_warnings(&definition, toml));
+        warnings.sort_by_key(|d| d.location);
         let images = self.resolve_images(&definition).await?;
         let running = self.store.services(definition.name.as_ref()).await?;
         let secrets = self.secret_versions(&definition).await?;
@@ -1084,7 +1108,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         Ok(Prepared {
             definition,
             images,
-            warnings: parsed.warnings,
+            warnings,
             changed,
             plan,
             noop,
@@ -1969,6 +1993,28 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             return Ok(());
         }
         PodmanVersion::CONFIG_FILES.require(&self.runtime.version(), "config files (`files`)")
+    }
+
+    /// The limits of `stack` larger than this host (ADR-0059 §5), as warnings at their keys in
+    /// `toml`.
+    fn limit_warnings(&self, stack: &Stack, toml: &str) -> Vec<Diagnostic> {
+        let services = FieldPath::default().key("services");
+        self.settings
+            .machine
+            .limit_warnings(stack)
+            .into_iter()
+            .map(|warning| {
+                let path = services
+                    .key(warning.service.as_ref())
+                    .key("limits")
+                    .key(warning.limit.as_ref());
+                Diagnostic {
+                    location: path.locate(toml),
+                    path,
+                    message: warning.message,
+                }
+            })
+            .collect()
     }
 
     /// The current versions of every secret `stack` references; unset ones are left out.

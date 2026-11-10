@@ -25,7 +25,8 @@ what the update design trusts, and [Hardening](#hardening) the sandboxing the un
 You need a Linux host on x86_64 or aarch64 with systemd as init, cgroup v2 and unprivileged user
 namespaces (rootless podman needs them anyway). The script installs podman itself with `apt` or
 `dnf` (Debian, Ubuntu, Fedora and relatives); on other distributions install podman, `newuidmap`
-/ `newgidmap` and `sysctl` first, and the script uses them.
+/ `newgidmap`, `sysctl` and catatonit first, and the script uses them
+([cgroup delegation and catatonit](#cgroup-delegation-and-catatonit)).
 
 ```sh
 # The latest stable release:
@@ -67,15 +68,24 @@ sudo bash install.sh --dry-run
   anything. Root never installs a file the `hoster` user could have written, or writes through a
   path that user controls;
 - installs podman (and `uidmap`, `procps`, `dbus-user-session` where missing) with `apt-get` or
-  `dnf` if any of `podman`, `newuidmap`, `sysctl`, `runuser` or `useradd` is missing. Without
-  either package manager it stops with an error naming the packages to install;
+  `dnf` if any of `podman`, `newuidmap`, `sysctl`, `runuser` or `useradd` is missing, and
+  `catatonit` (podman's init, for `init = true`) if neither `/usr/libexec/podman/catatonit` nor
+  `/usr/lib/podman/catatonit` exists. Without either package manager it stops with an error
+  naming the packages to install;
 - creates the `hoster` system user with a home directory in `/home/hoster` and a 65536-wide
   subordinate uid and gid range after the highest one already in `/etc/subuid` and
   `/etc/subgid`; an existing user or range is left alone;
 - runs `loginctl enable-linger hoster`, so the user's systemd instance (and with it
   `podman.socket` and `hoster.service`) runs at boot without a login;
 - installs `50-hoster.conf` as `/etc/sysctl.d/50-hoster.conf`
-  (`net.ipv4.ip_unprivileged_port_start = 80`, so hoster can bind :80 and :443) and applies it.
+  (`net.ipv4.ip_unprivileged_port_start = 80`, so hoster can bind :80 and :443) and applies it;
+- if the user's systemd instance, `user@<uid>.service`, does not delegate one of the cgroup
+  controllers `cpu`, `memory` and `pids` that resource limits use, writes
+  `/etc/systemd/system/user@<uid>.service.d/hoster-delegate.conf` (never over an existing file)
+  and runs `systemctl daemon-reload`. The change only applies when the user instance restarts, so
+  it restarts `user@<uid>.service` itself when `hoster.service` is neither enabled nor active and
+  no `hoster-*` container runs, as on a fresh host; otherwise it prints that the change applies at
+  the next restart of that unit or reboot ([cgroup delegation](#cgroup-delegation-and-catatonit)).
 
 **As `hoster`**, with that user's own systemd instance, it:
 
@@ -96,8 +106,8 @@ sudo bash install.sh --dry-run
   `~/.config/hoster/hoster.toml` (mode 0600) only if there is none;
 - runs `hoster doctor`. On a fresh host it reports failures until the steps below are done.
 
-It **never starts, enables or restarts** `hoster.service`. It ends by printing the remaining
-steps.
+It **never starts, enables or restarts** `hoster.service`, and restarts the user's systemd
+instance only while hoster neither runs nor is enabled. It ends by printing the remaining steps.
 
 The binary layout replaces `/usr/local/bin/hoster` ([ADR-0052](https://github.com/LHelge/hoster/blob/main/docs/adr/0052-release-install-and-self-update.md)): the service user owns its binary,
 so `hoster update` can replace it from inside the sandbox.
@@ -196,8 +206,9 @@ ReadWritePaths=/srv/hoster %h/.config/hoster %h/.local/lib/hoster
 ## Check and start
 
 `hoster doctor` checks the user, the configuration, the state directory, the podman socket, the
-sysctl, that :80/:443 can be bound, linger, `podman.socket`, cgroup delegation, the clock and the
-binary layout. It reads the same environment as the service, so pass the handle in:
+sysctl, that :80/:443 can be bound, linger, `podman.socket`, cgroup delegation (only needed for
+resource limits, see below), the clock and the binary layout. It reads the same environment as
+the service, so pass the handle in:
 
 ```sh
 HOSTER_ADMIN_GITHUB=octocat hoster doctor
@@ -214,6 +225,38 @@ systemctl --user status hoster
 
 `enable` adds it to `default.target`, which the lingering user instance reaches at boot.
 `Type=notify` means the unit only becomes `active` once hoster reports it is serving.
+
+## Cgroup delegation and catatonit
+
+A stack's resource limits ([[stack-format#2-2-3-resource-limits-adr-0059|`limits`]],
+[ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)) are enforced by the kernel's cgroup controllers `memory`, `pids` and `cpu`. Rootless
+podman puts hoster's containers in scopes under the user's systemd instance,
+`user@<uid>.service`, so they can only be limited by the controllers systemd delegates to that
+unit, which `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/cgroup.controllers`
+lists. systemd 252 and later delegate all three by default; Ubuntu 22.04's systemd 249
+delegates only `memory` and `pids`. A stack that sets a limit on a controller missing there is
+rejected when it is applied or deployed, and `hoster doctor`'s `cgroup_delegation` check names
+the gap. Stacks without limits are not affected.
+
+`install.sh` adds the delegation where it is missing. To do it by hand, as root:
+
+```sh
+uid=$(id -u hoster)
+mkdir -p /etc/systemd/system/user@$uid.service.d
+printf '[Service]\nDelegate=cpu memory pids\n' > /etc/systemd/system/user@$uid.service.d/hoster-delegate.conf
+systemctl daemon-reload
+systemctl restart user@$uid.service   # stops hoster and its containers; or reboot
+```
+
+`daemon-reload` alone is not enough: systemd only applies `Delegate=` when the user instance
+starts, so restart it (hoster's `Restart=always` and the reconciler bring everything back) or
+reboot. The drop-in is for hoster's user only and adds just what limits use.
+
+**catatonit** is podman's init, which `init = true` runs as PID 1. `install.sh` installs the
+`catatonit` package with `apt-get` or `dnf`, which puts it at `/usr/libexec/podman/catatonit`
+(Debian, Ubuntu, Fedora). On other distributions install it with their package manager: Arch's
+`catatonit` package uses `/usr/lib/podman/catatonit`, which podman also finds. Without it a
+service with `init = true` cannot be created and its deploy fails.
 
 ## After the first login
 
@@ -337,8 +380,9 @@ mv -T ~/.local/lib/hoster/current.new ~/.local/lib/hoster/current
 
 `scripts/test-install.sh` runs `install.sh` for real against fake releases served from
 `file://` URLs, with a stub binary per version: a dry run on a fresh host, an install, an
-idempotent re-run, updates with pruning, a refused downgrade, a checksum mismatch and a
-rolled-back version. It changes the host (it creates the `hoster` user), so CI runs it on its
+idempotent re-run, updates with pruning, a refused downgrade, a checksum mismatch, a
+rolled-back version, and the cgroup delegation drop-in with its guarded restart of the user
+instance. It changes the host (it creates the `hoster` user), so CI runs it on its
 disposable runner and locally it runs in a throwaway systemd container:
 
 ```sh

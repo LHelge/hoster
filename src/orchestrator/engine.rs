@@ -449,8 +449,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
     }
 
-    /// `Validating`: re-validates the revision and its routes, assigns the generation and
-    /// reserves the new containers' loopback ports.
+    /// `Validating`: re-validates the revision, the podman version and delegated cgroup
+    /// controllers it needs and its routes, assigns the generation and reserves the new
+    /// containers' loopback ports.
     async fn validate(&self, run: &mut Run) -> Event {
         if let Err(reason) = &run.plan {
             return Event::Invalid(reason.clone());
@@ -460,6 +461,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
         if let Err(reason) = self.check_engine(&run.target.definition) {
             return Event::Invalid(reason);
+        }
+        // A controller can be undelegated under a stored revision (ADR-0059 §5), so rollbacks
+        // and CI deploys are checked as an apply is.
+        if let Err(err) = self.settings.machine.check_limits(&run.target.definition) {
+            return Event::Invalid(err.to_string());
         }
         let others = match self.other_stacks(run.target.stack()).await {
             Ok(others) => others,
@@ -1327,6 +1333,7 @@ impl Run {
         spec.shm_size = service.shm_size;
         spec.tmpfs = service.tmpfs.clone();
         spec.init = service.init;
+        spec.limits = service.limits;
         let ports = self.ports.get(&change.service).cloned().unwrap_or_default();
         spec.ports = ports
             .into_iter()

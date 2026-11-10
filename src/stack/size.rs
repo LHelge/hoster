@@ -17,9 +17,14 @@ pub struct ByteSize(u64);
 
 impl ByteSize {
     /// One mebibyte, the smallest `shm_size` or `tmpfs` size.
-    pub const MIB: ByteSize = ByteSize(1 << 20);
+    pub const MIB: ByteSize = ByteSize::mebibytes(1);
     /// The largest size: podman's size fields are `i64`.
     pub const MAX: ByteSize = ByteSize(i64::MAX as u64);
+
+    /// `n` MiB. `n` is small enough: at most `i64::MAX` bytes.
+    pub const fn mebibytes(n: u64) -> Self {
+        Self(n << 20)
+    }
 
     /// Each unit and its bytes, in the order [`fmt::Display`] tries them: largest first, and the
     /// binary unit before the decimal one of the same rank.
@@ -106,6 +111,19 @@ impl fmt::Display for ByteSize {
     }
 }
 
+/// At most [`ByteSize::MAX`] bytes.
+impl TryFrom<u64> for ByteSize {
+    type Error = String;
+
+    fn try_from(bytes: u64) -> Result<Self, Self::Error> {
+        if bytes <= Self::MAX.0 {
+            Ok(Self(bytes))
+        } else {
+            Err(format!("{bytes} bytes is more than {} bytes", Self::MAX.0))
+        }
+    }
+}
+
 impl From<ByteSize> for u64 {
     fn from(size: ByteSize) -> Self {
         size.0
@@ -163,6 +181,14 @@ mod tests {
         ] {
             assert_eq!(bytes(text), expected, "{text}");
         }
+    }
+
+    #[test]
+    fn bytes_convert_up_to_the_maximum() {
+        assert_eq!(ByteSize::try_from(1 << 20), Ok(ByteSize::MIB));
+        assert_eq!(ByteSize::try_from(i64::MAX as u64), Ok(ByteSize::MAX));
+        assert!(ByteSize::try_from(i64::MAX as u64 + 1).is_err());
+        assert_eq!(ByteSize::mebibytes(8).to_string(), "8MiB");
     }
 
     #[test]

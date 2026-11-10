@@ -1,0 +1,17 @@
+---
+source: src/stack/tests.rs
+expression: parse(source).unwrap_err().to_string()
+---
+invalid stack file (12 errors):
+  line 6, column 21: services.small.limits.memory: invalid size `4MiB`: must be at least 8MiB
+  line 6, column 36: services.small.limits.pids: invalid pids 0: must be from 1 to 4294967295
+  line 6, column 46: services.small.limits.cpus: invalid cpus 0.001: must be a number from 0.01 to 1024
+  line 10, column 21: services.large.limits.memory: invalid size `8388607B`: must be at least 8MiB
+  line 10, column 40: services.large.limits.pids: invalid pids 4294967296: must be from 1 to 4294967295
+  line 10, column 59: services.large.limits.cpus: invalid cpus 1024.5: must be a number from 0.01 to 1024
+  line 14, column 21: services.odd.limits.memory: invalid size 536870912: write a size as a string with its unit, e.g. "512MiB" for 536870912 bytes
+  line 14, column 39: services.odd.limits.pids: invalid pids -1: must be from 1 to 4294967295
+  line 14, column 50: services.odd.limits.cpus: invalid cpus NaN: must be a number from 0.01 to 1024
+  line 18, column 21: services.infinite.limits.memory: invalid size `512m`: units are case-sensitive: write "512MiB" (binary, what Docker's `m` means) or "512MB" (decimal)
+  line 18, column 36: services.infinite.limits.cpus: invalid cpus inf: must be a number from 0.01 to 1024
+  line 22, column 19: services.negative.limits.cpus: invalid cpus -1: must be a number from 0.01 to 1024

@@ -228,6 +228,39 @@
       },
       "additionalProperties": false
     },
+    "Limits": {
+      "description": "Resource limits (ADR-0059). Shared memory, `tmpfs` and podman's own tmpfs mounts count\nagainst `memory`; `init` and `exec` health checks count against `pids`. During a start-first\ndeploy the old and the new container run side by side, each with these limits.",
+      "type": "object",
+      "properties": {
+        "cpus": {
+          "description": "CPU time, in CPUs: `1.5` lets the container use one and a half CPUs' worth of time per\nperiod. From 0.01 to 1024.",
+          "type": "number",
+          "examples": [
+            0.5,
+            1.5,
+            2
+          ],
+          "maximum": 1024.0,
+          "minimum": 0.01
+        },
+        "memory": {
+          "description": "A hard memory limit with no swap, at least `\"8MiB\"`, e.g. `\"512MiB\"`. A container that\ngoes over it is OOM-killed. A size is a whole number and a unit: `B`, `KB`, `MB`, `GB`\n(powers of 1000) or `KiB`, `MiB`, `GiB` (powers of 1024).",
+          "type": "string",
+          "examples": [
+            "512MiB",
+            "2GiB"
+          ],
+          "pattern": "^0*(([1-9][0-9]{7,}|9[0-9]{6}|8[4-9][0-9]{5}|839[0-9]{4}|8389[0-9]{3}|8388[7-9][0-9]{2}|83886[1-9][0-9]|838860[89])B|([1-9][0-9]{4,}|9[0-9]{3}|8[4-9][0-9]{2}|839[0-9]|8389)KB|([1-9][0-9]{4,}|9[0-9]{3}|8[2-9][0-9]{2}|819[2-9])KiB|([1-9][0-9]+|9)MB|([1-9][0-9]+|[89])MiB|[1-9][0-9]*(GB|GiB))$"
+        },
+        "pids": {
+          "description": "The most processes and threads the container may have at once, at least 1. Without it\npodman's 2048.",
+          "type": "integer",
+          "maximum": 4294967295,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "Route": {
       "description": "A (host, prefix) → container port route (ADR-0007, ADR-0009, ADR-0010). A (host, prefix)\nmust be unique within the stack and across stacks (ADR-0012).",
       "type": "object",
@@ -331,6 +364,10 @@
           "description": "Run podman's init (catatonit) as PID 1, which passes signals on and reaps exited child\nprocesses, for images whose own process does neither. The host needs catatonit.",
           "type": "boolean",
           "default": false
+        },
+        "limits": {
+          "description": "Resource limits (ADR-0059). Unset ones keep podman's defaults: no memory or CPU cap,\n2048 processes. The host's user manager must delegate the cgroup controller of each\nlimit set (`memory`, `pids`, `cpu`), or the stack is rejected.",
+          "$ref": "#/$defs/Limits"
         },
         "read_only": {
           "description": "Read-only root filesystem. podman then mounts an unsized tmpfs on `/tmp`, `/run` and\n`/var/tmp`; a `tmpfs` entry replaces the one at its own path.",

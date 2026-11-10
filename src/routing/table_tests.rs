@@ -9,8 +9,8 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::stack::{
-    DEFAULT_DRAIN_TIMEOUT, DEFAULT_STOP_TIMEOUT, Host, Name, Route, RouteTimeouts, Service, Stack,
-    UpdateStrategy,
+    DEFAULT_DRAIN_TIMEOUT, DEFAULT_STOP_TIMEOUT, Host, Limits, Name, Route, RouteTimeouts, Service,
+    Stack, UpdateStrategy,
 };
 
 fn name(s: &str) -> Name {
@@ -47,6 +47,7 @@ fn stack(stack_name: &str, routes: &[Decl<'_>]) -> Stack {
                 shm_size: None,
                 tmpfs: BTreeMap::new(),
                 init: false,
+                limits: Limits::default(),
                 routes: Vec::new(),
             })
             .routes

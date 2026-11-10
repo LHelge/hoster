@@ -22,6 +22,7 @@ mod deploy;
 mod diagnostic;
 mod file;
 mod image;
+mod limits;
 mod raw;
 mod route;
 mod schema;
@@ -37,6 +38,7 @@ pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
 pub use file::{ConfigFile, ContainerPath, FileMode, FileOwner, FileSource, Ownership};
 pub use image::{Digest, ImageRef, PinnedImage};
+pub use limits::{Cpus, Limit, Limits};
 pub use route::{Host, NormalizedPrefix};
 pub use schema::StackSchema;
 pub use size::ByteSize;
@@ -155,6 +157,8 @@ pub struct Service {
     pub tmpfs: BTreeMap<ContainerPath, ByteSize>,
     /// Run podman's init (catatonit) as PID 1 (ADR-0059 §1).
     pub init: bool,
+    /// Resource limits (ADR-0059 §2); unset ones keep podman's defaults.
+    pub limits: Limits,
     pub routes: Vec<Route>,
 }
 

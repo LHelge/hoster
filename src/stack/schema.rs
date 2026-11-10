@@ -23,6 +23,7 @@ use schemars::generate::SchemaSettings;
 use schemars::transform::RecursiveTransform;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 
+use super::Cpus;
 use super::raw::RawStack;
 
 /// The generated schema, as pretty-printed JSON.
@@ -164,6 +165,24 @@ impl Pattern {
         // n ≥ 2 (1.048576)
         "|([1-9][0-9]+|[2-9])MB",
         "|[1-9][0-9]*(MiB|GB|GiB)",
+        ")$",
+    );
+    /// A `memory` limit of at least 8 MiB ([`Limits::MIN_MEMORY`](super::Limits::MIN_MEMORY)),
+    /// written like [`SIZE`](Self::SIZE).
+    pub const MEMORY: &str = concat!(
+        "^0*(",
+        // n ≥ 8388608
+        "([1-9][0-9]{7,}|9[0-9]{6}|8[4-9][0-9]{5}|839[0-9]{4}|8389[0-9]{3}",
+        "|8388[7-9][0-9]{2}|83886[1-9][0-9]|838860[89])B",
+        // n ≥ 8389 (8388.608)
+        "|([1-9][0-9]{4,}|9[0-9]{3}|8[4-9][0-9]{2}|839[0-9]|8389)KB",
+        // n ≥ 8192
+        "|([1-9][0-9]{4,}|9[0-9]{3}|8[2-9][0-9]{2}|819[2-9])KiB",
+        // n ≥ 9 (8.388608)
+        "|([1-9][0-9]+|9)MB",
+        // n ≥ 8
+        "|([1-9][0-9]+|[89])MiB",
+        "|[1-9][0-9]*(GB|GiB)",
         ")$",
     );
     /// A path at or in `/proc`, `/sys` or `/dev`, which podman mounts over.
@@ -378,6 +397,25 @@ impl Field {
             "type": "string",
             "pattern": Pattern::SIZE,
             "examples": ["64MiB", "1GiB"],
+        })
+    }
+
+    /// A `memory` limit: a size of at least 8 MiB.
+    pub fn memory(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": Pattern::MEMORY,
+            "examples": ["512MiB", "2GiB"],
+        })
+    }
+
+    /// A `cpus` limit: an integer or a float from 0.01 to 1024.
+    pub fn cpus(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "number",
+            "minimum": Cpus::MIN,
+            "maximum": Cpus::MAX,
+            "examples": [0.5, 1.5, 2],
         })
     }
 
