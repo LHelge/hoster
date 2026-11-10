@@ -63,4 +63,6 @@ The admin UI's CSP allows no inline scripts and no `eval` (`script-src 'self'`),
 features that compile attribute code into functions (`hx-on:*` handlers and similar) do not work
 and must not be used. Use server-side logic and plain `hx-*` attributes instead.
 
-`hoster.css` is hoster's own stylesheet, not vendored.
+`hoster.css` is hoster's own stylesheet, not vendored. `editor.js` is hoster's own script, not
+vendored either (ADR-0060). It follows the same rules: no inline scripts, no `eval`, no
+`hx-on:*` and no `style=` attributes, with HTMX reached through `addEventListener`.
