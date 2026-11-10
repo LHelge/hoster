@@ -131,7 +131,10 @@ impl FakeProber {
     /// [`probed`](Self::probed) waits for one that is held, not for one from an earlier deploy.
     pub(super) fn hold(&self, port: u16) {
         let pattern = Self::pattern(port);
-        self.probes.lock().unwrap().retain(|p| !p.contains(&pattern));
+        self.probes
+            .lock()
+            .unwrap()
+            .retain(|p| !p.contains(&pattern));
         self.held.lock().unwrap().insert(port);
     }
 
