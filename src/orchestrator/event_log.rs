@@ -38,6 +38,13 @@ impl EventLog {
         Self { store, ui_events }
     }
 
+    /// An event log on `store` without an orchestrator, announcing on `ui_events` (tests of
+    /// other producers and readers).
+    #[cfg(test)]
+    pub(crate) fn detached(store: Store, ui_events: broadcast::Sender<UiEvent>) -> Self {
+        Self::new(store, ui_events)
+    }
+
     /// Records `event` and tells the open pages. A failed write is logged at `warn` and
     /// otherwise ignored: the operation the event describes has happened regardless.
     pub async fn record(&self, event: NewEvent) {
@@ -683,10 +690,6 @@ impl NotificationEvents {
 
     /// A notification mail was dropped because of `reason`, the delivery error as
     /// `notify::DeliveryError` writes it (it never holds the key).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "recorded by the notifier as it lands")
-    )]
     pub fn failed(reason: &str) -> NewEvent {
         NewEvent::new(
             EventKind::NotificationFailed,
@@ -695,6 +698,38 @@ impl NotificationEvents {
         )
         .subject(Self::SUBJECT)
         .meta(reason)
+    }
+}
+
+/// What a service or certificate event is about, beyond its stack and the page it links to:
+/// the service (`stack/service`) of a crash-loop or health event, the host of a certificate
+/// event. Several services share their stack's page and every host the certificates page, so
+/// the notifier keys its open problems by this (ADR-0058 §8).
+///
+/// It is read back from the message, which [`ServiceEvents`] and [`CertEvents`] write: the
+/// service name is the message's first word, the host the word after the first ` for `. Names
+/// and hosts hold no spaces. The tests pin the round trip.
+#[derive(Debug, Clone, Copy)]
+pub struct EventTopic;
+
+impl EventTopic {
+    /// The service or host `event` is about, if it is a crash-loop, health or certificate
+    /// event whose message names one.
+    pub fn of(event: &Event) -> Option<&str> {
+        let message = event.message.as_str();
+        let word = match event.kind {
+            EventKind::CrashLoopEntered | EventKind::CrashLoopLeft | EventKind::HealthChanged => {
+                message.split(' ').next().filter(|name| name.contains('/'))
+            }
+            EventKind::CertificateIssued
+            | EventKind::CertificateRenewed
+            | EventKind::CertificateFailed
+            | EventKind::DnsMismatch => message
+                .split_once(" for ")
+                .and_then(|(_, rest)| rest.split(' ').next()),
+            _ => None,
+        };
+        word.filter(|word| !word.is_empty())
     }
 }
 
@@ -777,6 +812,81 @@ mod tests {
         let events = webhook_deploy(now);
         let succeeded = events.succeeded(now + Duration::from_secs(90));
         assert_eq!(succeeded.message, "Deployed notes in 1m 30s");
+    }
+
+    /// `event` as the store returns it.
+    fn stored(event: NewEvent) -> Event {
+        Event {
+            id: crate::store::EventId::from(1),
+            at: Timestamp::now(),
+            kind: event.kind,
+            severity: event.severity,
+            stack: event.stack,
+            subject: event.subject,
+            message: event.message,
+            meta: event.meta,
+        }
+    }
+
+    #[test]
+    fn the_topic_of_a_service_event_is_its_service() {
+        let generation = ServiceGeneration {
+            stack: "notes".parse().unwrap(),
+            service: "web".parse().unwrap(),
+            generation: 3,
+        };
+        let service = ServiceEvents::from(&generation);
+        let unhealthy = HealthChange {
+            from: HealthStatus::Healthy,
+            to: HealthStatus::Unhealthy,
+            detail: "GET /healthz: 503 for 30s".into(),
+        };
+        let healthy = HealthChange {
+            from: HealthStatus::Unhealthy,
+            to: HealthStatus::Healthy,
+            detail: "GET /healthz: 200".into(),
+        };
+        for event in [
+            service.crash_loop_entered(5, Duration::from_secs(600)),
+            service.crash_loop_left(),
+            service.health_changed(&unhealthy).unwrap(),
+            service.health_changed(&healthy).unwrap(),
+            service.healthy_again(&healthy),
+        ] {
+            assert_eq!(EventTopic::of(&stored(event)), Some("notes/web"));
+        }
+        // A restart is not keyed by the notifier.
+        let restarted = stored(service.started_past_hold(&["db".parse().unwrap()]));
+        assert_eq!(EventTopic::of(&restarted), None);
+    }
+
+    #[test]
+    fn the_topic_of_a_certificate_event_is_its_host() {
+        let events = CertEvents::new("app.example.com", Some("notes"));
+        let mismatch = DnsMismatch {
+            host: "app.example.com".into(),
+            observed: vec![],
+            expected: vec!["203.0.113.7".parse().unwrap()],
+        };
+        for event in [
+            events.issued(SystemTime::now(), false),
+            events.issued(SystemTime::now(), true),
+            events.failed(
+                "order for app.example.com failed: rate limited",
+                SystemTime::now(),
+            ),
+            events.dns_mismatch(&mismatch),
+        ] {
+            assert_eq!(EventTopic::of(&stored(event)), Some("app.example.com"));
+        }
+    }
+
+    #[test]
+    fn other_events_have_no_topic() {
+        let started = stored(HosterEvents::started(&"0.3.0".parse().unwrap()));
+        assert_eq!(EventTopic::of(&started), None);
+        let deploy = stored(webhook_deploy(Timestamp::now()).failed(Some("for real")));
+        assert_eq!(EventTopic::of(&deploy), None);
     }
 
     #[test]

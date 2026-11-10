@@ -123,6 +123,20 @@ impl Store {
         .await?)
     }
 
+    /// The event `id`, unless the retention sweep has deleted it: the one a notifier reminder
+    /// is about (ADR-0058 §8).
+    pub async fn event(&self, id: EventId) -> Result<Option<Event>> {
+        Ok(sqlx::query_as!(
+            Event,
+            r#"SELECT id AS "id: EventId", at AS "at: Timestamp", kind AS "kind: EventKind",
+                      severity AS "severity: Severity", stack, subject, message, meta
+               FROM events WHERE id = ?"#,
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     /// Deletes every event older than `cutoff` (the retention sweep) except the newest one.
     /// Returns how many.
     ///

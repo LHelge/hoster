@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id: EventId\", at AS \"at: Timestamp\", kind AS \"kind: EventKind\",\n                      severity AS \"severity: Severity\", stack, subject, message, meta\n               FROM events WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: EventId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "at: Timestamp",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "kind: EventKind",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "severity: Severity",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "severity"
+          }
+        }
+      },
+      {
+        "name": "stack",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "subject",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "subject"
+          }
+        }
+      },
+      {
+        "name": "message",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "message"
+          }
+        }
+      },
+      {
+        "name": "meta",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "events",
+            "name": "meta"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "626606de0d788b952dceb9c35bcc4d779d128bb53d7cea18c2340552a2d08329"
+}

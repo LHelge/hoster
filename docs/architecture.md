@@ -298,7 +298,7 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 | **ACME task** | orchestrator runtime, single task | Account lifecycle, issuance, renewal. Writes `CertMap` and `ChallengeMap`. Persists account and certs to disk. |
 | **Registry client** | orchestrator runtime | Generic OCI distribution client (ADR-0025): token discovery from `WWW-Authenticate`, `HEAD` manifest → digest. Per-registry-host credentials. Used by the poller and for resolving third-party tags at stack apply. |
 | **Digest poller** | orchestrator runtime | Periodically resolves tracked ghcr tags to digests. Calls `orchestrator.deploy` only when a tag's observed digest changes (ADR-0043). |
-| **Notifier** | orchestrator runtime | Mails the operator about problems and recoveries (ADR-0058). Reads the event log (§11) past a persisted cursor, woken by `ui_events` and a one-minute timer; selects, de-duplicates and rate-limits; delivers through a mail `Provider` (Resend) with a short retry, and records `NotificationFailed` when it gives up. Idle until notifications are configured in Settings. |
+| **Notifier** | orchestrator runtime | Mails the operator about problems and recoveries (ADR-0058). Reads the event log (§11) past a persisted cursor, woken by `ui_events` and a one-minute timer; selects, de-duplicates and rate-limits; delivers through a mail `Provider` (Resend) with a short retry, and records `NotificationFailed` when it gives up. Idle until notifications are configured in Settings. Beyond ADR-0058 §7–§8 it keeps the open problems true to what the producers still know: a cancelled deploy (`DeployFailed`, warning) is not mailed; a successful deploy, or a rollback that went live, forgets the stack's crash-loop and health problems, since their generations are gone; `HosterStarted` forgets all of those, which the reconciler and health monitor write again if they persist; `StackRemoved` forgets every problem of the stack, its hosts' included. Open problems with no repeat event are reminded of from the timer, a day after their last mail (deploy problems never). The hourly cap and its held-back count live in memory. |
 | **Admin web UI + webhook (Axum)** | orchestrator runtime | One Axum app (ADR-0021).<br/>• **UI:** Askama-rendered pages with vendored HTMX 4 (embedded in the binary). GitHub OAuth login, restricted to `HOSTER_ADMIN_GITHUB`. SQLite sessions and CSRF tokens (ADR-0031).<br/>• **Webhook:** `/hooks/deploy`, authenticated with a GitHub Actions OIDC token (signature via a cached JWKS, `iss`, `aud`, expiry, single-use `jti`) and authorized by the stack's `[deploy]` rule (ADR-0047).<br/>• **Wiring:** calls `Orchestrator` methods directly and renders their typed results. Live views (deploy progress, logs) stream through SSE or HTMX polling. |
 | **GitHub OAuth client** | orchestrator runtime | Authorization-code + PKCE flow against github.com. Compares the login handle case-insensitively with `HOSTER_ADMIN_GITHUB` (ADR-0031). |
 | **:80 service** | Pingora | Answers `/.well-known/acme-challenge/<token>` from `ChallengeMap`. Redirects every other request to `https://` with 308. |
@@ -424,8 +424,8 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
 6. Build and store the initial `RouteTable`.
 7. Spawn the Pingora thread and wait for `ExecutionPhase::Running`. If it fails to bind :80/:443,
    exit non-zero so systemd shows the failure.
-8. Start the ACME task (renewals plus any missing certs, the admin host included), the poller and
-   the Axum app (web UI + webhook).
+8. Start the ACME task (renewals plus any missing certs, the admin host included), the poller, the
+   notifier (ADR-0058) and the Axum app (web UI + webhook).
 9. Notify systemd that the service is ready (`READY=1` with `Type=notify`).
 
 **Shutdown** (SIGTERM, or the graceful shutdown the System page requests after a self-update

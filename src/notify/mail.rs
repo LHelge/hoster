@@ -115,9 +115,9 @@ impl Letterhead {
         url
     }
 
-    /// The Events page on the admin host.
+    /// The Events page on the admin host (`/activity`; `/events` is the dashboard's stream).
     fn events(&self) -> Url {
-        self.page("/events").unwrap_or_else(|| self.admin.clone())
+        self.page("/activity").unwrap_or_else(|| self.admin.clone())
     }
 }
 
@@ -131,6 +131,10 @@ pub enum Notice<'a> {
     /// The hourly cap's summary: `more` events since it was reached went unmailed (§8).
     Summary { more: u32, at: Timestamp },
     /// The fixed message of Settings' Send test button (§5).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "sent by Settings → Notifications as it lands")
+    )]
     Test { at: Timestamp },
 }
 

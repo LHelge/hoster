@@ -150,7 +150,7 @@ fn an_event_of_no_stack_and_no_page_links_to_the_events_page() {
         ..problem()
     };
     let mail = mail(Notice::from(&event));
-    assert_mail_safe(&mail.html, "https://hoster.example.com/events");
+    assert_mail_safe(&mail.html, "https://hoster.example.com/activity");
     assert!(mail.html.contains(">Open the Events page</a>"));
     assert!(mail.html.contains("bgcolor=\"#a53d01\""));
 }
@@ -176,7 +176,7 @@ fn a_reminder_says_it_is_still_failing() {
 fn the_summary_counts_the_events_and_links_to_the_events_page() {
     let mail = mail(Notice::Summary { more: 7, at: at() });
     assert_eq!(mail.subject, "[srv-01] 7 more events since the last mail");
-    let link = "https://hoster.example.com/events";
+    let link = "https://hoster.example.com/activity";
     assert_mail_safe(&mail.html, link);
     assert!(mail.html.contains(">hourly cap</td>"));
     assert!(mail.html.contains("at most 20 notification mails an hour"));
