@@ -1,10 +1,10 @@
 ---
 id: w2w
-title: "ADR: runtime option allowlist and resource limits"
-status: open
+title: "ADR-0059: runtime options and resource limits"
+status: done
 priority: P2
 created: "2026-11-09T17:21:18.085686609Z"
-updated: "2026-11-09T17:21:18.085686609Z"
+updated: "2026-11-10T00:00:49.305121836Z"
 tags:
   - decision
   - docs
@@ -39,9 +39,9 @@ Write the ADR (next free number) for M13, amending ADR-0038's "no resource limit
 7. **Config hash.** All options and limits are part of it.
 
 ## Acceptance Criteria
-- [ ] ADR written with alternatives (defaults for everyone, cgroup-v1 support, a wider allowlist) and consequences. ADR-0038's status line updated. Index row added.
-- [ ] `docs/architecture.md` §8 updated with the new HostConfig fields.
-- [ ] Task sent to review for owner sign-off.
+- [x] ADR written with alternatives (defaults for everyone, cgroup-v1 support, a wider allowlist) and consequences. ADR-0038's status line updated. Index row added.
+- [x] `docs/architecture.md` §8 updated with the new HostConfig fields.
+- [x] Task sent to review for owner sign-off.
 
 ## References
 - ADR-0019, ADR-0023, ADR-0028, ADR-0038

@@ -22,6 +22,7 @@ The library behaviour this design depends on was checked against crate sources a
 | Pingora Unix-socket upstreams | pingora-core 0.9.1 | crate source | `HttpPeer::new_uds(path, tls, sni)` exists, so the proxy can reach the admin Axum app over a Unix socket (ADR-0031). |
 | Exec API, exec session removal, `Healthcheck NONE` (ADR-0056) | podman **6.1.4** (runc, rootless), bollard 0.21.1, checked 2026-11-09 | live, through the compat API and the podman-gated tests in `src/runtime/podman.rs` | See §1.6. |
 | Container archive upload (ADR-0057) | podman **6.1.4** (runc, rootless, overlay); 5.7.0 and 5.4.2 rootful (crun); bollard 0.21.1 (source), checked 2026-11-10 | live through the compat API (curl); bollard's upload options checked in crate source | See §1.7. |
+| Resource limits, `ShmSize`, `Tmpfs`, `Init`, `OOMKilled` (ADR-0059) | podman **6.1.4** (runc 1.5.2, rootless, cgroup v2, systemd 262); delegation and crun in a throwaway Debian 13 systemd container (systemd 257, podman 5.4.2, crun 1.21); catatonit packages of Debian 13, Ubuntu 22.04/24.04 and Fedora 43; checked 2026-11-10 | live, through the compat and libpod APIs, the CLI and systemctl | See §1.8. |
 
 ### 1.1 Pingora 0.9.1
 
@@ -210,6 +211,59 @@ ADR-0057 requires podman 5.4. No rootless 5.x and no SELinux host were tested.
 - **User gid.** A numeric `User` listed in the image's `/etc/passwd` runs with its passwd gid
   (`999` in `redis:7-alpine` is `999:1000`); an unlisted uid gets gid 0.
 
+### 1.8 Limits, runtime options and OOM (podman 6.1.4)
+
+Checked live on rootless podman 6.1.4 with runc 1.5.2, cgroup v2 and systemd 262 (user manager
+delegating `cpu memory pids`, the upstream default since systemd 252), through the compat and libpod
+APIs and the CLI:
+
+- **Fields.** `Memory`, `MemorySwap`, `NanoCpus`, `PidsLimit`, `ShmSize`, `Tmpfs` and `Init`
+  are accepted without warnings, echoed by inspect and in force inside: `memory.max`,
+  `memory.swap.max`, `pids.max`, `cpu.max` (`NanoCpus` 1.5e9 becomes `CpuQuota` 150000 /
+  `CpuPeriod` 100000) and the `/dev/shm` size. `Init: true` makes PID 1 `/run/podman-init`
+  (catatonit, bind-mounted from the host); a missing init binary fails at create ("container-init
+  binary not found on the host", seen with the CLI).
+- **Defaults when unset.** No memory or CPU cap (`cpu.max` `max 100000`), `PidsLimit` 2048 from
+  containers.conf, `ShmSize` 65536000.
+- **Swap.** `Memory` with `MemorySwap` unset, 0 or -1 gives `MemorySwap` = 2 × `Memory`
+  (`memory.swap.max` equal to the limit). Only `MemorySwap` = `Memory` gives `memory.swap.max` 0.
+- **Odd values.** `PidsLimit` 0 gives `pids.max` 1 (the container cannot fork), -1 gives `max`.
+  `ShmSize` 0 falls back to the default. 4 MiB of memory is accepted (no podman floor, CLI
+  included); 0.001 CPU is accepted and raised to `cpu.max` `1000 100000`, the kernel's minimum
+  quota.
+- **Tmpfs.** Podman appends `rprivate,tmpcopyup`. Without `mode=`, a path missing from the image
+  (or 1777 there, like `/tmp`) comes out 1777, but an existing directory keeps its image mode and
+  becomes `root:root`: `/var/cache/nginx` in `nginx-unprivileged` (`775 nginx:root`) turns
+  `775 root:root` and uid 101 cannot write; with `mode=1777` it can. `noexec` really blocks exec
+  (126). With `ReadonlyRootfs`, podman mounts unsized,
+  exec-allowed tmpfs on `/tmp`, `/run` and `/var/tmp` (`read_only_tmpfs`, which only libpod can
+  turn off); a `Tmpfs` entry replaces podman's mount at its path only. Tmpfs and shm pages are
+  charged to the memory cgroup: writing past `memory` OOM-kills the writer.
+- **OOM.** `State.OOMKilled` is false during a container's first run, even after a child was killed,
+  and true at any later exit once an OOM kill happened in its cgroup, also with exit 0 or after a
+  normal stop (143). It is sticky across `start`: after an OOM exit (137, true), starting the same
+  container again shows `running` with true, and a later run that exits 1 without any OOM still
+  reports true. Only a new container resets it. A killed PID 1 exits 137, with or without `Init`.
+  The kernel picks the victim (`memory.oom.group` 0), so a child's allocation can kill PID 1. Podman
+  emits no `oom` event, only `die`. While a container runs, the only signal is `oom_kill` in
+  `/sys/fs/cgroup<State.CgroupPath>/memory.events`.
+- **Controllers.** Compat `/info` reports `CpuCfsQuota` and `SwapLimit` false although both work.
+  libpod `/info` `host.cgroupControllers` lists the controllers of podman's own cgroup, not what
+  containers get: run from a cgroup with none it returns `[]`, yet a `--cpus 0.5 --memory 64m
+  --pids-limit 50` container started from there gets all three, since containers land in libpod
+  scopes under `user@<uid>.service`. What containers can use is that unit's `cgroup.controllers`,
+  which `ProtectControlGroups=yes` leaves readable. A limit on an undelegated controller (`io`,
+  `cpuset` here) is accepted at create and fails at start (HTTP 500 from runc; crun 1.21 likewise:
+  "controller `cpuset` is not available"), leaving the container `created`.
+- **Delegation.** Upstream `user@.service` has `Delegate=pids memory cpu` since systemd 252; Ubuntu
+  22.04 (systemd 249) ships `pids memory`. `Delegate=` lists in drop-ins add to the unit's (an
+  empty assignment resets). After changing the drop-in, `daemon-reload` updates the unit's
+  `DelegateControllers` but not the running manager's `cgroup.controllers`; only a restart of
+  `user@<uid>.service` (or a reboot) applies it (systemd 257).
+- **Init.** libpod `/info` reports no init path; that is containers.conf `init_path`, default
+  `/usr/libexec/podman/catatonit`. The `catatonit` package puts it there on Debian 13, Ubuntu
+  22.04 and 24.04 and Fedora 43; Arch uses `/usr/lib/podman/catatonit`.
+
 ## 2. Component overview
 
 ```mermaid
@@ -291,7 +345,7 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 | **Supervisor** (`main`) | main thread → orchestrator runtime | Loads config, builds the orchestrator runtime, starts everything in order (§4), owns OS signals, coordinates shutdown. |
 | **Orchestrator** | orchestrator runtime, `Arc<Orchestrator>` shared by all callers (ADR-0050) | The single writer of desired state. Exposes async methods (`apply`, `deploy`, `remove`, `rollback`, `status`, `transition`) to the web UI, webhook, poller and reconciler; applies idempotency by digest and config hash; enforces at most one deploy per stack; spawns deploy tasks; owns `ArcSwap<RouteTable>` writes. One internal `Mutex<State>` held only for in-memory work. |
 | **Deploy task** | orchestrator runtime, one per active stack deploy | Runs the deploy state machine (§5) for one stack by executing effects and calling `orchestrator.transition(id, event)` after each step. |
-| **Reconciler** | orchestrator runtime | Startup: compares persisted state with `podman ps` by label, then adopts, restarts or removes containers. Periodic (about every 15 s): restarts exited containers with backoff and flags CrashLooping (ADR-0028). Both passes visit containers in `depends_on` order, read from the last committed deployment's revision, and start one only once its dependencies are running and have passed their check since hoster (re)started them or first saw them running: without a bound while a dependency is down, for at most min(`start_period`, 5 min) while it runs without passing (§5.5). The startup pass defers unready containers to the periodic loop, which starts them as startup starts, not restarts (ADR-0056). |
+| **Reconciler** | orchestrator runtime | Startup: compares persisted state with `podman ps` by label, then adopts, restarts or removes containers. Periodic (about every 15 s): restarts exited containers with backoff and flags CrashLooping (ADR-0028). Both passes visit containers in `depends_on` order, read from the last committed deployment's revision, and start one only once its dependencies are running and have passed their check since hoster (re)started them or first saw them running: without a bound while a dependency is down, for at most min(`start_period`, 5 min) while it runs without passing (§5.5). The startup pass defers unready containers to the periodic loop, which starts them as startup starts, not restarts (ADR-0056). Each restart records the exit reason, naming an OOM on an exit 137 with `OOMKilled` true or on an exit where that sticky flag turned true since hoster last saw it (ADR-0059). |
 | **Podman client** | orchestrator runtime | A thin `ContainerRuntime` trait over bollard (network, pull, create, start, stop, remove, inspect, list, logs, exec). Finished exec sessions are removed, best effort, with a raw libpod call over the same socket (ADR-0056, §5.5). Production uses `PodmanRuntime`; tests use a fake. |
 | **State store** | orchestrator runtime | SQLite via sqlx (ADR-0022): `SqlitePool`, WAL mode, embedded migrations, compile-time checked queries. Persists stacks, deployments, digests, generations, port allocations, deploy history, sessions. |
 | **Health checker** | orchestrator runtime | Probes new containers before the swap with the service's check: HTTP or TCP on their `127.0.0.1` port, or an exec inside the container (ADR-0038, ADR-0056, §5.5). Afterwards, periodic probes feed status only. |
@@ -479,11 +533,11 @@ stateDiagram-v2
 | State | Work | Side effects | On failure |
 |---|---|---|---|
 | **Received** | Compare target digests with running ones per service. | none | — |
-| **Validating** | Parse the stack, check route collisions against other stacks' routes, allocate new ports for routed services that change, assign generation *n+1*. | Port allocations reserved (persisted). | → `Rejected`, reservations released. |
+| **Validating** | Parse the stack, check route collisions against other stacks' routes, allocate new ports for routed services that change, assign generation *n+1*. Reject a limit whose cgroup controller `user@<uid>.service`'s `cgroup.controllers` does not list (or that file cannot be read); apply runs the same check before resolving images (ADR-0059). | Port allocations reserved (persisted). | → `Rejected`, reservations released. |
 | **Pulling** | Pull every changed image `repo@digest`, with credentials if configured. Fail if a config file is equal to, under or an ancestor of an image `VOLUME` (ADR-0057). | Images in local storage. | → `Aborting`. |
 | **Starting** | Ensure network `hoster-<stack>`. For each changed **start-phase** service (see below) that is not held back and has no `depends_on` service left to start in this phase, create and start `hoster-<stack>-<svc>-g<n+1>` with labels, the network alias `<svc>`, and `127.0.0.1:<port>` publishing for routed services. | New containers running next to the old ones. | → `Aborting`. |
-| **HealthChecking** | Probe the started start-phase containers concurrently, each by its check (§5.5), until it passes, it times out, or the container exits. As soon as every in-phase dependency of a waiting service has passed, create and start it and probe it too (a start wave). Services held back for the replace phase (below) are not started here. Done when every other start-phase container has passed. | Dependents' containers created and started. | → `Aborting`; dependents not yet started are never created. |
-| **Replacing** | For each changed **replace-phase** service, one at a time in dependency order, name as tie-break (ADR-0048, ADR-0056): publish a `RouteTable` with its routes `Unavailable`, stop the old container (keep it), start the new one, probe it. Start each held-back start-phase service, and probe it, once its dependencies have passed, after re-checking that its unchanged dependencies run; a replacement that depends on one waits for it. After a replacement passes, start again, in dependency order, every unchanged service depending on it that was running when the deployment began and has exited since (no restart record), and probe each within its `start_period` before any changed service depending on it starts. Empty when no replace-phase service and no held-back service exists. | Old stop-first containers stopped; new ones running. 503 for their routes meanwhile. | → `Aborting`. |
+| **HealthChecking** | Probe the started start-phase containers concurrently, each by its check (§5.5), until it passes, it times out, or the container exits (the abort names an OOM kill, ADR-0059). As soon as every in-phase dependency of a waiting service has passed, create and start it and probe it too (a start wave). Services held back for the replace phase (below) are not started here. Done when every other start-phase container has passed. | Dependents' containers created and started. | → `Aborting`; dependents not yet started are never created. |
+| **Replacing** | For each changed **replace-phase** service, one at a time in dependency order, name as tie-break (ADR-0048, ADR-0056): publish a `RouteTable` with its routes `Unavailable`, stop the old container (keep it), start the new one, probe it (an exit aborts, naming an OOM kill, ADR-0059). Start each held-back start-phase service, and probe it, once its dependencies have passed, after re-checking that its unchanged dependencies run; a replacement that depends on one waits for it. After a replacement passes, start again, in dependency order, every unchanged service depending on it that was running when the deployment began and has exited since (no restart record), and probe each within its `start_period` before any changed service depending on it starts. Empty when no replace-phase service and no held-back service exists. | Old stop-first containers stopped; new ones running. 503 for their routes meanwhile. | → `Aborting`. |
 | **Switching** | The deploy task calls `transition(id, Healthy)`. The orchestrator rebuilds `RouteTable` with every changed service's new upstream and `store`s it, then writes all per-service pointers in one transaction. | Traffic moves atomically for the whole stack. | Cannot fail once in memory. A persist failure is fatal and logged; the reconciler fixes it at next start. |
 | **Draining** | Wait for `old_upstream.inflight == 0`, polled every 100 ms, or for the per-stack drain timeout. Keep-alive connections that are idle at Pingora's upstream pool are fine. New requests already go to the new upstream, and the old container is only stopped after this state. | none | Timeout → proceed; long-lived requests (SSE, WebSockets) get cut. |
 | **CleaningUp** | Stop old containers (SIGTERM, then the stop timeout), remove them, release their ports. | Old generation gone. | → `LiveWithWarnings`. The reconciler garbage-collects later. |
@@ -903,7 +957,8 @@ certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
   A service with several routes to different container ports gets one allocated host port per
   distinct container port.
 - **No host access for apps.** No container is ever given the podman socket, a bind mount of
-  host paths outside its volumes, `--privileged`, or host networking (ADR-0019).
+  host paths outside its volumes (apart from podman's own init binary with `init`, a path podman
+  picks, ADR-0059), `--privileged`, or host networking (ADR-0019).
 - **Config files (ADR-0057).** A service's `files` are uploaded with `PUT /containers/{id}/archive`
   after create and before the first start, both with `noOverwriteDirNonDir=true`, to paths
   resolved through `HEAD …/archive?path=` (`linkTarget`). The first tar holds `0:0 0755` entries
@@ -912,6 +967,18 @@ certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
   new parents to that user (§1.7). They live in the
   container's own layer, so restarts keep them and removing the container removes them. They
   need no host path, podman object or label.
+- **Create-time container config.** Always: `Healthcheck {Test: ["NONE"]}` in `Config` (ADR-0056),
+  and in `HostConfig` `RestartPolicy` `no` (ADR-0028), `ReadonlyRootfs` from `read_only` and the
+  k8s-file `LogConfig` (ADR-0044). Only when the service sets them (ADR-0059, §1.8): `Memory` and
+  `MemorySwap` both from `limits.memory` (no swap), `NanoCpus` = round(`limits.cpus` × 10⁹),
+  `PidsLimit` from `limits.pids`, `ShmSize` from `shm_size`, `Tmpfs` `{path:
+  "rw,nosuid,nodev,mode=1777,size=<bytes>"}` from `tmpfs`, and `Init: true` from `init`. Unset ones
+  keep podman's defaults (no memory or CPU cap, 2048 pids, 65536000-byte shm). `Privileged` and
+  `PublishAllPorts` stay pinned to `false`; never set: `Binds`, `CapAdd`, `CapDrop`, `SecurityOpt`,
+  `Sysctls`, `Ulimits`, `Devices`, `IpcMode`, `PidMode`, `UTSMode`, `UsernsMode`, `OomKillDisable`,
+  `OomScoreAdj`, `CpusetCpus` and the blkio/io fields. Like `exec` (§5.5), these keys enter the
+  config hash only when set: sizes as bytes, `cpus` as nano-CPUs, `tmpfs` as a sorted map, with
+  `init = false`, an empty `tmpfs` and an empty `limits` table counting as unset.
 
 ## 9. Security boundaries
 
@@ -922,7 +989,7 @@ certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
 | Internet → apps | Only through declared routes. Container ports are bound to loopback only (§1.5). |
 | CI → hoster | A GitHub Actions OIDC ID token in `Authorization: Bearer`. hoster checks the RS256 signature against GitHub's JWKS, the issuer, the audience (the admin host by default), the expiry, and that the `jti` hasn't been used before. The claims must satisfy the stack's `[deploy]` rule (`repository_id` required, optional refs/environment/workflow). Each digest must belong to its service's configured repo. No shared secret exists (ADR-0042, ADR-0047). |
 | hoster → podman | The rootless socket of hoster's own user. A podman compromise is bounded by that user's privileges. |
-| Apps → host | Rootless user namespaces. No socket, no privileged mode, own network per stack. The admin app listens on a 0600 Unix socket, so containers cannot reach it even if they can reach host loopback (ADR-0031). |
+| Apps → host | Rootless user namespaces. No socket, no privileged mode, own network per stack. The admin app listens on a 0600 Unix socket, so containers cannot reach it even if they can reach host loopback (ADR-0031). Optional per-service `memory`, `pids` and `cpus` limits on delegated cgroup controllers keep one container from starving the host, hoster and the proxy; without them a container has only podman's 2048-pid cap (ADR-0059, §8). |
 | Secrets at rest | Account key and cert keys are `0600`. App secrets are encrypted with XChaCha20-Poly1305 in SQLite, with the key in a separate 0600 file or a user systemd credential (ADR-0029). Once revealed, they are plaintext in the hoster user's podman storage: env secrets in the container config, and secret files in the container's layer (ADR-0057). |
 
 ## 10. Crate and module layout (proposal)
@@ -967,7 +1034,8 @@ same card on each stack's overview, and the Events page at `/activity`.
   paging.
 - **Producers.** Every producer writes explicitly through the orchestrator's `EventLog` handle:
   the orchestrator for deploy outcomes (started, succeeded, failed, rolled back), stack applies
-  and removals and secret changes; the reconciler for restarts and crash loops; the health
+  and removals and secret changes; the reconciler for restarts (the message names the exit and
+  any OOM kill, ADR-0059) and crash loops; the health
   monitor for health changes (none while a (re)started service's status stays `Unknown` in its
   grace, ADR-0056, §5.5); the reconciler again, under its restart kind, once for a dependent it
   started past its hold, a deferred startup start included (other deferred starts write

@@ -1,6 +1,6 @@
 # ADR-0052: Tag-driven releases, a curlable installer, and self-update from the UI
 
-- Status: Accepted (amends ADR-0023: binary location)
+- Status: Accepted (amends ADR-0023: binary location); install.sh also writes a `Delegate=` drop-in where a controller is missing, restarts the user manager for it only while `hoster.service` is neither enabled nor active and no hoster container runs, and installs catatonit, since ADR-0059
 - Date: 2026-11-08
 
 ## Context
