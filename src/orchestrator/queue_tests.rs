@@ -201,6 +201,7 @@ async fn cancelling_while_health_checking_removes_the_new_containers() {
 async fn cancelling_while_replacing_restarts_the_stopped_stop_first_container() {
     let h = harness().await;
     h.bootstrap().await;
+    h.prober.take_probes();
     h.prober.hold(9000);
     let applied = h.apply(&storage_changed()).await;
     let outcome = applied.deployment.unwrap();

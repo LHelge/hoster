@@ -714,21 +714,17 @@ async fn a_crash_while_health_checking_removes_the_new_generation() {
 async fn a_crash_while_replacing_restarts_the_stopped_stop_first_container() {
     let h = harness().await;
     h.bootstrap().await;
-    // The bootstrap probed storage too: forget that, so the wait below sees the new generation's
-    // probe, which Replacing makes only after it stopped the old container.
     h.prober.take_probes();
     h.prober.hold(9000);
     let applied = h.apply(&storage_changed(NOTES)).await;
     let id = applied.deployment.as_ref().unwrap().deployment;
     h.reaches(id, S::Replacing).await;
     h.prober.probed(9000).await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while h.container("hoster-notes-storage-g1").state == ContainerState::Running {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .expect("Replacing stopped the old storage container");
+    assert_ne!(
+        h.container("hoster-notes-storage-g1").state,
+        ContainerState::Running,
+        "Replacing stopped the old storage container"
+    );
     let (_, routes) = h.restart().await;
     assert_rolled_back(&h, id, &routes).await;
 }
