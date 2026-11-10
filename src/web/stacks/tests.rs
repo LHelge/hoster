@@ -106,6 +106,7 @@ pub(crate) fn notes_status() -> StackStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
     Preview(String),
+    Check(String),
     Apply(String),
     Deploy(String, DigestSet),
     Webhook(Box<WebhookDeploy>),
@@ -173,6 +174,8 @@ pub struct FakeStacks {
     pub operators: Mutex<Vec<Operator>>,
     /// The event log, in any order.
     pub log: Mutex<Vec<crate::store::Event>>,
+    /// What the live check reports for a file that parses, besides the parser's warnings.
+    pub check: Mutex<CheckReport>,
 }
 
 impl Default for FakeStacks {
@@ -192,6 +195,7 @@ impl Default for FakeStacks {
             earlier_volumes: Mutex::new(Vec::new()),
             operators: Mutex::new(Vec::new()),
             log: Mutex::new(Vec::new()),
+            check: Mutex::new(CheckReport::default()),
         }
     }
 }
@@ -247,6 +251,21 @@ impl StackControl for FakeStacks {
             changed: self.changed.lock().unwrap().clone(),
             start_order: self.start_order.lock().unwrap().clone(),
         })
+    }
+
+    async fn check_file(&self, toml: &str) -> Result<CheckReport, OrchestratorError> {
+        self.record(Call::Check(toml.into()));
+        match Stack::parse(toml) {
+            Ok(parsed) => {
+                let mut report = self.check.lock().unwrap().clone();
+                report.warnings.extend(parsed.warnings);
+                Ok(report)
+            }
+            Err(invalid) => Ok(CheckReport {
+                errors: invalid.diagnostics().to_vec(),
+                warnings: Vec::new(),
+            }),
+        }
     }
 
     async fn apply(&self, toml: &str, by: &Operator) -> Result<ApplyOutcome, OrchestratorError> {
@@ -1384,6 +1403,19 @@ async fn read_only_pages_need_a_session_but_no_javascript() {
         "{apply}"
     );
 
+    // The live check posts only the editor's text, a moment after typing stops, into the panel
+    // under it.
+    assert!(
+        apply.contains(r##"hx-post="/apply/check" hx-trigger="load, input changed delay:500ms" hx-target="#apply-check" hx-swap="innerMorph" hx-sync="this:replace" hx-encoding="application/x-www-form-urlencoded""##),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(
+            r#"<div id="apply-check" class="live-check" data-editor-for="stack-toml"></div>"#
+        ),
+        "{apply}"
+    );
+
     // Other pages don't load the editor.
     let stacks = body(app.get("/stacks", Some(&browser.cookie)).await).await;
     assert!(!stacks.contains("/assets/editor."), "{stacks}");
@@ -1582,6 +1614,101 @@ async fn apply_forms_take_bodies_up_to_8_mib() {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
     }
     assert_eq!(app.stacks.calls().len(), 4);
+}
+
+/// The editor's live check (ADR-0060): a summary, every problem with its line for the gutter
+/// and a link to put the caret there, and only the check called.
+#[tokio::test]
+async fn the_live_check_lists_problems_by_line() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let check = async |toml: &str| {
+        let response = app
+            .send(post(
+                "/apply/check",
+                &browser,
+                FORM,
+                encoded(&[("toml", toml)]),
+            ))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body(response).await
+    };
+
+    let clean = check(NOTES).await;
+    assert!(
+        clean.contains(r#"<p class="live-summary live-ok" role="status">No problems found."#),
+        "{clean}"
+    );
+    assert!(!clean.contains("<ul"), "{clean}");
+
+    let invalid = check(
+        "version = 1\r\nname = \"Bad\"\r\n\r\n[services.a]\r\nimage = \"ghcr.io/acme/a\"\r\n",
+    )
+    .await;
+    assert!(
+        invalid.contains(r#"<p class="live-summary live-fail" role="status">1 error</p>"#),
+        "{invalid}"
+    );
+    assert!(
+        invalid.contains(r#"<li class="check-fail" data-line="2" data-severity="error">"#),
+        "{invalid}"
+    );
+    assert!(
+        invalid.contains(r##"<a class="problem-at" href="#stack-toml" data-line="2" data-column="8">line 2, column 8</a>"##),
+        "{invalid}"
+    );
+    assert!(
+        invalid.contains(r#"<code class="problem-path">name</code>"#),
+        "{invalid}"
+    );
+
+    // Problems beyond the parser's, such as an unset secret, come from the orchestrator.
+    app.stacks.check.lock().unwrap().warnings.push(Diagnostic {
+        path: crate::stack::FieldPath::default()
+            .key("services")
+            .key("api"),
+        location: None,
+        message: "secret `notes/db` (for DB) is not set".into(),
+    });
+    let warned = check(NOTES).await;
+    assert!(
+        warned.contains(r#"<p class="live-summary live-warn" role="status">1 warning</p>"#),
+        "{warned}"
+    );
+    // Without a line there is nothing to mark or link to.
+    assert!(
+        warned.contains(
+            r#"<li class="check-warn"><span class="check-mark" aria-hidden="true">!</span>"#
+        ),
+        "{warned}"
+    );
+    assert!(!warned.contains("data-line"), "{warned}");
+
+    let empty = check("  \n").await;
+    assert!(
+        empty.contains("The file is checked as you type."),
+        "{empty}"
+    );
+
+    // Only the check ran, on the text with its line endings normalized.
+    let calls = app.stacks.calls();
+    assert_eq!(calls.len(), 3, "an empty editor isn't sent on: {calls:?}");
+    assert!(
+        calls.iter().all(|c| matches!(c, Call::Check(_))),
+        "{calls:?}"
+    );
+    assert!(!format!("{calls:?}").contains("\\r"), "{calls:?}");
+
+    // Like every form, it needs the CSRF token.
+    let request = Request::post("/apply/check")
+        .header(header::COOKIE, &browser.cookie)
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::CONTENT_TYPE, FORM)
+        .body(Body::from(encoded(&[("toml", NOTES)])))
+        .unwrap();
+    assert_eq!(app.send(request).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(app.stacks.calls().len(), 3);
 }
 
 #[tokio::test]

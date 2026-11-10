@@ -552,6 +552,65 @@ async fn preview_shows_what_an_apply_would_do_without_doing_it() {
     assert!(matches!(err, OrchestratorError::Invalid(_)), "{err}");
 }
 
+/// The editor's live check (ADR-0060): every local check, with the line of each problem, and
+/// never a registry call.
+#[tokio::test]
+async fn check_file_reports_local_problems_with_their_lines_and_never_resolves_tags() {
+    let h = harness().await;
+    let clean = h.orchestrator.check_file(NOTES).await.unwrap();
+    assert_eq!(clean, CheckReport::default());
+
+    // Parse and validation errors keep their own locations.
+    let invalid = h
+        .orchestrator
+        .check_file("version = 1\nname = \"Bad\"\n\n[services.a]\nimage = \"ghcr.io/acme/a\"\n")
+        .await
+        .unwrap();
+    assert!(invalid.warnings.is_empty());
+    assert!(
+        invalid
+            .errors
+            .iter()
+            .any(|d| d.path.to_string() == "name" && d.location.is_some_and(|l| l.line == 2)),
+        "{invalid:?}"
+    );
+
+    // A route another stack owns is an error at that route's `host`.
+    h.apply(NOTES).await;
+    let other = "version = 1\nname = \"other\"\n\n[services.app]\nimage = \"ghcr.io/acme/other\"\n\n[[services.app.routes]]\nhost = \"own.example.com\"\nport = 80\n\n[[services.app.routes]]\nhost = \"notes.example.com\"\nprefix = \"/api\"\nport = 80\n";
+    let collided = h.orchestrator.check_file(other).await.unwrap();
+    assert_eq!(collided.errors.len(), 1, "{collided:?}");
+    let collision = &collided.errors[0];
+    assert_eq!(collision.path.to_string(), "services.app.routes[1].host");
+    assert_eq!(
+        collision.location.map(|l| (l.line, l.column)),
+        Some((12, 1))
+    );
+    assert!(collision.message.contains("notes"), "{}", collision.message);
+
+    // A secret that is not set yet warns at its key; once set, the warning goes.
+    let unset = h.orchestrator.check_file(WITH_SECRETS).await.unwrap();
+    assert!(unset.errors.is_empty(), "{unset:?}");
+    assert_eq!(unset.warnings.len(), 1, "{unset:?}");
+    let warning = &unset.warnings[0];
+    assert_eq!(
+        warning.path.to_string(),
+        "services.api.secrets.DATABASE_URL"
+    );
+    assert_eq!(warning.location.map(|l| (l.line, l.column)), Some((8, 13)));
+    assert!(
+        warning.message.contains("notes/database-url"),
+        "{}",
+        warning.message
+    );
+    h.set_secret("notes/database-url", "postgres://x").await;
+    let set = h.orchestrator.check_file(WITH_SECRETS).await.unwrap();
+    assert_eq!(set, CheckReport::default());
+
+    // Only the apply above resolved a tag (storage's); the checks resolved none.
+    assert_eq!(h.resolver.calls.load(Ordering::SeqCst), 1);
+}
+
 /// The preview lists the order the apply would start the services in (ADR-0056 Decision 2).
 #[tokio::test]
 async fn preview_lists_the_start_order() {

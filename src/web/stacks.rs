@@ -31,6 +31,7 @@ use std::time::SystemTime;
 
 use askama::Template;
 use axum::Extension;
+use axum::extract::rejection::FormRejection;
 use axum::extract::{Form, FromRequest, Multipart, Path, Request};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -40,8 +41,9 @@ use tokio::sync::broadcast;
 use super::auth::Session;
 use super::pages::{FlashKind, Layout, Page, Section, Shell};
 use crate::orchestrator::{
-    ApplyOutcome, ApplyPreview, DeployOutcome, Operator, Orchestrator, OrchestratorError,
-    RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent, WebhookDeploy,
+    ApplyOutcome, ApplyPreview, CheckReport, DeployOutcome, Operator, Orchestrator,
+    OrchestratorError, RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent,
+    WebhookDeploy,
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
@@ -67,6 +69,9 @@ pub trait StackControl: Send + Sync + 'static {
 
     /// What applying `toml` would do; see [`Orchestrator::preview`].
     async fn preview(&self, toml: &str) -> Result<ApplyPreview, OrchestratorError>;
+
+    /// The problems the local checks find in `toml`; see [`Orchestrator::check_file`].
+    async fn check_file(&self, toml: &str) -> Result<CheckReport, OrchestratorError>;
 
     /// Applies `toml` and redeploys what changes, done `by` the signed-in operator; see
     /// [`Orchestrator::apply`].
@@ -172,6 +177,10 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
 
     async fn preview(&self, toml: &str) -> Result<ApplyPreview, OrchestratorError> {
         Orchestrator::preview(self, toml).await
+    }
+
+    async fn check_file(&self, toml: &str) -> Result<CheckReport, OrchestratorError> {
+        Orchestrator::check_file(self, toml).await
     }
 
     async fn apply(&self, toml: &str, by: &Operator) -> Result<ApplyOutcome, OrchestratorError> {
@@ -346,6 +355,26 @@ impl Stacks {
             Err(err) => {
                 ApplyFailed::new(Attempt::Check, Outcome::from(err).quoting(&toml)).into_response()
             }
+        }
+    }
+
+    /// `POST /apply/check`: the editor's diagnostics while the admin types (ADR-0060), from the
+    /// checks that need no network. Always answers 200 with the panel, so HTMX swaps it in even
+    /// when the check could not run.
+    pub async fn check(
+        Extension(stacks): Extension<Stacks>,
+        form: Result<Form<PastedFile>, FormRejection>,
+    ) -> Page<LiveCheck> {
+        let toml = match form {
+            Ok(Form(form)) => form.toml.unwrap_or_default().replace("\r\n", "\n"),
+            Err(err) => return Page(LiveCheck::unavailable(err.body_text())),
+        };
+        if toml.trim().is_empty() {
+            return Page(LiveCheck::empty());
+        }
+        match stacks.0.check_file(&toml).await {
+            Ok(report) => Page(LiveCheck::new(&report)),
+            Err(err) => Page(LiveCheck::unavailable(Outcome::from(err).message)),
         }
     }
 
@@ -596,9 +625,10 @@ impl<S: Send + Sync> FromRequest<S> for StackFile {
     }
 }
 
-/// The urlencoded form of [`StackFile`].
+/// The urlencoded form of [`StackFile`], and the live check's form (only the editor's text,
+/// never an upload).
 #[derive(Deserialize)]
-struct PastedFile {
+pub struct PastedFile {
     toml: Option<String>,
 }
 
@@ -876,7 +906,7 @@ mod list;
 mod logs;
 mod overview;
 
-use apply::{ApplyFailed, ApplyPage, Attempt, PreviewView, ReresolveView};
+use apply::{ApplyFailed, ApplyPage, Attempt, LiveCheck, PreviewView, ReresolveView};
 pub use deployments::DeploymentView;
 pub(super) use list::{Ago, Condition, LastDeploy, TrafficLine};
 pub(super) use overview::StackView;

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { INDENT, indent, lineCount, newline, outdent, tokenize } from "./editor.js";
+import { INDENT, indent, lineCount, newline, offsetAt, outdent, tokenize } from "./editor.js";
 
 /** The tokens of `text` that aren't plain, as `kind:text` strings. */
 function coloured(text) {
@@ -295,4 +295,23 @@ test("Enter keeps the current line's indent", () => {
   assert.equal(newline("\t\tx", 3), "\n\t\t");
   // In the middle of the indent, only the part before the caret is kept.
   assert.equal(newline("    x", 2), "\n  ");
+});
+
+test("offsetAt maps a diagnostic's line and column to a textarea offset", () => {
+  const text = "a = 1\nname = \"x\"\n\tkey = 2\n";
+  assert.equal(offsetAt(text, 1, 1), 0);
+  assert.equal(offsetAt(text, 2, 1), 6);
+  assert.equal(offsetAt(text, 2, 8), 13);
+  // A tab is one character.
+  assert.equal(offsetAt(text, 3, 2), text.indexOf("key"));
+  // Past the end of the line or the text, it clamps.
+  assert.equal(offsetAt(text, 1, 99), 5);
+  assert.equal(offsetAt(text, 99, 1), text.length);
+});
+
+test("offsetAt counts characters, not UTF-16 units", () => {
+  // The emoji is one character (two UTF-16 units); é is one either way.
+  const text = 'a = "\u{1F600}é" # x\n';
+  assert.equal(offsetAt(text, 1, 7), text.indexOf("é"));
+  assert.equal(offsetAt(text, 1, 10), text.indexOf("#"));
 });

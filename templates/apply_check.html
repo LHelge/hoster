@@ -1,0 +1,15 @@
+<p class="live-summary live-{{ tone }}" role="status">{{ summary }}</p>
+{%- if !items.is_empty() %}
+<ul class="checks live-problems">
+  {%- for item in items %}
+  {%- let problem = item.problem %}
+  <li class="check-{% if item.warning %}warn{% else %}fail{% endif %}"{% if let Some(line) = problem.line %} data-line="{{ line }}" data-severity="{% if item.warning %}warning{% else %}error{% endif %}"{% endif %}><span class="check-mark" aria-hidden="true">{% if item.warning %}!{% else %}✗{% endif %}</span><span class="check-body"><span class="visually-hidden">{% if item.warning %}Warning:{% else %}Problem:{% endif %} </span>
+    {%- if problem.line.is_some() || !problem.path.is_empty() %}<span class="problem-where">
+    {%- if let Some(line) = problem.line %}<a class="problem-at" href="#stack-toml" data-line="{{ line }}" data-column="{{ problem.column.unwrap_or(1) }}">line {{ line }}{% if let Some(column) = problem.column %}, column {{ column }}{% endif %}</a>{% endif %}
+    {%- if problem.line.is_some() && !problem.path.is_empty() %} · {% endif %}
+    {%- if !problem.path.is_empty() %}<code class="problem-path">{{ problem.path }}</code>{% endif %}</span>{% endif %}
+    <span class="problem-message">{{ problem.message }}</span>
+  </span></li>
+  {%- endfor %}
+</ul>
+{%- endif %}

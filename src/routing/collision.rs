@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::upstream::UnixUpstream;
 use crate::config::Config;
-use crate::stack::{Counted, Host, Name, NormalizedPrefix, Stack};
+use crate::stack::{Counted, FieldPath, Host, Name, NormalizedPrefix, Stack};
 
 /// The service that declares a route.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -120,6 +120,29 @@ pub struct Collision {
     pub claimant: RouteOwner,
     /// Who holds the pair.
     pub owner: Owner,
+}
+
+impl Collision {
+    /// Where the rejected route is in `candidate`'s file, the stack that claimed it: its
+    /// `host`, `services.<service>.routes[<i>].host`. Of two routes with the same host and
+    /// prefix, the later one is rejected.
+    pub fn path(&self, candidate: &Stack) -> FieldPath {
+        let service = FieldPath::default()
+            .key("services")
+            .key(self.claimant.service.as_ref());
+        let index = candidate
+            .services
+            .get(&self.claimant.service)
+            .and_then(|s| {
+                s.routes
+                    .iter()
+                    .rposition(|r| r.host == self.host && r.prefix == self.prefix)
+            });
+        match index {
+            Some(index) => service.key("routes").index(index).key("host"),
+            None => service.key("routes"),
+        }
+    }
 }
 
 impl fmt::Display for Collision {

@@ -83,7 +83,8 @@ use crate::runtime::{
 };
 use crate::secrets::{SecretError, SecretStore, SecretValue};
 use crate::stack::{
-    DeployCaller, Diagnostic, Digest, ImageRef, Name, PinnedImage, Service, Stack, StackError,
+    DeployCaller, Diagnostic, Digest, FieldPath, ImageRef, Name, PinnedImage, SecretRef, SecretUse,
+    Service, Stack, StackError,
 };
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
@@ -288,6 +289,17 @@ pub struct ApplyPreview {
     pub changed: Vec<String>,
     /// The order the redeploy starts them in (ADR-0056 Decision 2).
     pub start_order: Vec<Wave>,
+}
+
+/// The reply to [`Orchestrator::check_file`]: what the local checks find in a stack file, each
+/// problem with the line it is on where it has one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckReport {
+    /// Problems that stop the file from being applied.
+    pub errors: Vec<Diagnostic>,
+    /// Problems that let it apply but probably aren't what was meant, or that will fail its
+    /// deployment until they are fixed, such as a secret that is not set yet.
+    pub warnings: Vec<Diagnostic>,
 }
 
 /// A third-party service's pinned digest (ADR-0025), before and after an apply.
@@ -773,6 +785,84 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             changed: prepared.changed,
             start_order: prepared.plan.start_order(),
         })
+    }
+
+    /// Checks a stack file with what hoster knows locally, for the editor's diagnostics while
+    /// the admin types (ADR-0060). It runs the checks of [`preview`](Self::preview) that need no
+    /// network: validation, a removal in progress, route collisions and the reserved admin host
+    /// (ADR-0012), and the podman version config files need (ADR-0057 §9). Tags are not
+    /// resolved and nothing is stored. A secret the file references but that is not set yet is
+    /// a warning, not an error: a new stack's secrets can only be set once it exists, and the
+    /// deployment checks them again in `Validating`.
+    #[tracing::instrument(skip_all)]
+    pub async fn check_file(&self, toml: &str) -> Result<CheckReport> {
+        let parsed = match Stack::parse(toml) {
+            Ok(parsed) => parsed,
+            Err(invalid) => {
+                return Ok(CheckReport {
+                    errors: invalid.diagnostics().to_vec(),
+                    warnings: Vec::new(),
+                });
+            }
+        };
+        let stack = &parsed.stack;
+        let at = |path: FieldPath, message: String| Diagnostic {
+            location: path.locate(toml),
+            path,
+            message,
+        };
+        let root = FieldPath::default();
+        let services = root.key("services");
+
+        let mut errors = Vec::new();
+        if self.is_removing(stack.name.as_ref()) {
+            let removing = OrchestratorError::Removing(stack.name.to_string());
+            errors.push(at(root.key("name"), removing.to_string()));
+        }
+        match self.check_routes(stack).await {
+            Ok(()) => {}
+            Err(OrchestratorError::Collision(collisions)) => errors.extend(
+                collisions
+                    .collisions
+                    .iter()
+                    .map(|collision| at(collision.path(stack), collision.to_string())),
+            ),
+            Err(err) => return Err(err),
+        }
+        if let Err(message) = self.check_engine(stack) {
+            let with_files = stack.services.iter().find(|(_, s)| !s.files.is_empty());
+            let path = with_files.map_or_else(
+                || services.clone(),
+                |(name, _)| services.key(name.as_ref()).key("files"),
+            );
+            errors.push(at(path, message));
+        }
+
+        let mut warnings = parsed.warnings;
+        for (name, service) in &stack.services {
+            let service_path = services.key(name.as_ref());
+            for SecretRef { secret, usage } in service.secret_refs() {
+                if self.secrets.version(secret).await?.is_some() {
+                    continue;
+                }
+                let path = match usage {
+                    SecretUse::Env(var) => service_path.key("secrets").key(var),
+                    SecretUse::File(file) => {
+                        service_path.key("files").key(file.as_ref()).key("secret")
+                    }
+                };
+                warnings.push(at(
+                    path,
+                    format!(
+                        "secret `{secret}` (for {usage}) is not set; set it on the stack's \
+                         environment tab, or its deployment fails"
+                    ),
+                ));
+            }
+        }
+        errors.sort_by_key(|d| d.location);
+        warnings.sort_by_key(|d| d.location);
+        Ok(CheckReport { errors, warnings })
     }
 
     /// Receives the [`UiEvent`]s sent from now on.

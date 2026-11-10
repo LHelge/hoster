@@ -28,6 +28,7 @@ Implement ADR-0059 §2, §4 and §5: the per-service `limits` table end to end, 
   - It runs at apply (`Orchestrator::prepare`, after `check_routes`, before `resolve_images`) and in the engine's `Validating`, so CI deploys and rollbacks are covered.
   - An unreadable file rejects only stacks that set a limit.
   - The error names the missing controllers and the fix: `/etc/systemd/system/user@<uid>.service.d/hoster-delegate.conf` with `[Service]` `Delegate=cpu memory pids`, then a restart of `user@<uid>.service` or a reboot.
+- [ ] **Live check:** `Orchestrator::check_file` (the editor's diagnostics while typing, M15 x97) runs the controller check too, as an error at the offending `limits` key (`FieldPath::locate`), and the host warnings as warnings.
 - [ ] **Host warnings at apply:** `cpus` above the host's CPU count, or `memory` above `MemTotal`.
 - [ ] **Doctor:** the `cgroup_delegation` hint (`src/doctor/mod.rs`) names the same drop-in path and content instead of today's `user@.service.d/delegate.conf` with `cpuset io`. It explains that a reload is not enough, only a restart of the user manager or a reboot.
 - [ ] **install.sh** (amends ADR-0023 and ADR-0052):

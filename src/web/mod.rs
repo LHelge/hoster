@@ -351,6 +351,10 @@ impl WebApp {
                 "/apply/preview",
                 post(Stacks::preview).layer(DefaultBodyLimit::max(StackFile::MAX_BODY)),
             )
+            .route(
+                "/apply/check",
+                post(Stacks::check).layer(DefaultBodyLimit::max(StackFile::MAX_BODY)),
+            )
             .layer(Extension(self.stacks.clone()))
             .route(
                 "/settings/registries",

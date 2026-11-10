@@ -837,6 +837,16 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .editor .editor-input:focus, .editor .editor-input:focus-visible { outline: none; }
 .editor .editor-input::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); color: transparent; }
 .editor-hint { margin: -6px 0 0; color: var(--muted); font: 11.5px/1.5 var(--mono); }
+/* Diagnostics while typing (POST /apply/check): a summary line and the problems, each linking
+   to its line in the editor. */
+.live-check { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.live-check:empty { display: none; }
+.live-summary { margin: 0; color: var(--muted); font: 12px/1.5 var(--mono); }
+.live-ok { color: var(--ok); }
+.live-warn { color: var(--warn); }
+.live-fail { color: var(--fail); }
+.live-check .live-problems { max-height: 16rem; padding: 0; overflow-y: auto; }
+.live-problems a.problem-at { color: var(--link); }
 .tok-comment { color: var(--syn-comment); font-style: italic; }
 .tok-table { color: var(--syn-table); font-weight: 600; }
 .tok-key { color: var(--syn-key); }
