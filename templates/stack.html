@@ -192,7 +192,7 @@
 </section>
 {%- endif %}
 
-<p class="apply-link"><a class="button" href="/apply">{{ crate::web::Icon::Deploy }}Apply a new revision</a> <span class="muted">Applying a stack file redeploys the services whose configuration changes.</span></p>
+<p class="apply-link"><a class="button primary" href="/apply?stack={{ stack.name }}">Edit stack file</a> <a class="button" href="/apply">Apply a new file</a> <span class="muted">Applying a stack file redeploys the services whose configuration changes.</span></p>
 
 {%- if !stack.rejections.is_empty() %}
 <section class="card" aria-labelledby="rejections-title">

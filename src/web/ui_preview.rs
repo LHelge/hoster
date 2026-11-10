@@ -1487,6 +1487,39 @@ async fn ui_preview() {
             &Session::swap_with_oob(&typed, "apply-result", &result),
         );
     }
+    // Editing the active revision: the file as applied, checked as the page loads; then the
+    // preview once another revision became active meanwhile.
+    *app.stacks.changed.lock().unwrap() = vec!["api".into()];
+    let notes = app.stacks.current("notes").expect("the notes stack");
+    let opened = notes.revision.revision.to_string();
+    let edit = session.get("/apply?stack=notes", StatusCode::OK).await;
+    let live = session
+        .post("/apply/check", &[("toml", &notes.revision.toml)])
+        .await;
+    let edit = Session::inject(&edit, "apply-check", &live);
+    preview.write("states/apply-edit.html", "Apply: editing notes", &edit);
+    app.stacks
+        .set_revision("notes", notes.revision.revision + 1);
+    let stale = session
+        .post(
+            "/apply/preview",
+            &[
+                ("toml", &edited),
+                ("base_stack", "notes"),
+                ("base_revision", &opened),
+            ],
+        )
+        .await;
+    app.stacks.set_revision("notes", notes.revision.revision);
+    preview.write(
+        "states/apply-edit-stale.html",
+        "Apply: editing notes, another revision became active",
+        &Session::swap_with_oob(
+            &Session::fill_textarea(&edit, "stack-toml", &edited),
+            "apply-result",
+            &stale,
+        ),
+    );
     // The diagnostics while typing, before Check: an unknown key, on its line.
     let typing = "version = 1\nname = \"links\"\n\n[services.web]\nimage = \"docker.io/library/nginx:1.27\"\nvolumes = { data = \"/usr/share/nginx/html\" }\n\n[[services.web.routes]]\nhost = \"links.example.com\"\nport = 80\nstrip = true\n";
     let live = session.post("/apply/check", &[("toml", typing)]).await;
