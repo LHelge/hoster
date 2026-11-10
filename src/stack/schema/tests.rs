@@ -523,6 +523,95 @@ fn mount_paths_agree() {
     );
 }
 
+#[test]
+fn file_paths_agree() {
+    // The value is a table key here, so `@@` is the quoted path.
+    agrees_on_strings(
+        &with_app("[services.app.files]\n@@ = { content = \"x\" }"),
+        &[
+            "/etc/app/config.yml",
+            "/.hidden",
+            "/..x",
+            "/...",
+            "/ä",
+            "/a b",
+            "/a:b,c",
+            "/a\tb",
+            "/",
+            "etc/app.conf",
+            "/etc/",
+            "//etc",
+            "/a/./b",
+            "/a/../b",
+            "/..",
+            "/.",
+            "/a\0b",
+            "",
+        ],
+    );
+}
+
+#[test]
+fn file_sources_modes_and_owners_agree() {
+    agrees(
+        &with_app("[services.app.files]\n\"/etc/app.conf\" = @@"),
+        &[
+            "{ content = \"x\" }",
+            "{ content = \"\" }",
+            "{ secret = \"demo/creds\" }",
+            "{ secret = \"demo/creds\", mode = \"0440\", owner = \"0:65534\" }",
+            "{ content = \"x\", secret = \"demo/creds\" }",
+            "{ mode = \"0444\" }",
+            "{ }",
+            "{ content = 1 }",
+            "{ secret = \"demo/a b\" }",
+            "{ secret = \"demo\" }",
+            "{ content = \"x\", source = \"https://example.com\" }",
+            "\"x\"",
+        ],
+    );
+    agrees_on_strings(
+        &with_app("[services.app.files]\n\"/etc/app.conf\" = { content = \"x\", mode = @@ }"),
+        &[
+            "0000",
+            "0400",
+            "0644",
+            "0777",
+            "644",
+            "00644",
+            "1755",
+            "4755",
+            "0788",
+            "0o644",
+            "rw-r--r--",
+            " 0644",
+            "",
+        ],
+    );
+    agrees_on_strings(
+        &with_app("[services.app.files]\n\"/etc/app.conf\" = { content = \"x\", owner = @@ }"),
+        &[
+            "0:0",
+            "1000:1000",
+            "65535:65535",
+            "00000:00001",
+            "59999:60000",
+            "65536:0",
+            "0:65536",
+            "70000:0",
+            "000000:0",
+            "1000",
+            "1000:",
+            ":1000",
+            "0:0:0",
+            "nginx:nginx",
+            "-1:0",
+            "+1:0",
+            "",
+        ],
+    );
+}
+
 const DURATIONS: &[&str] = &[
     "30s",
     "500ms",
@@ -782,6 +871,35 @@ fn semantic_rules_are_parser_only() {
             with_app("env = { DB = \"x\" }\nsecrets = { DB = \"demo/db-url\" }"),
         ),
         (
+            "a file in a volume",
+            with_app(
+                "update = \"stop-first\"\nvolumes = { a = \"/data\" }\n\
+                 files = { \"/data/app.conf\" = { content = \"\" } }",
+            ),
+        ),
+        (
+            "a file above another file",
+            with_app(
+                "[services.app.files]\n\"/etc/app\" = { content = \"\" }\n\
+                 \"/etc/app/a.conf\" = { content = \"\" }",
+            ),
+        ),
+        (
+            "a file podman manages",
+            with_app("files = { \"/etc/hosts\" = { content = \"\" } }"),
+        ),
+        (
+            "a file's secret of another stack",
+            with_app("files = { \"/etc/a\" = { secret = \"other/x\" } }"),
+        ),
+        (
+            "file content over 256 KiB",
+            with_app(&format!(
+                "files = {{ \"/etc/a\" = {{ content = \"{}\" }} }}",
+                "x".repeat(256 * 1024 + 1)
+            )),
+        ),
+        (
             "a mount path used twice",
             with_app("update = \"stop-first\"\nvolumes = { a = \"/data\", b = \"/data\" }"),
         ),
@@ -854,6 +972,7 @@ fn unknown_fields_are_rejected_at_every_level() {
         MINIMAL.replace("port = 8080", "port = 8080\nweight = 1"),
         MINIMAL.replace("port = 8080", "port = 8080\ntimeouts = { total = \"1s\" }"),
         with_app("[services.app.health]\nretries = 3"),
+        with_app("files = { \"/etc/a\" = { content = \"\", template = true } }"),
         with_app("[services.app.health]\nhttp = { method = \"HEAD\" }"),
         with_app("[services.app.health]\ntcp = { host = \"x\" }"),
         format!("{MINIMAL}\n[deploy]\nrepository_id = 1\nrepository = \"acme/app\"\n"),

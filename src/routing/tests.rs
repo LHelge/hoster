@@ -35,6 +35,7 @@ fn stack(stack_name: &str, routes: &[(&str, &str, &str)]) -> Stack {
                 env: BTreeMap::new(),
                 secrets: BTreeMap::new(),
                 volumes: BTreeMap::new(),
+                files: BTreeMap::new(),
                 health: None,
                 update: UpdateStrategy::default(),
                 stop_timeout: DEFAULT_STOP_TIMEOUT,

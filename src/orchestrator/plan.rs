@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::secrets::SecretVersion;
-use crate::stack::{Digest, Name, PinnedImage, Probe, Service, Stack, UpdateStrategy};
+use crate::stack::{Digest, FileSource, Name, PinnedImage, Probe, Service, Stack, UpdateStrategy};
 use crate::store::{DigestSet, PortMap, ServicePointer};
 
 /// The current version of each secret a stack references, by secret name. A secret that is not
@@ -19,7 +19,7 @@ pub type SecretVersions = BTreeMap<String, SecretVersion>;
 /// SHA-256 over a service's resolved spec, everything but the image digest: the second half of
 /// the idempotency key (ADR-0029). It covers the container environment including the injected
 /// `PORT` (ADR-0051), the *versions* of the secrets it references (never their values),
-/// command, volumes, update strategy, health and routes. It leaves out `depends_on`
+/// command, volumes, config files (ADR-0057), update strategy, health and routes. It leaves out `depends_on`
 /// (ADR-0056 Decision 1): changing it reorders starts and never recreates a container.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConfigHash(String);
@@ -75,7 +75,7 @@ impl ConfigHash {
                 (env.as_str(), json!({"name": name, "version": version}))
             })
             .collect();
-        let spec = json!({
+        let mut spec = json!({
             "image": format!("{}/{}", service.image.registry(), service.image.repository()),
             "command": service.command,
             "entrypoint": service.entrypoint,
@@ -89,9 +89,41 @@ impl ConfigHash {
             "read_only": service.read_only,
             "routes": routes,
         });
+        // New in ADR-0057 and hashed only when set, so the hashes of services without files
+        // stand. Inline content goes in by its digest, a secret by its version; mode and owner
+        // with their defaults resolved, so writing a default out changes nothing.
+        if !service.files.is_empty() {
+            let files: Vec<Value> = service
+                .files
+                .iter()
+                .map(|(path, file)| {
+                    let mut entry = json!({
+                        "path": path.as_ref(),
+                        "mode": file.resolved_mode().to_string(),
+                        "owner": file.ownership().to_string(),
+                    });
+                    match &file.source {
+                        FileSource::Inline(content) => {
+                            let digest = Sha256::digest(content.as_bytes());
+                            entry["sha256"] = Value::from(Self::hex(&digest));
+                        }
+                        FileSource::Secret(name) => {
+                            entry["secret"] = Value::from(name.as_str());
+                            entry["version"] =
+                                Value::from(secrets.get(name).map(ToString::to_string));
+                        }
+                    }
+                    entry
+                })
+                .collect();
+            spec["files"] = Value::from(files);
+        }
         // serde_json's map is ordered, so the text is canonical.
-        let digest = Sha256::digest(spec.to_string().as_bytes());
-        Self(digest.iter().map(|b| format!("{b:02x}")).collect())
+        Self(Self::hex(&Sha256::digest(spec.to_string().as_bytes())))
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -658,6 +690,72 @@ update = "stop-first"
         let plan = Plan::new(&s, &pins(), &DigestSet::new(), &running, &version(2)).unwrap();
         let names: Vec<_> = plan.changes.iter().map(|c| c.service.to_string()).collect();
         assert_eq!(names, ["api"]);
+    }
+
+    /// ADR-0057 §7: a file's content, mode, owner and secret version are all part of its
+    /// service's hash, and of no other's.
+    #[test]
+    fn config_hash_covers_config_files() {
+        let none = SecretVersions::new();
+        let with_files = |files: &str| {
+            stack(&STACK.replace(
+                "image = \"ghcr.io/acme/notes-api\"",
+                &format!("image = \"ghcr.io/acme/notes-api\"\nfiles = {{ {files} }}"),
+            ))
+        };
+        let plain = stack(STACK);
+        let base = with_files(r#""/etc/a.conf" = { content = "a = 1" }"#);
+        assert_ne!(hash(&plain, "api", &none), hash(&base, "api", &none));
+        assert_eq!(
+            hash(&plain, "storage", &none),
+            hash(&base, "storage", &none)
+        );
+
+        for changed in [
+            r#""/etc/a.conf" = { content = "a = 2" }"#,
+            r#""/etc/b.conf" = { content = "a = 1" }"#,
+            r#""/etc/a.conf" = { content = "a = 1", mode = "0400" }"#,
+            r#""/etc/a.conf" = { content = "a = 1", owner = "1000:1000" }"#,
+            r#""/etc/a.conf" = { content = "a = 1" }, "/etc/b.conf" = { content = "" }"#,
+            r#""/etc/a.conf" = { secret = "notes/a" }"#,
+        ] {
+            let other = with_files(changed);
+            assert_ne!(
+                hash(&base, "api", &none),
+                hash(&other, "api", &none),
+                "{changed}"
+            );
+            assert_eq!(
+                hash(&base, "storage", &none),
+                hash(&other, "storage", &none)
+            );
+        }
+        // Writing the defaults out is the same file.
+        let explicit =
+            with_files(r#""/etc/a.conf" = { content = "a = 1", mode = "0444", owner = "0:0" }"#);
+        assert_eq!(hash(&base, "api", &none), hash(&explicit, "api", &none));
+
+        // A secret file follows its secret's version, like an env secret.
+        let secret = with_files(r#""/run/secrets/db" = { secret = "notes/db" }"#);
+        let version = |n: u8| {
+            let sealed = crate::store::SealedSecret {
+                name: "notes/db".into(),
+                nonce: vec![n; 24],
+                ciphertext: Vec::new(),
+                created_at: crate::store::Timestamp::now(),
+                updated_at: crate::store::Timestamp::now(),
+            };
+            SecretVersions::from([("notes/db".into(), SecretVersion::from(&sealed))])
+        };
+        let unset = hash(&secret, "api", &none);
+        let v1 = hash(&secret, "api", &version(1));
+        assert_ne!(unset, v1);
+        assert_ne!(v1, hash(&secret, "api", &version(2)));
+        assert_eq!(v1, hash(&secret, "api", &version(1)));
+        assert_eq!(
+            hash(&secret, "storage", &none),
+            hash(&secret, "storage", &version(1))
+        );
     }
 
     /// `depends_on` reorders starts but never recreates a container (ADR-0056 Decision 1); an

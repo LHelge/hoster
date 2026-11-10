@@ -20,6 +20,7 @@ mod check;
 mod dependency;
 mod deploy;
 mod diagnostic;
+mod file;
 mod image;
 mod raw;
 mod route;
@@ -33,6 +34,7 @@ use std::time::Duration;
 pub use check::StackCheck;
 pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
+pub use file::{ConfigFile, ContainerPath, FileMode, FileOwner, FileSource};
 pub use image::{Digest, ImageRef, PinnedImage};
 pub use route::{Host, NormalizedPrefix};
 pub use schema::StackSchema;
@@ -132,6 +134,9 @@ pub struct Service {
     pub secrets: BTreeMap<String, String>,
     /// Volume name → absolute mount path (ADR-0030).
     pub volumes: BTreeMap<String, String>,
+    /// Config files written into each container before it starts, by container path
+    /// (ADR-0057). No path is a parent directory of another, and none is in or above a volume.
+    pub files: BTreeMap<ContainerPath, ConfigFile>,
     /// Declared health check. `None` means the defaults of ADR-0038/ADR-0051 apply. A service
     /// without routes only ever declares an [`Probe::Exec`] check (ADR-0056).
     pub health: Option<HealthCheck>,

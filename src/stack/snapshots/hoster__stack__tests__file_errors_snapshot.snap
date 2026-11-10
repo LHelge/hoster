@@ -1,0 +1,40 @@
+---
+source: src/stack/tests.rs
+expression: parse(source).unwrap_err().to_string()
+---
+invalid stack file (35 errors):
+  line 10, column 19: services.app.files."relative.conf": invalid path `relative.conf`: must be an absolute path, starting with `/`
+  line 11, column 7: services.app.files."/": invalid path `/`: must name a file below `/`
+  line 12, column 15: services.app.files."/etc/app/": invalid path `/etc/app/`: must not end with `/`
+  line 13, column 15: services.app.files."/etc//app": invalid path `/etc//app`: must not have empty, `.` or `..` components
+  line 14, column 16: services.app.files."/etc/./app": invalid path `/etc/./app`: must not have empty, `.` or `..` components
+  line 15, column 17: services.app.files."/etc/../app": invalid path `/etc/../app`: must not have empty, `.` or `..` components
+  line 16, column 20: services.app.files."/etc/nul\0": invalid path `/etc/nul\0`: must not contain a NUL character
+  line 17, column 17: services.app.files."/proc/sys/x": `/proc/sys/x` is in `/proc`, which podman mounts over in every container
+  line 18, column 10: services.app.files."/sys": `/sys` is `/sys`, which podman mounts over in every container
+  line 19, column 16: services.app.files."/dev/shm/x": `/dev/shm/x` is in `/dev`, which podman mounts over in every container
+  line 20, column 16: services.app.files."/etc/hosts": `/etc/hosts` is written by podman itself and cannot be a config file
+  line 21, column 19: services.app.files."/etc/hostname": `/etc/hostname` is written by podman itself and cannot be a config file
+  line 22, column 22: services.app.files."/etc/resolv.conf": `/etc/resolv.conf` is written by podman itself and cannot be a config file
+  line 23, column 24: services.app.files."/run/.containerenv": `/run/.containerenv` is written by podman itself and cannot be a config file
+  line 24, column 17: services.app.files."/etc/passwd": `/etc/passwd` is written by podman itself and cannot be a config file
+  line 25, column 16: services.app.files."/etc/group": `/etc/group` is written by podman itself and cannot be a config file
+  line 26, column 18: services.app.files."/var/lib/app": `/var/lib/app` is the mount path of a volume
+  line 26, column 18: services.app.files."/var/lib/app": `/var/lib/app` is a parent directory of the file `/var/lib/app/config.yml`
+  line 27, column 29: services.app.files."/var/lib/app/config.yml": `/var/lib/app/config.yml` is in the volume mounted at `/var/lib/app`; a volume hides files uploaded there
+  line 28, column 14: services.app.files."/var/lib": `/var/lib` is a parent directory of the volume mounted at `/var/lib/app`
+  line 28, column 14: services.app.files."/var/lib": `/var/lib` is a parent directory of the file `/var/lib/app`
+  line 29, column 16: services.app.files."/etc/nginx": `/etc/nginx` is a parent directory of the file `/etc/nginx/nginx.conf`
+  line 31, column 42: services.app.files."/etc/a/both".secret: set exactly one of `content` or `secret`
+  line 32, column 20: services.app.files."/etc/a/neither": a file needs `content` or `secret`, e.g. { content = "…" }
+  line 33, column 35: services.app.files."/etc/a/other-stack".secret: invalid secret name `other/x`: expected `<stack>/<name>` with this stack's name, e.g. "demo/database-url"
+  line 34, column 33: services.app.files."/etc/a/malformed".secret: invalid secret name `demo/a b`: expected `<stack>/<name>` with this stack's name, e.g. "demo/database-url"
+  line 35, column 46: services.app.files."/etc/a/short-mode".mode: invalid mode `644`: expected four octal digits from "0000" to "0777", e.g. "0440"
+  line 36, column 42: services.app.files."/etc/a/sticky".mode: invalid mode `1755`: expected four octal digits from "0000" to "0777", e.g. "0440"
+  line 37, column 45: services.app.files."/etc/a/not-octal".mode: invalid mode `0808`: expected four octal digits from "0000" to "0777", e.g. "0440"
+  line 38, column 43: services.app.files."/etc/a/no-gid".owner: invalid owner `1000`: expected numeric `uid:gid`, each at most 65535, e.g. "0:65534"
+  line 39, column 44: services.app.files."/etc/a/big-uid".owner: invalid owner `65536:0`: expected numeric `uid:gid`, each at most 65535, e.g. "0:65534"
+  line 40, column 42: services.app.files."/etc/a/names".owner: invalid owner `nginx:nginx`: expected numeric `uid:gid`, each at most 65535, e.g. "0:65534"
+  line 41, column 25: services.app.files."/etc/a/two-problems": a file needs `content` or `secret`, e.g. { content = "…" }
+  line 41, column 34: services.app.files."/etc/a/two-problems".mode: invalid mode `rw`: expected four octal digits from "0000" to "0777", e.g. "0440"
+  line 41, column 48: services.app.files."/etc/a/two-problems".owner: invalid owner `:`: expected numeric `uid:gid`, each at most 65535, e.g. "0:65534"

@@ -19,10 +19,10 @@ use toml::Spanned;
 use super::dependency::Graph;
 use super::schema::Field;
 use super::{
-    DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH, DEFAULT_STOP_TIMEOUT, DeployAuth, Diagnostic,
-    ExpectStatus, FieldPath, HealthCheck, Host, ImageRef, Location, Name, NormalizedPrefix,
-    ParsedStack, Probe, Route, RouteTimeouts, SUPPORTED_VERSION, Service, Stack, StackError,
-    UpdateStrategy,
+    ConfigFile, ContainerPath, DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH, DEFAULT_STOP_TIMEOUT,
+    DeployAuth, Diagnostic, ExpectStatus, FieldPath, FileMode, FileOwner, FileSource, HealthCheck,
+    Host, ImageRef, Location, Name, NormalizedPrefix, ParsedStack, Probe, Route, RouteTimeouts,
+    SUPPORTED_VERSION, Service, Stack, StackError, UpdateStrategy,
 };
 use crate::health;
 
@@ -35,7 +35,9 @@ type Int = Spanned<i64>;
 /// The schema checks each field on its own. hoster checks the rules that need more than one value
 /// when the stack is applied: a (host, prefix) used twice within the stack or by another stack;
 /// `depends_on` cycles, unknown services or a service naming itself; secrets of another stack; a
-/// name set in both `env` and `secrets`; a mount path used twice; a tag or digest on images other
+/// name set in both `env` and `secrets`; a mount path used twice; a config file in, above or at a
+/// volume, above another file or at a path podman manages, and the 256 KiB per file and 1 MiB per
+/// stack limits on inline `content`; a tag or digest on images other
 /// than CI-built `ghcr.io` ones, and `track` only on those; `http` and `tcp` checks only on
 /// routed services, against a route's port; a timings-only `health` table only on routed
 /// services. It also rejects durations that overflow or whose fraction is not a whole number of
@@ -139,6 +141,15 @@ struct RawService {
     #[serde(default)]
     #[schemars(schema_with = "Field::volumes")]
     volumes: BTreeMap<String, Str>,
+    /// Config files: absolute container path → its content, e.g.
+    /// `"/etc/app/config.yml" = { content = "…" }` (ADR-0057). hoster writes them into each
+    /// container before it starts; they need podman 5.4 or later. A path may not be in or above a
+    /// volume, above another file, in `/proc`, `/sys` or `/dev`, or a file podman writes itself
+    /// (`/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/etc/passwd`, `/etc/group`,
+    /// `/run/.containerenv`).
+    #[serde(default)]
+    #[schemars(schema_with = "Field::files::<RawFile>")]
+    files: BTreeMap<String, Spanned<RawFile>>,
     /// Health check (ADR-0038, ADR-0056). Without it, a routed service is probed with
     /// `GET /healthz` on its first route's port, and any other service counts as healthy once
     /// running for 5 s.
@@ -175,6 +186,37 @@ struct RawService {
     /// publishes no ports.
     #[serde(default)]
     routes: Vec<RawRoute>,
+}
+
+/// A config file (ADR-0057): exactly one of `content` and `secret`, plus who may read it. The
+/// container's user cannot change it unless that user is root; with `read_only = true` nobody
+/// can.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "File")]
+#[schemars(extend("oneOf" = [{ "required": ["content"] }, { "required": ["secret"] }]))]
+struct RawFile {
+    /// The file's text, at most 256 KiB, and 1 MiB for all files of the stack together. A TOML
+    /// multi-line string (`"""…"""`, or `'''…'''` to keep backslashes) holds a whole file.
+    #[serde(default)]
+    #[schemars(with = "String")]
+    content: Option<Str>,
+    /// A secret `<stack>/<name>` of this stack whose value becomes the file's content
+    /// (ADR-0029). Changing the secret redeploys the service.
+    #[serde(default)]
+    #[schemars(schema_with = "Field::secret")]
+    secret: Option<Str>,
+    /// Permission bits as four octal digits, `"0000"` to `"0777"`. Default `"0444"` for
+    /// `content` and `"0400"` for `secret`.
+    #[serde(default)]
+    #[schemars(schema_with = "Field::file_mode")]
+    mode: Option<Str>,
+    /// Numeric `"uid:gid"` inside the container, each at most 65535. Default `"0:0"` for
+    /// `content`, and the user the container runs as for `secret`. Set it for images that start
+    /// as root and switch user themselves (nginx, postgres): podman sees those as root.
+    #[serde(default)]
+    #[schemars(schema_with = "Field::file_owner")]
+    owner: Option<Str>,
 }
 
 /// A (host, prefix) → container port route (ADR-0007, ADR-0009, ADR-0010). A (host, prefix)
@@ -494,6 +536,7 @@ impl RawStack {
             );
         }
         Self::check_dependency_cycles(v, &services_path, self.services.get_ref());
+        Self::check_file_total(v, &services_path, self.services.get_ref());
         let keys: BTreeSet<String> = self.services.get_ref().keys().cloned().collect();
         let mut services = BTreeMap::new();
         let mut all_valid = true;
@@ -520,6 +563,40 @@ impl RawStack {
             deploy: deploy?,
             services: all_valid.then_some(services)?,
         })
+    }
+
+    /// Inline file content is capped per stack (ADR-0057 §2): reported once, at the file that
+    /// takes the total over the limit. Files over the per-file limit are their own error and
+    /// count as nothing here.
+    fn check_file_total(
+        v: &mut Validator<'_>,
+        services_path: &FieldPath,
+        services: &BTreeMap<String, Spanned<RawService>>,
+    ) {
+        let mut total = 0;
+        for (key, service) in services {
+            for (file, raw) in &service.get_ref().files {
+                let Some(content) = &raw.get_ref().content else {
+                    continue;
+                };
+                let len = content.get_ref().len();
+                if len > ConfigFile::MAX_BYTES {
+                    continue;
+                }
+                total += len;
+                if total > ConfigFile::MAX_STACK_BYTES {
+                    v.error(
+                        &services_path.key(key).key("files").key(file).key("content"),
+                        content.span(),
+                        format!(
+                            "the stack's inline file content is over {} KiB in total",
+                            ConfigFile::MAX_STACK_BYTES / 1024
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
     }
 
     /// Reports each dependency cycle once, at the `depends_on` entry of its smallest member
@@ -715,12 +792,7 @@ impl RawService {
                 v.error(
                     &secret_path,
                     value.span(),
-                    format!(
-                        "invalid secret name `{}`: expected `<stack>/<name>` with this stack's \
-                         name, e.g. \"{}/database-url\"",
-                        value.get_ref(),
-                        stack.map_or("<stack>", |s| s.as_ref()),
-                    ),
+                    Self::secret_ref_error(value.get_ref(), stack),
                 );
                 valid = false;
             }
@@ -769,6 +841,45 @@ impl RawService {
             }
             volumes.insert(key, target.into_inner());
         }
+
+        let files_path = path.key("files");
+        let mut files = BTreeMap::new();
+        for (key, raw) in self.files {
+            let file_path = files_path.key(&key);
+            let span = raw.span();
+            let location: Option<ContainerPath> = v.parse_at(&file_path, &key, span.clone());
+            if let Some(location) = &location
+                && let Err(reason) =
+                    location.check_placement(mount_paths.iter().map(String::as_str))
+            {
+                v.error(&file_path, span.clone(), reason);
+                valid = false;
+            }
+            let file = raw
+                .into_inner()
+                .validate(v, &file_path, span.clone(), stack);
+            match (location, file) {
+                (Some(location), Some(file)) => {
+                    files.insert(location, (file, span));
+                }
+                _ => valid = false,
+            }
+        }
+        // A file cannot also be a directory that holds another one.
+        for (location, (_, span)) in &files {
+            if let Some(below) = files.keys().find(|other| location.is_ancestor_of(other)) {
+                v.error(
+                    &files_path.key(location.as_ref()),
+                    span.clone(),
+                    format!("`{location}` is a parent directory of the file `{below}`"),
+                );
+                valid = false;
+            }
+        }
+        let files = files
+            .into_iter()
+            .map(|(location, (file, _))| (location, file))
+            .collect();
 
         let mut depends_on = BTreeSet::new();
         let mut listed = BTreeSet::new();
@@ -847,6 +958,7 @@ impl RawService {
             env,
             secrets,
             volumes,
+            files,
             health: health?,
             update: self.update,
             stop_timeout: stop_timeout?,
@@ -891,6 +1003,15 @@ impl RawService {
         }
     }
 
+    /// What to tell the author of a `value` that fails [`Self::is_secret_ref`].
+    fn secret_ref_error(value: &str, stack: Option<&Name>) -> String {
+        format!(
+            "invalid secret name `{value}`: expected `<stack>/<name>` with this stack's name, \
+             e.g. \"{}/database-url\"",
+            stack.map_or("<stack>", |s| s.as_ref()),
+        )
+    }
+
     /// `<stack>/<name>` where `<stack>` is this stack's name (when it is valid).
     fn is_secret_ref(value: &str, stack: Option<&Name>) -> bool {
         let Some((owner, name)) = value.split_once('/') else {
@@ -901,6 +1022,77 @@ impl RawService {
             && name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    }
+}
+
+impl RawFile {
+    fn validate(
+        self,
+        v: &mut Validator<'_>,
+        path: &FieldPath,
+        span: Range<usize>,
+        stack: Option<&Name>,
+    ) -> Option<ConfigFile> {
+        let source = match (self.content, self.secret) {
+            (Some(content), None) => {
+                let len = content.get_ref().len();
+                if len > ConfigFile::MAX_BYTES {
+                    v.error(
+                        &path.key("content"),
+                        content.span(),
+                        format!(
+                            "the content is {len} bytes; a file holds at most {} KiB",
+                            ConfigFile::MAX_BYTES / 1024
+                        ),
+                    );
+                    None
+                } else {
+                    Some(FileSource::Inline(content.into_inner()))
+                }
+            }
+            (None, Some(secret)) => {
+                if RawService::is_secret_ref(secret.get_ref(), stack) {
+                    Some(FileSource::Secret(secret.into_inner()))
+                } else {
+                    v.error(
+                        &path.key("secret"),
+                        secret.span(),
+                        RawService::secret_ref_error(secret.get_ref(), stack),
+                    );
+                    None
+                }
+            }
+            (Some(_), Some(secret)) => {
+                v.error(
+                    &path.key("secret"),
+                    secret.span(),
+                    "set exactly one of `content` or `secret`",
+                );
+                None
+            }
+            (None, None) => {
+                v.error(
+                    path,
+                    span,
+                    "a file needs `content` or `secret`, e.g. { content = \"…\" }",
+                );
+                None
+            }
+        };
+        // No `?` above: the mode and owner are checked even when the source is wrong.
+        let mode: Option<Option<FileMode>> = match &self.mode {
+            Some(mode) => v.parse(&path.key("mode"), mode).map(Some),
+            None => Some(None),
+        };
+        let owner: Option<Option<FileOwner>> = match &self.owner {
+            Some(owner) => v.parse(&path.key("owner"), owner).map(Some),
+            None => Some(None),
+        };
+        Some(ConfigFile {
+            source: source?,
+            mode: mode?,
+            owner: owner?,
+        })
     }
 }
 

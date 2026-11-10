@@ -94,6 +94,13 @@ macro_rules! registry_port {
     };
 }
 
+/// A uid or gid of a config file: up to five digits, at most 65535.
+macro_rules! file_id {
+    () => {
+        "(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[0-5][0-9]{4}|[0-9]{1,4})"
+    };
+}
+
 /// One humantime number: digits, with whitespace allowed between them and before the unit
 /// (`"1 000 s"`).
 macro_rules! duration_number {
@@ -131,6 +138,18 @@ impl Pattern {
         r"|\.[^/:,.\x00-\x1f\x7f-\x9f][^/:,\x00-\x1f\x7f-\x9f]*",
         r"|\.\.[^/:,\x00-\x1f\x7f-\x9f]+))+$",
     );
+    /// An absolute config file path without empty, `.` or `..` components or NUL
+    /// ([`ContainerPath`](super::ContainerPath)).
+    pub const FILE_PATH: &str = concat!(
+        r"^(/([^/.\x00][^/\x00]*",
+        r"|\.[^/.\x00][^/\x00]*",
+        r"|\.\.[^/\x00]+))+$",
+    );
+    /// A file mode: four octal digits without setuid, setgid or sticky bits
+    /// ([`FileMode`](super::FileMode)).
+    pub const FILE_MODE: &str = "^0[0-7]{3}$";
+    /// A numeric `uid:gid`, each at most 65535 ([`FileOwner`](super::FileOwner)).
+    pub const FILE_OWNER: &str = concat!("^", file_id!(), ":", file_id!(), "$");
     /// An environment variable name.
     pub const ENV_NAME: &str = "^[A-Za-z_][A-Za-z0-9_]*$";
     /// A secret name, `<stack>/<name>`.
@@ -288,6 +307,32 @@ impl Field {
             "type": "object",
             "propertyNames": { "pattern": Pattern::ENV_NAME },
             "additionalProperties": { "type": "string", "pattern": Pattern::SECRET },
+        })
+    }
+
+    /// One secret name, `<stack>/<name>`.
+    pub fn secret(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({ "type": "string", "pattern": Pattern::SECRET })
+    }
+
+    /// A table of config files by container path: `T` is the raw file type.
+    pub fn files<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "propertyNames": { "pattern": Pattern::FILE_PATH },
+            "additionalProperties": generator.subschema_for::<T>(),
+        })
+    }
+
+    pub fn file_mode(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({ "type": "string", "pattern": Pattern::FILE_MODE, "examples": ["0440"] })
+    }
+
+    pub fn file_owner(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": Pattern::FILE_OWNER,
+            "examples": ["0:65534"],
         })
     }
 
