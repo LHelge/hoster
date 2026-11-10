@@ -3662,26 +3662,37 @@ mod tests {
                 [&(64u64 << 20).to_string(), "0", "100", "150000 100000"]
             );
 
-            // A shell that holds 64 MiB in a variable goes over the limit and is killed.
+            // A shell that holds 64 MiB in a variable goes over the limit and is killed. Its
+            // second run (the marker exists) exits 1 without any OOM.
             let mut hog = spec_for(stack.as_ref(), "hog");
             hog.command = Some(argv(&[
                 "sh",
                 "-c",
-                "x=$(head -c 67108864 /dev/zero | tr '\\0' a); echo survived",
+                "[ -e /ran ] && exit 1; touch /ran; \
+                 x=$(head -c 67108864 /dev/zero | tr '\\0' a); echo survived",
             ]));
             hog.limits.memory = Some("16MiB".parse().unwrap());
             let id = runtime.create_container(&hog).await.unwrap();
-            runtime.start(&id).await.unwrap();
-            let deadline = Instant::now() + Duration::from_secs(30);
-            let info = loop {
-                let info = runtime.inspect(&id).await.unwrap();
-                if !info.state.is_running() && info.state != ContainerState::Created {
-                    break info;
+            let exited = || async {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    let info = runtime.inspect(&id).await.unwrap();
+                    if !info.state.is_running() && info.state != ContainerState::Created {
+                        break info;
+                    }
+                    assert!(Instant::now() < deadline, "still {}", info.state);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                assert!(Instant::now() < deadline, "still {}", info.state);
-                tokio::time::sleep(Duration::from_millis(100)).await;
             };
+            runtime.start(&id).await.unwrap();
+            let info = exited().await;
             assert_eq!(info.state, ContainerState::Exited(Some(137)), "{info:?}");
+            assert!(info.oom_killed, "{info:?}");
+            // `OOMKilled` is sticky across `start` (ADR-0059 §6): the exit 1 still reports it,
+            // which is why hoster names an OOM only where the flag turned true.
+            runtime.start(&id).await.unwrap();
+            let info = exited().await;
+            assert_eq!(info.state, ContainerState::Exited(Some(1)), "{info:?}");
             assert!(info.oom_killed, "{info:?}");
         })
         .await;

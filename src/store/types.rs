@@ -600,7 +600,7 @@ pub enum EventKind {
     DeployFailed,
     /// A deployment redeployed an earlier one (ADR-0041).
     DeployRolledBack,
-    /// The reconciler restarted a container (exit code, OOM if podman reports it).
+    /// The reconciler restarted a container (its exit reason, OOM kills named per ADR-0059 §6).
     ContainerRestarted,
     /// A service entered crash loop (ADR-0028).
     CrashLoopEntered,

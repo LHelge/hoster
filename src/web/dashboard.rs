@@ -515,10 +515,20 @@ impl Warning {
             } else {
                 continue;
             };
+            // A crash loop names its last exit first, OOM kills included (ADR-0059 §6).
+            let last_exit = (kind == WarningKind::CrashLooping)
+                .then_some(service.restarts.last_exit.as_ref())
+                .flatten()
+                .map(|exit| format!("last: {exit}"));
+            let detail = [last_exit, service.health.last.clone()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
             warnings.push(Warning {
                 kind,
                 subject: format!("{} ({})", service.name, status.name),
-                detail: service.health.last.clone().unwrap_or_default(),
+                detail,
                 href: url.clone(),
             });
         }

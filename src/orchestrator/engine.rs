@@ -21,12 +21,13 @@ use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::event_log::DeployEvents;
+use super::exits::Exit;
 use super::machine::{Effect, Event};
 use super::notes::Note;
 use super::plan::{Change, Phase, Plan, SecretVersions, StartWaves};
 use super::routes::Routes;
 use super::{Interruption, Orchestrator, Result};
-use crate::health::{Check, DeploymentLog, ProbeLog, Probes};
+use crate::health::{Check, DeploymentLog, HealthError, ProbeLog, Probes};
 use crate::logging::LogSpan;
 use crate::routing::{DesiredStack, DrainOutcome, RouteClaims, ServiceState, Upstream};
 use crate::runtime::{
@@ -737,7 +738,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         );
                         let at = Instant::now();
                         let result = check.run(&probes, &id, &log).await;
-                        (service, result.map_err(|err| err.to_string()), at.elapsed())
+                        (service, result, at.elapsed())
                     }
                     .in_current_span(),
                 );
@@ -757,7 +758,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     Err(interruption) => return Event::Failed(interruption.to_string()),
                 };
             if let Err(err) = result {
-                return run.failed(&service, format!("{service}: {err}"));
+                let key = run.key(&service, run.generation);
+                let reason = self.probe_failure(run, &key, service.as_ref(), err);
+                return run.failed(&service, reason);
             }
             run.waves.passed(&service);
             let ready = run.waves.ready();
@@ -833,10 +836,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 Err(reason) => return run.failed(&change.service, reason),
             };
             let label = change.service.as_ref();
-            if let Err(reason) = self
-                .probe_one(run, &change.service, label, &id, check)
-                .await
-            {
+            let key = run.key(&change.service, run.generation);
+            if let Err(reason) = self.probe_one(run, &key, label, &id, check).await {
                 return run.failed(&change.service, reason);
             }
             if change.phase == Phase::Replace
@@ -907,6 +908,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             };
             let note = Note::Restarting { service, replaced };
             self.note_run(run, &note.to_string()).await;
+            self.before_start(&container.id).await;
             self.runtime.start(&container.id).await.map_err(|err| {
                 (
                     service.clone(),
@@ -937,20 +939,21 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .check_for(&definition.services[service], &pointer.ports)
                 .map_err(|err| (service.clone(), format!("service {service}: {err}")))?;
             let label = format!("{service} (unchanged)");
-            self.probe_one(run, service, &label, &container.id, check)
+            let key = run.key(service, pointer.generation);
+            self.probe_one(run, &key, &label, &container.id, check)
                 .await
                 .map_err(|reason| (service.clone(), reason))?;
         }
         Ok(())
     }
 
-    /// Probes `service`'s container `id` with `check` until it passes or fails, recording it
-    /// as events of the deployment; ends early on an interruption. A failure is reported as
-    /// `<label>: <why>`.
+    /// Probes `key`'s container `id` with `check` until it passes or fails, recording it as
+    /// events of the deployment; ends early on an interruption. A failure is reported as
+    /// [`Self::probe_failure`] words it.
     async fn probe_one(
         &self,
         run: &Run,
-        service: &Name,
+        key: &ServiceGeneration,
         label: &str,
         id: &ContainerId,
         check: Check,
@@ -958,7 +961,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let log = self.probe_log(run);
         log.record(
             &Note::Checking {
-                service,
+                service: &key.service,
                 check: &check,
             }
             .to_string(),
@@ -970,9 +973,38 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .await
         {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) => Err(format!("{label}: {err}")),
+            Ok(Err(err)) => Err(self.probe_failure(run, key, label, err)),
             Err(interruption) => Err(interruption.to_string()),
         }
+    }
+
+    /// Why the check of `key`'s container failed, as the deployment's failure reason: `<label>:
+    /// <why>`, or, for a container that exited with an OOM kill hoster can name, `<label>
+    /// exited: OOM-killed (limit 512MiB)` with the target's memory limit (ADR-0059 §6).
+    fn probe_failure(
+        &self,
+        run: &Run,
+        key: &ServiceGeneration,
+        label: &str,
+        err: HealthError,
+    ) -> String {
+        if let HealthError::Exited {
+            state, oom_killed, ..
+        } = err
+        {
+            let limit = run
+                .target
+                .definition
+                .services
+                .get(&key.service)
+                .and_then(|service| service.limits.memory);
+            let exit = Exit { state, oom_killed };
+            let reason = self.exit_reason(key, Some(exit), state, limit);
+            if reason.is_oom() {
+                return format!("{label} exited: {reason}");
+            }
+        }
+        format!("{label}: {err}")
     }
 
     /// Where probe results go: events of the deployment in its state, with the secret values
@@ -1112,6 +1144,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             committed.sort_in_dependency_order(&mut stopped, |(service, _)| service);
         }
         for (_, id) in stopped {
+            self.before_start(&id).await;
             if let Err(err) = self.runtime.start(&id).await {
                 problems.push(format!("cannot restart old container {id}: {err}"));
             }
@@ -1216,6 +1249,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .await
                 .map_err(|err| format!("cannot create {}: {err}", spec.name))?;
             run.created.push((change.service.clone(), id.clone()));
+            self.created(&run.key(&change.service, run.generation));
             self.runtime
                 .start(&id)
                 .await
@@ -1313,15 +1347,20 @@ impl Run {
             .collect()
     }
 
+    /// `service` of the target's stack at `generation`.
+    fn key(&self, service: &Name, generation: u32) -> ServiceGeneration {
+        ServiceGeneration {
+            stack: self.target.stack().clone(),
+            service: service.clone(),
+            generation,
+        }
+    }
+
     /// The container spec of `change`'s new generation (architecture §8).
     fn spec(&self, change: &Change) -> Result<ContainerSpec, String> {
         let stack = self.target.stack();
         let service = &self.target.definition.services[&change.service];
-        let generation = ServiceGeneration {
-            stack: stack.clone(),
-            service: change.service.clone(),
-            generation: self.generation,
-        };
+        let generation = self.key(&change.service, self.generation);
         let mut spec = ContainerSpec::new(&generation, self.id, change.image.clone());
         spec.command = service.command.clone();
         spec.entrypoint = service.entrypoint.clone();

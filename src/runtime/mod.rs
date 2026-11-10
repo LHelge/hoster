@@ -685,8 +685,10 @@ pub struct ContainerInfo {
     /// When the container was last started, as inspect reports it. The list endpoint does not
     /// say, so it is `None` there; so it is for a container that never started.
     pub started_at: Option<SystemTime>,
-    /// Whether the kernel's OOM killer ended the container's last run, as inspect reports it
-    /// (`State.OOMKilled`). The list endpoint does not say, so it is `false` there.
+    /// `State.OOMKilled` as inspect reports it: true at any exit once the OOM killer hit the
+    /// container's cgroup, and sticky across `start` for the container's lifetime
+    /// (architecture §1.8), so only a change since hoster last saw it names an exit (ADR-0059
+    /// §6). The list endpoint does not say, so it is `false` there.
     pub oom_killed: bool,
 }
 

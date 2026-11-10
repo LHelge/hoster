@@ -1,10 +1,10 @@
 ---
 id: r3r
 title: OOM detection and limits in the UI
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:23:25.599826110Z"
-updated: "2026-11-10T00:00:49.305121836Z"
+updated: "2026-11-10T21:58:12.149479532Z"
 tags:
   - orchestrator
   - web
@@ -12,23 +12,24 @@ tags:
 depends_on:
   - xxb
 parent: "9q5"
+attempts: 1
 ---
 
 ## Summary
 Implement ADR-0059 §6: name OOM kills from podman's sticky `State.OOMKilled` flag in restart events, restart records and deploy aborts. Show each service's limits and runtime options in the UI.
 
 ## Acceptance Criteria
-- [ ] **Flag tracking.** `OOMKilled` stays true across `start`, so hoster keeps the flag it last saw per container. It updates the flag at create (false), before each start it does, and when it first sees a container running (adoption at startup included).
-- [ ] **Exit reason** (one type with `Display`), for an exit hoster did not cause: before a reconciler restart (ADR-0028), or while a deploy probes the container:
+- [x] **Flag tracking.** `OOMKilled` stays true across `start`, so hoster keeps the flag it last saw per container. It updates the flag at create (false), before each start it does, and when it first sees a container running (adoption at startup included).
+- [x] **Exit reason** (one type with `Display`), for an exit hoster did not cause: before a reconciler restart (ADR-0028), or while a deploy probes the container:
   - exit 137 with the flag true reads "OOM-killed (limit 512MiB)", since an unsent SIGKILL is almost always the OOM killer;
   - any other exit where the flag turned true since hoster last saw it reads "exited <code> after an OOM kill (limit 512MiB)";
   - "(no memory limit)" replaces the limit when none is set, and the limit uses `ByteSize`'s `Display`;
   - an exit with no OOM reads as today (`exit <code>`).
-- [ ] **Restart event** (`ServiceEvents::restarted`, `src/orchestrator/event_log.rs`): the message carries the exit reason, replacing today's ", OOM killed" suffix from the flag alone. `meta` is unchanged. This narrows ADR-0055's "OOM if podman reports it" to these rules.
-- [ ] **Restart record** (`Restarts` / `RestartStats`, `src/orchestrator/reconcile.rs`): keeps the last exit reason (amends ADR-0028). It is shown in the crash-loop detail on the stack overview and in the dashboard warnings. A failed restart (e.g. a controller undelegated after apply: HTTP 500, container left `created`) records the start error as the reason.
-- [ ] **Deploy abort:** a container that exits while `HealthChecking` or `Replacing` probes it aborts the deploy with the exit reason in the deployment's failure reason and `failed` event, e.g. "app exited: OOM-killed (limit 512MiB)" (amends ADR-0038).
-- [ ] **Limits in the UI:** the stack overview's services card (`src/web/stacks/overview/services.rs`) shows each service's `limits` and runtime options (`shm_size`, `tmpfs`, `init`) from the committed revision, sizes in `ByteSize`'s `Display`.
-- [ ] If epic qmw (resource usage meters) has landed, its memory meter shows usage against the limit; otherwise leave a note on qmw.
+- [x] **Restart event** (`ServiceEvents::restarted`, `src/orchestrator/event_log.rs`): the message carries the exit reason, replacing today's ", OOM killed" suffix from the flag alone. `meta` is unchanged. This narrows ADR-0055's "OOM if podman reports it" to these rules.
+- [x] **Restart record** (`Restarts` / `RestartStats`, `src/orchestrator/reconcile.rs`): keeps the last exit reason (amends ADR-0028). It is shown in the crash-loop detail on the stack overview and in the dashboard warnings. A failed restart (e.g. a controller undelegated after apply: HTTP 500, container left `created`) records the start error as the reason.
+- [x] **Deploy abort:** a container that exits while `HealthChecking` or `Replacing` probes it aborts the deploy with the exit reason in the deployment's failure reason and `failed` event, e.g. "app exited: OOM-killed (limit 512MiB)" (amends ADR-0038). (An exit without a nameable OOM keeps today's "app: container … exited (1) before it became healthy".)
+- [x] **Limits in the UI:** the stack overview's services card (`src/web/stacks/overview/services.rs`) shows each service's `limits` and runtime options (`shm_size`, `tmpfs`, `init`) from the committed revision, sizes in `ByteSize`'s `Display`.
+- [x] If epic qmw (resource usage meters) has landed, its memory meter shows usage against the limit; otherwise leave a note on qmw. (qmw has not landed: note added to its body.)
 
 ## Implementation Notes
 - The tracked flag lives in memory with the reconciler's per-container state. It is lost on a hoster restart, and "first seen running" covers that case. Read the flag from the inspect the reconciler already does before a restart (`ContainerInfo.oom_killed`).

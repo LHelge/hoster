@@ -2,10 +2,10 @@
 id: "9q5"
 title: "M13: Runtime options and resource limits"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:20:07.818001581Z"
-updated: "2026-11-10T00:00:49.305121836Z"
+updated: "2026-11-10T21:58:12.149691244Z"
 tags:
   - stack
   - runtime

@@ -8,11 +8,12 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use super::exits::ExitReason;
 use super::{CANCELLED, STACK_REMOVED, UiEvent};
 use crate::acme::DnsMismatch;
 use crate::health::{HealthChange, HealthStatus};
 use crate::installation::Version;
-use crate::runtime::{ContainerInfo, ContainerState, ServiceGeneration};
+use crate::runtime::ServiceGeneration;
 use crate::stack::Name;
 use crate::store::{
     Deployment, DeploymentId, DeploymentSource, DeploymentState, Event, EventKind, EventPage,
@@ -260,23 +261,14 @@ impl<'a> From<&'a ServiceGeneration> for ServiceEvents<'a> {
 }
 
 impl ServiceEvents<'_> {
-    /// The reconciler restarted `container`, which had exited (as inspect reported it), on its
-    /// `attempt`th restart attempt since hoster started (a failed attempt counts but writes no
-    /// event, so the numbers can skip).
-    pub(super) fn restarted(&self, container: &ContainerInfo, attempt: u32) -> NewEvent {
-        let exit = match container.state {
-            ContainerState::Exited(Some(code)) => format!("exit {code}"),
-            state => state.to_string(),
-        };
-        let oom = if container.oom_killed {
-            ", OOM killed"
-        } else {
-            ""
-        };
+    /// The reconciler restarted the container, which had stopped for `reason` (an OOM kill
+    /// named by ADR-0059 §6), on its `attempt`th restart attempt since hoster started (a
+    /// failed attempt counts but writes no event, so the numbers can skip).
+    pub(super) fn restarted(&self, reason: &ExitReason, attempt: u32) -> NewEvent {
         self.event(
             EventKind::ContainerRestarted,
             Severity::Warning,
-            format!("Restarted {} ({exit}{oom})", self.name()),
+            format!("Restarted {}: {reason}", self.name()),
         )
         .meta(format!("{} · attempt {attempt}", self.generation()))
     }
@@ -885,6 +877,45 @@ mod tests {
         // A restart is not keyed by the notifier.
         let restarted = stored(service.started_past_hold(&["db".parse().unwrap()]));
         assert_eq!(EventTopic::of(&restarted), None);
+    }
+
+    /// ADR-0059 §6: the message carries the exit reason, OOM kills named; the meta is as before.
+    #[test]
+    fn a_restart_names_the_exit_reason() {
+        use super::super::exits::MemoryLimit;
+        use crate::runtime::ContainerState;
+        use crate::stack::ByteSize;
+
+        let generation = ServiceGeneration {
+            stack: "notes".parse().unwrap(),
+            service: "api".parse().unwrap(),
+            generation: 2,
+        };
+        let service = ServiceEvents::from(&generation);
+        let limit = MemoryLimit(Some(ByteSize::mebibytes(512)));
+        for (reason, message) in [
+            (
+                ExitReason::Exit(ContainerState::Exited(Some(1))),
+                "Restarted notes/api: exit 1",
+            ),
+            (
+                ExitReason::OomKilled(limit),
+                "Restarted notes/api: OOM-killed (limit 512MiB)",
+            ),
+            (
+                ExitReason::AfterOomKill {
+                    state: ContainerState::Exited(Some(0)),
+                    limit: MemoryLimit(None),
+                },
+                "Restarted notes/api: exited 0 after an OOM kill (no memory limit)",
+            ),
+        ] {
+            let event = service.restarted(&reason, 3);
+            assert_eq!(event.kind, EventKind::ContainerRestarted);
+            assert_eq!(event.severity, Severity::Warning);
+            assert_eq!(event.message, message);
+            assert_eq!(event.meta.as_deref(), Some("generation 2 · attempt 3"));
+        }
     }
 
     #[test]

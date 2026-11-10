@@ -361,6 +361,12 @@ A container that goes over `memory` is OOM-killed, also during a deploy's health
 then fails. Shared memory (`shm_size`) and `tmpfs` count against the limit, and so does
 podman's own tmpfs on `/tmp`, `/run` and `/var/tmp` with `read_only = true`.
 
+hoster names the kill where it shows: the deploy fails with "app exited: OOM-killed (limit
+512MiB)", and the restart event, a crash loop's detail on the stack page and the dashboard
+warning say the same. A child process killed in a container that keeps running shows only once
+the container exits ("exited 1 after an OOM kill"). Each service row on the stack page lists the
+limits and runtime options in effect.
+
 # 5. Editing the stack file in the UI
 
 **Stacks → New stack** opens an editor with a starter skeleton. On a stack's page, **Edit stack

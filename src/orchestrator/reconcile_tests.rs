@@ -445,7 +445,8 @@ async fn exited_containers_restart_with_backoff_until_crash_looping() {
         api_status.restarts,
         RestartStats {
             restarts: 5,
-            crash_looping: true
+            crash_looping: true,
+            last_exit: Some(ExitReason::Exit(ContainerState::Exited(Some(1)))),
         }
     );
     crash();
@@ -765,13 +766,13 @@ async fn each_restart_writes_one_event_with_the_exit_code_and_oom() {
             (
                 EventKind::ContainerRestarted,
                 Severity::Warning,
-                "Restarted notes/api (exit 1)".to_owned(),
+                "Restarted notes/api: exit 1".to_owned(),
                 "generation 2 · attempt 1".to_owned()
             ),
             (
                 EventKind::ContainerRestarted,
                 Severity::Warning,
-                "Restarted notes/api (exit 137, OOM killed)".to_owned(),
+                "Restarted notes/api: OOM-killed (no memory limit)".to_owned(),
                 "generation 2 · attempt 2".to_owned()
             ),
         ]
@@ -1108,4 +1109,146 @@ async fn a_settle_checked_dependency_passes_by_running_for_its_period() {
         !events.iter().any(|e| e.2.contains("although")),
         "{events:#?}"
     );
+}
+
+/// `api` (routed, start-first) limits its memory to 64 MiB; `storage` sets no limit.
+const LIMITED: &str = r#"
+version = 1
+name = "notes"
+
+[services.api]
+image = "docker.io/library/nginx:1.27"
+limits = { memory = "64MiB" }
+
+[[services.api.routes]]
+host = "notes.example.com"
+port = 8080
+
+[services.storage]
+image = "docker.io/library/redis:7"
+"#;
+
+/// LIMITED live, its containers created by the deployment (their `OOMKilled` seen false).
+async fn limited() -> Harness {
+    let h = harness().await;
+    h.delegate("cpu memory pids\n");
+    let live = h
+        .finish(h.apply(LIMITED).await.deployment.as_ref().unwrap())
+        .await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    h
+}
+
+/// The messages of the reconciler's restart events, oldest first.
+async fn restart_messages(h: &Harness) -> Vec<String> {
+    lifecycle_events(h)
+        .await
+        .into_iter()
+        .filter(|(kind, ..)| *kind == EventKind::ContainerRestarted)
+        .map(|(_, _, message, _)| message)
+        .collect()
+}
+
+/// ADR-0059 §6: a 137 with `OOMKilled` is an OOM kill with the committed limit; the sticky
+/// flag does not blame a later exit; an exit where the flag turned true since hoster last saw
+/// it (a child OOM-killed) names it too, "(no memory limit)" without one. The restart record
+/// keeps the last reason.
+#[tokio::test]
+async fn restarts_name_oom_kills_from_the_flag_hoster_last_saw() {
+    let h = limited().await;
+    let api = h.container("hoster-notes-api-g1").id;
+    let storage = h.container("hoster-notes-storage-g1").id;
+    let start = Instant::now();
+    let at = |secs: u64| start + Duration::from_secs(secs);
+
+    h.runtime.oom_kill(&api);
+    // A child of storage is OOM-killed; storage exits 0 later.
+    h.runtime.oom_kill_child(&storage);
+    h.runtime
+        .set_state(&storage, ContainerState::Exited(Some(0)));
+    h.orchestrator.reconcile_at(at(0)).await.unwrap();
+    let api_stats = service_status(&h.orchestrator, "api").await.restarts;
+    assert_eq!(api_stats.restarts, 1);
+    assert_eq!(
+        api_stats.last_exit.map(|r| r.to_string()).as_deref(),
+        Some("OOM-killed (limit 64MiB)")
+    );
+
+    // The flag stays true across the start; a later exit 1 is not an OOM.
+    assert!(h.container("hoster-notes-api-g1").state.is_running());
+    h.runtime.set_state(&api, ContainerState::Exited(Some(1)));
+    h.runtime
+        .set_state(&storage, ContainerState::Exited(Some(0)));
+    h.orchestrator.reconcile_at(at(1)).await.unwrap();
+    // A 137 with the flag already true is still named: the exit is the evidence.
+    h.runtime.oom_kill(&api);
+    h.orchestrator.reconcile_at(at(3)).await.unwrap();
+
+    assert_eq!(
+        restart_messages(&h).await,
+        [
+            "Restarted notes/api: OOM-killed (limit 64MiB)",
+            "Restarted notes/storage: exited 0 after an OOM kill (no memory limit)",
+            "Restarted notes/api: exit 1",
+            "Restarted notes/storage: exit 0",
+            "Restarted notes/api: OOM-killed (limit 64MiB)",
+        ]
+    );
+    let storage_stats = service_status(&h.orchestrator, "storage").await.restarts;
+    assert_eq!(
+        storage_stats.last_exit,
+        Some(ExitReason::Exit(ContainerState::Exited(Some(0))))
+    );
+}
+
+/// After a hoster restart the flags are gone: a container adopted with `OOMKilled` already
+/// true has its OOM named only on a 137.
+#[tokio::test]
+async fn an_adopted_container_with_the_flag_true_is_named_only_on_a_137() {
+    let h = limited().await;
+    let api = h.container("hoster-notes-api-g1").id;
+    h.runtime.oom_kill_child(&api);
+    let orchestrator = restarted(&h, RestartPolicy::default());
+    let report = orchestrator.recover().await.unwrap();
+    assert!(report.adopted.contains(&"hoster-notes-api-g1".to_owned()));
+    let start = Instant::now();
+
+    h.runtime.set_state(&api, ContainerState::Exited(Some(1)));
+    orchestrator.reconcile_at(start).await.unwrap();
+    h.runtime.oom_kill(&api);
+    orchestrator
+        .reconcile_at(start + Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        restart_messages(&h).await,
+        [
+            "Restarted notes/api: exit 1",
+            "Restarted notes/api: OOM-killed (limit 64MiB)",
+        ]
+    );
+}
+
+/// A start that fails (a controller undelegated after apply: HTTP 500, the container left
+/// `created`) is recorded as the reason; it writes no restart event.
+#[tokio::test]
+async fn a_failed_restart_records_the_start_error_as_the_reason() {
+    let h = limited().await;
+    let api = h.container("hoster-notes-api-g1").id;
+    let refused = RuntimeError::Api {
+        operation: Operation::Start,
+        message: "controller `memory` is not available".into(),
+    };
+    h.runtime.fail_always(Operation::Start, refused.clone());
+    h.runtime.set_state(&api, ContainerState::Created);
+    let report = h.orchestrator.reconcile_at(Instant::now()).await.unwrap();
+    assert_eq!(report.problems.len(), 1, "{report:?}");
+
+    let stats = service_status(&h.orchestrator, "api").await.restarts;
+    assert_eq!(stats.restarts, 1);
+    assert_eq!(
+        stats.last_exit,
+        Some(ExitReason::StartFailed(refused.to_string()))
+    );
+    assert!(restart_messages(&h).await.is_empty());
 }

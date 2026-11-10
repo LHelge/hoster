@@ -2730,3 +2730,54 @@ async fn the_preview_names_the_files_that_redeploy_a_service() {
     let plan = &html[..html.find("</ol>").unwrap()];
     assert!(!plan.contains("inline-hunter2"), "{plan}");
 }
+
+/// ADR-0059: each service row shows its limits and runtime options from the committed
+/// revision, sizes as `ByteSize` writes them; a crash loop names its last exit, OOM included.
+#[tokio::test]
+async fn the_overview_shows_limits_options_and_the_last_exit_of_a_crash_loop() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(!html.contains("runtime options"), "{html}");
+    assert!(!html.contains("resource limits"), "{html}");
+
+    let committed = NOTES.replace(
+        "[services.storage]\n",
+        "[services.storage]\nshm_size = \"256MiB\"\ninit = true\n\
+         tmpfs = { \"/tmp\" = \"64MiB\", \"/run\" = \"1024KiB\" }\n\
+         limits = { memory = \"512MiB\", pids = 256, cpus = 1.5 }\n",
+    );
+    {
+        let mut stacks = app.stacks.stacks.lock().unwrap();
+        let notes = &mut stacks[0];
+        // The active revision raises the limit; the committed one is in effect.
+        notes.revision = revision("notes", 3, &committed.replace("512MiB", "1GiB"));
+        notes.committed = Some(revision("notes", 2, &committed));
+        let api = &mut notes.services[0];
+        api.restarts = RestartStats {
+            restarts: 6,
+            crash_looping: true,
+            last_exit: Some(crate::orchestrator::ExitReason::OomKilled(
+                crate::orchestrator::MemoryLimit(Some(crate::stack::ByteSize::mebibytes(64))),
+            )),
+        };
+    }
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(r#"<span class="service-deps" title="resource limits"><span class="visually-hidden">limits </span>memory 512MiB · pids 256 · cpus 1.5</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="service-deps" title="runtime options"><span class="visually-hidden">runtime options </span>shm_size 256MiB · tmpfs /run 1MiB, /tmp 64MiB · init</span>"#),
+        "{html}"
+    );
+    assert_eq!(
+        html.matches("resource limits").count(),
+        1,
+        "api sets none: {html}"
+    );
+    assert!(
+        html.contains("restarted 6 times; last: OOM-killed (limit 64MiB)"),
+        "{html}"
+    );
+}

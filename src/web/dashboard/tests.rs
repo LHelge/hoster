@@ -74,6 +74,10 @@ fn service(name: &str, health: HealthStatus, restarts: u32, crash_looping: bool)
         restarts: RestartStats {
             restarts,
             crash_looping,
+            // A crash loop names its last exit (ADR-0059 §6).
+            last_exit: crash_looping.then_some(crate::orchestrator::ExitReason::OomKilled(
+                crate::orchestrator::MemoryLimit(Some(crate::stack::ByteSize::mebibytes(256))),
+            )),
         },
         health: HealthStats {
             status: health,
@@ -281,7 +285,7 @@ fn every_warning_kind_is_raised_and_badged() {
         "{html}"
     );
     assert!(
-        html.contains(&format!(r#"<span class="pill pill-fail">{}crash looping</span> <a href="/stacks/blog">worker (blog)</a>"#, crate::web::Icon::Failed)),
+        html.contains(&format!(r#"<span class="pill pill-fail">{}crash looping</span> <a href="/stacks/blog">worker (blog)</a><span class="warning-detail">last: OOM-killed (limit 256MiB) · GET /healthz of &#60;worker&#62;: 503</span>"#, crate::web::Icon::Failed)),
         "{html}"
     );
     assert!(
