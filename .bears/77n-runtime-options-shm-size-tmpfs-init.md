@@ -39,11 +39,13 @@ Implement ADR-0059 §1, §3 and §4 for the three runtime options, end to end: s
   - PID 1 is `/run/podman-init` with `init = true`.
 - [ ] stack-format.md §2.2 documents the three fields, `ByteSize` syntax, and with `read_only` which tmpfs podman adds on its own (unsized `/tmp`, `/run`, `/var/tmp`, replaced only at a declared path). It also lists what stays unexpressible (ADR-0059 Alternatives).
 - [ ] The stack JSON Schema covers the new fields (see Implementation Notes).
+- [ ] The third-party images guide (`site/content/wiki/third-party-images.md`, task k2v) fills in its `shm_size` / `tmpfs` / `init` compose-mapping row and covers the options in its worked example, where they help.
 
 ## Implementation Notes
 - `src/stack/raw.rs` (`RawService`, validation pass next to the duration handling), `src/stack/mod.rs` (`Service`). Reuse M12's normalised container-path type if it has landed; otherwise add one here for tmpfs and the volume overlap check. Keep the public API narrow.
 - The 1 MiB floor is a field rule, not a `ByteSize` rule: `ByteSize` parses any value up to i64::MAX.
-- **Schema:** the stack JSON Schema (`src/stack/schema.rs` via `schemars` on the raw types, `site/static/stack.schema.json` with a drift test) and `hoster stack check` land on `epic/emu-stack-authoring` first. After rebasing onto them, give the new raw fields schema attributes (a `ByteSize` string pattern, the tmpfs map) and regenerate. The drift test fails until you do. `hoster stack check` then picks up the new validation through the parser.
+- **Schema:** the stack JSON Schema (`src/stack/schema.rs` via `schemars` on the raw types, `site/static/stack.schema.json` with a drift test) and `hoster stack check` are on main. Give the new raw fields schema attributes (a `ByteSize` string pattern, the tmpfs map) and regenerate. The drift test fails until you do. `hoster stack check` then picks up the new validation through the parser.
+- **Editor (M15):** if the editor-help task (qjx) has landed, add snippets for the three options. The field reference follows the schema on its own.
 
 ## Edge Cases
 - `tmpfs = {}` and `init = false` hash and create exactly like a stack without them.

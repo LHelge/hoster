@@ -22,7 +22,7 @@ Implement ADR-0059: a small allowlist of container options that general images n
 
 Stays unexpressible (unknown fields): `stop_signal`, `cap_add`, `cap_drop`, `sysctls`, `devices`, `privileged`, `ulimits`, `security_opt`, `ipc`/`pid` modes, OOM-killer tuning, cpuset and io limits, reservations, CPU shares, bind mounts, GPUs (ADR-0019, ADR-0059 Alternatives).
 
-The stack JSON Schema (`src/stack/schema.rs`, `site/static/stack.schema.json` with a drift test) and `hoster stack check` land on `epic/emu-stack-authoring` first. Once this branch is rebased onto them, every new field must extend the schema.
+The stack JSON Schema (`src/stack/schema.rs`, `site/static/stack.schema.json` with a drift test) and `hoster stack check` are on main, so every new field must extend the schema. Once M15 (emu) lands, the new fields also get editor snippets (qjx) and their sections of the third-party images guide (k2v); 77n and xxb carry those criteria. The branch's old `docs(adr): ADR-0058` commit is stale (the ADR landed on main as ADR-0059), so recreate the branch from main.
 
 ## Acceptance Criteria
 
