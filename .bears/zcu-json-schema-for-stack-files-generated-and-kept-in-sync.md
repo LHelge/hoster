@@ -1,14 +1,15 @@
 ---
 id: zcu
 title: JSON Schema for stack files, generated and kept in sync
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:21:18.111817244Z"
-updated: "2026-11-09T17:21:18.111817244Z"
+updated: "2026-11-09T23:32:24.075196787Z"
 tags:
   - stack
   - docs
 parent: emu
+attempts: 1
 ---
 
 ## Summary

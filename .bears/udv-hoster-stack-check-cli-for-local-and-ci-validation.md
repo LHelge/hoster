@@ -1,14 +1,15 @@
 ---
 id: udv
 title: "`hoster stack check` CLI for local and CI validation"
-status: open
+status: done
 priority: P3
 created: "2026-11-09T17:21:18.120246756Z"
-updated: "2026-11-09T17:21:18.120246756Z"
+updated: "2026-11-09T23:45:41.699289090Z"
 tags:
   - cli
   - stack
 parent: emu
+attempts: 1
 ---
 
 ## Summary

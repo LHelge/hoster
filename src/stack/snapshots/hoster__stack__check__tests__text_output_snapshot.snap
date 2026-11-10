@@ -1,0 +1,16 @@
+---
+source: src/stack/check.rs
+expression: check.to_string()
+---
+ok.toml: valid, stack `demo` with 1 service
+bad.toml:3:8: error: name: invalid name `Demo`: must start with a lowercase letter and contain only lowercase letters, digits and `-`, at most 31 characters
+bad.toml:10:8: error: services.app.routes[0].port: invalid port 0: must be 1-65535
+bad.toml: invalid, 2 errors
+syntax.toml:3:13: error: invalid basic string, expected `"`
+syntax.toml: invalid, 1 error
+dup.toml: error: services.web.routes: route `demo.example.com/` of service `web` of stack `demo` duplicates the same route of service `app` of stack `demo`
+dup.toml: invalid, 1 error
+warn.toml:13:8: warning: services.app.volumes: this service has volumes but uses `update = "start-first"`: during a deploy the old and the new container mount the same volume at once; set `update = "stop-first"` unless the app is safe with that
+warn.toml: valid, stack `demo` with 1 service, 1 warning
+
+note: not checked offline, as they need the server: routes taken by another stack; the reserved admin host; secrets being set in the secret store; third-party image tags resolving to a digest; cgroup controllers for resource limits.
