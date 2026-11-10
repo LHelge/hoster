@@ -52,6 +52,8 @@ struct State {
     starts: Vec<String>,
     /// The podman version reported; [`FakeRuntime::DEFAULT_VERSION`] unless set.
     version: Option<String>,
+    /// The volumes declared by images whose reference contains the pattern.
+    image_volumes: Vec<(String, Vec<String>)>,
 }
 
 /// One scripted exec result.
@@ -167,6 +169,14 @@ impl FakeRuntime {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes images whose reference contains `pattern` declare `volumes` (their `VOLUME`s).
+    pub fn set_image_volumes(&self, pattern: &str, volumes: &[&str]) {
+        let volumes = volumes.iter().map(|v| (*v).to_owned()).collect();
+        self.lock()
+            .image_volumes
+            .push((pattern.to_owned(), volumes));
     }
 
     /// Makes the fake report `version` as its podman version.
@@ -435,6 +445,26 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
+    async fn image_volumes(&self, image: &PinnedImage) -> Result<Vec<String>, RuntimeError> {
+        let mut state = self.lock();
+        state.enter(Operation::ImageVolumes)?;
+        let reference = image.to_string();
+        if !state.images.contains(&reference) {
+            return Err(RuntimeError::NotFound {
+                kind: ObjectKind::Image,
+                name: reference,
+            });
+        }
+        Ok(state
+            .image_volumes
+            .iter()
+            .filter(|(pattern, _)| reference.contains(pattern.as_str()))
+            .flat_map(|(_, volumes)| volumes.iter().cloned())
+            .collect())
+    }
+
+    /// Like podman, a failed upload (`fail_next(Operation::UploadFiles, …)`) leaves no
+    /// container behind.
     async fn create_container(&self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
         let mut state = self.lock();
         state.enter(Operation::CreateContainer)?;
@@ -466,6 +496,9 @@ impl ContainerRuntime for FakeRuntime {
                 kind: ObjectKind::Container,
                 name: spec.name.clone(),
             });
+        }
+        if !spec.files.is_empty() {
+            state.enter(Operation::UploadFiles)?;
         }
         state.next_id += 1;
         let id = ContainerId::from(format!("{:064x}", state.next_id));
@@ -701,6 +734,7 @@ mod tests {
                 host_port: 20000,
             }],
             volumes: Vec::new(),
+            files: Vec::new(),
             user: None,
             read_only: false,
             stop_timeout: Duration::from_secs(10),

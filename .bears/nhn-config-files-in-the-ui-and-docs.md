@@ -1,16 +1,17 @@
 ---
 id: nhn
 title: Config files in the UI and docs
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-09T17:23:25.591456230Z"
-updated: "2026-11-09T23:58:38.823017608Z"
+updated: "2026-11-10T16:09:02.461779529Z"
 tags:
   - web
   - docs
 depends_on:
   - rp5
 parent: xgf
+attempts: 1
 ---
 
 ## Summary

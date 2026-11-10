@@ -34,7 +34,7 @@ use std::time::Duration;
 pub use check::StackCheck;
 pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
-pub use file::{ConfigFile, ContainerPath, FileMode, FileOwner, FileSource};
+pub use file::{ConfigFile, ContainerPath, FileMode, FileOwner, FileSource, Ownership};
 pub use image::{Digest, ImageRef, PinnedImage};
 pub use route::{Host, NormalizedPrefix};
 pub use schema::StackSchema;

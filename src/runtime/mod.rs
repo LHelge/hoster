@@ -8,6 +8,7 @@
 mod exec;
 #[cfg(test)]
 pub mod fake;
+mod files;
 mod podman;
 
 use std::collections::BTreeMap;
@@ -36,6 +37,7 @@ pub use exec::{ExecGuard, ExecOutcome, ExecOutput, RunningExec};
 )]
 #[cfg(test)]
 pub use fake::FakeRuntime;
+pub use files::ContainerFile;
 pub use podman::{PodmanRuntime, PodmanSocket};
 
 /// Podman object labels (docs/architecture.md §8).
@@ -111,7 +113,20 @@ pub trait ContainerRuntime: Send + Sync + 'static {
         image: &PinnedImage,
     ) -> impl Future<Output = Result<(), RuntimeError>> + Send;
 
-    /// Creates (but does not start) a container. Fails with [`RuntimeError::Conflict`] when the
+    /// The mount paths the local image `image` declares as volumes (`VOLUME` in its
+    /// Dockerfile), as the image spells them. podman mounts an anonymous volume at each, which
+    /// hides config files uploaded there (ADR-0057 §3). Fails with [`RuntimeError::NotFound`]
+    /// when the image is not present.
+    fn image_volumes(
+        &self,
+        image: &PinnedImage,
+    ) -> impl Future<Output = Result<Vec<String>, RuntimeError>> + Send;
+
+    /// Creates (but does not start) a container, and writes the spec's config files into it
+    /// (ADR-0057): each path is resolved through the image's symbolic links and checked again
+    /// against the reserved paths and the volumes of the spec and the image. When a file
+    /// cannot be written the container is removed again and the call fails with
+    /// [`RuntimeError::ConfigFiles`]. Fails with [`RuntimeError::Conflict`] when the
     /// name is taken, e.g. by a leftover of an interrupted deploy.
     fn create_container(
         &self,
@@ -415,6 +430,9 @@ pub struct ContainerSpec {
     network_alias: String,
     pub ports: Vec<PortBinding>,
     pub volumes: Vec<VolumeMount>,
+    /// Config files written into the container's own layer between create and start
+    /// (ADR-0057). No host path backs them, and removing the container removes them.
+    pub files: Vec<ContainerFile>,
     pub user: Option<String>,
     pub read_only: bool,
     pub stop_timeout: Duration,
@@ -460,6 +478,7 @@ impl ContainerSpec {
             network_alias: generation.service.to_string(),
             ports: Vec::new(),
             volumes: Vec::new(),
+            files: Vec::new(),
             user: None,
             read_only: false,
             stop_timeout: DEFAULT_STOP_TIMEOUT,
@@ -768,6 +787,8 @@ pub enum Operation {
     PullImage,
     RemoveImage,
     CreateContainer,
+    ImageVolumes,
+    UploadFiles,
     Start,
     Stop,
     Remove,
@@ -790,6 +811,8 @@ impl fmt::Display for Operation {
             Self::PullImage => "pull image",
             Self::RemoveImage => "remove image",
             Self::CreateContainer => "create container",
+            Self::ImageVolumes => "read the volumes of image",
+            Self::UploadFiles => "write config files",
             Self::Start => "start container",
             Self::Stop => "stop container",
             Self::Remove => "remove container",
@@ -868,6 +891,11 @@ pub enum RuntimeError {
     /// The configured credential for a registry could not be read.
     #[error("cannot use the registry credential: {message}")]
     Credentials { registry: String, message: String },
+    /// A container's config files could not be written into it (ADR-0057), so it was not
+    /// created. The message is hoster's own check or podman's reason; it names container
+    /// paths only, never host paths or a file's content.
+    #[error("cannot write its config files: {message}")]
+    ConfigFiles { message: String },
     #[error("{operation} is not implemented yet")]
     Unsupported { operation: Operation },
     #[error("podman failed to {operation}: {message}")]

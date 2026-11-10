@@ -984,7 +984,24 @@ impl DeploymentLog {
                 .filter(|s| s.expose().chars().count() >= Self::MIN_REDACTED_CHARS)
                 .cloned(),
         );
-        // A secret containing another is redacted whole.
+        self.sorted()
+    }
+
+    /// Also redacts the secrets of config files (ADR-0057 §6): each whole value like
+    /// [`Self::redacting`], and each of its lines, trimmed, on its own. A check that prints one
+    /// line of a credentials file must not show it either.
+    pub fn redacting_lines<'a>(self, files: impl IntoIterator<Item = &'a SecretValue>) -> Self {
+        let files: Vec<&SecretValue> = files.into_iter().collect();
+        let lines: Vec<SecretValue> = files
+            .iter()
+            .flat_map(|file| file.expose().lines())
+            .map(|line| SecretValue::from(line.trim()))
+            .collect();
+        self.redacting(files).redacting(&lines)
+    }
+
+    /// Longest first, so a secret containing another is redacted whole.
+    fn sorted(mut self) -> Self {
         self.secrets.sort_by(|a, b| {
             let (a, b) = (a.expose(), b.expose());
             b.len().cmp(&a.len()).then_with(|| a.cmp(b))

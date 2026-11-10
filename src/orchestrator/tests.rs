@@ -2559,3 +2559,267 @@ async fn a_deployment_with_config_files_is_rejected_on_an_older_podman() {
     );
     assert_eq!(h.runtime.calls().len(), created, "nothing reached podman");
 }
+
+/// A monitoring stack as ADR-0057 has it in mind: an inline config, a secret file with the
+/// defaults and one with a mode and an owner. `exporter` has no files.
+const MONITORING: &str = r#"
+version = 1
+name = "monitoring"
+
+[services.prometheus]
+image = "docker.io/prom/prometheus:v3.0.0"
+user = "65534"
+read_only = true
+
+[services.prometheus.files]
+"/etc/prometheus/prometheus.yml" = { content = "scrape_interval: 15s\n" }
+"/run/secrets/remote-write.token" = { secret = "monitoring/token" }
+"/etc/prometheus/web.yml" = { secret = "monitoring/web", mode = "0440", owner = "0:65534" }
+
+[services.prometheus.health]
+exec = ["promtool", "check", "healthy"]
+interval = "10ms"
+
+[services.exporter]
+image = "docker.io/prom/node-exporter:v1.8.0"
+"#;
+
+/// ADR-0057 §3, §4 and §6: the engine resolves content, mode and owner and hands the files
+/// to the runtime with the container; nothing that prints the spec shows a file's content.
+#[tokio::test]
+async fn config_files_go_to_the_runtime_with_their_container() {
+    let h = harness().await;
+    h.set_secret("monitoring/token", "t0ken-value").await;
+    h.set_secret("monitoring/web", "basic_auth_users:\n  admin: $2y$hash\n")
+        .await;
+    let applied = h.apply(MONITORING).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+
+    let spec = h.spec_of("hoster-monitoring-prometheus-g1");
+    let files: Vec<_> = spec
+        .files
+        .iter()
+        .map(|f| {
+            (
+                f.path.to_string(),
+                f.mode.to_string(),
+                f.owner.to_string(),
+                f.content.expose().to_owned(),
+            )
+        })
+        .collect();
+    let row = |path: &str, mode: &str, owner: &str, content: &str| {
+        (
+            path.to_owned(),
+            mode.to_owned(),
+            owner.to_owned(),
+            content.to_owned(),
+        )
+    };
+    assert_eq!(
+        files,
+        [
+            row(
+                "/etc/prometheus/prometheus.yml",
+                "0444",
+                "0:0",
+                "scrape_interval: 15s\n"
+            ),
+            row(
+                "/etc/prometheus/web.yml",
+                "0440",
+                "0:65534",
+                "basic_auth_users:\n  admin: $2y$hash\n"
+            ),
+            // A secret file defaults to the container's user, whoever podman says that is.
+            row(
+                "/run/secrets/remote-write.token",
+                "0400",
+                "user",
+                "t0ken-value"
+            ),
+        ]
+    );
+    // File secrets are not environment variables.
+    assert!(spec.secrets.is_empty() && !spec.env.contains_key("token"));
+    let debug = format!("{spec:?}");
+    for content in ["t0ken-value", "$2y$hash", "scrape_interval"] {
+        assert!(!debug.contains(content), "{content} in {debug}");
+    }
+    assert!(h.spec_of("hoster-monitoring-exporter-g1").files.is_empty());
+
+    // Nothing of a file's content reaches the deployment's events either.
+    let events = h.store.events(deployment.id).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|e| !e.message.as_deref().unwrap_or("").contains("t0ken"))
+    );
+}
+
+/// ADR-0057 §3: only the pulled image knows its volumes, so `Pulling` is where a file in one
+/// fails the deploy, before any container exists.
+#[tokio::test]
+async fn a_config_file_in_an_image_volume_fails_the_deploy_in_pulling() {
+    let h = harness().await;
+    h.set_secret("monitoring/token", "t0ken-value").await;
+    h.set_secret("monitoring/web", "x").await;
+    h.runtime
+        .set_image_volumes("prom/prometheus", &["/prometheus", "/etc/prometheus/"]);
+    let applied = h.apply(MONITORING).await;
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    let error = failed.error.unwrap();
+    assert!(
+        error.starts_with(
+            "service prometheus: `/etc/prometheus/prometheus.yml` is in the volume mounted at \
+             `/etc/prometheus`; a volume hides files uploaded there; the image \
+             docker.io/prom/prometheus@sha256:"
+        ) && error.ends_with("declares that volume"),
+        "{error}"
+    );
+    assert!(
+        !h.runtime.calls().contains(&Operation::CreateContainer),
+        "{:?}",
+        h.runtime.calls()
+    );
+
+    // A file above an image volume is as wrong: the start would fail (architecture §1.7).
+    let h = harness().await;
+    h.set_secret("monitoring/token", "t0ken-value").await;
+    h.set_secret("monitoring/web", "x").await;
+    h.runtime
+        .set_image_volumes("prom/prometheus", &["/run/secrets/remote-write.token/data"]);
+    let applied = h.apply(MONITORING).await;
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("is a parent directory of the volume mounted at"),
+        "{failed:?}"
+    );
+}
+
+/// The runtime removes a container whose files it could not write; the deployment fails with
+/// podman's reason and the old generation keeps running.
+#[tokio::test]
+async fn a_failed_upload_fails_the_deployment() {
+    let h = harness().await;
+    h.set_secret("monitoring/token", "t0ken-value").await;
+    h.set_secret("monitoring/web", "x").await;
+    let applied = h.apply(MONITORING).await;
+    assert_eq!(
+        h.finish(applied.deployment.as_ref().unwrap()).await.state,
+        S::Live
+    );
+
+    h.runtime.fail_next(
+        Operation::UploadFiles,
+        RuntimeError::ConfigFiles {
+            message: "error setting ownership of \"/etc/prometheus/web.yml\" to 70000:0: \
+                      invalid argument"
+                .into(),
+        },
+    );
+    let changed = MONITORING.replace("owner = \"0:65534\"", "owner = \"65535:0\"");
+    let applied = h.apply(&changed).await;
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    assert_eq!(
+        failed.error.as_deref(),
+        Some(
+            "cannot create hoster-monitoring-prometheus-g2: cannot write its config files: \
+             error setting ownership of \"/etc/prometheus/web.yml\" to 70000:0: invalid argument"
+        )
+    );
+    let names: Vec<String> = h.runtime.containers().into_iter().map(|c| c.name).collect();
+    assert_eq!(
+        names,
+        [
+            "hoster-monitoring-exporter-g1",
+            "hoster-monitoring-prometheus-g1"
+        ]
+    );
+    assert!(
+        h.container("hoster-monitoring-prometheus-g1")
+            .state
+            .is_running()
+    );
+}
+
+/// A secret can grow after the stack was applied, so its size is checked when it is written
+/// (ADR-0057 §6). The message names the secret and the file, never the value.
+#[tokio::test]
+async fn an_oversized_file_secret_fails_the_deploy() {
+    let h = harness().await;
+    let big = "s3cret-".repeat(256 * 1024 / 7 + 1);
+    h.set_secret("monitoring/token", &big).await;
+    h.set_secret("monitoring/web", "x").await;
+    let applied = h.apply(MONITORING).await;
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    assert_eq!(
+        failed.error.as_deref(),
+        Some(
+            format!(
+                "cannot create hoster-monitoring-prometheus-g1: secret `monitoring/token` (for \
+                 file /run/secrets/remote-write.token) is {} bytes; a file holds at most 256 KiB",
+                big.len()
+            )
+            .as_str()
+        )
+    );
+    assert!(
+        h.runtime
+            .containers()
+            .iter()
+            .all(|c| !c.name.contains("prometheus"))
+    );
+}
+
+/// ADR-0057 §6: exec output is redacted for file secrets too, each line on its own.
+#[tokio::test]
+async fn exec_output_is_redacted_for_each_line_of_a_file_secret() {
+    let h = harness().await;
+    h.set_secret("monitoring/token", "t0ken-value").await;
+    h.set_secret(
+        "monitoring/web",
+        "basic_auth_users:\n  admin: $2y$hash-of-admin\n",
+    )
+    .await;
+    h.runtime.script_exec(
+        "-prometheus-",
+        [
+            Ok(ExecOutcome::finished(
+                1,
+                "bad line in web.yml: admin: $2y$hash-of-admin (token t0ken-value)\n".into(),
+            )),
+            Ok(ExecOutcome::finished(0, "healthy\n".into())),
+        ],
+    );
+    let applied = h.apply(MONITORING).await;
+    let deployment = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+    let notes: Vec<_> = h
+        .notes(deployment.id)
+        .await
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("output \"bad line in web.yml: <redacted> (token <redacted>)\"")),
+        "{notes:#?}"
+    );
+    assert!(
+        !notes
+            .iter()
+            .any(|n| n.contains("hash-of-admin") || n.contains("t0ken")),
+        "{notes:#?}"
+    );
+}
