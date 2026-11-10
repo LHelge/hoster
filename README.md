@@ -39,6 +39,14 @@ Tests run with [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest -
 package manager; settings in `.config/nextest.toml`). `cargo test` runs the same tests if you
 don't have it.
 
+The admin UI's stack editor, `assets/editor.js`, is hoster's own script with no dependencies and
+no build step (ADR-0060). Its tokenizer and editing helpers are tested with node's built-in test
+runner, with nothing to install from npm. Building and `cargo nextest run` don't need node.
+
+```sh
+node --test 'assets/*.test.mjs'               # editor script tests (node 22 or later)
+```
+
 CI (`.github/workflows/ci.yml`) runs the same format, lint and test steps on every pull request
 and every push to `main`, checks that `.sqlx/` is up to date, and checks that the static musl
 release build links statically. On a pull request the static build only runs when the pull

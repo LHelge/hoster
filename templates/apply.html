@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Apply a stack file{% endblock %}
+{% block scripts %}
+  <script type="module" src="{{ layout.editor() }}"></script>
+{%- endblock %}
 {% block crumb %}<a href="/stacks">~/stacks</a>/new{% endblock %}
 {% block heading %}Apply a stack file{% endblock %}
 {% block content %}
@@ -12,7 +15,7 @@
     </div>
     <form class="apply-form" hx-post="/apply/preview" hx-target="#apply-result" enctype="multipart/form-data">
       <label class="visually-hidden" for="stack-toml">Stack file</label>
-      <textarea id="stack-toml" name="toml" rows="22" spellcheck="false" autocomplete="off" placeholder="version = 1&#10;name = &#34;…&#34;&#10;&#10;[services.web]&#10;image = &#34;…&#34;"></textarea>
+      <textarea id="stack-toml" name="toml" rows="22" data-editor="toml" spellcheck="false" autocomplete="off" placeholder="version = 1&#10;name = &#34;…&#34;&#10;&#10;[services.web]&#10;image = &#34;…&#34;"></textarea>
       <div class="apply-form-foot">
         <label class="apply-upload">or upload <input type="file" name="file" accept=".toml,text/plain,application/toml"></label>
         <button class="primary" type="submit">Check</button>

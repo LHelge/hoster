@@ -99,6 +99,16 @@
   --warn-tint: color-mix(in srgb, var(--warn) 10%, transparent);
   --fail-tint: color-mix(in srgb, var(--fail) 10%, transparent);
   --neutral-tint: color-mix(in srgb, var(--muted) 10%, transparent);
+  /* Stack editor syntax colours (assets/editor.js): aliases of the text and status colours, so
+     they meet the contrast rule on --inset without tokens of their own. */
+  --syn-comment: var(--muted);
+  --syn-table: var(--accent);
+  --syn-key: var(--link);
+  --syn-string: var(--ok);
+  --syn-escape: var(--p50);
+  --syn-number: var(--warn);
+  --syn-literal: var(--p95);
+  --syn-punct: var(--text-2);
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius-card: 10px;
@@ -757,6 +767,90 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 }
 .apply-form { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px; }
 .apply-form textarea { width: 100%; min-height: 24rem; font: 13px/1.5 var(--mono); tab-size: 4; resize: vertical; }
+
+/* The stack editor (assets/editor.js, ADR-0060): the textarea's text is transparent over a
+   highlighted copy of it (.editor-highlight), beside a line-number gutter. The script moves the
+   copy and the numbers with the textarea's scroll position. The textarea, the copy and the
+   gutter share one font, line height, padding and tab size, or the caret drifts off the text. */
+.editor {
+  display: flex;
+  min-width: 0;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-control);
+  background: var(--inset);
+  overflow: hidden;
+}
+.editor:focus-within { border-color: var(--accent); outline: 2px solid var(--accent-tint); outline-offset: 0; }
+.editor:has(.editor-input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The numbers are positioned out of flow, so a long file never makes the gutter, and with it the
+   editor, taller than the textarea. */
+.editor-gutter {
+  position: relative;
+  flex: none;
+  width: calc(var(--digits, 2) * 1ch + 20px);
+  border-right: 1px solid var(--divider);
+  color: var(--muted);
+  font: 13px/1.5 var(--mono);
+  text-align: right;
+  overflow: hidden;
+  user-select: none;
+}
+.editor-lines { position: absolute; top: 10px; right: 0; left: 0; }
+.editor-lines span { display: block; padding: 0 8px 0 12px; font-variant-numeric: tabular-nums; }
+.editor-lines span.is-warning { background: var(--warn-tint); color: var(--warn); font-weight: 600; }
+.editor-lines span.is-error { background: var(--fail-tint); color: var(--fail); font-weight: 600; }
+.editor-body { position: relative; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.editor-highlight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--text);
+  font: 13px/1.5 var(--mono);
+  tab-size: 4;
+  white-space: pre;
+  pointer-events: none;
+}
+.editor-highlight code { font: inherit; }
+.editor .editor-input {
+  display: block;
+  position: relative;
+  width: 100%;
+  min-height: 24rem;
+  margin: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+  font: 13px/1.5 var(--mono);
+  tab-size: 4;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow: auto;
+  resize: vertical;
+}
+.editor .editor-input:focus, .editor .editor-input:focus-visible { outline: none; }
+.editor .editor-input::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); color: transparent; }
+.editor-hint { margin: -6px 0 0; color: var(--muted); font: 11.5px/1.5 var(--mono); }
+.tok-comment { color: var(--syn-comment); font-style: italic; }
+.tok-table { color: var(--syn-table); font-weight: 600; }
+.tok-key { color: var(--syn-key); }
+.tok-string { color: var(--syn-string); }
+.tok-escape { color: var(--syn-escape); }
+.tok-number { color: var(--syn-number); }
+.tok-bool, .tok-date { color: var(--syn-literal); }
+.tok-punct { color: var(--syn-punct); }
+/* Forced colours (Windows high contrast) override the transparent text: show the textarea as it
+   is and drop the copy behind it. */
+@media (forced-colors: active) {
+  .editor-highlight { display: none; }
+  .editor .editor-input { color: CanvasText; }
+}
 .apply-form-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; }
 .apply-upload { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
 .apply-upload input { max-width: 100%; font-size: 13px; }

@@ -381,6 +381,11 @@ impl Layout {
         Assets::get().htmx_sse.url()
     }
 
+    /// hoster's stack editor script (ADR-0060), loaded only by pages with an editor.
+    pub fn editor(&self) -> String {
+        Assets::get().editor.url()
+    }
+
     pub fn stylesheet(&self) -> String {
         Assets::get().stylesheet.url()
     }
