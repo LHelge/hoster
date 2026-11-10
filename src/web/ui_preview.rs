@@ -1099,9 +1099,17 @@ impl Preview {
     fn write(&mut self, file: &str, label: &str, html: &str) {
         let path = self.dir.join(file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, Self::without_streams(html)).unwrap();
+        std::fs::write(
+            &path,
+            Self::without_streams(html).replace(Self::LIVE_CHECK, ""),
+        )
+        .unwrap();
         self.index.push((file.to_owned(), label.to_owned()));
     }
+
+    /// The stack editor's live check request (ADR-0060), left out like the streams: a static
+    /// server cannot answer the POST. The states below show its panel filled in instead.
+    const LIVE_CHECK: &str = " hx-post=\"/apply/check\"";
 
     /// `html` without its `hx-sse:connect` attributes: a static server has no streams, and
     /// htmx would swap the server's 404 page into the element.
@@ -1467,16 +1475,30 @@ async fn ui_preview() {
     ] {
         *app.stacks.changed.lock().unwrap() = changed.iter().map(|&s| s.to_owned()).collect();
         let result = session.post("/apply/preview", &[("toml", toml)]).await;
+        let live = session.post("/apply/check", &[("toml", toml)]).await;
+        let typed = Session::inject(
+            &Session::fill_textarea(&apply, "stack-toml", toml),
+            "apply-check",
+            &live,
+        );
         preview.write(
             file,
             label,
-            &Session::swap_with_oob(
-                &Session::fill_textarea(&apply, "stack-toml", toml),
-                "apply-result",
-                &result,
-            ),
+            &Session::swap_with_oob(&typed, "apply-result", &result),
         );
     }
+    // The diagnostics while typing, before Check: an unknown key, on its line.
+    let typing = "version = 1\nname = \"links\"\n\n[services.web]\nimage = \"docker.io/library/nginx:1.27\"\nvolumes = { data = \"/usr/share/nginx/html\" }\n\n[[services.web.routes]]\nhost = \"links.example.com\"\nport = 80\nstrip = true\n";
+    let live = session.post("/apply/check", &[("toml", typing)]).await;
+    preview.write(
+        "states/apply-typing.html",
+        "Apply: diagnostics while typing",
+        &Session::inject(
+            &Session::fill_textarea(&apply, "stack-toml", typing),
+            "apply-check",
+            &live,
+        ),
+    );
     *app.stacks.changed.lock().unwrap() = vec!["api".into()];
     let stack = session.get("/stacks/notes", StatusCode::OK).await;
     let reresolve = session.post("/stacks/notes/reresolve/preview", &[]).await;

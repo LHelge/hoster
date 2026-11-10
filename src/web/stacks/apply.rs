@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use similar::{ChangeTag, TextDiff};
 
 use super::{Outcome, Problem, StackView};
-use crate::orchestrator::{ApplyPreview, PinChange, Wave};
+use crate::orchestrator::{ApplyPreview, CheckReport, PinChange, Wave};
 use crate::stack::{Counted, FileSource, Stack};
 use crate::web::pages::{Layout, Page};
 
@@ -30,6 +30,78 @@ use crate::web::pages::{Layout, Page};
 #[template(path = "apply.html")]
 pub struct ApplyPage {
     pub(super) layout: Layout,
+}
+
+/// The editor's diagnostics panel (ADR-0060), answered by `POST /apply/check` while the admin
+/// types: a one-line summary that screen readers announce when it changes, and every problem
+/// with a link that puts the caret on its line. The editor script marks the same lines in its
+/// gutter, from each item's `data-line` and `data-severity`.
+#[derive(Template)]
+#[template(path = "apply_check.html")]
+pub struct LiveCheck {
+    summary: String,
+    /// `ok`, `warn`, `fail` or `idle`: the summary's colour.
+    tone: &'static str,
+    items: Vec<LiveProblem>,
+}
+
+/// One problem in the [`LiveCheck`] panel.
+struct LiveProblem {
+    /// A warning, or else an error.
+    warning: bool,
+    problem: Problem,
+}
+
+impl LiveCheck {
+    /// The panel for `report`: its errors, then its warnings, each in line order.
+    pub(super) fn new(report: &CheckReport) -> Self {
+        let (errors, warnings) = (report.errors.len(), report.warnings.len());
+        let (summary, tone) = match (errors, warnings) {
+            (0, 0) => (
+                "No problems found. Check also resolves the tags and shows the plan.".to_owned(),
+                "ok",
+            ),
+            (0, w) => (format!("{}", Counted(w, "warning")), "warn"),
+            (e, 0) => (format!("{}", Counted(e, "error")), "fail"),
+            (e, w) => (
+                format!("{}, {}", Counted(e, "error"), Counted(w, "warning")),
+                "fail",
+            ),
+        };
+        let items = report
+            .errors
+            .iter()
+            .map(|d| (false, d))
+            .chain(report.warnings.iter().map(|d| (true, d)))
+            .map(|(warning, d)| LiveProblem {
+                warning,
+                problem: Problem::from(d),
+            })
+            .collect();
+        Self {
+            summary,
+            tone,
+            items,
+        }
+    }
+
+    /// The panel for an empty editor.
+    pub(super) fn empty() -> Self {
+        Self {
+            summary: "The file is checked as you type.".to_owned(),
+            tone: "idle",
+            items: Vec::new(),
+        }
+    }
+
+    /// The panel when the check could not run, saying why.
+    pub(super) fn unavailable(reason: impl fmt::Display) -> Self {
+        Self {
+            summary: format!("Could not check the file: {reason}"),
+            tone: "warn",
+            items: Vec::new(),
+        }
+    }
 }
 
 /// How a plan line changes something, drawn as its sign.

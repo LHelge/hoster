@@ -325,6 +325,26 @@ export function newline(text, pos) {
   return "\n" + text.slice(from, k);
 }
 
+/**
+ * The offset in `text` (in UTF-16 code units, as the textarea counts) of 1-based `line` and
+ * `column`, where the column counts characters, as hoster's diagnostics do. Clamps to the end of
+ * the line and of the text.
+ */
+export function offsetAt(text, line, column) {
+  let offset = 0;
+  for (let l = 1; l < line; l += 1) {
+    const nl = text.indexOf("\n", offset);
+    if (nl === -1) return text.length;
+    offset = nl + 1;
+  }
+  const nl = text.indexOf("\n", offset);
+  const end = nl === -1 ? text.length : nl;
+  for (let c = 1; c < column && offset < end; c += 1) {
+    offset += text.codePointAt(offset) > 0xffff ? 2 : 1;
+  }
+  return offset;
+}
+
 // ---- DOM wiring --------------------------------------------------------------------------------
 
 /** One enhanced textarea. */
@@ -444,6 +464,20 @@ class Editor {
     }
   }
 
+  /** Puts the caret on `line` and `column` and scrolls it into view. */
+  jump(line, column) {
+    const ta = this.textarea;
+    const pos = offsetAt(ta.value, line, column);
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+    const height = parseFloat(getComputedStyle(ta).lineHeight) || 20;
+    const top = (line - 1) * height;
+    if (top < ta.scrollTop || top + height > ta.scrollTop + ta.clientHeight) {
+      ta.scrollTop = Math.max(0, top - ta.clientHeight / 3);
+    }
+    this.follow();
+  }
+
   key(e) {
     const leave = this.leaveOnTab;
     this.leaveOnTab = false;
@@ -506,6 +540,33 @@ export function editorFor(textarea) {
   return editors.get(textarea);
 }
 
+/**
+ * Follows a diagnostics panel (`[data-editor-for="<textarea id>"]`, filled by the live check,
+ * see templates/apply_check.html): marks its problems' lines in that editor's gutter whenever
+ * its content changes, and makes each problem's `a[data-line]` link put the caret there.
+ */
+function follow(panel) {
+  const editorOf = () => editors.get(panel.ownerDocument.getElementById(panel.dataset.editorFor));
+  const mark = () => {
+    const editor = editorOf();
+    if (!editor) return;
+    const lines = (severity) =>
+      [...panel.querySelectorAll(`li[data-severity="${severity}"]`)].map((li) => Number(li.dataset.line));
+    editor.markLines(lines("error"), "error");
+    editor.markLines(lines("warning"), "warning");
+  };
+  new MutationObserver(mark).observe(panel, { childList: true, subtree: true, characterData: true, attributes: true });
+  panel.addEventListener("click", (e) => {
+    const link = e.target.closest("a[data-line]");
+    const editor = editorOf();
+    if (!link || !editor) return;
+    e.preventDefault();
+    editor.jump(Number(link.dataset.line), Number(link.dataset.column) || 1);
+  });
+  mark();
+}
+
 if (typeof document !== "undefined") {
   enhance(document);
+  for (const panel of document.querySelectorAll("[data-editor-for]")) follow(panel);
 }

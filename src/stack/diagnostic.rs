@@ -34,6 +34,82 @@ impl FieldPath {
     pub fn is_root(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Where this path is written in `source`: the start of its last key, or of its last array
+    /// element. `None` when `source` is not TOML or has no such path. For checks that run on the
+    /// validated model, which keeps no spans, such as route collisions (ADR-0012).
+    pub fn locate(&self, source: &str) -> Option<Location> {
+        use toml::de::{DeArray, DeTable, DeValue};
+        let document = DeTable::parse(source).ok()?;
+        let mut table: Option<&DeTable<'_>> = Some(document.get_ref());
+        let mut array: Option<&DeArray<'_>> = None;
+        let mut at = None;
+        for step in self.steps()? {
+            let value = match step {
+                Step::Key(key) => {
+                    let (name, value) = table?.iter().find(|(name, _)| name.get_ref() == &key)?;
+                    at = Some(name.span().start);
+                    value
+                }
+                Step::Index(index) => {
+                    let value = array?.get(index)?;
+                    at = Some(value.span().start);
+                    value
+                }
+            };
+            (table, array) = match value.get_ref() {
+                DeValue::Table(inner) => (Some(inner), None),
+                DeValue::Array(inner) => (None, Some(inner)),
+                _ => (None, None),
+            };
+        }
+        at.map(|offset| Location::of(source, offset))
+    }
+
+    /// The keys and indexes of the path, the inverse of [`key`](Self::key) and
+    /// [`index`](Self::index). `None` if the text is not such a path.
+    fn steps(&self) -> Option<Vec<Step>> {
+        let mut steps = Vec::new();
+        let mut rest = self.0.as_str();
+        while !rest.is_empty() {
+            if let Some(after) = rest.strip_prefix('[') {
+                let (digits, tail) = after.split_once(']')?;
+                steps.push(Step::Index(digits.parse().ok()?));
+                rest = tail;
+            } else if rest.starts_with('"') {
+                // A key `key` quoted with `{:?}`: read up to the closing, unescaped quote.
+                let mut key = String::new();
+                let mut chars = rest[1..].char_indices();
+                let end = loop {
+                    match chars.next()? {
+                        (i, '"') => break i + 2,
+                        (_, '\\') => key.push(match chars.next()?.1 {
+                            'n' => '\n',
+                            't' => '\t',
+                            'r' => '\r',
+                            '0' => '\0',
+                            c => c,
+                        }),
+                        (_, c) => key.push(c),
+                    }
+                };
+                steps.push(Step::Key(key));
+                rest = &rest[end..];
+            } else {
+                let end = rest.find(['.', '[']).unwrap_or(rest.len());
+                steps.push(Step::Key(rest[..end].to_owned()));
+                rest = &rest[end..];
+            }
+            rest = rest.strip_prefix('.').unwrap_or(rest);
+        }
+        Some(steps)
+    }
+}
+
+/// One step of a [`FieldPath`].
+enum Step {
+    Key(String),
+    Index(usize),
 }
 
 impl From<&serde_path_to_error::Path> for FieldPath {
@@ -215,6 +291,68 @@ mod tests {
             path,
             location,
             message: "broken".to_owned(),
+        }
+    }
+
+    #[test]
+    fn paths_locate_their_last_key_or_element() {
+        let source = "version = 1\nname = \"notes\"\n\n[services.web]\nimage = \"x\"\nfiles.\"/etc/my app.conf\" = { content = \"a\" }\n\n[[services.web.routes]]\nhost = \"a.example.com\"\nport = 80\n\n[[services.web.routes]]\n  host = \"b.example.com\"\n  port = 81\n";
+        let root = FieldPath::default();
+        let web = root.key("services").key("web");
+        let at = |path: &FieldPath| path.locate(source);
+        assert_eq!(at(&root.key("name")), Some(Location { line: 2, column: 1 }));
+        assert_eq!(
+            at(&web),
+            Some(Location {
+                line: 4,
+                column: 11
+            })
+        );
+        assert_eq!(
+            at(&web.key("files").key("/etc/my app.conf").key("content")),
+            Some(Location {
+                line: 6,
+                column: 30
+            })
+        );
+        assert_eq!(
+            at(&web.key("routes").index(1).key("host")),
+            Some(Location {
+                line: 13,
+                column: 3
+            })
+        );
+        assert_eq!(
+            at(&web.key("routes").index(0).key("port")),
+            Some(Location {
+                line: 10,
+                column: 1
+            })
+        );
+        // Missing paths, wrong shapes and broken TOML locate nothing.
+        assert_eq!(at(&web.key("routes").index(2)), None);
+        assert_eq!(at(&web.key("image").key("x")), None);
+        assert_eq!(at(&root.key("nope")), None);
+        assert_eq!(root.key("name").locate("name = "), None);
+        assert_eq!(at(&root), None);
+    }
+
+    #[test]
+    fn quoted_keys_round_trip_through_steps() {
+        for key in [
+            "plain",
+            "with space",
+            "quote\"inside",
+            "back\\slash",
+            "tab\there",
+            "a.b",
+            "[0]",
+        ] {
+            let path = FieldPath::default().key(key).index(3);
+            match path.steps().unwrap().as_slice() {
+                [Step::Key(k), Step::Index(3)] => assert_eq!(k, key),
+                _ => panic!("{path}"),
+            }
         }
     }
 
