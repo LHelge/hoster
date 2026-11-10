@@ -39,14 +39,16 @@ use crate::acme::{Backoff, DnsMismatch, DnsVerdict, Validity};
 use crate::config::ConfigSource;
 use crate::health::{HealthStats, HealthStatus};
 use crate::notify::{Letterhead, Mail, Notice};
-use crate::orchestrator::{CertStatus, RestartStats, ServiceState, ServiceStatus, StackStatus};
+use crate::orchestrator::{
+    CertStatus, ExitReason, MemoryLimit, RestartStats, ServiceState, ServiceStatus, StackStatus,
+};
 use crate::registry::{RegistryCheck, RegistryCredential};
 use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
 use crate::runtime::{
     ContainerRuntime, ContainerSpec, ContainerState, LogLine, LogStream, NetworkSpec, Operation,
     PortBinding, RuntimeError, ServiceGeneration,
 };
-use crate::stack::RouteTimeouts;
+use crate::stack::{ByteSize, RouteTimeouts};
 use crate::stats::{CertExpiry, RequestOutcome};
 use crate::store::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentOutcome, DeploymentSource,
@@ -77,6 +79,8 @@ port = 8080
 
 [services.worker]
 image = "ghcr.io/acme/blog-worker"
+init = true
+limits = { memory = "256MiB", pids = 256, cpus = 0.5 }
 "#;
 
 const SHOP: &str = r#"version = 1
@@ -91,6 +95,9 @@ port = 3000
 
 [services.db]
 image = "docker.io/library/postgres:17"
+shm_size = "256MiB"
+tmpfs = { "/tmp" = "64MiB", "/run/postgresql" = "1MiB" }
+limits = { memory = "1GiB" }
 
 [services.db.volumes]
 pgdata = "/var/lib/postgresql/data"
@@ -190,6 +197,9 @@ impl Fixtures {
             restarts: RestartStats {
                 restarts,
                 crash_looping,
+                last_exit: crash_looping.then_some(ExitReason::OomKilled(MemoryLimit(Some(
+                    ByteSize::mebibytes(256),
+                )))),
             },
             health: HealthStats {
                 status: health,
@@ -632,13 +642,13 @@ impl Fixtures {
             Event {
                 stack: Some("shop".into()),
                 subject: Some("/stacks/shop".into()),
-                meta: Some("exit 137, OOM killed · restart 4".into()),
+                meta: Some("generation 7 · attempt 4".into()),
                 ..event(
                     5,
                     11 * Duration::from_secs(60),
                     EventKind::ContainerRestarted,
                     Severity::Warning,
-                    "shop: web restarted",
+                    "Restarted shop/web: OOM-killed (limit 256MiB)",
                 )
             },
             Event {

@@ -42,13 +42,14 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::event_log::{DeployEvents, ServiceEvents};
+use super::exits::{Exit, ExitReason, OomFlags};
 use super::monitor::Readiness;
 use super::{Orchestrator, Result};
 use crate::runtime::{
     ContainerInfo, ContainerRuntime, ContainerState, NetworkSpec, ObjectKind, RuntimeError,
     ServiceGeneration, label,
 };
-use crate::stack::{DEFAULT_STOP_TIMEOUT, Name, Stack};
+use crate::stack::{ByteSize, DEFAULT_STOP_TIMEOUT, Name, Stack};
 use crate::store::{Deployment, DeploymentId, DeploymentState, ServicePointer};
 
 /// How the reconciler restarts crashed containers (ADR-0028).
@@ -96,6 +97,8 @@ pub(super) struct Restarts {
     /// No restart before this.
     not_before: Option<Instant>,
     crash_looping: bool,
+    /// Why the last restart was needed, or why it failed (ADR-0059 §6), for the UI.
+    last: Option<ExitReason>,
 }
 
 impl Restarts {
@@ -107,6 +110,7 @@ impl Restarts {
             backoff: policy.initial_backoff,
             not_before: None,
             crash_looping: false,
+            last: None,
         }
     }
 
@@ -130,10 +134,11 @@ impl Restarts {
         self.not_before.filter(|&at| at > now)
     }
 
-    /// Records a restart (attempt) at `now`. Returns whether the service just started crash
-    /// looping.
-    pub(super) fn record(&mut self, now: Instant) -> bool {
+    /// Records a restart (attempt) at `now`, needed or failed for `reason`. Returns whether the
+    /// service just started crash looping.
+    pub(super) fn record(&mut self, now: Instant, reason: ExitReason) -> bool {
         self.prune(now);
+        self.last = Some(reason);
         self.recent.push_back(now);
         self.total += 1;
         let was = self.crash_looping;
@@ -160,8 +165,10 @@ impl Restarts {
         let was_crash_looping = self.crash_looping;
         let policy = self.policy;
         let total = self.total;
+        let last = self.last.take();
         *self = Self::new(policy);
         self.total = total;
+        self.last = last;
         if was_crash_looping {
             Running::LeftCrashLoop
         } else {
@@ -209,6 +216,8 @@ pub(super) struct Reconciler {
     /// The holds whose end without a pass was written to the event log, by dependent: each
     /// dependency with the end of its hold, so one hold writes one event.
     past_holds: BTreeMap<ServiceGeneration, BTreeMap<Name, Instant>>,
+    /// The `OOMKilled` flag last seen per container (ADR-0059 §6), deployments' included.
+    pub(super) oom: OomFlags,
 }
 
 impl Reconciler {
@@ -219,12 +228,15 @@ impl Reconciler {
 }
 
 /// A service's restart statistics, as [`Orchestrator::status`] reports them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestartStats {
     /// Restarts of the current generation since hoster started.
     pub restarts: u32,
     /// 5 restarts within 10 minutes (ADR-0028).
     pub crash_looping: bool,
+    /// Why the last restart was needed (an OOM kill named, ADR-0059 §6), or the start error
+    /// of a restart that failed.
+    pub last_exit: Option<ExitReason>,
 }
 
 /// What the gate says about starting a stopped container (ADR-0056 Decision 3).
@@ -368,6 +380,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .map(|(_, r)| RestartStats {
                 restarts: r.total,
                 crash_looping: r.is_crash_looping(),
+                last_exit: r.last.clone(),
             })
             .unwrap_or_default()
     }
@@ -450,6 +463,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     ) -> Result<()> {
         // Find the stacks, and the objects that are not hoster's. What to do with each stack's
         // objects is decided from a fresh listing once its slot is held.
+        let listed_at = Instant::now();
         let mut containers = self.runtime.list_managed().await?;
         containers.sort_by(|a, b| a.name.cmp(&b.name));
         let networks = self.runtime.list_managed_networks().await?;
@@ -468,6 +482,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 Err(reason) => self.foreign("container", &container.name, &reason, report),
             }
         }
+        let present: BTreeSet<ServiceGeneration> = containers
+            .iter()
+            .filter_map(|c| ServiceGeneration::try_from(c).ok())
+            .collect();
         let mut stack_networks = BTreeMap::new();
         for network in networks {
             match network_stack(&network) {
@@ -510,6 +528,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         reconciler.hold_ends.retain(|key, _| keep(key));
         reconciler.deferred.retain(|key| keep(key));
         reconciler.past_holds.retain(|key, _| keep(key));
+        reconciler.oom.retain(&present, listed_at);
         Ok(())
     }
 
@@ -571,7 +590,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     now,
                 )
             };
-            self.keep_running(pass, now, generation, container, gate, report)
+            let limit = definition
+                .as_deref()
+                .and_then(|stack| stack.services.get(&generation.service))
+                .and_then(|service| service.limits.memory);
+            self.keep_running(pass, now, generation, container, gate, limit, report)
                 .await;
         }
         self.warn_missing(stack, &pointers, &containers);
@@ -657,7 +680,11 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 
     /// Keeps a current-generation container running: adopts it, or (re)starts it once `gate`
-    /// lets it.
+    /// lets it. `limit` is its memory limit in the committed revision, for the exit reason.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one pass's context for one container"
+    )]
     async fn keep_running(
         &self,
         pass: Pass,
@@ -665,6 +692,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         generation: &ServiceGeneration,
         container: &ContainerInfo,
         gate: Gate,
+        limit: Option<ByteSize>,
         report: &mut ReconcileReport,
     ) {
         let (stack, service, gen_no) = fields(generation);
@@ -675,6 +703,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 reconciler.hold_ends.remove(generation);
                 reconciler.deferred.remove(generation);
             }
+            self.seen_running(generation, &container.id).await;
             let running = self
                 .reconciler()
                 .restarts
@@ -741,6 +770,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 stack, service, generation = gen_no, container = %container.name,
                 state = %container.state, "starting stopped container of the current generation"
             );
+            self.before_start(&container.id).await;
             match self.runtime.start(&container.id).await {
                 Ok(()) => {
                     report.started.push(container.name.clone());
@@ -775,20 +805,20 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             report.backing_off.push(container.name.clone());
             return;
         }
-        // How it ended, for the event: inspect reports the exit code and whether the OOM
-        // killer ended it, which the listing does not.
-        let inspected = self.runtime.inspect(&container.id).await;
-        let exited: &ContainerInfo = match &inspected {
-            Ok(inspected) if !inspected.state.is_running() => inspected,
-            Ok(_) => container,
+        // How it ended: inspect reports the exit code and whether the OOM killer ended it, which
+        // the listing does not. The flag it reports is the one this start goes from.
+        let exit = match self.runtime.inspect(&container.id).await {
+            Ok(inspected) if !inspected.state.is_running() => Some(Exit::from(&inspected)),
+            Ok(_) => None,
             Err(err) => {
                 tracing::debug!(
                     stack, service, generation = gen_no, container = %container.name, %err,
                     "cannot inspect exited container; reporting its listed state"
                 );
-                container
+                None
             }
         };
+        let reason = self.exit_reason(generation, exit, container.state, limit);
         let started = self.runtime.start(&container.id).await;
         let (looping, total, backoff) = {
             let mut reconciler = self.reconciler();
@@ -797,20 +827,24 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .restarts
                 .entry(generation.clone())
                 .or_insert_with(|| Restarts::new(policy));
-            let looping = restarts.record(now);
+            let recorded = match &started {
+                Ok(()) => reason.clone(),
+                Err(err) => ExitReason::StartFailed(err.to_string()),
+            };
+            let looping = restarts.record(now, recorded);
             (looping, restarts.total, restarts.backoff())
         };
         match started {
             Ok(()) => {
                 tracing::warn!(
                     stack, service, generation = gen_no, container = %container.name,
-                    state = %exited.state, oom_killed = exited.oom_killed, restarts = total,
-                    next_backoff = ?backoff, "restarted exited container"
+                    exit = %reason, restarts = total, next_backoff = ?backoff,
+                    "restarted exited container"
                 );
                 report.started.push(container.name.clone());
                 self.restarted(generation, now);
                 self.events
-                    .record(ServiceEvents::from(generation).restarted(exited, total))
+                    .record(ServiceEvents::from(generation).restarted(&reason, total))
                     .await;
                 if !past.is_empty() {
                     self.record_past_hold(generation, &past).await;
@@ -1022,6 +1056,10 @@ mod tests {
         RestartPolicy::default()
     }
 
+    fn exit() -> ExitReason {
+        ExitReason::Exit(ContainerState::Exited(Some(1)))
+    }
+
     #[tokio::test(start_paused = true)]
     async fn backoff_doubles_from_one_second_to_five_minutes() {
         let mut restarts = Restarts::new(RestartPolicy {
@@ -1033,7 +1071,7 @@ mod tests {
         for _ in 0..12 {
             let now = Instant::now();
             assert!(restarts.is_due(now));
-            restarts.record(now);
+            restarts.record(now, exit());
             let next = restarts.due_after(now).expect("a wait after a restart");
             waits.push((next - now).as_secs());
             // Just before the wait is over the restart is not due yet.
@@ -1050,7 +1088,7 @@ mod tests {
         let mut became = Vec::new();
         for _ in 0..5 {
             let now = Instant::now();
-            became.push(restarts.record(now));
+            became.push(restarts.record(now, exit()));
             tokio::time::advance(restarts.due_after(now).unwrap() - now).await;
         }
         assert_eq!(became, [false, false, false, false, true]);
@@ -1061,7 +1099,7 @@ mod tests {
             None,
             "the crash-loop wait is over"
         );
-        restarts.record(now);
+        restarts.record(now, exit());
         assert_eq!(
             restarts.due_after(now).map(|at| at - now),
             Some(Duration::from_secs(300))
@@ -1069,7 +1107,7 @@ mod tests {
         // Still crashing every five minutes: it stays crash looping.
         for _ in 0..4 {
             tokio::time::advance(Duration::from_secs(300)).await;
-            assert!(!restarts.record(Instant::now()));
+            assert!(!restarts.record(Instant::now(), exit()));
             assert!(restarts.is_crash_looping());
         }
         // Up for a whole window without a restart: the history resets.
@@ -1083,7 +1121,7 @@ mod tests {
         assert_eq!(restarts.running(Instant::now()), Running::LeftCrashLoop);
         assert!(!restarts.is_crash_looping());
         let now = Instant::now();
-        restarts.record(now);
+        restarts.record(now, exit());
         assert_eq!(
             restarts.due_after(now).map(|at| at - now),
             Some(Duration::from_secs(1))
@@ -1095,7 +1133,7 @@ mod tests {
     async fn restarts_spread_beyond_the_window_never_crash_loop() {
         let mut restarts = Restarts::new(policy());
         for _ in 0..10 {
-            restarts.record(Instant::now());
+            restarts.record(Instant::now(), exit());
             tokio::time::advance(Duration::from_secs(3 * 60)).await;
         }
         assert!(!restarts.is_crash_looping());

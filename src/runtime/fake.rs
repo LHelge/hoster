@@ -98,7 +98,8 @@ struct FakeContainer {
     state: ContainerState,
     /// When it last started running.
     started_at: Option<SystemTime>,
-    /// Whether the OOM killer ended its last run; cleared when it starts again.
+    /// Whether the OOM killer hit its cgroup: sticky for the container's lifetime, as podman's
+    /// `State.OOMKilled` (architecture §1.8).
     oom_killed: bool,
     logs: Vec<LogLine>,
     /// The streams following the log; each gets every line pushed from now on. They end when
@@ -111,7 +112,6 @@ impl FakeContainer {
     fn set_state(&mut self, state: ContainerState) {
         if state.is_running() && !self.state.is_running() {
             self.started_at = Some(SystemTime::now());
-            self.oom_killed = false;
         }
         self.state = state;
         if !state.is_running() {
@@ -306,10 +306,19 @@ impl FakeRuntime {
     }
 
     /// Simulates the kernel's OOM killer ending a container: it exits with 137 and inspect
-    /// reports `OOMKilled` until it starts again.
+    /// reports `OOMKilled` from now on, also after it starts again (as podman's, it is sticky).
     pub fn oom_kill(&self, id: &ContainerId) {
         if let Some(container) = self.lock().containers.get_mut(id) {
             container.set_state(ContainerState::Exited(Some(137)));
+            container.oom_killed = true;
+        }
+    }
+
+    /// Simulates the OOM killer ending a child of a running container: it keeps running, and
+    /// inspect reports `OOMKilled` from now on. (Podman reports it only once the container
+    /// exits; hoster reads it only then, too.)
+    pub fn oom_kill_child(&self, id: &ContainerId) {
+        if let Some(container) = self.lock().containers.get_mut(id) {
             container.oom_killed = true;
         }
     }

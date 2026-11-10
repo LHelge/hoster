@@ -54,6 +54,7 @@
 mod certs;
 mod engine;
 mod event_log;
+mod exits;
 mod gc;
 pub mod machine;
 mod monitor;
@@ -99,6 +100,14 @@ use event_log::OperatorEvents;
 pub use event_log::{
     EventLog, EventTopic, HosterEvents, NotificationEvents, Operator, RegistryEvents,
 };
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "the UI only displays it; its tests build one"
+    )
+)]
+pub use exits::{ExitReason, MemoryLimit};
 pub use gc::GcSettings;
 use machine::Event;
 pub use notes::NoteKind;

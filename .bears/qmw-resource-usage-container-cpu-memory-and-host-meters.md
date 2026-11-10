@@ -5,7 +5,7 @@ type: epic
 status: open
 priority: P3
 created: "2026-11-08T18:22:30.005241476Z"
-updated: "2026-11-08T18:22:30.005241476Z"
+updated: "2026-11-10T21:57:32.224171376Z"
 tags:
   - design-followup
   - observability
@@ -31,4 +31,8 @@ Medium. A background sampler that caches the latest values (the sidebar renders 
 
 The sampling interval and cost on a small VPS; whether to keep a short history (that would tie into the traffic-history epic).
 
-References: ADR-0002, ADR-0038, ADR-0045, `src/runtime/`, `src/web/pages.rs`.
+## Note from r3r (epic 9q5, ADR-0059)
+
+Limits have arrived: `Service.limits` (`memory: Option<ByteSize>`, `pids`, `cpus`) is in every revision, and the stack overview's services card already shows them per service from the committed revision (`ServiceRow.limits` in `src/web/stacks/overview/services.rs`). The memory meter should show usage against `limits.memory` where set (and the CPU column against `limits.cpus`), and stay limit-free where unset. OOM kills are already named in restart events, crash-loop details and deploy aborts (`ExitReason` in `src/orchestrator/exits.rs`); a meter could link to that rather than duplicate it.
+
+References: ADR-0002, ADR-0038, ADR-0045, ADR-0059, `src/runtime/`, `src/web/pages.rs`.

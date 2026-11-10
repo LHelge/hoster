@@ -1259,3 +1259,90 @@ async fn a_held_back_service_waits_for_its_restarted_unchanged_dependency() {
     assert!(restarted < passed && passed < web, "{notes:#?}");
     h.assert_one_generation_each(&h.routes).await;
 }
+
+/// The message of deployment `id`'s `failed` event (ADR-0055).
+async fn failed_event(h: &Harness, id: DeploymentId) -> String {
+    let subject = format!("/stacks/notes/deployments/{id}");
+    h.store
+        .event_page(&crate::store::EventQuery {
+            kinds: [crate::store::EventKind::DeployFailed].into(),
+            limit: crate::store::EventQuery::MAX,
+            ..crate::store::EventQuery::default()
+        })
+        .await
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|e| e.subject.as_deref() == Some(subject.as_str()))
+        .expect("a failed event")
+        .message
+}
+
+/// ADR-0059 §6 (amends ADR-0038): a new container OOM-killed while `HealthChecking` probes it
+/// aborts the deployment with the target's limit named, in its error and its `failed` event.
+#[tokio::test]
+async fn an_oom_kill_while_health_checking_names_it_in_the_abort() {
+    let h = harness().await;
+    h.bootstrap().await;
+    h.delegate("cpu memory pids\n");
+    h.prober.hold(8080);
+    let limited = NOTES.replace(
+        "[services.web]",
+        "[services.api.limits]\nmemory = \"64MiB\"\n\n[services.web]",
+    );
+    let applied = h.apply(&limited).await;
+    assert_eq!(applied.changed, ["api"]);
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::HealthChecking).await;
+    h.prober.probed(8080).await;
+    h.runtime.oom_kill(&h.container("hoster-notes-api-g3").id);
+    h.prober.release(8080);
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    let reason = "api exited: OOM-killed (limit 64MiB)";
+    assert_eq!(failed.error.as_deref(), Some(reason));
+    assert!(failed_event(&h, id).await.contains(reason));
+}
+
+/// The same while `Replacing` probes a stop-first replacement; the old container is started
+/// again, and an exit without the flag reads as before.
+#[tokio::test]
+async fn an_oom_kill_while_replacing_names_it_in_the_abort() {
+    let h = harness().await;
+    h.bootstrap().await;
+    h.delegate("cpu memory pids\n");
+    h.prober.hold(9000);
+    let limited = NOTES.replace(
+        "[[services.storage.routes]]",
+        "[services.storage.limits]\nmemory = \"128MiB\"\n\n[[services.storage.routes]]",
+    );
+    let applied = h.apply(&limited).await;
+    assert_eq!(applied.changed, ["storage"]);
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(9000).await;
+    h.runtime
+        .oom_kill(&h.container("hoster-notes-storage-g3").id);
+    h.prober.release(9000);
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Failed, "{failed:?}");
+    let reason = "storage exited: OOM-killed (limit 128MiB)";
+    assert_eq!(failed.error.as_deref(), Some(reason));
+    assert!(failed_event(&h, id).await.contains(reason));
+    assert!(h.container("hoster-notes-storage-g1").state.is_running());
+
+    // A plain exit keeps today's words.
+    h.prober.hold(9000);
+    let applied = h.apply(&limited.replace("128MiB", "256MiB")).await;
+    let id = applied.deployment.as_ref().unwrap().deployment;
+    h.reaches(id, S::Replacing).await;
+    h.prober.probed(9000).await;
+    let g4 = h.container("hoster-notes-storage-g4").id;
+    h.runtime.set_state(&g4, ContainerState::Exited(Some(1)));
+    h.prober.release(9000);
+    let failed = h.finish(applied.deployment.as_ref().unwrap()).await;
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("storage: container hoster-notes-storage-g4 exited (1) before it became healthy")
+    );
+}

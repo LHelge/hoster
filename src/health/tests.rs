@@ -671,6 +671,7 @@ fn probe_events_are_told_apart() {
         HealthError::Exited {
             name: "hoster-demo-app-g1".into(),
             state: ContainerState::Exited(Some(1)),
+            oom_killed: false,
         }
         .to_string(),
         HealthError::Inspect {

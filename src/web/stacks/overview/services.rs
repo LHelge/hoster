@@ -8,11 +8,13 @@
 //! loopback port of a routed service (ADR-0026; `internal` for one that is not routed), its
 //! generation, how long its container has been up (from `State.StartedAt`, which
 //! only inspect reports) and a link to its log. Under the name come the services it names in
-//! `depends_on`, and under the pill the health check in effect (ADR-0056): the declared `exec`,
-//! `http` or `tcp` probe with its command, path or port, or the default, both from the
-//! revision the reconciler and the monitor use (the last committed deployment's, ADR-0056
-//! Decision 3). A stopped service the reconciler holds back for its dependencies is "waiting
-//! for db".
+//! `depends_on` and its resource limits and runtime options (ADR-0059: `memory 512MiB · pids
+//! 512 · cpus 1.5`, `shm_size 256MiB · tmpfs /tmp 64MiB · init`), and under the pill the health
+//! check in effect (ADR-0056): the declared `exec`, `http` or `tcp` probe with its command,
+//! path or port, or the default, all from the revision the reconciler and the monitor use (the
+//! last committed deployment's, ADR-0056 Decision 3). A stopped service the reconciler holds
+//! back for its dependencies is "waiting for db"; a crash-looping one names its last exit,
+//! OOM kills included (ADR-0059 §6).
 //!
 //! The port is the one the running container publishes, as podman reports it: the allocation
 //! itself (the port reservations in the store) is not part of [`StackStatus`], so a routed
@@ -36,7 +38,7 @@ use super::super::list::{ServiceChip, StackCard};
 use crate::health::{CheckSpec, HealthStatus};
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::runtime::{ContainerInfo, PublishedPort, label};
-use crate::stack::{Service, Stack};
+use crate::stack::{Limits, Service, Stack};
 use crate::web::ui::Uptime;
 use crate::web::ui::{Pill, Tone};
 
@@ -285,6 +287,12 @@ pub struct ServiceRow {
     /// The health check in effect; `None` when no revision declares the service (it does not
     /// parse).
     pub check: Option<CheckView>,
+    /// The resource limits in effect (ADR-0059 §2), `memory 512MiB · cpus 1.5`; `None` for
+    /// none.
+    pub limits: Option<String>,
+    /// The runtime options in effect (ADR-0059 §1), `shm_size 256MiB · tmpfs /tmp 64MiB ·
+    /// init`; `None` for none.
+    pub options: Option<String>,
     pub restarts: u32,
     pub port: String,
     pub generation: Option<u32>,
@@ -348,6 +356,14 @@ impl ServiceRow {
                 .collect(),
             files: declared.active.map_or(0, |s| s.files.len()),
             check: declared.in_effect.map(CheckView::from),
+            limits: declared
+                .in_effect
+                .filter(|s| !s.limits.is_empty())
+                .map(|s| LimitsView(&s.limits).to_string()),
+            options: declared
+                .in_effect
+                .map(|s| OptionsView(s).to_string())
+                .filter(|options| !options.is_empty()),
             restarts: service.restarts.restarts,
             port,
             generation,
@@ -382,14 +398,20 @@ impl ServiceRow {
     ) -> (Pill, String) {
         let health = service.health.detail();
         match &service.state {
-            _ if service.is_crash_looping() => (
-                Tone::Fail.pill("crash looping"),
-                format!(
-                    "restarted {} times; {}",
-                    service.restarts.restarts,
-                    health.unwrap_or_else(|| "keeps exiting".to_owned())
-                ),
-            ),
+            _ if service.is_crash_looping() => {
+                let mut detail = format!("restarted {} times", service.restarts.restarts);
+                if let Some(last) = &service.restarts.last_exit {
+                    detail.push_str(&format!("; last: {last}"));
+                }
+                match health {
+                    Some(health) => detail.push_str(&format!("; {health}")),
+                    None if service.restarts.last_exit.is_none() => {
+                        detail.push_str("; keeps exiting");
+                    }
+                    None => {}
+                }
+                (Tone::Fail.pill("crash looping"), detail)
+            }
             // Held back by the reconciler until its dependencies run and pass (ADR-0056), as
             // long as its container is known not to run.
             ServiceState::Running { .. }
@@ -483,6 +505,46 @@ impl From<&Service> for CheckView {
             },
             why: spec.why(),
         }
+    }
+}
+
+/// A service's resource limits, in the order the table documents them: `memory 512MiB · pids
+/// 512 · cpus 1.5`.
+struct LimitsView<'a>(&'a Limits);
+
+impl fmt::Display for LimitsView<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Limits { memory, pids, cpus } = self.0;
+        let parts = [
+            memory.map(|m| format!("memory {m}")),
+            pids.map(|p| format!("pids {p}")),
+            cpus.map(|c| format!("cpus {c}")),
+        ];
+        f.write_str(&parts.into_iter().flatten().collect::<Vec<_>>().join(" · "))
+    }
+}
+
+/// A service's runtime options: `shm_size 256MiB · tmpfs /tmp 64MiB, /run 16MiB · init`, empty
+/// when it sets none.
+struct OptionsView<'a>(&'a Service);
+
+impl fmt::Display for OptionsView<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let service = self.0;
+        let tmpfs = (!service.tmpfs.is_empty()).then(|| {
+            let mounts: Vec<String> = service
+                .tmpfs
+                .iter()
+                .map(|(path, size)| format!("{path} {size}"))
+                .collect();
+            format!("tmpfs {}", mounts.join(", "))
+        });
+        let parts = [
+            service.shm_size.map(|size| format!("shm_size {size}")),
+            tmpfs,
+            service.init.then(|| "init".to_owned()),
+        ];
+        f.write_str(&parts.into_iter().flatten().collect::<Vec<_>>().join(" · "))
     }
 }
 
@@ -881,6 +943,16 @@ mod tests {
         let (html, detail) = pill(api, false, None);
         assert!(html.contains(">crash looping</span>"), "{html}");
         assert_eq!(detail, "restarted 6 times; GET /healthz: <503>");
+        // The last exit comes first, an OOM kill or a failed start named (ADR-0059 §6).
+        api.restarts.last_exit = Some(crate::orchestrator::ExitReason::StartFailed(
+            "podman failed to start container: boom".into(),
+        ));
+        let (_, detail) = pill(api, false, None);
+        assert_eq!(
+            detail,
+            "restarted 6 times; last: cannot start: podman failed to start container: boom; \
+             GET /healthz: <503>"
+        );
 
         status.services[1].state = ServiceState::AwaitingFirstDigest;
         let (html, detail) = pill(&status.services[1], false, None);

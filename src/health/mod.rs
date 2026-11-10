@@ -183,7 +183,12 @@ pub enum HealthError {
         source: RuntimeError,
     },
     #[error("container {name} {state}{}", HealthError::BEFORE_HEALTHY)]
-    Exited { name: String, state: ContainerState },
+    Exited {
+        name: String,
+        state: ContainerState,
+        /// `State.OOMKilled` as inspect reported it, for the exit reason (ADR-0059 §6).
+        oom_killed: bool,
+    },
     #[error(
         "{}{check} did not pass within {}: last result: {last}{}",
         Check::VERDICT,
@@ -496,6 +501,7 @@ impl Check {
             Err(HealthError::Exited {
                 name: info.name,
                 state: info.state,
+                oom_killed: info.oom_killed,
             })
         }
     }

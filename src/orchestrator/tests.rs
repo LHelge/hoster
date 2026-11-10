@@ -2897,7 +2897,7 @@ impl Harness {
     }
 
     /// The controllers the fixture host's user manager (uid 1000) delegates.
-    fn delegate(&self, controllers: &str) {
+    pub(super) fn delegate(&self, controllers: &str) {
         self.host_file(
             "sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cgroup.controllers",
             controllers,
