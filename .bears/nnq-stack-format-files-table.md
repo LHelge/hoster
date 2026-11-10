@@ -4,7 +4,7 @@ title: "Stack format: `files` table"
 status: open
 priority: P2
 created: "2026-11-09T17:22:16.205452185Z"
-updated: "2026-11-09T17:22:16.205452185Z"
+updated: "2026-11-09T23:58:38.823017608Z"
 tags:
   - stack
 depends_on:
@@ -13,20 +13,27 @@ parent: xgf
 ---
 
 ## Summary
-Parse and validate `[services.<svc>.files]` exactly as the M12 ADR specifies, carry it in the model, and include it in the config hash.
+Parse and validate `[services.<svc>.files]` exactly as ADR-0057 §1 and §2 specify, carry it in the model, include it in the config hash (§7) and the stack JSON Schema. The upload, secret wiring and podman version check are rp5's.
 
 ## Acceptance Criteria
-- [ ] `Service.files: BTreeMap<ContainerPath, ConfigFile>`, where `ConfigFile` holds the source (`Inline(String)` or `Secret(name)`), `mode` and `owner` per the ADR. `ContainerPath` is a validated absolute path type (`FromStr` / `Display` / `AsRef<str>`) that is reusable by `tmpfs` (M13).
-- [ ] Errors, all collected with spans: relative or unnormalized path, `/`, a duplicate, a path equal to or inside a volume mount path, an inline file over the size cap, a stack total over the cap, a bad secret name format, an invalid mode.
-- [ ] `ConfigHash::new` includes inline content (or its hash) and secret refs with versions. A secret-backed file's version comes from the same `SecretVersions` the env secrets use.
-- [ ] Engine pre-flight (`check_secrets` in `src/orchestrator/engine.rs`) also rejects missing file secrets by name.
-- [ ] stack-format.md §2.2 documents `files` with an example and the UID / `mode` note. The schema is regenerated if zcu has landed.
+- [ ] `Service.files: BTreeMap<ContainerPath, ConfigFile>`. `ConfigFile` holds the source (`Inline(String)` or `Secret(SecretRef)` of the same stack), an optional `FileMode` and an optional `FileOwner`, each with `FromStr` / `Display`. `ContainerPath` is a validated absolute path type (`FromStr` / `Display` / `AsRef<str>`), reusable by `tmpfs` (M13).
+- [ ] Format (§1): an inline table with exactly one of `content` (a TOML string) or `secret = "<stack>/<name>"`. `mode` is an octal string `"0000"`–`"0777"` (setuid, setgid and sticky rejected); `owner` is a numeric `"uid:gid"`, both required, each at most 65535. Owner names, unknown keys, a malformed secret name and a secret of another stack are errors.
+- [ ] Path rules (§2), all collected with spans: absolute and normalized (no empty, `.` or `..` component, no trailing `/`, not `/`, no NUL); unique per service; not an ancestor of another of its files; not under `/proc`, `/sys` or `/dev`; not `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/run/.containerenv`, `/etc/passwd` or `/etc/group`; neither equal to, under nor an ancestor of a service `volumes` path. The reserved-path and volume checks are a method rp5 can re-run on a resolved path.
+- [ ] Caps: inline content 256 KiB per file and 1 MiB per stack (secret files don't count). The apply routes set `DefaultBodyLimit` to 8 MiB (axum's default is 2 MB); a larger body gets axum's 413.
+- [ ] `ConfigHash::new` adds a `files` key only when the service has files, so no existing hash changes. Per file: `{path, mode, owner, sha256(content)}` or `{path, mode, owner, secret, version}`, with defaults resolved (`"user"` for the container-user owner of secret files). Secret entries take their version from `SecretVersions`; making the collection include file-only secrets is rp5's.
+- [ ] JSON Schema: the stack JSON Schema (`src/stack/schema.rs`, `site/static/stack.schema.json`, drift test; task zcu) lands on `epic/emu-stack-authoring` first. Once this branch is rebased onto it, extend the schema with `files` (path keys, `content` / `secret` one-of, `mode` / `owner` patterns, `additionalProperties: false`) and regenerate the committed file.
+
+## Edge Cases
+- `content = ""` is a valid empty file. `mode = "644"` is rejected (the ADR's range is four-digit strings) and so is `"1755"`. `owner = "1000"` without a gid is an error, as is `owner = "65536:0"`. A path differing only by a trailing `/` is rejected, not normalized.
 
 ## Testing
-- `src/stack/tests.rs` snapshots for every rule; config-hash tests in `src/orchestrator/plan.rs` (content change → new hash, secret version change → new hash, unrelated service unchanged).
+- `src/stack/tests.rs` snapshots for every format and path rule and both caps.
+- Config-hash tests in `src/orchestrator/plan.rs`: a stack without `files` keeps its hash; content, mode or owner change → new hash; secret version change → new hash; an unrelated service unchanged.
+- A web test that an apply body over 2 MB but under 8 MiB is accepted.
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## References
-- The M12 ADR (task 5jg); ADR-0029
-- `site/content/wiki/stack-format.md` §2.2
-- `src/stack/raw.rs`, `src/stack/mod.rs`, `src/orchestrator/plan.rs`, `src/orchestrator/engine.rs`
+- ADR-0057 (§1, §2, §7); ADR-0029
+- `docs/architecture.md` §8 (Config files bullet)
+- `site/content/wiki/stack-format.md` §2.2 (the reference text itself is nhn's)
+- `src/stack/raw.rs`, `src/stack/mod.rs`, `src/stack/schema.rs` (after rebase), `src/orchestrator/plan.rs`, `src/web/stacks/apply.rs`
