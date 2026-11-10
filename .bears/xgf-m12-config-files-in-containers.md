@@ -2,10 +2,10 @@
 id: xgf
 title: "M12: Config files in containers"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:20:07.807354984Z"
-updated: "2026-11-09T23:58:38.823017608Z"
+updated: "2026-11-10T16:42:06.971058684Z"
 tags:
   - stack
   - runtime
@@ -29,13 +29,13 @@ Tasks: nnq (format and validation), then m9b (secret references of env and files
 ## Acceptance Criteria
 
 - [x] An ADR records the format, the size caps, the mechanism and how it relates to ADR-0019 (ADR-0057, task 5jg).
-- [ ] Inline and secret-backed files reach the container at the declared path with the documented owner and mode (`content`: `0:0 0444`; `secret`: the container's user, `0400`), readable by the container's user and not writable by a non-root container user (read-only with `read_only = true`).
-- [ ] Changing a file's content or its secret redeploys only that service, and stacks without `files` keep their config hash. A rollback restores the old inline content; secret files get the current value (ADR-0041 Correction).
-- [ ] Missing secrets reject the deployment by name and path, never showing a value. Secret file content is redacted from exec output, each line too.
-- [ ] File material goes away with its container: container removal is the GC, and nothing else needs cleaning up.
-- [ ] A stack with `files` is rejected on podman older than 5.4, naming both versions. Other stacks are unaffected, and `hoster doctor` reports the podman version.
-- [ ] CI runs the live config-files test on podman 5.4 or later on every PR (dgq).
-- [ ] The stack overview lists files (path, mode, owner, size or secret name) without ever showing secret content. The stack-format reference documents `files`.
+- [x] Inline and secret-backed files reach the container at the declared path with the documented owner and mode (`content`: `0:0 0444`; `secret`: the container's user, `0400`), readable by the container's user and not writable by a non-root container user (read-only with `read_only = true`).
+- [x] Changing a file's content or its secret redeploys only that service, and stacks without `files` keep their config hash. A rollback restores the old inline content; secret files get the current value (ADR-0041 Correction).
+- [x] Missing secrets reject the deployment by name and path, never showing a value. Secret file content is redacted from exec output, each line too.
+- [x] File material goes away with its container: container removal is the GC, and nothing else needs cleaning up.
+- [x] A stack with `files` is rejected on podman older than 5.4, naming both versions. Other stacks are unaffected, and `hoster doctor` reports the podman version.
+- [x] CI runs the live config-files test on podman 5.4 or later on every PR (dgq).
+- [x] The stack overview lists files (path, mode, owner, size or secret name) without ever showing secret content. The stack-format reference documents `files`.
 
 ## References
 
