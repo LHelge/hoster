@@ -667,6 +667,11 @@ impl Outcome {
         }
     }
 
+    /// The status the outcome is answered with.
+    pub(super) fn status(&self) -> StatusCode {
+        self.status
+    }
+
     pub(super) fn with_link(mut self, href: String, label: impl Into<String>) -> Self {
         self.link = Some(Link {
             href,

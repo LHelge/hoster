@@ -483,7 +483,7 @@ button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* ---- Forms ---------------------------------------------------------------------------------- */
 
-input, textarea {
+input, textarea, select {
   min-height: 36px;
   padding: 7px 10px;
   border: 1px solid var(--input-border);
@@ -505,8 +505,8 @@ input[type="file"]::file-selector-button {
   font: inherit;
   cursor: pointer;
 }
-input:focus, textarea:focus { border-color: var(--accent); outline: 2px solid var(--accent-tint); outline-offset: 0; }
-input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input:focus, textarea:focus, select:focus { border-color: var(--accent); outline: 2px solid var(--accent-tint); outline-offset: 0; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 label { color: var(--text-2); }
 
 .inline-form { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0 0.25rem 0.25rem 0; }
@@ -1461,6 +1461,13 @@ code.field-name { font-size: 13px; overflow-wrap: anywhere; }
 .field-control > .card-result > .flash { margin: 0; }
 .field-inline input { flex: 1 1 220px; }
 .field-empty { margin: 0; padding: 18px 20px; color: var(--muted); }
+.field-control select { min-width: 12rem; font: 13px/1.4 var(--mono); }
+.field-control .switch input { width: 1px; }
+.field-control [aria-invalid="true"] { border-color: var(--fail); }
+.field-error { margin: 0; color: var(--fail); font-size: 12px; line-height: 1.5; }
+/* Settings → Notifications: the status pill with its time, the last delivery's error. */
+.notify-state { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.notify-detail { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 .registry-rows { margin: 0; padding: 0; list-style: none; }
 .registry-user { color: var(--text-2); font-family: var(--mono); }
 .settings-submit { display: flex; justify-content: flex-end; padding: 14px 20px; border-top: 1px solid var(--divider); }

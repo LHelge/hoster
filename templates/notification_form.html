@@ -1,0 +1,59 @@
+<section id="notify-form" class="card settings-card" aria-labelledby="notify-config"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <div class="settings-head">
+    <h2 id="notify-config">Configuration</h2>
+    <p class="field-help">One recipient. The API key is encrypted at rest and write-only.</p>
+  </div>
+  <form hx-post="/settings/notifications" hx-target="#notify-form" hx-swap="outerHTML">
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="notify-provider">Provider</label><span class="field-help">The mail API that delivers the notifications.</span></div>
+      <div class="field-control">
+        <select id="notify-provider" name="provider"{% if errors.provider.is_some() %} aria-invalid="true" aria-describedby="notify-provider-error"{% endif %}>
+          {%- for option in providers() %}
+          <option value="{{ option.name }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+          {%- endfor %}
+        </select>
+        {%- if let Some(error) = errors.provider %}
+        <p id="notify-provider-error" class="field-error">{{ error }}</p>
+        {%- endif %}
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="notify-key">API key</label><span class="field-help">{% if let Some(changed) = key_changed %}A key is stored, last changed {{ changed }}. Leave empty to keep it.{% else %}No key is stored.{% endif %} Write-only: it is never shown again.</span></div>
+      <div class="field-control">
+        <input id="notify-key" type="password" name="api_key" autocomplete="new-password" spellcheck="false"{% if key_changed.is_some() %} placeholder="stored · leave empty to keep"{% endif %}{% if errors.api_key.is_some() %} aria-invalid="true" aria-describedby="notify-key-error"{% endif %}>
+        {%- if let Some(error) = errors.api_key %}
+        <p id="notify-key-error" class="field-error">{{ error }}</p>
+        {%- endif %}
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="notify-from">From address</label><span class="field-help">The sender of the notifications.</span></div>
+      <div class="field-control">
+        <input id="notify-from" type="email" name="from" value="{{ from }}" autocomplete="off" spellcheck="false" placeholder="hoster@example.com"{% if errors.from.is_some() %} aria-invalid="true" aria-describedby="notify-from-error"{% endif %}>
+        {%- if let Some(error) = errors.from %}
+        <p id="notify-from-error" class="field-error">{{ error }}</p>
+        {%- endif %}
+        <span class="field-note">Must be on a domain verified at {{ provider.label() }}. Until one is, only its test sender works, and only to the account's own address.</span>
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="notify-recipient">Recipient</label><span class="field-help">Where the notifications go.</span></div>
+      <div class="field-control">
+        <input id="notify-recipient" type="email" name="recipient" value="{{ recipient }}" autocomplete="off" spellcheck="false" placeholder="you@example.com"{% if errors.recipient.is_some() %} aria-invalid="true" aria-describedby="notify-recipient-error"{% endif %}>
+        {%- if let Some(error) = errors.recipient %}
+        <p id="notify-recipient-error" class="field-error">{{ error }}</p>
+        {%- endif %}
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-label"><span class="field-name" id="notify-enabled-label">Enabled</span><span class="field-help">Needs the API key, the from address and the recipient.</span></div>
+      <div class="field-control"><label class="switch"><input type="checkbox" role="switch" name="enabled" aria-labelledby="notify-enabled-label"{% if enabled %} checked{% endif %}><span class="switch-track" aria-hidden="true"></span>send notifications</label></div>
+    </div>
+    <div class="field">
+      <div class="field-label"><span class="field-name" id="notify-successes-label">Also notify on successes</span><span class="field-help">Every successful deploy and certificate, not only recoveries.</span></div>
+      <div class="field-control"><label class="switch"><input type="checkbox" role="switch" name="also_successes" aria-labelledby="notify-successes-label"{% if also_successes %} checked{% endif %}><span class="switch-track" aria-hidden="true"></span>successes too</label></div>
+    </div>
+    <div class="settings-submit"><button type="submit" class="primary">Save</button></div>
+  </form>
+  <div id="notify-save-result" class="card-result" aria-live="polite">{% if let Some(result) = result %}{{ result|safe }}{% endif %}</div>
+</section>

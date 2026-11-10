@@ -3,8 +3,9 @@
 //! `dashboard.rs`), the event log's feeds and Events page (ADR-0055, see `events.rs`), container
 //! logs (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
 //! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029, ADR-0049, see
-//! `stacks.rs`), Settings: Registries (ADR-0025), the instance name (ADR-0058) and read-only
-//! views of the configuration (ADR-0024, see `settings.rs`), the deploy webhook (ADR-0042, ADR-0047, see `webhook.rs`), and
+//! `stacks.rs`), Settings: Registries (ADR-0025), the instance name and notifications (ADR-0058)
+//! and read-only views of the configuration (ADR-0024, see `settings.rs`), the deploy webhook
+//! (ADR-0042, ADR-0047, see `webhook.rs`), and
 //! the System page with self-update (ADR-0052, see `system.rs`).
 //!
 //! The public surface is [`WebApp`]: [`WebApp::router`] builds the routes, [`WebApp::start`]
@@ -54,6 +55,7 @@ use crate::installation::Installation;
 use crate::instance::Instance;
 use crate::orchestrator::Orchestrator;
 use crate::runtime::ContainerRuntime;
+use crate::secrets::SecretStore;
 use crate::stack::StackSchema;
 use crate::stats::Stats;
 use crate::store::Store;
@@ -68,7 +70,7 @@ use self::dashboard::Dashboard;
 use self::events::EventsPage;
 pub(crate) use self::icons::Icon;
 use self::pages::ShellSource;
-use self::settings::{EffectiveConfig, Registries, RegistryControl, Settings};
+use self::settings::{EffectiveConfig, Notifications, Registries, RegistryControl, Settings};
 use self::stacks::{StackControl, Stacks};
 use self::system::{LocalHost, System};
 pub(crate) use self::ui::Tone;
@@ -156,7 +158,8 @@ impl WebApp {
     /// through `orchestrator`, the served certificates in `certs` with the DNS check `dns`
     /// (shared with the ACME task), registry credentials in `registry`, the GitHub OAuth App's
     /// credentials read from their files or systemd credentials, the dashboard's `stats`, the
-    /// `instance` name (ADR-0058) and `shutdown`, which the System page requests after a self-update (ADR-0052). Fails when the
+    /// `instance` name (ADR-0058), the `secrets` the notification API key is kept in, and
+    /// `shutdown`, which the System page requests after a self-update (ADR-0052). Fails when the
     /// credentials are missing. Deploy webhook tokens are verified against GitHub's key set for
     /// the configured audience (ADR-0047).
     #[expect(
@@ -173,6 +176,7 @@ impl WebApp {
         registry: RegistryAccess,
         stats: Stats,
         instance: Instance,
+        secrets: SecretStore,
         shutdown: ShutdownRequest,
     ) -> anyhow::Result<Self> {
         let installation = Installation::from_env()
@@ -198,6 +202,17 @@ impl WebApp {
             directory: AcmeDirectory::from(config.acme.directory_url.as_str()),
         };
         let registry = registry.recorded(orchestrator.event_log());
+        let notifications = Notifications::new(
+            store.clone(),
+            secrets.clone(),
+            Arc::new(secrets),
+            orchestrator.event_log(),
+            instance.clone(),
+            config
+                .admin_origin()
+                .parse()
+                .context("the admin origin is not a URL")?,
+        );
         Ok(WebApp::new(
             auth,
             runtime,
@@ -210,6 +225,7 @@ impl WebApp {
             store,
             stats,
             instance,
+            notifications,
         ))
     }
 
@@ -229,6 +245,7 @@ impl WebApp {
         store: Store,
         stats: Stats,
         instance: Instance,
+        notifications: Notifications,
     ) -> Self {
         WebApp {
             shell: ShellSource::new(
@@ -248,6 +265,7 @@ impl WebApp {
                 Arc::clone(&certificates),
                 Arc::clone(&registries),
                 instance,
+                notifications,
             ),
             registries: Registries::from(registries),
         }
@@ -334,6 +352,15 @@ impl WebApp {
             .layer(Extension(self.registries.clone()))
             .route("/settings/general/name", post(Settings::save_name))
             .route("/settings/general/name/reset", post(Settings::reset_name))
+            .route(
+                Notifications::URL,
+                get(Settings::notifications).post(Notifications::save),
+            )
+            .route("/settings/notifications/test", post(Notifications::test))
+            .route(
+                "/settings/notifications/remove",
+                post(Notifications::remove),
+            )
             .route("/settings", get(Settings::index))
             .route("/settings/{part}", get(Settings::section))
             .layer(Extension(self.settings.clone()))

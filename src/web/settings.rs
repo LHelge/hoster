@@ -1,11 +1,16 @@
 //! Settings: a grouped sub-nav over sections that are each their own URL, `/settings/<part>`
-//! (epic 8bf). The sections show the configuration hoster runs with read-only
+//! (epic 8bf). Most sections show the configuration hoster runs with read-only
 //! ([`EffectiveConfig`], see `effective.rs`), because that is `hoster.toml` plus `HOSTER_*`
-//! (ADR-0024). What is editable are run-time settings kept in SQLite (ADR-0058 §1), which take
-//! effect without a restart, and Registries.
+//! (ADR-0024). Three are editable: Registries, and the run-time settings kept in SQLite
+//! (ADR-0058 §1), which take effect without a restart: the instance name on General and
+//! Notifications.
 //!
 //! Settings → General: the instance name (ADR-0058 §2) is editable above the read-only fields.
 //! Saving an empty name, or "Reset", returns to the default, the machine's hostname.
+//!
+//! Settings → Notifications (ADR-0058 §5, see `notifications.rs`): the mail provider, its
+//! write-only API key, the addresses and the switches, a **Send test** button and the last
+//! delivery's result.
 //!
 //! Settings → Registries (ADR-0025): one pull credential per registry host, kept in the secret
 //! store (ADR-0029). The token is write-only: the page lists hosts, usernames and when each was
@@ -14,6 +19,7 @@
 //! failure. Registry credentials are hoster's own: changing one redeploys nothing.
 
 mod effective;
+mod notifications;
 
 use std::fmt;
 use std::str::FromStr;
@@ -28,6 +34,7 @@ use serde::Deserialize;
 
 pub use self::effective::EffectiveConfig;
 use self::effective::{ConfigSection, Shown};
+pub use self::notifications::Notifications;
 use super::auth::Session;
 use super::certificates::CertificateControl;
 use super::pages::{Layout, Page, Section, Shell};
@@ -44,6 +51,7 @@ use crate::secrets::SecretValue;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPart {
     General,
+    Notifications,
     Registries,
     Webhook,
     Proxy,
@@ -53,7 +61,10 @@ pub enum SettingsPart {
 impl SettingsPart {
     /// The sub-nav's groups, in order.
     const GROUPS: [(&str, &[SettingsPart]); 3] = [
-        ("instance", &[SettingsPart::General]),
+        (
+            "instance",
+            &[SettingsPart::General, SettingsPart::Notifications],
+        ),
         ("deploy", &[SettingsPart::Registries, SettingsPart::Webhook]),
         (
             "network",
@@ -68,6 +79,7 @@ impl SettingsPart {
     pub fn slug(self) -> &'static str {
         match self {
             SettingsPart::General => "general",
+            SettingsPart::Notifications => "notifications",
             SettingsPart::Registries => "registries",
             SettingsPart::Webhook => "webhook",
             SettingsPart::Proxy => "proxy",
@@ -85,6 +97,7 @@ impl fmt::Display for SettingsPart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             SettingsPart::General => "general",
+            SettingsPart::Notifications => "notifications",
             SettingsPart::Registries => "registries",
             SettingsPart::Webhook => "deploy webhook",
             SettingsPart::Proxy => "reverse proxy",
@@ -150,14 +163,15 @@ impl SettingsNav {
 }
 
 /// The sections' handlers: the effective configuration, the certificate overview (for the
-/// public addresses the DNS check resolved), the registries (for the sub-nav's count) and the
-/// instance name, shared as a request extension.
+/// public addresses the DNS check resolved), the registries (for the sub-nav's count), the
+/// instance name and Notifications, shared as a request extension.
 #[derive(Clone)]
 pub struct Settings {
     config: Arc<EffectiveConfig>,
     certificates: Arc<dyn CertificateControl>,
     registries: Arc<dyn RegistryControl>,
     instance: Instance,
+    notifications: Notifications,
 }
 
 impl Settings {
@@ -168,12 +182,14 @@ impl Settings {
         certificates: Arc<dyn CertificateControl>,
         registries: Arc<dyn RegistryControl>,
         instance: Instance,
+        notifications: Notifications,
     ) -> Self {
         Self {
             config: Arc::new(config),
             certificates,
             registries,
             instance,
+            notifications,
         }
     }
 
@@ -198,25 +214,42 @@ impl Settings {
             SettingsPart::Proxy => config.proxy(),
             SettingsPart::Certificates => config.certificates(),
             SettingsPart::Registries => return Redirect::to(Registries::URL).into_response(),
+            SettingsPart::Notifications => {
+                return Self::notifications(Extension(settings), shell).await;
+            }
         };
-        let registries = settings
+        Page(SettingsPage {
+            layout: shell.layout(Section::Settings),
+            nav: settings.nav(current).await,
+            name: (current == SettingsPart::General).then(|| NameField::from(&settings.instance)),
+            section,
+            file: config.file(),
+        })
+        .into_response()
+    }
+
+    /// `GET /settings/notifications`.
+    pub async fn notifications(Extension(settings): Extension<Settings>, shell: Shell) -> Response {
+        let nav = settings.nav(SettingsPart::Notifications).await;
+        settings
+            .notifications
+            .page(shell.layout(Section::Settings), nav)
+            .await
+    }
+
+    /// The sub-nav with `current` marked, counting the registries.
+    async fn nav(&self, current: SettingsPart) -> SettingsNav {
+        let registries = self
             .registries
             .list()
             .await
             .inspect_err(|err| tracing::warn!(error = %err, "counting the registries failed"))
             .ok()
             .map(|entries| entries.len());
-        Page(SettingsPage {
-            layout: shell.layout(Section::Settings),
-            nav: SettingsNav {
-                current,
-                registries,
-            },
-            name: (current == SettingsPart::General).then(|| NameField::from(&settings.instance)),
-            section,
-            file: config.file(),
-        })
-        .into_response()
+        SettingsNav {
+            current,
+            registries,
+        }
     }
 
     /// `POST /settings/general/name`: stores the instance name; an empty one resets it to the

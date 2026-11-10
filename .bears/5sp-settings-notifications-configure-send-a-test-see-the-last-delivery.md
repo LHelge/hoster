@@ -1,10 +1,10 @@
 ---
 id: "5sp"
 title: "Settings → Notifications: configure, send a test, see the last delivery"
-status: open
+status: done
 priority: P3
 created: "2026-11-09T23:23:24.838900008Z"
-updated: "2026-11-09T23:29:11.834719784Z"
+updated: "2026-11-10T01:18:25.720664409Z"
 tags:
   - web
   - ui
@@ -15,6 +15,7 @@ depends_on:
   - "6qz"
   - mxq
 parent: c5s
+attempts: 1
 ---
 
 ## Summary

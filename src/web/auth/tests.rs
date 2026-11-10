@@ -12,7 +12,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 use crate::installation::Installation;
 use crate::instance::Instance;
+use crate::orchestrator::EventLog;
 use crate::runtime::FakeRuntime;
+use crate::secrets::{SecretKey, SecretStore};
 use crate::stats::tests::FakeStats;
 use crate::stats::{Stats, Traffic};
 use crate::supervisor::ShutdownRequest;
@@ -20,7 +22,8 @@ use crate::update::Updater;
 use crate::update::fake::{FakeDeployments, FakeReleases, FakeService};
 use crate::web::WebApp;
 use crate::web::certificates::tests::FakeCertificates;
-use crate::web::settings::tests::FakeRegistries;
+use crate::web::settings::Notifications;
+use crate::web::settings::tests::{FakeMailer, FakeRegistries};
 use crate::web::stacks::tests::FakeStacks;
 use crate::web::system::System;
 use crate::web::webhook::OidcVerifier;
@@ -49,6 +52,12 @@ pub struct TestApp {
     pub stats: Arc<FakeStats>,
     /// The instance name the sidebar and Settings → General show; the hostname is `srv-01`.
     pub instance: Instance,
+    /// The secret store Settings → Notifications keeps its API key in.
+    pub secrets: SecretStore,
+    /// The mail provider Settings → Notifications sends its test through.
+    pub mailer: Arc<FakeMailer>,
+    /// Settings → Notifications, for tests that rebuild [`crate::web::settings::Settings`].
+    pub notifications: Notifications,
     pub app: WebApp,
     _dir: TempDir,
 }
@@ -98,6 +107,16 @@ impl TestApp {
         let instance = Instance::with_default(store.clone(), "srv-01".parse().unwrap())
             .await
             .unwrap();
+        let secrets = SecretStore::new(store.clone(), &SecretKey::generate());
+        let mailer = Arc::new(FakeMailer::default());
+        let notifications = Notifications::new(
+            store.clone(),
+            secrets.clone(),
+            mailer.clone(),
+            EventLog::detached(store.clone(), tokio::sync::broadcast::channel(16).0),
+            instance.clone(),
+            ORIGIN.parse().unwrap(),
+        );
         let system = System::new(
             Updater::new(
                 Installation::new(dir.path().join("lib")),
@@ -121,6 +140,7 @@ impl TestApp {
             store.clone(),
             Stats::new(traffic.clone(), stats.clone()),
             instance.clone(),
+            notifications.clone(),
         );
         TestApp {
             github,
@@ -132,6 +152,9 @@ impl TestApp {
             traffic,
             stats,
             instance,
+            secrets,
+            mailer,
+            notifications,
             app,
             _dir: dir,
         }

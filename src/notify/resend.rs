@@ -175,6 +175,37 @@ impl Resend {
         })
     }
 
+    /// Resend's error answer in plain words, from its error `code` and, for a 403, its
+    /// `message`; `None` when they say nothing the status does not.
+    pub(super) fn explain(status: StatusCode, code: &str, message: &str) -> Option<String> {
+        let message = message.to_lowercase();
+        Some(match code {
+            "missing_api_key" | "invalid_api_key" | "restricted_api_key" => {
+                "Invalid key: Resend refused the API key, or it may not send mail.".to_owned()
+            }
+            "daily_quota_exceeded" => {
+                "Quota used up: the Resend account's daily sending quota is spent.".to_owned()
+            }
+            "monthly_quota_exceeded" => {
+                "Quota used up: the Resend account's monthly sending quota is spent.".to_owned()
+            }
+            "rate_limit_exceeded" => {
+                "Rate limited: Resend asked hoster to slow down; try again shortly.".to_owned()
+            }
+            _ if status == StatusCode::FORBIDDEN && message.contains("own email") => {
+                "Sender domain not verified: Resend's test sender only mails the account's own \
+                 address. Verify a domain and send from it."
+                    .to_owned()
+            }
+            _ if status == StatusCode::FORBIDDEN && message.contains("domain") => {
+                "Sender domain not verified: the from address must be on a domain verified at \
+                 Resend."
+                    .to_owned()
+            }
+            _ => return None,
+        })
+    }
+
     /// `retry-after` in whole (or fractional) seconds, as Resend sends it.
     fn retry_after(headers: &HeaderMap) -> Option<Duration> {
         headers

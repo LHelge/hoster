@@ -12,7 +12,7 @@
 //! under a [`Letterhead`] gives the subject, plain text and HTML of a [`Message`].
 //!
 //! The [`Notifier`] (`notifier.rs`, ADR-0058 §6–§9) is the background task that reads the event
-//! log and sends those mails.
+//! log and sends those mails, through the [`Courier`] that Settings' Send test uses too.
 
 mod mail;
 mod notifier;
@@ -33,7 +33,7 @@ use crate::secrets::{SecretName, SecretValue};
 #[cfg(test)]
 pub(crate) use self::mail::tests as mail_fixtures;
 pub use self::mail::{Letterhead, Mail, Notice};
-pub use self::notifier::{Mailer, Notifier};
+pub use self::notifier::{Courier, Mailer, Notifier, Tested};
 
 /// Longest a single delivery request may take. The notifier retries a timeout (ADR-0058 §9),
 /// so this is short.
@@ -255,6 +255,14 @@ impl ProviderKind {
         })
     }
 
+    /// The provider's error answer in plain words, when the provider's codes and messages
+    /// tell more than the status; [`DeliveryError::plain`] falls back on the status.
+    fn explain(self, status: StatusCode, code: &str, message: &str) -> Option<String> {
+        match self {
+            Self::Resend => resend::Resend::explain(status, code, message),
+        }
+    }
+
     /// The HTTP client every provider uses: rustls with ring (ADR-0037), a request timeout and
     /// hoster's `User-Agent`.
     fn http_client(self, timeout: Duration) -> Result<reqwest::Client, DeliveryError> {
@@ -353,10 +361,6 @@ impl DeliveryError {
     }
 
     /// The HTTP status the provider answered, if it answered.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shown by Settings → Notifications as it lands")
-    )]
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             Self::Unavailable { status, .. } | Self::Rejected { status, .. } => Some(*status),
@@ -365,10 +369,6 @@ impl DeliveryError {
     }
 
     /// The provider's own error code (Resend: `validation_error`, `daily_quota_exceeded`, …).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shown by Settings → Notifications as it lands")
-    )]
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Unavailable { code, .. } | Self::Rejected { code, .. } => code.as_deref(),
@@ -377,16 +377,54 @@ impl DeliveryError {
     }
 
     /// The provider's explanation, for the UI.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shown by Settings → Notifications as it lands")
-    )]
     pub fn provider_message(&self) -> Option<&str> {
         match self {
             Self::Unavailable { message, .. } | Self::Rejected { message, .. } => {
                 message.as_deref()
             }
             _ => None,
+        }
+    }
+
+    /// The provider that failed.
+    pub fn provider(&self) -> ProviderKind {
+        match self {
+            Self::Client { provider, .. }
+            | Self::Network { provider, .. }
+            | Self::Timeout { provider, .. }
+            | Self::Unavailable { provider, .. }
+            | Self::Rejected { provider, .. } => *provider,
+        }
+    }
+
+    /// What went wrong in plain words, for the operator: an invalid key, an unverified sender
+    /// domain, a used-up quota, a rate limit, the network. The provider's own answer is in
+    /// the [`Display`](fmt::Display) form.
+    pub fn plain(&self) -> String {
+        let kind = self.provider();
+        let provider = kind.label();
+        match self {
+            Self::Client { .. } => return "Not sent.".to_owned(),
+            Self::Network { .. } | Self::Timeout { .. } => {
+                return format!("Network: hoster could not get an answer from {provider}.");
+            }
+            Self::Unavailable { .. } | Self::Rejected { .. } => {}
+        }
+        let status = self.status().unwrap_or_default();
+        if let Some(plain) = kind.explain(
+            status,
+            self.code().unwrap_or_default(),
+            self.provider_message().unwrap_or_default(),
+        ) {
+            return plain;
+        }
+        match status.as_u16() {
+            401 | 403 => format!("Invalid key: {provider} refused the API key."),
+            429 => {
+                format!("Rate limited: {provider} asked hoster to slow down; try again shortly.")
+            }
+            500.. => format!("{provider} is unavailable at the moment."),
+            _ => format!("{provider} refused the mail."),
         }
     }
 

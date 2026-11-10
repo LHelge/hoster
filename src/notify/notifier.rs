@@ -77,14 +77,113 @@ enum Outcome {
     Cancelled,
 }
 
-/// The notifier task. Build it with [`Notifier::new`] and [`run`](Notifier::run) it.
-pub struct Notifier {
+/// What a delivery needs besides the decision to send: the letterhead a [`Notice`] is rendered
+/// under, the provider it goes through and the store its result is recorded in as the last
+/// delivery. The notifier and Settings' Send test both deliver through it, so a mail is
+/// rendered, keyed and recorded the same way whichever sent it. Cheap to clone.
+#[derive(Clone)]
+pub struct Courier {
     store: Store,
-    events: EventLog,
     mailer: Arc<dyn Mailer>,
     instance: Instance,
     /// The admin origin the mails' buttons link to.
     admin: Url,
+}
+
+/// How a test mail went: its result, and the last delivery recorded for it.
+pub struct Tested {
+    pub result: Result<Delivery, DeliveryError>,
+    pub last: LastDelivery,
+}
+
+impl Courier {
+    /// A courier building providers with `mailer`, signing with `instance`'s name, linking to
+    /// `admin` and recording the last delivery in `store`.
+    pub fn new(store: Store, mailer: Arc<dyn Mailer>, instance: Instance, admin: Url) -> Self {
+        Self {
+            store,
+            mailer,
+            instance,
+            admin,
+        }
+    }
+
+    /// Sends the fixed test mail (ADR-0058 §5) from `from` to `to` through `kind`, once and
+    /// without retrying, and records the result as the last delivery.
+    pub async fn send_test(
+        &self,
+        kind: ProviderKind,
+        from: &MailAddress,
+        to: &MailAddress,
+    ) -> Tested {
+        let at = Timestamp::now();
+        let route = Route {
+            kind,
+            from: from.clone(),
+            to: to.clone(),
+        };
+        let result = match self.message(&route, Notice::Test { at }, Key::Test(at)) {
+            Some(message) => match self.mailer.provider(kind).await {
+                Ok(provider) => provider.send(&message).await,
+                Err(err) => Err(err),
+            },
+            None => Err(DeliveryError::Client {
+                provider: kind,
+                reason: "the test mail could not be rendered".to_owned(),
+            }),
+        };
+        let outcome = match &result {
+            Ok(delivery) => {
+                tracing::info!(id = delivery.id, "test notification sent");
+                DeliveryOutcome::Sent {
+                    id: delivery.id.clone(),
+                }
+            }
+            Err(err) => {
+                tracing::info!(error = %err, "test notification not delivered");
+                DeliveryOutcome::Failed {
+                    error: err.to_string(),
+                }
+            }
+        };
+        let last = self.record(outcome).await;
+        Tested { result, last }
+    }
+
+    /// `notice` rendered under the letterhead as a message along `route`; `None`, logged, if
+    /// it cannot be rendered.
+    fn message(&self, route: &Route, notice: Notice<'_>, key: Key<'_>) -> Option<Message> {
+        let letterhead = Letterhead::new(self.instance.name(), self.admin.clone());
+        match Mail::try_from((&letterhead, notice)) {
+            Ok(mail) => Some(mail.into_message(route.from.clone(), route.to.clone(), key.into())),
+            Err(err) => {
+                tracing::error!(error = %err, "cannot render a notification mail");
+                None
+            }
+        }
+    }
+
+    /// Records `outcome`, now, as the last delivery; a store failure is logged.
+    async fn record(&self, outcome: DeliveryOutcome) -> LastDelivery {
+        let last = LastDelivery {
+            at: Timestamp::now(),
+            outcome,
+        };
+        if let Err(err) = self.store.record_delivery(&last).await {
+            tracing::warn!(
+                error = format!("{:#}", anyhow::Error::from(err)),
+                "cannot record the last notification delivery"
+            );
+        }
+        last
+    }
+}
+
+/// The notifier task. Build it with [`Notifier::new`] and [`run`](Notifier::run) it.
+pub struct Notifier {
+    store: Store,
+    events: EventLog,
+    courier: Courier,
     /// `ui_events`, as a wake-up only; `None` once the channel closed.
     wake: Option<broadcast::Receiver<UiEvent>>,
     /// The fallback wake-up.
@@ -111,11 +210,9 @@ impl Notifier {
         wake: broadcast::Receiver<UiEvent>,
     ) -> Self {
         Self {
+            courier: Courier::new(store.clone(), mailer, instance, admin),
             store,
             events,
-            mailer,
-            instance,
-            admin,
             wake: Some(wake),
             tick: Self::TICK,
             retry: Retry::default(),
@@ -295,15 +392,9 @@ impl Notifier {
         key: Key<'_>,
         cancel: &CancellationToken,
     ) -> Outcome {
-        let letterhead = Letterhead::new(self.instance.name(), self.admin.clone());
-        let mail = match Mail::try_from((&letterhead, notice)) {
-            Ok(mail) => mail,
-            Err(err) => {
-                tracing::error!(error = %err, "cannot render a notification mail");
-                return Outcome::Dropped;
-            }
+        let Some(message) = self.courier.message(route, notice, key) else {
+            return Outcome::Dropped;
         };
-        let message = mail.into_message(route.from.clone(), route.to.clone(), key.into());
         let result = tokio::select! {
             () = cancel.cancelled() => return Outcome::Cancelled,
             result = self.send(route.kind, &message, cancel) => result,
@@ -330,16 +421,7 @@ impl Notifier {
                 (Outcome::Dropped, DeliveryOutcome::Failed { error })
             }
         };
-        let last = LastDelivery {
-            at: Timestamp::now(),
-            outcome: delivery,
-        };
-        if let Err(err) = self.store.record_delivery(&last).await {
-            tracing::warn!(
-                error = format!("{:#}", anyhow::Error::from(err)),
-                "cannot record the last notification delivery"
-            );
-        }
+        self.courier.record(delivery).await;
         outcome
     }
 
@@ -351,7 +433,7 @@ impl Notifier {
         message: &Message,
         cancel: &CancellationToken,
     ) -> Result<Option<Delivery>, DeliveryError> {
-        let provider = self.mailer.provider(kind).await?;
+        let provider = self.courier.mailer.provider(kind).await?;
         let started = Instant::now();
         let mut failures = 0;
         loop {
@@ -391,6 +473,8 @@ enum Key<'a> {
     /// A reminder about the event, sent at the time.
     Reminder(&'a Event, Timestamp),
     Summary(Timestamp),
+    /// Settings' Send test, pressed at the time.
+    Test(Timestamp),
 }
 
 impl From<Key<'_>> for IdempotencyKey {
@@ -404,6 +488,7 @@ impl From<Key<'_>> for IdempotencyKey {
                 at.as_millis()
             ),
             Key::Summary(at) => format!("hoster-summary-{}", at.as_millis()),
+            Key::Test(at) => format!("hoster-test-{}", at.as_millis()),
         };
         key.parse().expect("digits and dashes are a valid key")
     }

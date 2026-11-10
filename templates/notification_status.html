@@ -1,0 +1,18 @@
+<div id="notify-status"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <div class="field">
+    <div class="field-label"><span class="field-name">Status</span><span class="field-help">Notifications are off until they are saved switched on.</span></div>
+    <div class="field-control"><span class="notify-state">{{ state }}</span><p class="field-text">{{ detail }}</p></div>
+  </div>
+  <div class="field">
+    <div class="field-label"><span class="field-name">Last delivery</span><span class="field-help">A notification or a test, whichever was last.</span></div>
+    <div class="field-control">
+      {%- if let Some(last) = last %}
+      <span class="notify-state">{{ last.result }}<span class="field-note"><time datetime="{{ last.at }}">{{ last.at }}</time></span></span>
+      <p class="field-text notify-detail">{{ last.detail }}</p>
+      {%- else %}
+      <p class="field-text">No mail has been sent yet.</p>
+      {%- endif %}
+      <a class="field-text" href="{{ failures }}">hoster's warnings on the Events page, delivery failures among them</a>
+    </div>
+  </div>
+</div>
