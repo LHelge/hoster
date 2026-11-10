@@ -23,6 +23,7 @@ use serde::Serialize;
 
 use crate::config::{Config, ConfigError, PortRange};
 use crate::installation::Installation;
+use crate::machine::CgroupControllers;
 use crate::runtime::{PodmanSocket, PodmanVersion};
 
 /// First systemd release with user-scoped encrypted credentials (`systemd-creds --user`).
@@ -33,9 +34,6 @@ const PUBLIC_PORTS: [u16; 2] = [80, 443];
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
 /// Most bytes read of the `/_ping` status line and headers.
 const PING_MAX_HEAD: usize = 8192;
-/// Controllers the user manager must delegate before stacks can get `Memory`, `NanoCpus` and
-/// `PidsLimit` (ADR-0038).
-const DELEGATED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
 
 /// Runs external programs for the checks; faked in tests.
 pub trait Commands {
@@ -349,36 +347,32 @@ impl Doctor {
         }
     }
 
-    /// The user manager delegates the cgroup controllers that resource limits will need
-    /// (ADR-0023, ADR-0038). Advisory: v1 sets no limits.
+    /// The user manager delegates the cgroup controllers resource limits need (ADR-0059 §5),
+    /// read from the same file apply and deployments check. Advisory: only stacks that set a
+    /// limit need them, and those are rejected without.
     fn check_cgroup_delegation(&self) -> Outcome {
-        let uid = self.uid;
-        let path = self.cgroup_root.join(format!(
-            "user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers"
-        ));
-        let controllers = match std::fs::read_to_string(&path) {
-            Ok(controllers) => controllers,
-            Err(e) => {
-                return Outcome::fail(
-                    format!("cannot read {}: {e}", path.display()),
-                    "needs cgroup v2 and a running user manager (linger enabled)",
-                );
+        let controllers = CgroupControllers::read(&self.cgroup_root, self.uid);
+        let fix = controllers.fix();
+        match controllers.missing() {
+            Err(e) => Outcome::fail(
+                format!("cannot read {}: {e}", controllers.path().display()),
+                "needs cgroup v2 and a running user manager (linger enabled)",
+            ),
+            Ok(missing) if missing.is_empty() => {
+                let listed = controllers.listed().into_iter().flatten();
+                let listed: Vec<&str> = listed.map(String::as_str).collect();
+                Outcome::Pass(format!("delegated: {}", listed.join(" ")))
             }
-        };
-        let delegated: Vec<&str> = controllers.split_whitespace().collect();
-        let missing: Vec<&str> = DELEGATED_CONTROLLERS
-            .into_iter()
-            .filter(|c| !delegated.contains(c))
-            .collect();
-        if missing.is_empty() {
-            Outcome::Pass(format!("delegated: {}", delegated.join(" ")))
-        } else {
-            Outcome::fail(
-                format!("not delegated: {}", missing.join(" ")),
-                "add `[Service]` `Delegate=cpu cpuset io memory pids` in \
-                 /etc/systemd/system/user@.service.d/delegate.conf, then \
-                 `sudo systemctl daemon-reload` and restart user@<uid>.service",
-            )
+            Ok(missing) => {
+                let missing: Vec<&str> = missing.iter().map(AsRef::as_ref).collect();
+                Outcome::fail(
+                    format!(
+                        "not delegated: {}; stacks with `limits` on them are rejected",
+                        missing.join(" ")
+                    ),
+                    format!("as root, {fix}"),
+                )
+            }
         }
     }
 
@@ -1113,8 +1107,17 @@ mod tests {
         let Outcome::Fail { detail, hint } = fx.doctor.check_cgroup_delegation() else {
             panic!("missing cpu must be reported");
         };
-        assert_eq!(detail, "not delegated: cpu");
-        assert!(hint.contains("Delegate="));
+        assert_eq!(
+            detail,
+            "not delegated: cpu; stacks with `limits` on them are rejected"
+        );
+        assert_eq!(
+            hint,
+            "as root, create /etc/systemd/system/user@1000.service.d/hoster-delegate.conf \
+             containing `[Service]` and `Delegate=cpu memory pids`, then restart \
+             user@1000.service (which stops hoster and its containers) or reboot; \
+             `systemctl daemon-reload` alone does not apply it"
+        );
         fx.cgroup_controllers("cpuset cpu io memory pids\n");
         assert_eq!(status(fx.doctor.check_cgroup_delegation()), "pass");
     }

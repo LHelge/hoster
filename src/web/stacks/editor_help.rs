@@ -344,6 +344,15 @@ impl Snippet {
             per_service: true,
         },
         Snippet {
+            id: "limits",
+            title: "Resource limits",
+            about: "Caps the container's memory (a hard limit, no swap), processes and CPU time. \
+                    Unset ones keep podman's defaults. During a start-first deploy the old and \
+                    the new container each get these limits.",
+            toml: "[services.web.limits]\nmemory = \"512MiB\"  # OOM-killed above it\npids = 512\ncpus = 1.5\n",
+            per_service: true,
+        },
+        Snippet {
             id: "deploy",
             title: "Deploy from CI",
             about: "Lets GitHub Actions in one repository deploy new image digests with its \

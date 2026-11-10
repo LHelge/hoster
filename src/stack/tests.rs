@@ -1854,3 +1854,121 @@ fn tmpfs_paths_differing_by_a_prefix_only_are_independent() {
     let parsed = parse(&source);
     assert!(parsed.is_ok(), "{parsed:?}");
 }
+
+#[test]
+fn limits_parse() {
+    let source = app_with("[services.app.limits]\nmemory = \"512MiB\"\npids = 512\ncpus = 1.5");
+    let parsed = parse(&source).expect("valid");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let limits = app(&parsed.stack).limits;
+    assert_eq!(limits.memory.map(u64::from), Some(512 << 20));
+    assert_eq!(limits.pids, Some(512));
+    assert_eq!(limits.cpus.map(f64::from), Some(1.5));
+    // An integer is a number of CPUs too.
+    let whole = parse(&app_with("limits = { cpus = 2 }")).unwrap().stack;
+    assert_eq!(app(&whole).limits.cpus.map(f64::from), Some(2.0));
+
+    // Unset, and an empty table, are no limits at all.
+    for source in [MINIMAL.to_owned(), app_with("limits = {}")] {
+        let stack = parse(&source).unwrap().stack;
+        assert!(app(&stack).limits.is_empty());
+    }
+    // The bounds are inclusive, in any unit.
+    for floor in [
+        "memory = \"8MiB\", pids = 1, cpus = 0.01",
+        "memory = \"8389KB\", pids = 4294967295, cpus = 1024",
+        "memory = \"8388608B\"",
+        "memory = \"8192KiB\"",
+        "memory = \"9MB\"",
+    ] {
+        let parsed = parse(&app_with(&format!("limits = {{ {floor} }}")));
+        assert!(parsed.is_ok(), "{floor}: {parsed:?}");
+    }
+}
+
+/// Every rule on `limits` (ADR-0059 §2), all in one file.
+#[test]
+fn limit_errors_snapshot() {
+    let source = r#"version = 1
+name = "demo"
+
+[services.small]
+image = "docker.io/library/nginx:1.27"
+limits = { memory = "4MiB", pids = 0, cpus = 0.001 }
+
+[services.large]
+image = "docker.io/library/nginx:1.27"
+limits = { memory = "8388607B", pids = 4294967296, cpus = 1024.5 }
+
+[services.odd]
+image = "docker.io/library/nginx:1.27"
+limits = { memory = 536870912, pids = -1, cpus = nan }
+
+[services.infinite]
+image = "docker.io/library/nginx:1.27"
+limits = { memory = "512m", cpus = inf }
+
+[services.negative]
+image = "docker.io/library/nginx:1.27"
+limits = { cpus = -1 }
+"#;
+    insta::assert_snapshot!(parse(source).unwrap_err().to_string());
+}
+
+#[test]
+fn limits_are_a_closed_table() {
+    for unknown in [
+        "memory_swap = \"1GiB\"",
+        "cpu = 1",
+        "memory_reservation = \"64MiB\"",
+    ] {
+        let err = parse(&app_with(&format!("limits = {{ {unknown} }}"))).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "{unknown}: {err}"
+        );
+    }
+    let err = parse(&app_with("limits = { cpus = \"1.5\" }")).unwrap_err();
+    assert!(
+        err.to_string().contains("a number of CPUs such as 1.5"),
+        "{err}"
+    );
+}
+
+/// ADR-0059 §2: shared memory and tmpfs are charged to the memory limit, so reaching it is a
+/// warning at `memory`.
+#[test]
+fn shm_and_tmpfs_reaching_memory_are_warned_about() {
+    let warning = |lines: &str| {
+        let parsed = parse(&app_with(lines)).expect("valid");
+        parsed
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert!(warning("shm_size = \"63MiB\"\nlimits = { memory = \"64MiB\" }").is_empty());
+    assert!(warning("shm_size = \"256MiB\"\ntmpfs = { \"/tmp\" = \"64MiB\" }").is_empty());
+    assert_eq!(
+        warning("shm_size = \"64MiB\"\nlimits = { memory = \"64MiB\" }"),
+        [
+            "line 8, column 21: services.app.limits.memory: `shm_size` (64MiB) reaches `memory` \
+          (64MiB): shared memory and tmpfs count against the memory limit, so filling them \
+          leaves the app nothing and can get the container OOM-killed"
+        ]
+    );
+    let both = warning(
+        "shm_size = \"32MiB\"\ntmpfs = { \"/tmp\" = \"16MiB\", \"/run\" = \"16MiB\" }\n\
+         limits = { memory = \"64MiB\" }",
+    );
+    assert_eq!(both.len(), 1, "{both:?}");
+    assert!(
+        both[0].contains("`shm_size` and the `tmpfs` sizes (64MiB) reach `memory` (64MiB)"),
+        "{both:?}"
+    );
+    let tmpfs = warning("tmpfs = { \"/tmp\" = \"1GiB\" }\nlimits = { memory = \"512MiB\" }");
+    assert!(
+        tmpfs[0].contains("the `tmpfs` sizes (1GiB) reach `memory` (512MiB)"),
+        "{tmpfs:?}"
+    );
+}

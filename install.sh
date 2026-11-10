@@ -5,9 +5,11 @@
 #   curl -fsSL https://github.com/LHelge/hoster/releases/latest/download/install.sh | sudo bash
 #   curl -fsSL .../install.sh | sudo bash -s -- --version v0.2.0 --dry-run
 #
-# As root it installs podman (apt or dnf) if missing, creates the `hoster` system user with
-# subordinate uid/gid ranges, enables linger and installs the low-port sysctl, which it downloads
-# and checks against the release's SHA256SUMS itself before changing anything. As `hoster` it
+# As root it installs podman and catatonit (apt or dnf) if missing, creates the `hoster` system
+# user with subordinate uid/gid ranges, enables linger, installs the low-port sysctl, which it
+# downloads and checks against the release's SHA256SUMS itself before changing anything, and
+# delegates the cgroup controllers resource limits need to the user's systemd instance (ADR-0059),
+# restarting that instance only while hoster neither runs nor is enabled. As `hoster` it
 # downloads the binary for this architecture and checks it against the release's SHA256SUMS,
 # installs it as ~/.local/lib/hoster/versions/vX.Y.Z and switches `current` to it, enables
 # podman.socket, installs the user unit, creates the state and config directories, writes the
@@ -279,6 +281,19 @@ install_dir() {
     fi
 }
 
+# True when restarting the user manager would stop something: hoster.service is enabled or
+# active, a hoster-* container runs, or podman cannot tell.
+hoster_in_use() {
+    cd "$HOME" 2>/dev/null || cd /
+    if systemctl --user -q is-enabled hoster.service 2>/dev/null ||
+        systemctl --user -q is-active hoster.service 2>/dev/null; then
+        return 0
+    fi
+    local running
+    running=$(podman ps -q --filter 'name=^hoster-' 2>/dev/null) || return 0
+    [ -n "$running" ]
+}
+
 # Everything the hoster user does. $1 is the staging directory with the verified files.
 hoster_user() {
     local staging=$1
@@ -360,7 +375,8 @@ Usage: curl -fsSL https://github.com/LHelge/hoster/releases/latest/download/inst
        sudo bash install.sh [--version vX.Y.Z] [--dry-run]
 
 Installs hoster as a systemd user service of the `hoster` user, or updates an existing install
-to a newer release. Safe to re-run. Never starts or restarts the service.
+to a newer release. Safe to re-run. Never starts or restarts the service, and restarts the
+user's systemd instance (for cgroup delegation) only while hoster neither runs nor is enabled.
 
 Options:
   --version vX.Y.Z  install this release (pre-releases only this way); default: this script's
@@ -394,7 +410,7 @@ as_hoster() {
     local functions
     functions=$(declare -f say ok die run curl_opts fetch verify fetch_release semver_cmp \
         is_semver_tag user_bus installed_versions current_version hoster_binary install_file \
-        install_dir hoster_user)
+        install_dir hoster_in_use hoster_user)
     runuser -u "$SERVICE_USER" -- env -i \
         HOME="$home" USER="$SERVICE_USER" LOGNAME="$SERVICE_USER" SHELL=/bin/bash \
         PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin \
@@ -454,6 +470,10 @@ install_packages() {
     if ! command -v sysctl > /dev/null; then
         missing+=(sysctl) apt+=(procps) dnf+=(procps-ng)
     fi
+    # podman's init for `init = true` (ADR-0059), where podman looks for it.
+    if [ ! -e /usr/libexec/podman/catatonit ] && [ ! -e /usr/lib/podman/catatonit ]; then
+        missing+=(catatonit) apt+=(catatonit) dnf+=(catatonit)
+    fi
     # Base tools minimal images can lack.
     if ! command -v runuser > /dev/null; then
         missing+=(runuser) apt+=(util-linux) dnf+=(util-linux)
@@ -476,7 +496,7 @@ install_packages() {
     elif command -v dnf > /dev/null; then
         run dnf install -y -q "${dnf[@]}"
     else
-        die "${missing[*]} missing and neither apt-get nor dnf found: install the podman package (with newuidmap from uidmap or shadow-utils, and sysctl from procps) with your package manager, then re-run"
+        die "${missing[*]} missing and neither apt-get nor dnf found: install the podman package (with newuidmap from uidmap or shadow-utils, sysctl from procps, and catatonit) with your package manager, then re-run"
     fi
 }
 
@@ -521,12 +541,82 @@ enable_linger() {
     local uid
     uid=$(id -u "$SERVICE_USER")
     systemctl start "user@$uid.service"
+    wait_user_manager "$uid"
+}
+
+# Waits until the user manager of uid $1 listens on its private bus.
+wait_user_manager() {
     local i
     for i in $(seq 1 60); do
-        [ -S "/run/user/$uid/systemd/private" ] && return
+        [ -S "/run/user/$1/systemd/private" ] && return
         [ "$i" = 60 ] || sleep 0.5
     done
-    die "the systemd user manager of $SERVICE_USER did not start (systemctl status user@$uid.service)"
+    die "the systemd user manager of $SERVICE_USER did not start (systemctl status user@$1.service)"
+}
+
+# Resource limits need the cpu, memory and pids controllers delegated to the user manager, where
+# podman puts hoster's containers (ADR-0059). If it lacks one, this writes
+# /etc/systemd/system/user@<uid>.service.d/hoster-delegate.conf (never over an existing file).
+# Only a restart of the user manager applies `Delegate=`, and that stops everything the user
+# runs, so it restarts it only while hoster.service is neither enabled nor active and no
+# hoster-* container runs; otherwise it says when the change applies. $1 is root's staging
+# directory.
+delegate_controllers() {
+    local uid
+    if ! uid=$(id -u "$SERVICE_USER" 2>/dev/null); then
+        say "would delegate cpu, memory and pids to user@<uid>.service of $SERVICE_USER if it lacks one"
+        return
+    fi
+    local unit=user@$uid.service
+    local file=/sys/fs/cgroup/user.slice/user-$uid.slice/$unit/cgroup.controllers
+    local dropin=/etc/systemd/system/$unit.d/hoster-delegate.conf
+    local listed
+    if ! listed=$(cat "$file" 2>/dev/null); then
+        say "note: cannot read $file (cgroup v2 and a running user manager are needed); hoster doctor checks the delegation"
+        return
+    fi
+    local controller missing=()
+    for controller in cpu memory pids; do
+        case " $listed " in
+            *" $controller "*) ;;
+            *) missing+=("$controller") ;;
+        esac
+    done
+    if [ "${#missing[@]}" = 0 ]; then
+        ok "$unit delegates cpu memory pids"
+        return
+    fi
+    if [ -e "$dropin" ]; then
+        ok "$dropin exists and is left alone"
+    else
+        printf '%s\n' "# Written by hoster's install.sh: the cgroup controllers resource limits use" \
+            "# (ADR-0059). Applied by a restart of $unit or a reboot, not by a reload." \
+            "[Service]" "Delegate=cpu memory pids" > "$1/hoster-delegate.conf"
+        run install -d -m 0755 "${dropin%/*}"
+        run install -m 0644 "$1/hoster-delegate.conf" "$dropin"
+        run systemctl daemon-reload
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        say "would restart $unit to delegate ${missing[*]} if hoster.service is neither enabled nor active and no hoster-* container runs"
+        return
+    fi
+    local configured
+    configured=" $(systemctl show -p DelegateControllers --value "$unit" 2>/dev/null || true) "
+    for controller in "${missing[@]}"; do
+        case $configured in
+            *" $controller "*) ;;
+            *)
+                say "warning: $unit does not delegate ${missing[*]}, and its configuration does not add them either; check $dropin. Stacks with limits on them are rejected."
+                return
+                ;;
+        esac
+    done
+    if as_hoster hoster_in_use; then
+        say "note: $unit delegates ${missing[*]} once it restarts (which stops hoster and its containers) or at the next reboot; until then stacks with limits on them are rejected: sudo systemctl restart $unit"
+        return
+    fi
+    run systemctl restart "$unit"
+    wait_user_manager "$uid"
 }
 
 install_sysctl() {
@@ -649,6 +739,7 @@ main() {
     fi
     enable_linger
     install_sysctl "$staging/root"
+    delegate_controllers "$staging/root"
 
     local before=""
     before=$(current_version "$home/.local/lib/hoster" 2>/dev/null || true)

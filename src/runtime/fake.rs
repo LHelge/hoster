@@ -741,6 +741,7 @@ mod tests {
             shm_size: None,
             tmpfs: BTreeMap::new(),
             init: false,
+            limits: crate::stack::Limits::default(),
         }
     }
 

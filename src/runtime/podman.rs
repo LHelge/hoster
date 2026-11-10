@@ -414,6 +414,12 @@ impl From<&ContainerSpec> for ContainerCreateBody {
                     .collect()
             }),
             init: spec.init.then_some(true),
+            // `MemorySwap` equal to `Memory` is what gives no swap; unset, 0 or -1 would give
+            // as much swap again (architecture §1.8).
+            memory: spec.limits.memory.map(i64::from),
+            memory_swap: spec.limits.memory.map(i64::from),
+            nano_cpus: spec.limits.cpus.map(i64::from),
+            pids_limit: spec.limits.pids.map(i64::from),
             ..HostConfig::default()
         };
         // Podman would otherwise run a docker-format image's HEALTHCHECK itself, on systemd
@@ -2220,6 +2226,35 @@ mod tests {
         assert_eq!(host.init, None);
     }
 
+    /// ADR-0059 §4: `memory` sets `Memory` and `MemorySwap` alike (no swap), `cpus` becomes
+    /// rounded nano-CPUs, `pids` the `PidsLimit`; unset limits stay unset.
+    #[test]
+    fn create_body_sets_limits_only_when_set() {
+        let mut spec = spec_for("notes", "web");
+        spec.limits.memory = Some("512MiB".parse().unwrap());
+        spec.limits.pids = Some(256);
+        spec.limits.cpus = Some("1.5".parse().unwrap());
+        let host = ContainerCreateBody::from(&spec).host_config.unwrap();
+        assert_eq!(host.memory, Some(512 << 20));
+        assert_eq!(host.memory_swap, host.memory);
+        assert_eq!(host.nano_cpus, Some(1_500_000_000));
+        assert_eq!(host.pids_limit, Some(256));
+        assert_eq!(host.memory_reservation, None);
+        assert_eq!(host.cpu_quota, None);
+        assert_eq!(host.cpu_period, None);
+        assert_eq!(host.privileged, Some(false));
+
+        spec.limits.cpus = Some("0.333333333".parse().unwrap());
+        spec.limits.memory = None;
+        spec.limits.pids = None;
+        let host = ContainerCreateBody::from(&spec).host_config.unwrap();
+        assert_eq!(host.nano_cpus, Some(333_333_333));
+        assert_eq!(
+            (host.memory, host.memory_swap, host.pids_limit),
+            (None, None, None)
+        );
+    }
+
     #[test]
     fn create_body_turns_podmans_own_healthcheck_off() {
         // Every container, whatever its spec: hoster runs all checks itself (ADR-0056).
@@ -3595,6 +3630,59 @@ mod tests {
             for own in ["/run", "/var/tmp"] {
                 assert!(!mount(own).contains("size="), "{}", mount(own));
             }
+        })
+        .await;
+    }
+
+    /// ADR-0059 §2 on real podman (architecture §1.8): `memory` is a hard limit without swap,
+    /// `pids` and `cpus` reach the container's cgroup, and a process that goes over `memory`
+    /// is OOM-killed. Needs the user manager to delegate `cpu memory pids`.
+    #[tokio::test]
+    async fn limits_reach_the_containers_cgroup() {
+        with_stack(|runtime, stack| async move {
+            running_sleeper(&runtime, &stack).await;
+            let mut spec = spec_for(stack.as_ref(), "limited");
+            spec.command = Some(argv(&["sleep", "600"]));
+            spec.stop_timeout = Duration::from_secs(1);
+            spec.limits.memory = Some("64MiB".parse().unwrap());
+            spec.limits.pids = Some(100);
+            spec.limits.cpus = Some("1.5".parse().unwrap());
+            let id = runtime.create_container(&spec).await.unwrap();
+            runtime.start(&id).await.unwrap();
+            let (code, output) = sh(
+                &runtime,
+                &id,
+                "cd /sys/fs/cgroup && cat memory.max memory.swap.max pids.max cpu.max",
+            )
+            .await;
+            assert_eq!(code, 0, "{output}");
+            let lines: Vec<&str> = output.lines().collect();
+            assert_eq!(
+                lines,
+                [&(64u64 << 20).to_string(), "0", "100", "150000 100000"]
+            );
+
+            // A shell that holds 64 MiB in a variable goes over the limit and is killed.
+            let mut hog = spec_for(stack.as_ref(), "hog");
+            hog.command = Some(argv(&[
+                "sh",
+                "-c",
+                "x=$(head -c 67108864 /dev/zero | tr '\\0' a); echo survived",
+            ]));
+            hog.limits.memory = Some("16MiB".parse().unwrap());
+            let id = runtime.create_container(&hog).await.unwrap();
+            runtime.start(&id).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let info = loop {
+                let info = runtime.inspect(&id).await.unwrap();
+                if !info.state.is_running() && info.state != ContainerState::Created {
+                    break info;
+                }
+                assert!(Instant::now() < deadline, "still {}", info.state);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            assert_eq!(info.state, ContainerState::Exited(Some(137)), "{info:?}");
+            assert!(info.oom_killed, "{info:?}");
         })
         .await;
     }

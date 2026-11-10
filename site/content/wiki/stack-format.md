@@ -143,6 +143,7 @@ name = "notes"       # required; stack name
 | `shm_size` | size | no | Size of `/dev/shm`, at least `"1MiB"`, e.g. `"256MiB"` (§2.2.2, [ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). Default podman's 65536000 bytes (62.5 MiB). |
 | `tmpfs` | table path → size | no | In-memory directories: absolute container path → size, each at least `"1MiB"`, e.g. `{ "/tmp" = "64MiB" }` (§2.2.2, [ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). Mounted `rw,nosuid,nodev,mode=1777`. |
 | `init` | bool | no | Default `false`. Runs podman's init (catatonit) as PID 1 (§2.2.2, [ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). |
+| `limits` | table | no | Resource limits `memory`, `pids` and `cpus`, each optional, with no defaults (§2.2.3, [ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). The host must delegate their cgroup controllers. |
 | `routes` | array of route | no | Zero or more. If empty, the service publishes no ports ([ADR-0007](https://github.com/LHelge/hoster/blob/main/docs/adr/0007-route-model-and-loopback-only-publishing.md)). |
 
 There are intentionally **no** fields for `ports`, `privileged`, `network_mode`, `cap_add`,
@@ -277,9 +278,10 @@ container's memory.
 
 **`init = true`** runs podman's init, catatonit, as PID 1. It passes signals on to the image's
 process and reaps the exited child processes that an app running as PID 1 often leaves as
-zombies. `init = false` is the same as leaving it out. The host needs the `catatonit` package
-(`apt-get install catatonit` or `dnf install catatonit`): without it the container cannot be
-created and the deploy fails. podman bind-mounts the init binary into the container itself, the
+zombies. `init = false` is the same as leaving it out. The host needs the `catatonit` package,
+which [[install|install.sh]] installs with `apt-get` or `dnf` (elsewhere, see
+[[install#cgroup-delegation-and-catatonit|Install]]): without it the container cannot be created and
+the deploy fails. podman bind-mounts the init binary into the container itself, the
 only host file a stack file can bring in.
 
 A change to any of the three is part of the service's config hash, so it recreates the
@@ -291,6 +293,56 @@ the host or the kernel ([ADR-0019](https://github.com/LHelge/hoster/blob/main/do
 `devices`, `privileged`, `ulimits`, `security_opt`, the `ipc` and `pid` modes, OOM-killer tuning,
 cpusets, I/O limits, reservations and CPU shares. Each can be added on its own once an image
 needs it. There is no `noexec` tmpfs and no per-mount option.
+
+## 2.2.3 Resource limits ([ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md))
+
+Without limits a container can take all of the host's memory, CPU time and processes, and with
+them hoster's and the other stacks'. A service's `limits` table caps them:
+
+```toml
+[services.db]
+image = "docker.io/library/postgres:17"
+shm_size = "256MiB"
+
+[services.db.limits]
+memory = "1GiB"   # hard limit, no swap: OOM-killed above it
+pids = 512        # processes and threads
+cpus = 1.5        # one and a half CPUs' worth of time
+```
+
+| Key | Type | Rules |
+|---|---|---|
+| `memory` | size | At least `"8MiB"`, written like `shm_size` (§2.2.2). A hard limit: the container gets **no swap**, and the kernel's OOM killer ends a process in it that would go over. |
+| `pids` | integer | 1 to 4294967295. The most processes and threads the container may have at once; a `fork` past it fails. |
+| `cpus` | number | 0.01 to 1024, an integer or a float such as `1.5`. CPU time per scheduling period: `1.5` is one and a half CPUs' worth, spread over any CPUs. |
+
+There are **no defaults**: each limit that is left out keeps podman's (no memory or CPU cap,
+2048 processes), and `limits = {}` is the same as no table. Other keys (`memory_swap`,
+reservations, CPU shares) are unknown fields.
+
+**What counts.** `memory` covers everything in the container's memory: shared memory
+(`shm_size`), every `tmpfs`, and with `read_only = true` podman's own tmpfs on `/tmp`, `/run` and
+`/var/tmp`. Validation warns when `shm_size` and the `tmpfs` sizes add up to `memory` or more.
+`pids` covers `init`'s catatonit and every `exec` health check while it runs, as well as the app.
+
+**Start-first deploys run old and new together.** During a start-first deploy the new container
+starts next to the old one and both run until the swap, each with its own limits. So for a moment
+a service can use twice its limits; plan the host's memory for that, or use `stop-first`. hoster
+reserves nothing for itself: leave the host some memory and CPU beyond the sum of the limits for
+hoster, its proxy and podman.
+
+**The host must delegate the controllers.** Rootless podman can only enforce a limit whose cgroup
+controller (`memory`, `pids`, `cpu`) systemd delegates to hoster's user manager,
+`user@<uid>.service`. A stack that sets a limit on a missing controller is rejected when it is
+applied, and a deployment of a stored revision (a rollback, a CI deploy) is rejected in
+`Validating`, naming the controller and the fix (Install, [[install#cgroup-delegation-and-catatonit|cgroup
+delegation]]). If hoster cannot read the user manager's `cgroup.controllers`, only stacks that set
+a limit are rejected. The editor's live check marks the limit itself. A `cpus` above the host's
+CPU count or a `memory` above its total memory caps nothing, and applying warns about it.
+
+A change to a limit is part of the service's config hash (`memory` by bytes, `cpus` by the
+nano-CPUs podman gets), so it recreates the service's containers through a normal deploy. A
+service without limits keeps the hash it had before limits existed.
 
 ## 2.3 Route
 

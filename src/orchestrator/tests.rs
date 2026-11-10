@@ -233,13 +233,18 @@ pub(super) async fn harness_with(settle: Duration) -> Harness {
     let secrets = SecretStore::new(store.clone(), &SecretKey::generate());
     let routes = Arc::<ArcSwap<RouteTable>>::default();
     let prober = Arc::new(FakeProber::with_delay(settle));
+    // The host's `/proc` and `/sys` are fixtures (ADR-0059 §5); none until a test writes them.
+    let settings = Settings {
+        machine: Machine::under(&dir.path().join("host"), 1000),
+        ..settings(settle)
+    };
     let orchestrator = Orchestrator::with_prober(
         store.clone(),
         Arc::clone(&runtime),
         Arc::clone(&resolver) as Arc<dyn TagResolver>,
         ports,
         secrets.clone(),
-        settings(settle),
+        settings,
         Arc::clone(&routes),
         Arc::clone(&prober) as Arc<dyn Prober>,
     );
@@ -2881,4 +2886,188 @@ async fn exec_output_is_redacted_for_each_line_of_a_file_secret() {
             .any(|n| n.contains("hash-of-admin") || n.contains("t0ken")),
         "{notes:#?}"
     );
+}
+
+impl Harness {
+    /// Writes `text` to `path` under the fixture host's root (`proc/meminfo`, …).
+    fn host_file(&self, path: &str, text: &str) {
+        let path = self._dir.path().join("host").join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The controllers the fixture host's user manager (uid 1000) delegates.
+    fn delegate(&self, controllers: &str) {
+        self.host_file(
+            "sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cgroup.controllers",
+            controllers,
+        );
+    }
+}
+
+/// `api` limits its memory and CPUs; `storage` sets no limit.
+const WITH_LIMITS: &str = r#"
+version = 1
+name = "notes"
+
+[services.api]
+image = "docker.io/library/nginx:1.27"
+limits = { memory = "64MiB", cpus = 1.5 }
+
+[[services.api.routes]]
+host = "notes.example.com"
+port = 8080
+
+[services.storage]
+image = "docker.io/library/redis:7"
+"#;
+
+/// ADR-0059 §5: a limit whose controller the user manager does not delegate rejects the stack
+/// at apply, before any tag is resolved, with the one fix; delegated, it reaches podman.
+#[tokio::test]
+async fn limits_need_their_cgroup_controllers_at_apply() {
+    let h = harness().await;
+    h.delegate("memory pids\n");
+    for result in [
+        h.orchestrator.preview(WITH_LIMITS).await.map(|_| ()),
+        h.orchestrator.apply(WITH_LIMITS).await.map(|_| ()),
+    ] {
+        let err = result.unwrap_err();
+        assert!(matches!(err, OrchestratorError::Undelegated(_)), "{err:?}");
+        let message = err.to_string();
+        assert!(
+            message.starts_with(
+                "hoster's user manager does not delegate the cgroup controller cpu, so \
+                 `limits.cpus` of api cannot be enforced without it; to fix it, create \
+                 /etc/systemd/system/user@1000.service.d/hoster-delegate.conf containing \
+                 `[Service]` and `Delegate=cpu memory pids`"
+            ),
+            "{message}"
+        );
+    }
+    assert!(h.orchestrator.status().await.unwrap().is_empty());
+    assert_eq!(
+        h.resolver.calls.load(Ordering::SeqCst),
+        0,
+        "no tag resolved"
+    );
+
+    h.delegate("cpuset cpu io memory pids\n");
+    let applied = h.apply(WITH_LIMITS).await;
+    let live = h.finish(&applied.deployment.clone().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+    let api = h.spec_of("hoster-notes-api-g1").limits;
+    assert_eq!(api.memory.map(u64::from), Some(64 << 20));
+    assert_eq!(api.cpus.map(i64::from), Some(1_500_000_000));
+    assert_eq!(api.pids, None);
+    assert!(h.spec_of("hoster-notes-storage-g1").limits.is_empty());
+}
+
+/// A controller can go under a stored revision (a changed drop-in, another host): a rollback
+/// or redeploy is rejected in `Validating`, with apply's text, before anything reaches podman.
+#[tokio::test]
+async fn a_deployment_with_limits_is_rejected_in_validating_without_the_controller() {
+    let h = harness().await;
+    h.delegate("cpu memory pids\n");
+    let applied = h.apply(WITH_LIMITS).await;
+    let first = h.finish(&applied.deployment.clone().unwrap()).await;
+    assert_eq!(first.state, S::Live, "{first:?}");
+    let second = h
+        .apply(&WITH_LIMITS.replace("cpus = 1.5", "cpus = 1"))
+        .await;
+    let second = h.finish(&second.deployment.clone().unwrap()).await;
+    assert_eq!(second.state, S::Live, "{second:?}");
+
+    h.delegate("memory pids\n");
+    let expected = h
+        .orchestrator
+        .apply(WITH_LIMITS)
+        .await
+        .unwrap_err()
+        .to_string();
+    let created = h.runtime.calls().len();
+    let back = h.orchestrator.rollback("notes", first.id).await.unwrap();
+    let rejected = h.finish(&back).await;
+    assert_eq!(rejected.state, S::Rejected, "{rejected:?}");
+    assert_eq!(rejected.error.as_deref(), Some(expected.as_str()));
+    assert_eq!(h.runtime.calls().len(), created, "nothing reached podman");
+}
+
+/// Without a readable `cgroup.controllers` hoster cannot tell whether a limit holds: only
+/// stacks that set one are rejected.
+#[tokio::test]
+async fn an_unreadable_controller_list_rejects_only_stacks_with_limits() {
+    let h = harness().await;
+    let err = h.orchestrator.apply(WITH_LIMITS).await.unwrap_err();
+    assert!(matches!(err, OrchestratorError::Undelegated(_)), "{err:?}");
+    let message = err.to_string();
+    assert!(
+        message.contains("user@1000.service/cgroup.controllers cannot be read"),
+        "{message}"
+    );
+    let unlimited =
+        WITH_LIMITS.replace("limits = { memory = \"64MiB\", cpus = 1.5 }", "limits = {}");
+    let applied = h.apply(&unlimited).await;
+    let live = h.finish(&applied.deployment.clone().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+}
+
+/// The editor's live check reports a missing controller at each limit that needs it, and a
+/// limit larger than the host as a warning at its key; apply returns the same warnings.
+#[tokio::test]
+async fn check_file_and_apply_report_limits_against_the_host() {
+    let h = harness().await;
+    h.delegate("memory pids\n");
+    let report = h.orchestrator.check_file(WITH_LIMITS).await.unwrap();
+    assert!(report.warnings.is_empty(), "{report:?}");
+    let errors: Vec<(String, Option<(usize, usize)>)> = report
+        .errors
+        .iter()
+        .map(|d| (d.path.to_string(), d.location.map(|l| (l.line, l.column))))
+        .collect();
+    assert_eq!(
+        errors,
+        [("services.api.limits.cpus".to_owned(), Some((7, 30)))]
+    );
+    assert!(report.errors[0].message.contains("hoster-delegate.conf"));
+
+    // Unreadable: every limit set is in doubt.
+    std::fs::remove_file(h._dir.path().join(
+        "host/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cgroup.controllers",
+    ))
+    .unwrap();
+    let report = h.orchestrator.check_file(WITH_LIMITS).await.unwrap();
+    let paths: Vec<String> = report.errors.iter().map(|d| d.path.to_string()).collect();
+    assert_eq!(
+        paths,
+        ["services.api.limits.memory", "services.api.limits.cpus"]
+    );
+
+    h.delegate("cpu memory pids\n");
+    h.host_file("proc/meminfo", "MemTotal:       32768 kB\n");
+    h.host_file("sys/devices/system/cpu/online", "0\n");
+    let report = h.orchestrator.check_file(WITH_LIMITS).await.unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    let warnings: Vec<(String, String)> = report
+        .warnings
+        .iter()
+        .map(|d| (d.path.to_string(), d.message.clone()))
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            (
+                "services.api.limits.memory".to_owned(),
+                "`memory = \"64MiB\"` is more than this host's 32 MiB of memory (MemTotal), so \
+                 it caps nothing"
+                    .to_owned()
+            ),
+            (
+                "services.api.limits.cpus".to_owned(),
+                "`cpus = 1.5` is more than this host's 1 CPU, so it caps nothing".to_owned()
+            ),
+        ]
+    );
+    let applied = h.apply(WITH_LIMITS).await;
+    assert_eq!(applied.warnings, report.warnings);
 }

@@ -87,7 +87,7 @@ Go through the compose file service by service. Most keys have a direct counterp
 | `shm_size: 256m` | `shm_size = "256MiB"`. Sizes need a unit spelled out: `m` becomes `MiB`, and a bare number of bytes is an error (Stack file format, §2.2.2). |
 | `tmpfs: /tmp` or `tmpfs: ["/run:size=16m"]` | `tmpfs = { "/tmp" = "64MiB" }`: every mount needs a size, and gets mode 1777 and no other options. |
 | `init: true` | `init = true`. |
-| `deploy.resources.limits`, `mem_limit`, `cpus` | Planned for a later release ([ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). |
+| `deploy.resources.limits` (`memory`, `cpus`, `pids`), `mem_limit`, `cpus`, `pids_limit` | `limits = { memory = "512MiB", cpus = 1.5, pids = 512 }` (Stack file format, §2.2.3). `memory` is a hard limit with no swap (compose's `memswap_limit` has no counterpart), and needs a unit like `shm_size`: `512m` becomes `"512MiB"`. `cpus: "1.5"` becomes the number `1.5`. Reservations (`deploy.resources.reservations`, `mem_reservation`) and `cpu_shares` have no counterpart. |
 
 Some compose keys have **no equivalent**, on purpose: an app on hoster gets nothing on the host
 beyond its containers ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)).
@@ -171,6 +171,10 @@ port = 3000
 http = { path = "/health" }
 start_period = "90s"                           # migrations run at start-up
 
+[services.web.limits]
+memory = "512MiB"                              # twice that during a deploy (§4.7)
+cpus = 1
+
 # ─── The worker: same image, another command, no routes ──────────────────────
 [services.worker]
 image = "ghcr.io/example/tracker:2.4"
@@ -192,6 +196,10 @@ shm_size = "256MiB"                            # parallel queries outgrow the de
 [services.db.health]
 exec = ["pg_isready", "-h", "127.0.0.1", "-U", "tracker"]
 start_period = "2m"
+
+[services.db.limits]
+memory = "1GiB"                                # shm_size counts against it
+pids = 256
 
 # ─── Redis ───────────────────────────────────────────────────────────────────
 [services.cache]
@@ -227,6 +235,12 @@ exec = ["sh", "-c", "redis-cli ping | grep -q PONG"]
 - **`shm_size`** for `db`, which the compose file didn't set: Docker's default `/dev/shm` is 64 MB
   and podman's 62.5 MiB, and Postgres's parallel queries can fail with `could not resize shared
   memory segment` on either.
+- **`limits`** for `web` and `db`, which the compose file didn't set: without them one
+  runaway query or request can take the host's memory from everything else, hoster included. The
+  host's user instance must delegate the cgroup controllers ([[install#cgroup-delegation-and-catatonit|Install]]),
+  or the apply is rejected naming the fix. `db`'s 1 GiB covers its 256 MiB of `/dev/shm`, which
+  counts against the limit. `web` is start-first, so during a deploy the old and the new
+  container each may use 512 MiB (§4.7).
 - **`stop-first`** for `db` and `cache`, which each own a volume (§4.5). `web` keeps the
   zero-downtime default, which is why its `config.yml` says uploads go in the database: a volume
   for uploads would need `stop-first` too.
@@ -333,6 +347,19 @@ Do it when nobody uses the app: anything written between the dump and the restor
 
 Read the image's release notes too: a major version sometimes moves its data directory or
 changes its defaults.
+
+## 4.7 Limits and start-first deploys
+
+A start-first deploy starts the new container next to the old one and stops the old one only
+once the new one passes its check. Both run with the service's `limits` in the meantime, so a
+service with `memory = "512MiB"` can use 1 GiB for the length of the overlap, and the same goes
+for CPU time and processes. Size the host for the sum of every start-first service's limits
+counted twice, or set `update = "stop-first"` where the memory matters more than the gap.
+Leave room for hoster, its proxy and podman as well: hoster reserves nothing for itself.
+
+A container that goes over `memory` is OOM-killed, also during a deploy's health check, which
+then fails. Shared memory (`shm_size`) and `tmpfs` count against the limit, and so does
+podman's own tmpfs on `/tmp`, `/run` and `/var/tmp` with `read_only = true`.
 
 # 5. Editing the stack file in the UI
 

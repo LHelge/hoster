@@ -19,8 +19,8 @@ pub type SecretVersions = BTreeMap<String, SecretVersion>;
 /// SHA-256 over a service's resolved spec, everything but the image digest: the second half of
 /// the idempotency key (ADR-0029). It covers the container environment including the injected
 /// `PORT` (ADR-0051), the *versions* of the secrets it references (never their values),
-/// command, volumes, config files (ADR-0057), runtime options (ADR-0059), update strategy, health
-/// and routes. It leaves out `depends_on`
+/// command, volumes, config files (ADR-0057), runtime options and limits (ADR-0059), update
+/// strategy, health and routes. It leaves out `depends_on`
 /// (ADR-0056 Decision 1): changing it reorders starts and never recreates a container.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConfigHash(String);
@@ -134,6 +134,21 @@ impl ConfigHash {
         }
         if service.init {
             spec["init"] = Value::from(true);
+        }
+        // ADR-0059 §4: each limit only when set (`memory` as bytes, `cpus` as the nano-CPUs
+        // podman gets), and an empty table not at all.
+        let mut limits = serde_json::Map::new();
+        if let Some(memory) = service.limits.memory {
+            limits.insert("memory".into(), Value::from(u64::from(memory)));
+        }
+        if let Some(pids) = service.limits.pids {
+            limits.insert("pids".into(), Value::from(pids));
+        }
+        if let Some(cpus) = service.limits.cpus {
+            limits.insert("cpus".into(), Value::from(i64::from(cpus)));
+        }
+        if !limits.is_empty() {
+            spec["limits"] = Value::Object(limits);
         }
         // serde_json's map is ordered, so the text is canonical.
         Self(Self::hex(&Sha256::digest(spec.to_string().as_bytes())))
@@ -809,6 +824,53 @@ update = "stop-first"
             "shm_size = \"256MiB\"\ntmpfs = { \"/tmp\" = \"65MiB\" }\ninit = true",
             "shm_size = \"256MiB\"\ntmpfs = { \"/run\" = \"64MiB\" }\ninit = true",
             "shm_size = \"256MiB\"\ntmpfs = { \"/tmp\" = \"64MiB\", \"/run\" = \"1MiB\" }\ninit = true",
+        ] {
+            assert!(
+                hashes.insert(hash(&with(changed), "api", &none)),
+                "{changed} hashes like another spec"
+            );
+        }
+    }
+
+    /// ADR-0059 §4: each limit is part of the hash only when set, `memory` by bytes and `cpus`
+    /// by nano-CPUs; `limits = {}` hashes like a service without the table.
+    #[test]
+    fn config_hash_covers_limits_only_when_set() {
+        let none = SecretVersions::new();
+        let with = |limits: &str| {
+            stack(&STACK.replace(
+                "image = \"ghcr.io/acme/notes-api\"",
+                &format!("image = \"ghcr.io/acme/notes-api\"\nlimits = {{ {limits} }}"),
+            ))
+        };
+        let plain = hash(&stack(STACK), "api", &none);
+        assert_eq!(plain, hash(&with(""), "api", &none));
+        let base = with("memory = \"512MiB\", pids = 256, cpus = 1.5");
+        assert_ne!(plain, hash(&base, "api", &none));
+        assert_eq!(
+            hash(&stack(STACK), "storage", &none),
+            hash(&base, "storage", &none)
+        );
+        // The same bytes or nano-CPUs written another way are the same spec.
+        for same in [
+            "memory = \"536870912B\", pids = 256, cpus = 1.5",
+            "memory = \"524288KiB\", pids = 256, cpus = 1.5000000001",
+        ] {
+            assert_eq!(
+                hash(&base, "api", &none),
+                hash(&with(same), "api", &none),
+                "{same}"
+            );
+        }
+        let mut hashes = std::collections::HashSet::from([hash(&base, "api", &none), plain]);
+        for changed in [
+            "memory = \"512MiB\"",
+            "pids = 256",
+            "cpus = 1.5",
+            "memory = \"512MB\", pids = 256, cpus = 1.5",
+            "memory = \"512MiB\", pids = 257, cpus = 1.5",
+            "memory = \"512MiB\", pids = 256, cpus = 1.6",
+            "memory = \"512MiB\", pids = 256, cpus = 1.500000001",
         ] {
             assert!(
                 hashes.insert(hash(&with(changed), "api", &none)),

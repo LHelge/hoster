@@ -829,6 +829,7 @@ impl From<OrchestratorError> for Outcome {
             | E::Digest { .. }
             | E::NotRedeployable { .. }
             | E::Unsupported(_)
+            | E::Undelegated(_)
             | E::VolumeConfirmation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             E::StackBusy(_)
             | E::Removing(_)

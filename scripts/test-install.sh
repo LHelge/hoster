@@ -6,7 +6,10 @@
 #     the config, and starts nothing;
 #   - a re-run changes nothing (and keeps an edited config);
 #   - newer releases switch `current` and prune to current + previous;
-#   - a downgrade, a checksum mismatch and a rolled-back version are refused or kept.
+#   - a downgrade, a checksum mismatch and a rolled-back version are refused or kept;
+#   - a user manager without the cpu controller gets the delegation drop-in and a restart while
+#     hoster is idle; an existing drop-in is left alone; with hoster enabled, a hoster container
+#     running or podman failing, it gets only a notice.
 #
 # It changes the host for real (user `hoster`, /etc/sysctl.d, linger), so it only runs on a
 # disposable machine, as root, with HOSTER_INSTALL_TEST_DISPOSABLE=1 (CI's runner does that).
@@ -196,6 +199,7 @@ check "state dir 0700" test "$(stat -c '%a %U' "$home/.local/share/hoster")" = "
 check "config dir 0700" test "$(stat -c '%a %U' "$home/.config/hoster")" = "700 hoster"
 check "hoster on PATH" test "$(readlink "$home/.local/bin/hoster")" = ../lib/hoster/current/hoster
 check "podman.socket enabled" as_hoster systemctl --user -q is-enabled podman.socket
+check "catatonit installed where podman looks" test -e /usr/libexec/podman/catatonit -o -e /usr/lib/podman/catatonit
 check "hoster.service not started" not as_hoster systemctl --user -q is-active hoster.service
 check "hoster.service not enabled" not as_hoster systemctl --user -q is-enabled hoster.service
 check "doctor ran" out_has "stub doctor for v0.1.0"
@@ -251,6 +255,99 @@ check "re-run after rollback succeeds" install_from "$HOSTER_INSTALL_RELEASES_UR
 check "current stays v0.1.1" test "$(current)" = versions/v0.1.1
 check "explicit --version switches forward" install_from "$HOSTER_INSTALL_RELEASES_URL/latest/download/install.sh" --version v0.1.2
 check "current is v0.1.2 again" test "$(current)" = versions/v0.1.2
+
+echo "--- cgroup delegation (ADR-0059)"
+uid=$(id -u hoster)
+unit=user@$uid.service
+controllers=/sys/fs/cgroup/user.slice/user-$uid.slice/$unit/cgroup.controllers
+dropin=/etc/systemd/system/$unit.d/hoster-delegate.conf
+undelegate=/etc/systemd/system/user@.service.d/00-test-undelegate.conf
+manager_pid() { systemctl show -p MainPID --value "$unit"; }
+has_cpu() { grep -qw cpu "$controllers"; }
+# Restarts the user manager, whose template's delegation is cut to `pids memory` (Ubuntu
+# 22.04's default) while $undelegate exists; a drop-in named later still adds to it.
+restart_manager() {
+    systemctl daemon-reload
+    # The checks restart it more often than its start limit allows.
+    systemctl reset-failed "$unit"
+    systemctl restart "$unit"
+    for _ in $(seq 1 60); do
+        [ -S "/run/user/$uid/systemd/private" ] && return
+        sleep 0.5
+    done
+    echo "error: $unit did not come back" >&2
+    exit 1
+}
+undelegate_cpu() {
+    mkdir -p "${undelegate%/*}"
+    printf '[Service]\nDelegate=\nDelegate=pids memory\n' > "$undelegate"
+}
+# Rootless podman cannot run inside this test's container (nested user namespaces), so
+# install.sh's `podman ps` goes through a stand-in that answers as $podman_mode says: no
+# containers, a running hoster-* container, or a failure (explicit, since real podman works on
+# a VM such as the CI runner); anything else goes to the real podman.
+podman_mode=/run/test-podman-mode
+cat > /usr/local/bin/podman << SHIM
+#!/bin/sh
+if [ "\$1" = ps ]; then
+    case \$(cat $podman_mode 2> /dev/null) in
+        none) exit 0 ;;
+        running) echo 0123456789ab && exit 0 ;;
+        fail) echo 'Error: unable to connect to Podman socket' >&2 && exit 125 ;;
+    esac
+fi
+exec /usr/bin/podman "\$@"
+SHIM
+chmod 0755 /usr/local/bin/podman
+# Runs install.sh with cpu taken away from the user manager, the drop-in as $1 says (absent, or
+# the admin's own) and podman answering $2. Sets before_pid to the manager's PID before it.
+undelegated_install() {
+    undelegate_cpu
+    rm -f "$dropin"
+    if [ "$1" = own ]; then
+        mkdir -p "${dropin%/*}"
+        echo "# the admin's own" > "$dropin"
+    fi
+    echo "$2" > "$podman_mode"
+    restart_manager
+    before_pid=$(manager_pid)
+    install_from "$HOSTER_INSTALL_RELEASES_URL/latest/download/install.sh"
+}
+undelegate_cpu
+restart_manager
+if has_cpu; then
+    echo "note: cannot take the cpu controller away from $unit here; skipping the delegation checks"
+else
+    check "install while hoster is idle succeeds" undelegated_install absent none
+    check "drop-in written" grep -qx 'Delegate=cpu memory pids' "$dropin"
+    check "drop-in is 0644 root" test "$(stat -c '%a %U' "$dropin")" = "644 root"
+    check "idle user manager restarted" test "$(manager_pid)" != "$before_pid"
+    check "cpu delegated after the restart" has_cpu
+    check "podman.socket listening after the restart" as_hoster systemctl --user -q is-active podman.socket
+
+    check "install with an existing drop-in succeeds" undelegated_install own none
+    check "existing drop-in left alone" grep -qx "# the admin's own" "$dropin"
+    check "existing drop-in reported" out_has "$dropin exists and is left alone"
+    check "a drop-in that adds nothing is warned about" out_has "its configuration does not add them"
+    check "no restart for a drop-in that adds nothing" test "$(manager_pid)" = "$before_pid"
+
+    as_hoster systemctl --user enable hoster.service > /dev/null 2>&1
+    check "install with hoster enabled succeeds" undelegated_install absent none
+    as_hoster systemctl --user disable hoster.service > /dev/null 2>&1
+    check "drop-in written while hoster is enabled" grep -qx 'Delegate=cpu memory pids' "$dropin"
+    check "no restart while hoster is enabled" test "$(manager_pid)" = "$before_pid"
+    check "restart notice printed" out_has "delegates cpu once it restarts"
+    check "hoster.service still not started" not as_hoster systemctl --user -q is-active hoster.service
+
+    check "install with a hoster container running succeeds" undelegated_install absent running
+    check "no restart while a hoster container runs" test "$(manager_pid)" = "$before_pid"
+    check "drop-in written while a container runs" test -f "$dropin"
+
+    check "install when podman cannot tell succeeds" undelegated_install absent fail
+    check "no restart when podman cannot tell" test "$(manager_pid)" = "$before_pid"
+fi
+rm -f "$undelegate" /usr/local/bin/podman "$podman_mode"
+restart_manager
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed" >&2

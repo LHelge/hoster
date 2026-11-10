@@ -8,13 +8,13 @@
 //! addresses; tests use a fixed [`Facts`]. Nothing here fails: a fact that cannot be read is
 //! `None` and shown as unknown.
 
-use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::acme::DnsCheck;
+use crate::machine::{Machine, Memory};
 use crate::runtime::EngineInfo;
 use crate::web::containers::ContainerSource;
 use crate::web::ui::Uptime;
@@ -162,25 +162,6 @@ impl Facts {
     }
 }
 
-/// A size in bytes, in GiB with one decimal (MiB below one GiB).
-struct Memory(u64);
-
-impl fmt::Display for Memory {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const MIB: f64 = 1024.0 * 1024.0;
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a memory size shown with one decimal"
-        )]
-        let mib = self.0 as f64 / MIB;
-        if mib >= 1024.0 {
-            write!(f, "{:.1} GiB", mib / 1024.0)
-        } else {
-            write!(f, "{mib:.0} MiB")
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl HostFacts for Facts {
     /// Always these facts (tests and the UI preview).
@@ -193,6 +174,8 @@ impl HostFacts for Facts {
 pub struct LocalHost {
     /// `/`, or a directory standing in for it in tests.
     root: PathBuf,
+    /// Memory and CPUs, read as the orchestrator reads them for resource limits.
+    machine: Machine,
     runtime: Arc<dyn ContainerSource>,
     dns: DnsCheck,
     data_dir: PathBuf,
@@ -207,6 +190,7 @@ impl LocalHost {
     pub fn new(runtime: Arc<dyn ContainerSource>, dns: DnsCheck, data_dir: PathBuf) -> Self {
         Self {
             root: PathBuf::from("/"),
+            machine: Machine::local(),
             runtime,
             dns,
             data_dir,
@@ -217,6 +201,7 @@ impl LocalHost {
     #[cfg(test)]
     pub fn under(mut self, root: &std::path::Path) -> Self {
         self.root = root.to_path_buf();
+        self.machine = Machine::under(root, 1000);
         self
     }
 
@@ -234,32 +219,11 @@ impl LocalHost {
             .and_then(|text| OsRelease(&text).pretty_name())
     }
 
-    /// `MemTotal` from `/proc/meminfo`, in bytes.
-    fn memory(&self) -> Option<u64> {
-        let text = self.file("proc/meminfo")?;
-        let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
-        let mut words = line.split_whitespace().skip(1);
-        let value: u64 = words.next()?.parse().ok()?;
-        match words.next() {
-            Some("kB") => value.checked_mul(1024),
-            None => Some(value),
-            Some(_) => None,
-        }
-    }
-
     /// The first number of `/proc/uptime`.
     fn uptime(&self) -> Option<Duration> {
         let text = self.file("proc/uptime")?;
         let secs: f64 = text.split_whitespace().next()?.parse().ok()?;
         Duration::try_from_secs_f64(secs).ok()
-    }
-
-    /// The online CPUs from `/sys/devices/system/cpu/online`; when that cannot be read, the CPUs
-    /// hoster may run on (which a cgroup quota or affinity mask can make fewer).
-    fn cpus(&self) -> Option<usize> {
-        self.file("sys/devices/system/cpu/online")
-            .and_then(|list| CpuList(&list).count())
-            .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
     }
 
     /// `2` when the unified hierarchy is mounted, `1` when only the legacy one is.
@@ -298,8 +262,8 @@ impl HostFacts for LocalHost {
             os: self.os(),
             kernel: self.file("proc/sys/kernel/osrelease"),
             arch: Some(std::env::consts::ARCH.to_owned()),
-            cpus: self.cpus(),
-            memory: self.memory(),
+            cpus: self.machine.cpus(),
+            memory: self.machine.memory(),
             engine: self.engine().await,
             cgroups: self.cgroups(),
             public_source: (!public.is_empty()).then(|| self.dns.source().to_string()),
@@ -307,21 +271,6 @@ impl HostFacts for LocalHost {
             data_dir: Some(self.data_dir.clone()),
             uptime: self.uptime(),
         }
-    }
-}
-
-/// A kernel CPU list (`0-7`, `0,2-3`), as in `/sys/devices/system/cpu/online`.
-struct CpuList<'a>(&'a str);
-
-impl CpuList<'_> {
-    /// How many CPUs the list names; `None` when it is not a CPU list.
-    fn count(&self) -> Option<usize> {
-        self.0.trim().split(',').try_fold(0usize, |count, range| {
-            let (first, last) = range.split_once('-').unwrap_or((range, range));
-            let (first, last): (usize, usize) =
-                (first.trim().parse().ok()?, last.trim().parse().ok()?);
-            count.checked_add(last.checked_sub(first)? + 1)
-        })
     }
 }
 
@@ -381,15 +330,6 @@ mod tests {
             Some("Arch Linux")
         );
         assert_eq!(OsRelease("PRETTY_NAME=\n").pretty_name(), None);
-    }
-
-    #[test]
-    fn cpu_lists_are_counted() {
-        assert_eq!(CpuList("0-7\n").count(), Some(8));
-        assert_eq!(CpuList("0").count(), Some(1));
-        assert_eq!(CpuList("0,2-3,8-11").count(), Some(7));
-        assert_eq!(CpuList("").count(), None);
-        assert_eq!(CpuList("3-1").count(), None);
     }
 
     #[tokio::test]

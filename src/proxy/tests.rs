@@ -38,8 +38,8 @@ use crate::routing::{
     DesiredStack, DesiredState, DrainOutcome, Reserved, RouteTable, Target, UnixUpstream, Upstream,
 };
 use crate::stack::{
-    DEFAULT_DRAIN_TIMEOUT, DEFAULT_STOP_TIMEOUT, Name, Route, RouteTimeouts, Service, Stack,
-    UpdateStrategy,
+    DEFAULT_DRAIN_TIMEOUT, DEFAULT_STOP_TIMEOUT, Limits, Name, Route, RouteTimeouts, Service,
+    Stack, UpdateStrategy,
 };
 use crate::stats::{StatusClass, Traffic};
 use crate::web::{Listen, TestApp, WebServer};
@@ -174,6 +174,7 @@ fn service(routes: Vec<Route>) -> Service {
         shm_size: None,
         tmpfs: BTreeMap::new(),
         init: false,
+        limits: Limits::default(),
         routes,
     }
 }
