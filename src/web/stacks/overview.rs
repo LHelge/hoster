@@ -36,9 +36,9 @@ use self::services::{ServiceRow, ServiceTable};
 use super::frame::{StackHeader, Tab};
 use super::list::StackCard;
 use super::{Outcome, Stacks, When};
-use crate::orchestrator::StackStatus;
+use crate::orchestrator::{StackSecret, StackStatus};
 use crate::runtime::VolumeMount;
-use crate::stack::Stack;
+use crate::stack::{ConfigFile, ContainerPath, FileSource, Ownership, Stack};
 use crate::stats::{Elapsed, Stats};
 use crate::store::WebhookRejection;
 use crate::web::auth::{Auth, Session};
@@ -62,11 +62,18 @@ impl Stacks {
             Err(outcome) => return outcome.page(layout),
         };
         let feed = StackFeed::new(stacks.clone(), &name);
-        let (volumes, events) = tokio::join!(stacks.0.volumes(&name), feed.read());
+        let (volumes, secrets, events) = tokio::join!(
+            stacks.0.volumes(&name),
+            stacks.0.secrets(&name),
+            feed.read()
+        );
         let volumes = match volumes {
             Ok(volumes) => volumes,
             Err(err) => return Outcome::from(err).page(layout),
         };
+        // Only the "not set" mark of a file's secret needs them; the environment tab reports
+        // a store that cannot be read.
+        let secrets = secrets.ok();
         let containers = containers
             .of_stack(&name)
             .await
@@ -81,6 +88,7 @@ impl Stacks {
             stack: StackView::new(
                 &status,
                 volumes,
+                secrets.as_deref(),
                 containers,
                 events,
                 &Readings::of(&stats).await,
@@ -130,6 +138,8 @@ pub struct StackView {
     routes: Vec<String>,
     /// The named volumes of every revision, which removing with `delete_volumes` deletes.
     volumes: Vec<VolumeView>,
+    /// The config files of the active revision (ADR-0057), service by service.
+    files: Vec<FileRow>,
     /// The KPI tiles.
     kpis: Vec<Kpi>,
     /// The routes the proxy has counted, slowest first.
@@ -179,6 +189,11 @@ impl StackView {
         self.volumes.iter().filter(|v| !v.mounts.is_empty())
     }
 
+    /// Where a file's secret is set or replaced.
+    fn environment_url(&self) -> String {
+        format!("{}/environment", self.url)
+    }
+
     /// How many volumes only earlier revisions declare.
     fn unmounted(&self) -> usize {
         self.volumes.iter().filter(|v| v.mounts.is_empty()).count()
@@ -198,10 +213,12 @@ impl StackView {
 impl StackView {
     /// The overview of `status`, whose revisions declare `volumes` (podman names), with its
     /// `containers` (or why they cannot be listed), `events` as its Recent events card and the
-    /// figures of `readings`.
+    /// figures of `readings`. `secrets` are the stack's, when the store could be read, for the
+    /// "not set" mark of a config file's secret.
     fn new(
         status: &StackStatus,
         volumes: BTreeSet<String>,
+        secrets: Option<&[StackSecret]>,
         containers: Result<StackContainers, String>,
         events: RecentEvents,
         readings: &Readings,
@@ -222,6 +239,105 @@ impl StackView {
             rejections: status.rejections.iter().map(RejectionView::from).collect(),
             routes: StackCard::routes(status),
             volumes: VolumeView::all(status, volumes),
+            files: stack
+                .as_ref()
+                .map(|stack| FileRow::all(stack, secrets))
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// One config file of the active revision (ADR-0057 §10): where it goes, who may read it and
+/// where its content comes from. The content itself is never part of the page.
+#[derive(Debug, PartialEq, Eq)]
+struct FileRow {
+    service: String,
+    path: String,
+    /// Four octal digits, the default resolved.
+    mode: String,
+    /// `uid:gid`, or "container user" for a secret file without `owner`.
+    owner: String,
+    content: FileContent,
+}
+
+/// Where a config file's content comes from.
+#[derive(Debug, PartialEq, Eq)]
+enum FileContent {
+    /// Text in the stack file, by its size.
+    Inline { size: String },
+    Secret {
+        /// The secret's full name, `<stack>/<name>`.
+        full: String,
+        /// Whether it is set; `None` when the secret store could not be read.
+        set: Option<bool>,
+    },
+}
+
+impl FileRow {
+    /// Every config file of `stack`, by service and path. `secrets` are the stack's, as
+    /// [`crate::orchestrator::Orchestrator::secrets`] lists them.
+    fn all(stack: &Stack, secrets: Option<&[StackSecret]>) -> Vec<Self> {
+        let prefix = format!("{}/", stack.name);
+        stack
+            .services
+            .iter()
+            .flat_map(|(service, spec)| {
+                let prefix = &prefix;
+                spec.files.iter().map(move |(path, file)| {
+                    Self::new(service.as_ref(), path, file, prefix, secrets)
+                })
+            })
+            .collect()
+    }
+
+    fn new(
+        service: &str,
+        path: &ContainerPath,
+        file: &ConfigFile,
+        prefix: &str,
+        secrets: Option<&[StackSecret]>,
+    ) -> Self {
+        let content = match &file.source {
+            FileSource::Inline(content) => FileContent::Inline {
+                size: FileSize(content.len()).to_string(),
+            },
+            FileSource::Secret(full) => {
+                let name = full.strip_prefix(prefix).unwrap_or(full);
+                FileContent::Secret {
+                    full: full.clone(),
+                    set: secrets.map(|secrets| {
+                        secrets
+                            .iter()
+                            .any(|s| s.name == name && s.updated_at.is_some())
+                    }),
+                }
+            }
+        };
+        Self {
+            service: service.to_owned(),
+            path: path.to_string(),
+            mode: file.resolved_mode().to_string(),
+            owner: match file.ownership() {
+                Ownership::Ids(owner) => owner.to_string(),
+                Ownership::ContainerUser => "container user".to_owned(),
+            },
+            content,
+        }
+    }
+}
+
+/// A file's size as the files card shows it: `812 B`, `1.5 KiB`.
+struct FileSize(usize);
+
+impl std::fmt::Display for FileSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            bytes @ 0..1024 => write!(f, "{bytes} B"),
+            // Tenths of a KiB, rounded up so a file never looks smaller than it is.
+            bytes => {
+                let tenths = (bytes * 10).div_ceil(1024);
+                write!(f, "{}.{} KiB", tenths / 10, tenths % 10)
+            }
         }
     }
 }
@@ -334,6 +450,7 @@ mod tests {
         let view = StackView::new(
             &notes_status(),
             BTreeSet::new(),
+            None,
             Ok(StackContainers::default()),
             RecentEvents::of_stack("notes", Some(Vec::new()), std::time::SystemTime::now()),
             &Readings::default(),

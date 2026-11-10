@@ -1,10 +1,10 @@
 ---
 id: dgq
 title: "CI: run the config-files podman test on ubuntu-26.04 (podman 5.7)"
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-10T15:21:06.344379894Z"
-updated: "2026-11-10T15:21:06.344379894Z"
+updated: "2026-11-10T16:17:14.091812628Z"
 tags:
   - ci
   - runtime
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - rp5
 parent: xgf
+attempts: 1
 ---
 
 ## Summary

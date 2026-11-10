@@ -2228,3 +2228,152 @@ async fn the_overview_shows_kpis_slowest_routes_routes_and_volumes() {
     );
     assert!(!html.contains("style="), "{html}");
 }
+
+/// `NOTES` with config files (ADR-0057): two on `api`, one of them a secret that is set, and a
+/// secret file on `storage` whose secret is not.
+fn notes_with_files() -> String {
+    format!(
+        "{NOTES}\n[services.api.files]\n\
+         \"/etc/notes/config.yml\" = {{ content = \"\"\"\nlisten: 8080\npassword: inline-hunter2\n\"\"\" }}\n\
+         \"/run/secrets/db.json\" = {{ secret = \"notes/db\", mode = \"0440\", owner = \"0:65534\" }}\n\n\
+         [services.storage.files]\n\"/etc/rustfs/license\" = {{ secret = \"notes/missing\" }}\n"
+    )
+}
+
+/// ADR-0057 §10: the overview lists each file's path, mode, owner and size or secret name,
+/// and never its content.
+#[tokio::test]
+async fn the_overview_lists_config_files_without_their_content() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    // No files, no card.
+    let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(!html.contains(r#"id="files""#), "{html}");
+    assert!(!html.contains("config file"), "{html}");
+
+    app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 4, &notes_with_files());
+    let response = app.get("/stacks/notes", Some(&browser.cookie)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(
+        html.contains(
+            r#"<h2 id="files-title">Config files <span class="card-count">· 3</span></h2>"#
+        ),
+        "{html}"
+    );
+    // The service rows point at the card.
+    assert!(
+        html.contains(r##"<a class="service-deps" href="#files">2 config files</a>"##),
+        "{html}"
+    );
+    assert!(
+        html.contains(r##"<a class="service-deps" href="#files">1 config file</a>"##),
+        "{html}"
+    );
+    let card = &html[html.find(r#"id="files""#).unwrap()..];
+    let card = &card[..card.find("</section>").unwrap()];
+    let cells: Vec<&str> = card
+        .split("<tr>")
+        .skip(2)
+        .map(|row| row.split("</tr>").next().unwrap().trim())
+        .collect();
+    assert_eq!(cells.len(), 3, "{card}");
+    // Inline: the defaults resolved, and the size.
+    for part in [
+        r#"<span class="mono">api</span>"#,
+        r#"<code class="wrap">/etc/notes/config.yml</code>"#,
+        r#"<td class="mono nowrap">0444</td>"#,
+        r#"<td class="mono nowrap">0:0</td>"#,
+        r#"<span class="tag tag-neutral">inline</span> <span class="muted nowrap">38 B</span>"#,
+    ] {
+        assert!(cells[0].contains(part), "{part} in {}", cells[0]);
+    }
+    // A secret that is set: its name, linked to where it is replaced.
+    for part in [
+        r#"<code class="wrap">/run/secrets/db.json</code>"#,
+        r#"<td class="mono nowrap">0440</td>"#,
+        r#"<td class="mono nowrap">0:65534</td>"#,
+        r#"<a href="/stacks/notes/environment"><code class="env-secret">notes/db</code></a>"#,
+    ] {
+        assert!(cells[1].contains(part), "{part} in {}", cells[1]);
+    }
+    assert!(!cells[1].contains("not set"), "{}", cells[1]);
+    // One that is not: marked like in the environment tab, owned by the container's user.
+    for part in [
+        r#"<span class="mono">storage</span>"#,
+        r#"<td class="mono nowrap">0400</td>"#,
+        r#"<td class="mono nowrap">container user</td>"#,
+        r#"<code class="env-secret">notes/missing</code></a> <span class="pill pill-warn""#,
+        "not set",
+    ] {
+        assert!(cells[2].contains(part), "{part} in {}", cells[2]);
+    }
+    // Neither inline nor secret content is on the page.
+    assert!(!html.contains("inline-hunter2"), "{html}");
+    assert!(!html.contains("listen: 8080"), "{html}");
+}
+
+/// The plan says which file makes a service redeploy.
+#[tokio::test]
+async fn the_preview_names_the_files_that_redeploy_a_service() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 4, &notes_with_files());
+    *app.stacks.changed.lock().unwrap() = vec!["api".into(), "storage".into()];
+
+    let preview = |toml: String| {
+        let (app, browser) = (&app, &browser);
+        async move {
+            let response = app
+                .send(post(
+                    "/apply/preview",
+                    browser,
+                    FORM,
+                    encoded(&[("toml", &toml)]),
+                ))
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            body(response).await
+        }
+    };
+    let changed = notes_with_files()
+        .replace("listen: 8080", "listen: 9090")
+        .replace(
+            "secret = \"notes/missing\"",
+            "secret = \"notes/missing\", mode = \"0444\"",
+        );
+    let html = preview(changed).await;
+    assert!(
+        html.contains(
+            r#"redeploy <strong>api</strong> <span class="plan-note">file /etc/notes/config.yml changed</span>"#
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"redeploy <strong>storage</strong> <span class="plan-note">file /etc/rustfs/license changed</span>"#
+        ),
+        "{html}"
+    );
+
+    // Added and removed files are named too; a service redeployed for another reason says
+    // nothing about files.
+    let changed = notes_with_files()
+        .replace("\"/run/secrets/db.json\"", "\"/run/secrets/database.json\"")
+        .replace("RUSTFS_ADDRESS = \":9000\"", "RUSTFS_ADDRESS = \":9001\"");
+    let html = preview(changed).await;
+    assert!(
+        html.contains(
+            r#"redeploy <strong>api</strong> <span class="plan-note">files /run/secrets/db.json removed, /run/secrets/database.json added</span>"#
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"redeploy <strong>storage</strong></span>"#),
+        "{html}"
+    );
+    // The diff and the confirm form carry the file, like any stack file text, but the plan
+    // never quotes content.
+    let plan = &html[..html.find("</ol>").unwrap()];
+    assert!(!plan.contains("inline-hunter2"), "{plan}");
+}

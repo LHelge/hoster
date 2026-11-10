@@ -19,6 +19,38 @@ pub(super) fn dependency_example() -> &'static str {
     &section[start..start + len]
 }
 
+/// The third worked example (§3.3): an image configured by an inline file and a secret file.
+pub(super) fn files_example() -> &'static str {
+    let doc = include_str!("../../site/content/wiki/stack-format.md");
+    let section = &doc[doc.find("\n## 3.3 Worked example").expect("§3.3 exists")..];
+    let start = section.find("```toml\n").expect("§3.3 has a TOML block") + "```toml\n".len();
+    let len = section[start..].find("```").expect("TOML block is closed");
+    &section[start..start + len]
+}
+
+#[test]
+fn files_example_validates_with_the_documented_owners_and_modes() {
+    let parsed = parse(files_example()).expect("§3.3 is valid");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let files = &parsed.stack.services[&"proxy".parse::<Name>().unwrap()].files;
+    let summary: Vec<String> = files
+        .iter()
+        .map(|(path, file)| format!("{path} {} {}", file.resolved_mode(), file.ownership()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            "/etc/nginx/conf.d/default.conf 0444 0:0",
+            "/etc/nginx/htpasswd 0440 0:101"
+        ]
+    );
+    // The multi-line string starts at its first line, as the reference says.
+    let FileSource::Inline(config) = &files.values().next().unwrap().source else {
+        panic!("inline");
+    };
+    assert!(config.starts_with("server {\n"), "{config}");
+}
+
 #[test]
 fn dependency_example_validates_with_its_dependencies_and_checks() {
     let parsed = parse(dependency_example()).expect("§3.2 is valid");
