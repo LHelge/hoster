@@ -150,6 +150,24 @@ impl Pattern {
     pub const FILE_MODE: &str = "^0[0-7]{3}$";
     /// A numeric `uid:gid`, each at most 65535 ([`FileOwner`](super::FileOwner)).
     pub const FILE_OWNER: &str = concat!("^", file_id!(), ":", file_id!(), "$");
+    /// A size of at least 1 MiB ([`ByteSize`](super::ByteSize) with the floor of `shm_size` and
+    /// `tmpfs`): for each unit, the numbers whose bytes reach 2²⁰, leading zeros allowed.
+    pub const SIZE: &str = concat!(
+        "^0*(",
+        // n ≥ 1048576
+        "([1-9][0-9]{7,}|[2-9][0-9]{6}|1[1-9][0-9]{5}|10[5-9][0-9]{4}|1049[0-9]{3}",
+        "|1048[6-9][0-9]{2}|10485[89][0-9]|104857[6-9])B",
+        // n ≥ 1049 (1048.576)
+        "|([1-9][0-9]{4,}|[2-9][0-9]{3}|1[1-9][0-9]{2}|10[5-9][0-9]|1049)KB",
+        // n ≥ 1024
+        "|([1-9][0-9]{4,}|[2-9][0-9]{3}|1[1-9][0-9]{2}|10[3-9][0-9]|102[4-9])KiB",
+        // n ≥ 2 (1.048576)
+        "|([1-9][0-9]+|[2-9])MB",
+        "|[1-9][0-9]*(MiB|GB|GiB)",
+        ")$",
+    );
+    /// A path at or in `/proc`, `/sys` or `/dev`, which podman mounts over.
+    pub const MOUNTED_OVER: &str = "^/(proc|sys|dev)(/|$)";
     /// An environment variable name.
     pub const ENV_NAME: &str = "^[A-Za-z_][A-Za-z0-9_]*$";
     /// A secret name, `<stack>/<name>`.
@@ -351,6 +369,27 @@ impl Field {
             "type": "object",
             "propertyNames": { "pattern": Pattern::NAME },
             "additionalProperties": { "type": "string", "pattern": Pattern::MOUNT_PATH },
+        })
+    }
+
+    /// A size of at least 1 MiB.
+    pub fn size(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "pattern": Pattern::SIZE,
+            "examples": ["64MiB", "1GiB"],
+        })
+    }
+
+    /// The `tmpfs` table: mount path → size.
+    pub fn tmpfs(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "propertyNames": {
+                "pattern": Pattern::MOUNT_PATH,
+                "not": { "pattern": Pattern::MOUNTED_OVER },
+            },
+            "additionalProperties": Self::size(generator),
         })
     }
 

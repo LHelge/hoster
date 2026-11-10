@@ -84,7 +84,9 @@ Go through the compose file service by service. Most keys have a direct counterp
 | `stop_grace_period` | `stop_timeout`. |
 | `restart` | Nothing: hoster always restarts containers that exit, and starts them after a reboot. |
 | `container_name`, `hostname`, `networks`, `links` | Nothing: each stack has one network, and each service's name is its DNS name on it. |
-| `shm_size`, `tmpfs`, `init` | Planned for a later release ([ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). |
+| `shm_size: 256m` | `shm_size = "256MiB"`. Sizes need a unit spelled out: `m` becomes `MiB`, and a bare number of bytes is an error (Stack file format, §2.2.2). |
+| `tmpfs: /tmp` or `tmpfs: ["/run:size=16m"]` | `tmpfs = { "/tmp" = "64MiB" }`: every mount needs a size, and gets mode 1777 and no other options. |
+| `init: true` | `init = true`. |
 | `deploy.resources.limits`, `mem_limit`, `cpus` | Planned for a later release ([ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). |
 
 Some compose keys have **no equivalent**, on purpose: an app on hoster gets nothing on the host
@@ -185,6 +187,7 @@ stop_timeout = "30s"
 env = { POSTGRES_USER = "tracker" }
 secrets = { POSTGRES_PASSWORD = "tracker/db-password" }
 volumes = { pgdata = "/var/lib/postgresql/data" }
+shm_size = "256MiB"                            # parallel queries outgrow the default 62.5 MiB
 
 [services.db.health]
 exec = ["pg_isready", "-h", "127.0.0.1", "-U", "tracker"]
@@ -221,6 +224,9 @@ exec = ["sh", "-c", "redis-cli ping | grep -q PONG"]
   initialisation. `cache` had no healthcheck in compose; it gets one, so `depends_on` can wait for
   redis to finish loading. `worker` has no routes and no `health` table, so it counts as healthy
   once it has run for 5 seconds.
+- **`shm_size`** for `db`, which the compose file didn't set: Docker's default `/dev/shm` is 64 MB
+  and podman's 62.5 MiB, and Postgres's parallel queries can fail with `could not resize shared
+  memory segment` on either.
 - **`stop-first`** for `db` and `cache`, which each own a volume (§4.5). `web` keeps the
   zero-downtime default, which is why its `config.yml` says uploads go in the database: a volume
   for uploads would need `stop-first` too.
@@ -333,7 +339,7 @@ changes its defaults.
 **Stacks → New stack** opens an editor with a starter skeleton. On a stack's page, **Edit stack
 file** opens the active revision's file as it was applied, comments included. The editor
 highlights the TOML, checks the file while you type and marks problems on their lines. Beside it
-are snippets for routes, volumes, health checks and files, and a reference of every field.
+are snippets for routes, volumes, health checks, files and tmpfs, and a reference of every field.
 **Check** then resolves the tags and shows the plan before you apply. If someone applies another
 revision while you edit, the preview says so.
 

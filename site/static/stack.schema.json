@@ -2,7 +2,7 @@
   "$id": "https://docs.hoster.lhelge.se/stack.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "hoster stack file",
-  "description": "A hoster stack file (`<stack>.stack.toml`): one or more services deployed together on one\npodman network. See https://docs.hoster.lhelge.se/wiki/stack-format/.\n\nThe schema checks each field on its own. hoster checks the rules that need more than one value\nwhen the stack is applied: a (host, prefix) used twice within the stack or by another stack;\n`depends_on` cycles, unknown services or a service naming itself; secrets of another stack; a\nname set in both `env` and `secrets`; a mount path used twice; a config file in, above or at a\nvolume, above another file or at a path podman manages, and the 256 KiB per file and 1 MiB per\nstack limits on inline `content`; a tag or digest on images other\nthan CI-built `ghcr.io` ones, and `track` only on those; `http` and `tcp` checks only on\nrouted services, against a route's port; a timings-only `health` table only on routed\nservices. It also rejects durations that overflow or whose fraction is not a whole number of\nnanoseconds, such as `\"0.001h\"`.",
+  "description": "A hoster stack file (`<stack>.stack.toml`): one or more services deployed together on one\npodman network. See https://docs.hoster.lhelge.se/wiki/stack-format/.\n\nThe schema checks each field on its own. hoster checks the rules that need more than one value\nwhen the stack is applied: a (host, prefix) used twice within the stack or by another stack;\n`depends_on` cycles, unknown services or a service naming itself; secrets of another stack; a\nname set in both `env` and `secrets`; a mount path used twice; a config file in, above or at a\nvolume, above another file or at a path podman manages, and the 256 KiB per file and 1 MiB per\nstack limits on inline `content`; a `tmpfs` path at, in or above a volume, a config file or\nanother `tmpfs` path; a tag or digest on images other\nthan CI-built `ghcr.io` ones, and `track` only on those; `http` and `tcp` checks only on\nrouted services, against a route's port; a timings-only `health` table only on routed\nservices. It also rejects durations that overflow or whose fraction is not a whole number of\nnanoseconds, such as `\"0.001h\"`, and sizes over 9223372036854775807 bytes.",
   "type": "object",
   "properties": {
     "deploy": {
@@ -327,8 +327,13 @@
           "type": "string",
           "pattern": "^(([a-z0-9.-]*\\.[a-z0-9.-]*|localhost)(:0*(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[0-9]{1,4}))?|[a-z0-9.-]+:0*(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[0-9]{1,4}))/[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[0-9a-f]{64})?$"
         },
+        "init": {
+          "description": "Run podman's init (catatonit) as PID 1, which passes signals on and reaps exited child\nprocesses, for images whose own process does neither. The host needs catatonit.",
+          "type": "boolean",
+          "default": false
+        },
         "read_only": {
-          "description": "Read-only root filesystem.",
+          "description": "Read-only root filesystem. podman then mounts an unsized tmpfs on `/tmp`, `/run` and\n`/var/tmp`; a `tmpfs` entry replaces the one at its own path.",
           "type": "boolean",
           "default": false
         },
@@ -351,11 +356,38 @@
             "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
           }
         },
+        "shm_size": {
+          "description": "Size of `/dev/shm`, at least `\"1MiB\"`, e.g. `\"256MiB\"` (ADR-0059). Without it podman's\n65536000 bytes (62.5 MiB), too little for PostgreSQL's parallel queries. A size is a whole\nnumber and a unit: `B`, `KB`, `MB`, `GB` (powers of 1000) or `KiB`, `MiB`, `GiB` (powers\nof 1024).",
+          "type": "string",
+          "examples": [
+            "64MiB",
+            "1GiB"
+          ],
+          "pattern": "^0*(([1-9][0-9]{7,}|[2-9][0-9]{6}|1[1-9][0-9]{5}|10[5-9][0-9]{4}|1049[0-9]{3}|1048[6-9][0-9]{2}|10485[89][0-9]|104857[6-9])B|([1-9][0-9]{4,}|[2-9][0-9]{3}|1[1-9][0-9]{2}|10[5-9][0-9]|1049)KB|([1-9][0-9]{4,}|[2-9][0-9]{3}|1[1-9][0-9]{2}|10[3-9][0-9]|102[4-9])KiB|([1-9][0-9]+|[2-9])MB|[1-9][0-9]*(MiB|GB|GiB))$"
+        },
         "stop_timeout": {
           "description": "SIGTERM → SIGKILL grace period when the container is stopped, as a duration such as\n`\"10s\"`.",
           "type": "string",
           "default": "10s",
           "pattern": "^[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*([0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(\\.[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[0-9][0-9\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y)|(nanos|nsec|ns|usec|us|µs|millis|msec|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m|hours|hour|hrs|hr|h|days|day|d|weeks|week|wks|wk|w|months|month|M|years|year|yrs|yr|y))[\\x09-\\x0D \\x85\\xA0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*)+$"
+        },
+        "tmpfs": {
+          "description": "Scratch space in memory: absolute container path → size, at least `\"1MiB\"`, e.g.\n`\"/var/cache/nginx\" = \"16MiB\"` (ADR-0059). Mounted read-write for everyone (mode 1777),\nemptied whenever the container stops. A path may not be in `/proc`, `/sys` or `/dev`\n(`/dev/shm` is `shm_size`'s), or at, in or above a volume, a config file or another\n`tmpfs` path.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "examples": [
+              "64MiB",
+              "1GiB"
+            ],
+            "pattern": "^0*(([1-9][0-9]{7,}|[2-9][0-9]{6}|1[1-9][0-9]{5}|10[5-9][0-9]{4}|1049[0-9]{3}|1048[6-9][0-9]{2}|10485[89][0-9]|104857[6-9])B|([1-9][0-9]{4,}|[2-9][0-9]{3}|1[1-9][0-9]{2}|10[5-9][0-9]|1049)KB|([1-9][0-9]{4,}|[2-9][0-9]{3}|1[1-9][0-9]{2}|10[3-9][0-9]|102[4-9])KiB|([1-9][0-9]+|[2-9])MB|[1-9][0-9]*(MiB|GB|GiB))$"
+          },
+          "propertyNames": {
+            "not": {
+              "pattern": "^/(proc|sys|dev)(/|$)"
+            },
+            "pattern": "^(/([^/:,.\\x00-\\x1f\\x7f-\\x9f][^/:,\\x00-\\x1f\\x7f-\\x9f]*|\\.[^/:,.\\x00-\\x1f\\x7f-\\x9f][^/:,\\x00-\\x1f\\x7f-\\x9f]*|\\.\\.[^/:,\\x00-\\x1f\\x7f-\\x9f]+))+$"
+          }
         },
         "track": {
           "description": "Tag the ghcr poller watches, e.g. `\"main\"` (ADR-0043). Only for CI-built `ghcr.io` images\nwithout a tag or digest.",

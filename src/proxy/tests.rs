@@ -171,6 +171,9 @@ fn service(routes: Vec<Route>) -> Service {
         stop_timeout: DEFAULT_STOP_TIMEOUT,
         user: None,
         read_only: false,
+        shm_size: None,
+        tmpfs: BTreeMap::new(),
+        init: false,
         routes,
     }
 }

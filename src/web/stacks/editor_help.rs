@@ -291,7 +291,7 @@ impl Snippet {
             id: "service",
             title: "Service",
             about: "Another container in the stack. The others reach it by its name.",
-            toml: "[services.worker]\nimage = \"ghcr.io/you/worker\"\n# depends_on = [\"web\"]\n# env = { LOG_LEVEL = \"info\" }\n",
+            toml: "[services.worker]\nimage = \"ghcr.io/you/worker\"\n# depends_on = [\"web\"]\n# env = { LOG_LEVEL = \"info\" }\n# shm_size = \"256MiB\"  # /dev/shm, 62.5 MiB by default\n# init = true          # an init as PID 1 reaps child processes\n",
             per_service: false,
         },
         Snippet {
@@ -332,6 +332,15 @@ impl Snippet {
             about: "A file written into the container before it starts, from the stack file \
                     or from a secret.",
             toml: "[services.web.files.\"/etc/app/config.toml\"]\ncontent = \"\"\"\nkey = \"value\"\n\"\"\"\n# Or the value of a secret set on the environment tab:\n# secret = \"<stack>/<name>\"\n",
+            per_service: true,
+        },
+        Snippet {
+            id: "tmpfs",
+            title: "Scratch space (tmpfs)",
+            about: "Directories in memory that any user in the container can write, emptied when \
+                    it stops: what an image with read_only = true still needs to write to. \
+                    shm_size and init go in the service's own table.",
+            toml: "[services.web.tmpfs]\n\"/tmp\" = \"64MiB\"\n# \"/var/cache/app\" = \"16MiB\"\n",
             per_service: true,
         },
         Snippet {
