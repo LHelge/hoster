@@ -17,12 +17,13 @@ use serde::Deserialize;
 use toml::Spanned;
 
 use super::dependency::Graph;
+use super::file::Overlap;
 use super::schema::Field;
 use super::{
-    ConfigFile, ContainerPath, DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH, DEFAULT_STOP_TIMEOUT,
-    DeployAuth, Diagnostic, ExpectStatus, FieldPath, FileMode, FileOwner, FileSource, HealthCheck,
-    Host, ImageRef, Location, Name, NormalizedPrefix, ParsedStack, Probe, Route, RouteTimeouts,
-    SUPPORTED_VERSION, Service, Stack, StackError, UpdateStrategy,
+    ByteSize, ConfigFile, ContainerPath, DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH,
+    DEFAULT_STOP_TIMEOUT, DeployAuth, Diagnostic, ExpectStatus, FieldPath, FileMode, FileOwner,
+    FileSource, HealthCheck, Host, ImageRef, Location, Name, NormalizedPrefix, ParsedStack, Probe,
+    Route, RouteTimeouts, SUPPORTED_VERSION, Service, Stack, StackError, UpdateStrategy,
 };
 use crate::health;
 
@@ -37,11 +38,12 @@ type Int = Spanned<i64>;
 /// `depends_on` cycles, unknown services or a service naming itself; secrets of another stack; a
 /// name set in both `env` and `secrets`; a mount path used twice; a config file in, above or at a
 /// volume, above another file or at a path podman manages, and the 256 KiB per file and 1 MiB per
-/// stack limits on inline `content`; a tag or digest on images other
+/// stack limits on inline `content`; a `tmpfs` path at, in or above a volume, a config file or
+/// another `tmpfs` path; a tag or digest on images other
 /// than CI-built `ghcr.io` ones, and `track` only on those; `http` and `tcp` checks only on
 /// routed services, against a route's port; a timings-only `health` table only on routed
 /// services. It also rejects durations that overflow or whose fraction is not a whole number of
-/// nanoseconds, such as `"0.001h"`.
+/// nanoseconds, such as `"0.001h"`, and sizes over 9223372036854775807 bytes.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "hoster stack file")]
@@ -178,14 +180,95 @@ struct RawService {
     #[serde(default)]
     #[schemars(schema_with = "Field::user")]
     user: Option<Str>,
-    /// Read-only root filesystem.
+    /// Read-only root filesystem. podman then mounts an unsized tmpfs on `/tmp`, `/run` and
+    /// `/var/tmp`; a `tmpfs` entry replaces the one at its own path.
     #[serde(default)]
     #[schemars(extend("default" = false))]
     read_only: bool,
+    /// Size of `/dev/shm`, at least `"1MiB"`, e.g. `"256MiB"` (ADR-0059). Without it podman's
+    /// 65536000 bytes (62.5 MiB), too little for PostgreSQL's parallel queries. A size is a whole
+    /// number and a unit: `B`, `KB`, `MB`, `GB` (powers of 1000) or `KiB`, `MiB`, `GiB` (powers
+    /// of 1024).
+    #[serde(default)]
+    #[schemars(schema_with = "Field::size")]
+    shm_size: Option<Spanned<RawSize>>,
+    /// Scratch space in memory: absolute container path → size, at least `"1MiB"`, e.g.
+    /// `"/var/cache/nginx" = "16MiB"` (ADR-0059). Mounted read-write for everyone (mode 1777),
+    /// emptied whenever the container stops. A path may not be in `/proc`, `/sys` or `/dev`
+    /// (`/dev/shm` is `shm_size`'s), or at, in or above a volume, a config file or another
+    /// `tmpfs` path.
+    #[serde(default)]
+    #[schemars(schema_with = "Field::tmpfs")]
+    tmpfs: BTreeMap<String, Spanned<RawSize>>,
+    /// Run podman's init (catatonit) as PID 1, which passes signals on and reaps exited child
+    /// processes, for images whose own process does neither. The host needs catatonit.
+    #[serde(default)]
+    #[schemars(extend("default" = false))]
+    init: bool,
     /// Routes from a (host, prefix) to a container port (ADR-0007). Without routes the service
     /// publishes no ports.
     #[serde(default)]
     routes: Vec<RawRoute>,
+}
+
+/// A size as a stack file writes it: a string such as `"512MiB"`, or a bare integer, which is
+/// an error the validator explains instead of serde's "expected a string".
+#[derive(Debug)]
+enum RawSize {
+    Text(String),
+    Integer(i64),
+}
+
+impl RawSize {
+    /// The size, at least `floor`, or the error to report.
+    fn size(&self, floor: ByteSize) -> Result<ByteSize, String> {
+        let text = match self {
+            RawSize::Text(text) => text,
+            // Compose reads an integer as bytes: name those bytes when they make a size.
+            RawSize::Integer(n) => {
+                let bytes = format!("{n}B").parse::<ByteSize>().ok();
+                let example = match bytes.filter(|b| *b >= floor) {
+                    Some(bytes) => format!("\"{bytes}\" for {n} bytes"),
+                    None => format!("\"{n}MiB\""),
+                };
+                return Err(format!(
+                    "invalid size {n}: write a size as a string with its unit, e.g. {example}"
+                ));
+            }
+        };
+        let size: ByteSize = text.parse()?;
+        if size < floor {
+            return Err(format!(
+                "invalid size `{}`: must be at least {floor}",
+                text.escape_debug()
+            ));
+        }
+        Ok(size)
+    }
+}
+
+impl<'de> Deserialize<'de> for RawSize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = RawSize;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a size such as \"512MiB\"")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<RawSize, E> {
+                Ok(RawSize::Text(v.to_owned()))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<RawSize, E> {
+                Ok(RawSize::Integer(v))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 /// A config file (ADR-0057): exactly one of `content` and `secret`, plus who may read it. The
@@ -456,6 +539,20 @@ impl<'s> Validator<'s> {
                 None
             }
         }
+    }
+
+    /// A size of at least `floor`, reporting the error at its span.
+    fn size(
+        &mut self,
+        path: &FieldPath,
+        value: &Spanned<RawSize>,
+        floor: ByteSize,
+    ) -> Option<ByteSize> {
+        value
+            .get_ref()
+            .size(floor)
+            .map_err(|e| self.error(path, value.span(), e))
+            .ok()
     }
 
     fn non_empty(&mut self, path: &FieldPath, value: &Str) -> Option<String> {
@@ -825,10 +922,7 @@ impl RawService {
                 v.error(
                     &volume_path,
                     target.span(),
-                    format!(
-                        "invalid mount path `{target_str}`: must be an absolute path below `/` \
-                         without empty, `.` or `..` segments, a trailing `/`, `:` or `,`"
-                    ),
+                    Self::mount_path_error(target_str),
                 );
                 valid = false;
             } else if !mount_paths.insert(target_str.clone()) {
@@ -876,10 +970,16 @@ impl RawService {
                 valid = false;
             }
         }
-        let files = files
+        let files: BTreeMap<ContainerPath, ConfigFile> = files
             .into_iter()
             .map(|(location, (file, _))| (location, file))
             .collect();
+
+        let shm_size = match &self.shm_size {
+            Some(size) => v.size(&path.key("shm_size"), size, ByteSize::MIB).map(Some),
+            None => Some(None),
+        };
+        let tmpfs = Self::validate_tmpfs(v, &path.key("tmpfs"), &self.tmpfs, &mount_paths, &files);
 
         let mut depends_on = BTreeSet::new();
         let mut listed = BTreeSet::new();
@@ -964,8 +1064,96 @@ impl RawService {
             stop_timeout: stop_timeout?,
             user: self.user.map(Spanned::into_inner),
             read_only: self.read_only,
+            shm_size: shm_size?,
+            tmpfs: tmpfs?,
+            init: self.init,
             routes,
         })
+    }
+
+    /// The `tmpfs` table (ADR-0059 §1): each path a mount path outside `/proc`, `/sys` and
+    /// `/dev`, not at, in or above one of the service's `volumes` (their valid mount paths),
+    /// `files` or other `tmpfs` paths, and each size at least 1 MiB.
+    fn validate_tmpfs(
+        v: &mut Validator<'_>,
+        path: &FieldPath,
+        raw: &BTreeMap<String, Spanned<RawSize>>,
+        volumes: &BTreeSet<String>,
+        files: &BTreeMap<ContainerPath, ConfigFile>,
+    ) -> Option<BTreeMap<ContainerPath, ByteSize>> {
+        // A tmpfs at a path no tmpfs may have is reported once, as that.
+        let mounts: Vec<&str> = raw
+            .keys()
+            .map(String::as_str)
+            .filter(|key| Self::tmpfs_target(key).is_ok())
+            .collect();
+        let mut valid = true;
+        let mut tmpfs = BTreeMap::new();
+        for (key, size) in raw {
+            let entry = path.key(key);
+            let span = size.span();
+            let size = v.size(&entry, size, ByteSize::MIB);
+            let problems = match Self::tmpfs_target(key) {
+                Ok(target) => {
+                    let problems = Self::tmpfs_overlaps(&target, volumes, files, &mounts);
+                    if let Some(size) = size {
+                        tmpfs.insert(target, size);
+                    }
+                    problems
+                }
+                Err(problem) => vec![problem],
+            };
+            valid &= size.is_some() && problems.is_empty();
+            for problem in problems {
+                v.error(&entry, span.clone(), problem);
+            }
+        }
+        valid.then_some(tmpfs)
+    }
+
+    /// `key` as a path a tmpfs may be mounted at, on its own.
+    fn tmpfs_target(key: &str) -> Result<ContainerPath, String> {
+        if !Self::is_mount_path(key) {
+            return Err(Self::mount_path_error(key));
+        }
+        let target: ContainerPath = key.parse()?;
+        target.check_tmpfs()?;
+        Ok(target)
+    }
+
+    /// How a tmpfs at `target` overlaps the service's other mounts and files: each volume and
+    /// file it is at, in or above, and each other tmpfs it is above (one below it reports the
+    /// pair).
+    fn tmpfs_overlaps(
+        target: &ContainerPath,
+        volumes: &BTreeSet<String>,
+        files: &BTreeMap<ContainerPath, ConfigFile>,
+        mounts: &[&str],
+    ) -> Vec<String> {
+        let volumes = volumes.iter().filter_map(|volume| {
+            Some(match target.overlap(volume)? {
+                Overlap::Same => format!("`{target}` is also the mount path of a volume"),
+                Overlap::Inside => format!("`{target}` is in the volume mounted at `{volume}`"),
+                Overlap::Above => {
+                    format!("`{target}` is a parent directory of the volume mounted at `{volume}`")
+                }
+            })
+        });
+        let files = files.keys().filter_map(|file| {
+            Some(match target.overlap(file.as_ref())? {
+                Overlap::Same => format!("`{target}` is also a config file"),
+                Overlap::Inside => format!("`{target}` is below the config file `{file}`"),
+                Overlap::Above => format!(
+                    "`{target}` is a parent directory of the config file `{file}`, which the \
+                     tmpfs would hide"
+                ),
+            })
+        });
+        let mounts = mounts
+            .iter()
+            .filter(|other| target.overlap(other) == Some(Overlap::Above))
+            .map(|other| format!("`{target}` is a parent directory of the tmpfs at `{other}`"));
+        volumes.chain(files).chain(mounts).collect()
     }
 
     /// An absolute container path with exactly one spelling, so duplicate mounts are caught
@@ -977,6 +1165,15 @@ impl RawService {
                 .all(|segment| !matches!(segment, "" | "." | ".."))
                 && !rest.chars().any(|c| c == ':' || c == ',' || c.is_control())
         })
+    }
+
+    /// What to tell the author of a `target` that fails [`Self::is_mount_path`].
+    fn mount_path_error(target: &str) -> String {
+        format!(
+            "invalid mount path `{}`: must be an absolute path below `/` without empty, `.` or \
+             `..` segments, a trailing `/`, `:` or `,`",
+            target.escape_debug()
+        )
     }
 
     /// `^[A-Za-z_][A-Za-z0-9_]*$`

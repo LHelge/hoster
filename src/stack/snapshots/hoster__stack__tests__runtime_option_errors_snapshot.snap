@@ -1,0 +1,42 @@
+---
+source: src/stack/tests.rs
+expression: parse(source).unwrap_err().to_string()
+---
+invalid stack file (37 errors):
+  line 9, column 12: services.app.shm_size: invalid size `512KiB`: must be at least 1MiB
+  line 12, column 14: services.app.tmpfs.relative: invalid mount path `relative`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 13, column 7: services.app.tmpfs."/": invalid mount path `/`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 14, column 13: services.app.tmpfs."/cache/": invalid mount path `/cache/`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 15, column 13: services.app.tmpfs."//cache": invalid mount path `//cache`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 16, column 12: services.app.tmpfs."/a/./b": invalid mount path `/a/./b`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 17, column 13: services.app.tmpfs."/a/../b": invalid mount path `/a/../b`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 18, column 10: services.app.tmpfs."/a:b": invalid mount path `/a:b`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 19, column 10: services.app.tmpfs."/a,b": invalid mount path `/a,b`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 20, column 14: services.app.tmpfs."/dev/shm": `/dev/shm` is podman's `/dev/shm`; set its size with `shm_size`
+  line 21, column 16: services.app.tmpfs."/dev/shm/x": `/dev/shm/x` is in podman's `/dev/shm`; set its size with `shm_size`
+  line 22, column 10: services.app.tmpfs."/dev": `/dev` is `/dev`, which podman mounts over in every container
+  line 23, column 13: services.app.tmpfs."/proc/x": `/proc/x` is in `/proc`, which podman mounts over in every container
+  line 24, column 10: services.app.tmpfs."/sys": `/sys` is `/sys`, which podman mounts over in every container
+  line 25, column 18: services.app.tmpfs."/var/lib/app": `/var/lib/app` is also the mount path of a volume
+  line 25, column 18: services.app.tmpfs."/var/lib/app": `/var/lib/app` is a parent directory of the tmpfs at `/var/lib/app/cache`
+  line 26, column 24: services.app.tmpfs."/var/lib/app/cache": `/var/lib/app/cache` is in the volume mounted at `/var/lib/app`
+  line 27, column 10: services.app.tmpfs."/var": `/var` is a parent directory of the volume mounted at `/var/lib/app`
+  line 27, column 10: services.app.tmpfs."/var": `/var` is a parent directory of the tmpfs at `/var/lib/app`
+  line 27, column 10: services.app.tmpfs."/var": `/var` is a parent directory of the tmpfs at `/var/lib/app/cache`
+  line 28, column 14: services.app.tmpfs."/etc/app": `/etc/app` is a parent directory of the config file `/etc/app/app.conf`, which the tmpfs would hide
+  line 29, column 19: services.app.tmpfs."/etc/one.conf": `/etc/one.conf` is also a config file
+  line 29, column 19: services.app.tmpfs."/etc/one.conf": `/etc/one.conf` is a parent directory of the tmpfs at `/etc/one.conf/x`
+  line 30, column 21: services.app.tmpfs."/etc/one.conf/x": `/etc/one.conf/x` is below the config file `/etc/one.conf`
+  line 31, column 10: services.app.tmpfs."/srv": `/srv` is a parent directory of the tmpfs at `/srv/inner`
+  line 33, column 11: services.app.tmpfs."/zero": invalid size `0B`: must be at least 1MiB
+  line 34, column 12: services.app.tmpfs."/small": invalid size `1048575B`: must be at least 1MiB
+  line 35, column 11: services.app.tmpfs."/bare": invalid size `512`: a size needs a unit, e.g. "512MiB"
+  line 36, column 14: services.app.tmpfs."/integer": invalid size 512: write a size as a string with its unit, e.g. "512MiB"
+  line 37, column 13: services.app.tmpfs."/docker": invalid size `512m`: units are case-sensitive: write "512MiB" (binary, what Docker's `m` means) or "512MB" (decimal)
+  line 38, column 15: services.app.tmpfs."/fraction": invalid size `1.5GiB`: a size is a whole number; use a smaller unit, e.g. "1536MiB" for 1.5 GiB
+  line 39, column 13: services.app.tmpfs."/spaced": invalid size `512 MiB`: write the number and the unit without a space, e.g. "512MiB"
+  line 40, column 14: services.app.tmpfs."/unknown": invalid size `1TiB`: unknown unit `TiB`; expected B, KB, MB, GB, KiB, MiB or GiB
+  line 41, column 11: services.app.tmpfs."/huge": invalid size `8589934592GiB`: more than 9223372036854775807 bytes
+  line 42, column 12: services.app.tmpfs."/both:": invalid size `0B`: must be at least 1MiB
+  line 42, column 12: services.app.tmpfs."/both:": invalid mount path `/both:`: must be an absolute path below `/` without empty, `.` or `..` segments, a trailing `/`, `:` or `,`
+  line 46, column 12: services.other.shm_size: invalid size 268435456: write a size as a string with its unit, e.g. "256MiB" for 268435456 bytes

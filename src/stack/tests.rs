@@ -1748,3 +1748,109 @@ fn secret_refs_list_env_then_files() {
         ]
     );
 }
+
+#[test]
+fn runtime_options_parse() {
+    let source = app_with(
+        r#"read_only = true
+shm_size = "256MiB"
+init = true
+tmpfs = { "/tmp" = "64MiB", "/var/cache/nginx" = "16MB" }"#,
+    );
+    let parsed = parse(&source).expect("valid");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let service = app(&parsed.stack);
+    assert_eq!(service.shm_size.map(u64::from), Some(256 << 20));
+    assert!(service.init);
+    let tmpfs: Vec<(String, u64)> = service
+        .tmpfs
+        .iter()
+        .map(|(path, size)| (path.to_string(), u64::from(*size)))
+        .collect();
+    assert_eq!(
+        tmpfs,
+        [
+            ("/tmp".to_owned(), 64 << 20),
+            ("/var/cache/nginx".to_owned(), 16_000_000)
+        ]
+    );
+
+    // Unset, and the explicit forms of unset.
+    for source in [MINIMAL.to_owned(), app_with("tmpfs = {}\ninit = false")] {
+        let stack = parse(&source).unwrap().stack;
+        let service = app(&stack);
+        assert_eq!(service.shm_size, None);
+        assert!(service.tmpfs.is_empty());
+        assert!(!service.init);
+    }
+    // The floor is inclusive, in any unit.
+    let floor = parse(&app_with(
+        "shm_size = \"1MiB\"\ntmpfs = { \"/a\" = \"1049KB\", \"/b\" = \"1048576B\" }",
+    ));
+    assert!(floor.is_ok(), "{floor:?}");
+}
+
+/// Every rule on `shm_size`, `tmpfs` and `init` (ADR-0059 §1, §3), all in one file.
+#[test]
+fn runtime_option_errors_snapshot() {
+    let source = r#"version = 1
+name = "demo"
+
+[services.app]
+image = "docker.io/library/nginx:1.27"
+update = "stop-first"
+volumes = { data = "/var/lib/app" }
+files = { "/etc/app/app.conf" = { content = "" }, "/etc/one.conf" = { content = "" } }
+shm_size = "512KiB"
+
+[services.app.tmpfs]
+"relative" = "1MiB"
+"/" = "1MiB"
+"/cache/" = "1MiB"
+"//cache" = "1MiB"
+"/a/./b" = "1MiB"
+"/a/../b" = "1MiB"
+"/a:b" = "1MiB"
+"/a,b" = "1MiB"
+"/dev/shm" = "1MiB"
+"/dev/shm/x" = "1MiB"
+"/dev" = "1MiB"
+"/proc/x" = "1MiB"
+"/sys" = "1MiB"
+"/var/lib/app" = "1MiB"
+"/var/lib/app/cache" = "1MiB"
+"/var" = "1MiB"
+"/etc/app" = "1MiB"
+"/etc/one.conf" = "1MiB"
+"/etc/one.conf/x" = "1MiB"
+"/srv" = "1MiB"
+"/srv/inner" = "1MiB"
+"/zero" = "0B"
+"/small" = "1048575B"
+"/bare" = "512"
+"/integer" = 512
+"/docker" = "512m"
+"/fraction" = "1.5GiB"
+"/spaced" = "512 MiB"
+"/unknown" = "1TiB"
+"/huge" = "8589934592GiB"
+"/both:" = "0B"
+
+[services.other]
+image = "docker.io/library/redis:7"
+shm_size = 268435456
+"#;
+    insta::assert_snapshot!(parse(source).unwrap_err().to_string());
+}
+
+#[test]
+fn tmpfs_paths_differing_by_a_prefix_only_are_independent() {
+    let source = app_with(
+        "update = \"stop-first\"\nvolumes = { data = \"/data\" }\n\
+         files = { \"/etc/app.conf\" = { content = \"\" } }\n\
+         tmpfs = { \"/data2\" = \"1MiB\", \"/etc/app.conf.d\" = \"1MiB\", \"/run\" = \"1MiB\", \
+         \"/run2\" = \"1MiB\", \"/devices\" = \"1MiB\", \"/dev2/shm\" = \"1MiB\" }",
+    );
+    let parsed = parse(&source);
+    assert!(parsed.is_ok(), "{parsed:?}");
+}

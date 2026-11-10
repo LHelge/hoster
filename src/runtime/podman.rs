@@ -342,6 +342,11 @@ impl<'a> Call<'a> {
     }
 }
 
+/// The options of every tmpfs mount (ADR-0059 §1, architecture §1.8): no `noexec`, and mode 1777
+/// so an image's non-root user can write to a directory the image already has, which would
+/// otherwise turn `root:root` under the mount.
+const TMPFS_OPTIONS: &str = "rw,nosuid,nodev,mode=1777";
+
 /// The create request, with every ADR-0019 setting pinned to its safe value: never privileged,
 /// the stack network only (no host network), private PID/IPC namespaces, no devices, no added
 /// capabilities, no binds. Ports go to 127.0.0.1 only (ADR-0007), podman never restarts a
@@ -397,6 +402,18 @@ impl From<&ContainerSpec> for ContainerCreateBody {
             userns_mode: None,
             readonly_rootfs: Some(spec.read_only),
             log_config: Some(ContainerLog::config()),
+            // ADR-0059: each only when the service sets it, so podman keeps its defaults.
+            shm_size: spec.shm_size.map(i64::from),
+            tmpfs: (!spec.tmpfs.is_empty()).then(|| {
+                spec.tmpfs
+                    .iter()
+                    .map(|(path, size)| {
+                        let options = format!("{TMPFS_OPTIONS},size={}", u64::from(*size));
+                        (path.to_string(), options)
+                    })
+                    .collect()
+            }),
+            init: spec.init.then_some(true),
             ..HostConfig::default()
         };
         // Podman would otherwise run a docker-format image's HEALTHCHECK itself, on systemd
@@ -2143,6 +2160,66 @@ mod tests {
         );
     }
 
+    /// ADR-0059 §4: `shm_size`, `tmpfs` and `init` reach the create request only when set.
+    #[test]
+    fn create_body_sets_runtime_options_only_when_set() {
+        let unset = ContainerCreateBody::from(&spec_for("notes", "web"))
+            .host_config
+            .unwrap();
+        assert_eq!(unset.shm_size, None);
+        assert_eq!(unset.tmpfs, None);
+        assert_eq!(unset.init, None);
+
+        let mut spec = spec_for("notes", "web");
+        spec.shm_size = Some("256MiB".parse().unwrap());
+        spec.tmpfs = std::collections::BTreeMap::from([
+            ("/tmp".parse().unwrap(), "64MiB".parse().unwrap()),
+            ("/var/cache/nginx".parse().unwrap(), "16MB".parse().unwrap()),
+        ]);
+        spec.init = true;
+        let host = ContainerCreateBody::from(&spec).host_config.unwrap();
+        assert_eq!(host.shm_size, Some(256 << 20));
+        assert_eq!(
+            host.tmpfs,
+            Some(HashMap::from([
+                (
+                    "/tmp".to_owned(),
+                    "rw,nosuid,nodev,mode=1777,size=67108864".to_owned()
+                ),
+                (
+                    "/var/cache/nginx".to_owned(),
+                    "rw,nosuid,nodev,mode=1777,size=16000000".to_owned()
+                ),
+            ]))
+        );
+        assert_eq!(host.init, Some(true));
+        // ADR-0019 and architecture §8 hold with every option set.
+        assert_eq!(host.privileged, Some(false));
+        assert_eq!(host.publish_all_ports, Some(false));
+        assert!(host.binds.is_none());
+        assert!(host.cap_add.is_none());
+        assert!(host.cap_drop.is_none());
+        assert!(host.security_opt.is_none());
+        assert!(host.sysctls.is_none());
+        assert!(host.ulimits.is_none());
+        assert!(host.devices.is_none());
+        assert!(host.ipc_mode.is_none());
+        assert!(host.pid_mode.is_none());
+        assert!(host.uts_mode.is_none());
+        assert!(host.userns_mode.is_none());
+        assert!(host.oom_kill_disable.is_none());
+        assert!(host.oom_score_adj.is_none());
+        assert!(host.cpuset_cpus.is_none());
+        assert!(host.memory.is_none());
+        assert!(host.pids_limit.is_none());
+        assert!(host.nano_cpus.is_none());
+
+        // `init = false` is unset, not `Init: false`.
+        spec.init = false;
+        let host = ContainerCreateBody::from(&spec).host_config.unwrap();
+        assert_eq!(host.init, None);
+    }
+
     #[test]
     fn create_body_turns_podmans_own_healthcheck_off() {
         // Every container, whatever its spec: hoster runs all checks itself (ADR-0056).
@@ -3458,6 +3535,66 @@ mod tests {
                     ..
                 })
             ));
+        })
+        .await;
+    }
+
+    /// ADR-0059 on real podman (architecture §1.8): `/dev/shm` has `shm_size`, a tmpfs on a
+    /// directory the image has (root's, mode 755) gets its size and mode 1777 and a non-root
+    /// user can write to it, and `init` makes PID 1 podman's init. `read_only` keeps podman's
+    /// own tmpfs on `/run` and `/var/tmp`.
+    #[tokio::test]
+    async fn runtime_options_reach_the_container() {
+        with_stack(|runtime, stack| async move {
+            running_sleeper(&runtime, &stack).await;
+            let mut spec = spec_for(stack.as_ref(), "options");
+            spec.command = Some(argv(&["sleep", "600"]));
+            spec.stop_timeout = Duration::from_secs(1);
+            spec.user = Some("1000:1000".into());
+            spec.read_only = true;
+            spec.shm_size = Some("256MiB".parse().unwrap());
+            spec.tmpfs = std::collections::BTreeMap::from([(
+                "/home".parse().unwrap(),
+                "16MiB".parse().unwrap(),
+            )]);
+            spec.init = true;
+            let id = runtime.create_container(&spec).await.unwrap();
+            runtime.start(&id).await.unwrap();
+
+            let (code, output) = sh(
+                &runtime,
+                &id,
+                "df -k /dev/shm /home | tail -n 2 | awk '{print $6, $2}'; stat -c '%a %U' /home; \
+                 touch /home/written && echo written; tr '\\0' ' ' < /proc/1/cmdline; echo; \
+                 grep -E ' /(home|run|var/tmp) ' /proc/mounts | awk '{print \"mount\", $2, $4}'",
+            )
+            .await;
+            assert_eq!(code, 0, "{output}");
+            let lines: Vec<&str> = output.lines().collect();
+            assert_eq!(
+                lines[..4],
+                ["/dev/shm 262144", "/home 16384", "1777 root", "written"]
+            );
+            assert!(
+                lines[4].starts_with("/run/podman-init -- sleep 600"),
+                "PID 1 is {:?}",
+                lines[4]
+            );
+            let mount = |path: &str| {
+                let prefix = format!("mount {path} ");
+                *lines
+                    .iter()
+                    .find(|l| l.starts_with(&prefix))
+                    .unwrap_or_else(|| panic!("{path} is not a mount: {output}"))
+            };
+            let home = mount("/home");
+            assert!(home.contains("nosuid") && home.contains("nodev"), "{home}");
+            assert!(!home.contains("noexec"), "{home}");
+            assert!(home.contains("size=16384k"), "{home}");
+            // podman's own, unsized: only the declared path is replaced.
+            for own in ["/run", "/var/tmp"] {
+                assert!(!mount(own).contains("size="), "{}", mount(own));
+            }
         })
         .await;
     }

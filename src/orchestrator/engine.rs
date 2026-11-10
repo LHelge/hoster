@@ -1324,6 +1324,9 @@ impl Run {
         spec.user = service.user.clone();
         spec.read_only = service.read_only;
         spec.stop_timeout = service.stop_timeout;
+        spec.shm_size = service.shm_size;
+        spec.tmpfs = service.tmpfs.clone();
+        spec.init = service.init;
         let ports = self.ports.get(&change.service).cloned().unwrap_or_default();
         spec.ports = ports
             .into_iter()

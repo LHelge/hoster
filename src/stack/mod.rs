@@ -25,6 +25,7 @@ mod image;
 mod raw;
 mod route;
 mod schema;
+mod size;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -38,6 +39,7 @@ pub use file::{ConfigFile, ContainerPath, FileMode, FileOwner, FileSource, Owner
 pub use image::{Digest, ImageRef, PinnedImage};
 pub use route::{Host, NormalizedPrefix};
 pub use schema::StackSchema;
+pub use size::ByteSize;
 
 /// Default upper bound for draining old upstreams (ADR-0017).
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -145,6 +147,14 @@ pub struct Service {
     /// `uid[:gid]` inside the container.
     pub user: Option<String>,
     pub read_only: bool,
+    /// The size of `/dev/shm`, at least 1 MiB (ADR-0059 §1). `None` keeps podman's 65536000
+    /// bytes.
+    pub shm_size: Option<ByteSize>,
+    /// tmpfs mounts by container path, each at least 1 MiB (ADR-0059 §1). No path is in
+    /// `/proc`, `/sys` or `/dev`, or at, in or above a volume, a config file or another tmpfs.
+    pub tmpfs: BTreeMap<ContainerPath, ByteSize>,
+    /// Run podman's init (catatonit) as PID 1 (ADR-0059 §1).
+    pub init: bool,
     pub routes: Vec<Route>,
 }
 

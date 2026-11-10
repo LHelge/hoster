@@ -23,7 +23,7 @@ use futures_util::stream::BoxStream;
 
 use crate::registry::CredentialError;
 use crate::secrets::SecretValue;
-use crate::stack::{DEFAULT_STOP_TIMEOUT, Name, PinnedImage, Stack};
+use crate::stack::{ByteSize, ContainerPath, DEFAULT_STOP_TIMEOUT, Name, PinnedImage, Stack};
 use crate::store::DeploymentId;
 
 #[allow(
@@ -436,6 +436,12 @@ pub struct ContainerSpec {
     pub user: Option<String>,
     pub read_only: bool,
     pub stop_timeout: Duration,
+    /// The size of `/dev/shm`; `None` keeps podman's (ADR-0059).
+    pub shm_size: Option<ByteSize>,
+    /// tmpfs mounts by path, each mounted writable for everyone (mode 1777) at its size.
+    pub tmpfs: BTreeMap<ContainerPath, ByteSize>,
+    /// Run podman's init as PID 1.
+    pub init: bool,
 }
 
 #[allow(
@@ -482,6 +488,9 @@ impl ContainerSpec {
             user: None,
             read_only: false,
             stop_timeout: DEFAULT_STOP_TIMEOUT,
+            shm_size: None,
+            tmpfs: BTreeMap::new(),
+            init: false,
         }
     }
 

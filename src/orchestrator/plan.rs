@@ -19,7 +19,8 @@ pub type SecretVersions = BTreeMap<String, SecretVersion>;
 /// SHA-256 over a service's resolved spec, everything but the image digest: the second half of
 /// the idempotency key (ADR-0029). It covers the container environment including the injected
 /// `PORT` (ADR-0051), the *versions* of the secrets it references (never their values),
-/// command, volumes, config files (ADR-0057), update strategy, health and routes. It leaves out `depends_on`
+/// command, volumes, config files (ADR-0057), runtime options (ADR-0059), update strategy, health
+/// and routes. It leaves out `depends_on`
 /// (ADR-0056 Decision 1): changing it reorders starts and never recreates a container.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConfigHash(String);
@@ -117,6 +118,22 @@ impl ConfigHash {
                 })
                 .collect();
             spec["files"] = Value::from(files);
+        }
+        // New in ADR-0059 and hashed only when set, like `files`: sizes as bytes, `tmpfs` as a
+        // map sorted by path, `init` only when true.
+        if let Some(size) = service.shm_size {
+            spec["shm_size"] = Value::from(u64::from(size));
+        }
+        if !service.tmpfs.is_empty() {
+            let tmpfs: BTreeMap<&str, u64> = service
+                .tmpfs
+                .iter()
+                .map(|(path, size)| (path.as_ref(), u64::from(*size)))
+                .collect();
+            spec["tmpfs"] = json!(tmpfs);
+        }
+        if service.init {
+            spec["init"] = Value::from(true);
         }
         // serde_json's map is ordered, so the text is canonical.
         Self(Self::hex(&Sha256::digest(spec.to_string().as_bytes())))
@@ -756,6 +773,48 @@ update = "stop-first"
             hash(&secret, "storage", &none),
             hash(&secret, "storage", &version(1))
         );
+    }
+
+    /// ADR-0059 §4: `shm_size`, `tmpfs` and `init` are part of the hash when set, by bytes, and
+    /// `tmpfs = {}` and `init = false` hash like a service without them.
+    #[test]
+    fn config_hash_covers_runtime_options_only_when_set() {
+        let none = SecretVersions::new();
+        let with = |lines: &str| {
+            stack(&STACK.replace(
+                "image = \"ghcr.io/acme/notes-api\"",
+                &format!("image = \"ghcr.io/acme/notes-api\"\n{lines}"),
+            ))
+        };
+        let plain = hash(&stack(STACK), "api", &none);
+        for unset in ["tmpfs = {}", "init = false", "tmpfs = {}\ninit = false"] {
+            assert_eq!(plain, hash(&with(unset), "api", &none), "{unset}");
+        }
+        let base = with("shm_size = \"256MiB\"\ntmpfs = { \"/tmp\" = \"64MiB\" }\ninit = true");
+        assert_ne!(plain, hash(&base, "api", &none));
+        assert_eq!(
+            hash(&stack(STACK), "storage", &none),
+            hash(&base, "storage", &none)
+        );
+        // The same bytes in another unit are the same spec.
+        let respelled =
+            with("shm_size = \"268435456B\"\ntmpfs = { \"/tmp\" = \"65536KiB\" }\ninit = true");
+        assert_eq!(hash(&base, "api", &none), hash(&respelled, "api", &none));
+        let mut hashes = std::collections::HashSet::from([hash(&base, "api", &none)]);
+        for changed in [
+            "shm_size = \"256MiB\"",
+            "tmpfs = { \"/tmp\" = \"64MiB\" }",
+            "init = true",
+            "shm_size = \"256MB\"\ntmpfs = { \"/tmp\" = \"64MiB\" }\ninit = true",
+            "shm_size = \"256MiB\"\ntmpfs = { \"/tmp\" = \"65MiB\" }\ninit = true",
+            "shm_size = \"256MiB\"\ntmpfs = { \"/run\" = \"64MiB\" }\ninit = true",
+            "shm_size = \"256MiB\"\ntmpfs = { \"/tmp\" = \"64MiB\", \"/run\" = \"1MiB\" }\ninit = true",
+        ] {
+            assert!(
+                hashes.insert(hash(&with(changed), "api", &none)),
+                "{changed} hashes like another spec"
+            );
+        }
     }
 
     /// `depends_on` reorders starts but never recreates a container (ADR-0056 Decision 1); an

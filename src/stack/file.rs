@@ -5,6 +5,9 @@
 //! The types validate one value each. The rules between a file and the rest of its service
 //! (other files, volumes) are checked at apply in `raw.rs`; the ones a deploy has to repeat on
 //! a path resolved inside the container are [`ContainerPath::check_placement`].
+//!
+//! [`ContainerPath`] is also where a `tmpfs` mount goes (ADR-0059 §1), checked by
+//! [`ContainerPath::check_tmpfs`].
 
 use std::fmt;
 use std::str::FromStr;
@@ -52,15 +55,7 @@ impl ContainerPath {
         &self,
         volumes: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), String> {
-        if let Some(dir) = Self::MOUNTED_OVER
-            .iter()
-            .find(|dir| Self::within(&self.0, dir))
-        {
-            let place = if self.0 == **dir { "is" } else { "is in" };
-            return Err(format!(
-                "`{self}` {place} `{dir}`, which podman mounts over in every container"
-            ));
-        }
+        self.check_not_mounted_over()?;
         if Self::MANAGED.contains(&self.0.as_str()) {
             return Err(format!(
                 "`{self}` is written by podman itself and cannot be a config file"
@@ -90,6 +85,50 @@ impl ContainerPath {
         Ok(())
     }
 
+    /// Whether a tmpfs may be mounted here (ADR-0059 §1): not at or in `/proc`, `/sys` or
+    /// `/dev`, and so not at `/dev/shm`, which `shm_size` sizes. Overlaps with the service's
+    /// other mounts are [`ContainerPath::overlap`].
+    pub fn check_tmpfs(&self) -> Result<(), String> {
+        const SHM: &str = "/dev/shm";
+        if Self::within(&self.0, SHM) {
+            let place = if self.0 == SHM { "is" } else { "is in" };
+            return Err(format!(
+                "`{self}` {place} podman's `{SHM}`; set its size with `shm_size`"
+            ));
+        }
+        self.check_not_mounted_over()
+    }
+
+    /// Not at or in one of [`Self::MOUNTED_OVER`].
+    fn check_not_mounted_over(&self) -> Result<(), String> {
+        match Self::MOUNTED_OVER
+            .iter()
+            .find(|dir| Self::within(&self.0, dir))
+        {
+            Some(dir) => {
+                let place = if self.0 == **dir { "is" } else { "is in" };
+                Err(format!(
+                    "`{self}` {place} `{dir}`, which podman mounts over in every container"
+                ))
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// How this path lies against `other`, another mount target or file path of the same
+    /// container; `None` when neither is at or in the other.
+    pub(super) fn overlap(&self, other: &str) -> Option<Overlap> {
+        if self.0 == other {
+            Some(Overlap::Same)
+        } else if Self::within(&self.0, other) {
+            Some(Overlap::Inside)
+        } else if Self::within(other, &self.0) {
+            Some(Overlap::Above)
+        } else {
+            None
+        }
+    }
+
     /// The directories above this path, outermost first, without `/`: `/etc` and `/etc/app`
     /// for `/etc/app/a.conf`.
     pub fn ancestors(&self) -> impl Iterator<Item = &str> {
@@ -98,6 +137,17 @@ impl ContainerPath {
             .skip(1)
             .map(|(end, _)| &self.0[..end])
     }
+}
+
+/// How one container path lies against another ([`ContainerPath::overlap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Overlap {
+    /// They are the same path.
+    Same,
+    /// This path is below the other.
+    Inside,
+    /// This path is a directory above the other.
+    Above,
 }
 
 impl FromStr for ContainerPath {

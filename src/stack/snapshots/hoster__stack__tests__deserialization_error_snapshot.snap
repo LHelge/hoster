@@ -2,4 +2,4 @@
 source: src/stack/tests.rs
 expression: parse(&source).unwrap_err().to_string()
 ---
-invalid stack file: line 7, column 1: services.app.resources: unknown field `resources`, expected one of `image`, `track`, `command`, `entrypoint`, `env`, `secrets`, `volumes`, `files`, `health`, `update`, `depends_on`, `stop_timeout`, `user`, `read_only`, `routes`
+invalid stack file: line 7, column 1: services.app.resources: unknown field `resources`, expected one of `image`, `track`, `command`, `entrypoint`, `env`, `secrets`, `volumes`, `files`, `health`, `update`, `depends_on`, `stop_timeout`, `user`, `read_only`, `shm_size`, `tmpfs`, `init`, `routes`

@@ -738,6 +738,9 @@ mod tests {
             user: None,
             read_only: false,
             stop_timeout: Duration::from_secs(10),
+            shm_size: None,
+            tmpfs: BTreeMap::new(),
+            init: false,
         }
     }
 

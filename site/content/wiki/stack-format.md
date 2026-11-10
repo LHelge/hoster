@@ -139,11 +139,15 @@ name = "notes"       # required; stack name
 | `update` | string | no | `"start-first"` (default; zero-downtime) or `"stop-first"` (for services that cannot run twice; short outage with 503 + `Retry-After`) ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
 | `stop_timeout` | duration | no | Default `10s`. SIGTERM → SIGKILL grace period. |
 | `user` | string | no | `uid[:gid]` inside the container. |
-| `read_only` | bool | no | Default `false`. Read-only root filesystem. |
+| `read_only` | bool | no | Default `false`. Read-only root filesystem. podman then mounts its own unsized tmpfs on `/tmp`, `/run` and `/var/tmp`; see §2.2.2. |
+| `shm_size` | size | no | Size of `/dev/shm`, at least `"1MiB"`, e.g. `"256MiB"` (§2.2.2, [ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). Default podman's 65536000 bytes (62.5 MiB). |
+| `tmpfs` | table path → size | no | In-memory directories: absolute container path → size, each at least `"1MiB"`, e.g. `{ "/tmp" = "64MiB" }` (§2.2.2, [ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). Mounted `rw,nosuid,nodev,mode=1777`. |
+| `init` | bool | no | Default `false`. Runs podman's init (catatonit) as PID 1 (§2.2.2, [ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md)). |
 | `routes` | array of route | no | Zero or more. If empty, the service publishes no ports ([ADR-0007](https://github.com/LHelge/hoster/blob/main/docs/adr/0007-route-model-and-loopback-only-publishing.md)). |
 
 There are intentionally **no** fields for `ports`, `privileged`, `network_mode`, `cap_add`,
 `devices`, bind mounts, or the podman socket ([ADR-0007](https://github.com/LHelge/hoster/blob/main/docs/adr/0007-route-model-and-loopback-only-publishing.md), [ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)).
+Nor for the other runtime settings compose offers (§2.2.2).
 
 ## 2.2.1 Config files ([ADR-0057](https://github.com/LHelge/hoster/blob/main/docs/adr/0057-config-files-in-stack-files.md))
 
@@ -222,6 +226,71 @@ output is redacted for the whole value and for each of its lines of four charact
   `/run/secrets/`, hiding files written there. Use another directory on those hosts.
 
 A worked example is in §3.3.
+
+## 2.2.2 Shared memory, tmpfs and init ([ADR-0059](https://github.com/LHelge/hoster/blob/main/docs/adr/0059-runtime-options-and-resource-limits.md))
+
+Some images need more of the container than its file system. Postgres outgrows the default
+`/dev/shm`, an image with `read_only = true` still writes a cache or a PID file somewhere, and a
+process that starts children without reaping them needs an init. Three service fields cover
+that:
+
+```toml
+[services.db]
+image = "docker.io/library/postgres:17"
+shm_size = "256MiB"          # /dev/shm; podman's default is 62.5 MiB
+
+[services.web]
+image = "docker.io/nginxinc/nginx-unprivileged:1.27"
+read_only = true
+tmpfs = { "/var/cache/nginx" = "16MiB", "/tmp" = "8MiB" }
+init = true                  # catatonit as PID 1
+```
+
+**Sizes** are strings: a whole number and a unit, with no space and no fraction. The units are
+`B`, `KB`, `MB` and `GB` (1000, 1000², 1000³ bytes) and `KiB`, `MiB` and `GiB` (1024, 1024²,
+1024³ bytes), and they are case-sensitive. A bare number (`512` or `"512"`) and Docker's `512m`
+are errors that suggest `"512MiB"`: `m` doesn't say whether it means 1000² or 1024². A size is
+at most 9223372036854775807 bytes. `shm_size` and every `tmpfs` size are at least `"1MiB"`,
+so `"0B"` never means "podman's default".
+
+**`shm_size`** sizes `/dev/shm`. Without it podman gives 65536000 bytes (62.5 MiB), too little
+for Postgres's parallel queries (`could not resize shared memory segment`).
+
+**`tmpfs`** mounts a directory in memory at each path, at most its size. It is empty at every
+start, so it holds scratch data only: anything to keep belongs in a volume. Each mount is
+`rw,nosuid,nodev,mode=1777`, executable and writable by every user in the container. The mode
+matters for a directory the image already has: without it the mount comes out owned by root
+with the image directory's mode, and an image that runs as another user (nginx-unprivileged's
+`/var/cache/nginx`, uid 101) could not write there. A path is absolute and written one way (no
+`.`, `..` or empty segment, no trailing `/`, no `:` or `,`), and may not be:
+
+- `/`, in `/proc`, `/sys` or `/dev`, which podman mounts over (`/dev/shm` is sized by
+  `shm_size`);
+- at, in or a parent directory of one of the service's `volumes`, `files` or other `tmpfs`
+  paths.
+
+**With `read_only = true`** podman mounts its own unsized tmpfs on `/tmp`, `/run` and
+`/var/tmp`, so those three stay writable without a `tmpfs` entry. Declaring one of them replaces
+podman's mount at that path only: `tmpfs = { "/tmp" = "64MiB" }` caps `/tmp`, and `/run` and
+`/var/tmp` stay podman's, without a size. Shared memory and tmpfs pages count as the
+container's memory.
+
+**`init = true`** runs podman's init, catatonit, as PID 1. It passes signals on to the image's
+process and reaps the exited child processes that an app running as PID 1 often leaves as
+zombies. `init = false` is the same as leaving it out. The host needs the `catatonit` package
+(`apt-get install catatonit` or `dnf install catatonit`): without it the container cannot be
+created and the deploy fails. podman bind-mounts the init binary into the container itself, the
+only host file a stack file can bring in.
+
+A change to any of the three is part of the service's config hash, so it recreates the
+service's containers through a normal deploy. A service without them keeps the hash it had
+before these fields existed.
+
+**Not expressible.** Other runtime settings stay unknown fields, most because they reach into
+the host or the kernel ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)): `stop_signal`, `cap_add`, `cap_drop`, `sysctls`,
+`devices`, `privileged`, `ulimits`, `security_opt`, the `ipc` and `pid` modes, OOM-killer tuning,
+cpusets, I/O limits, reservations and CPU shares. Each can be added on its own once an image
+needs it. There is no `noexec` tmpfs and no per-mount option.
 
 ## 2.3 Route
 

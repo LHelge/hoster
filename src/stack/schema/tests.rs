@@ -524,6 +524,108 @@ fn mount_paths_agree() {
     );
 }
 
+/// Sizes of at least 1 MiB in every unit, around each unit's floor (ADR-0059 §3).
+#[test]
+fn sizes_agree() {
+    let sizes = [
+        "1MiB",
+        "01MiB",
+        "0MiB",
+        "000MiB",
+        "1GiB",
+        "1GB",
+        "8589934591GiB",
+        "2MB",
+        "1MB",
+        "10MB",
+        "1024KiB",
+        "1023KiB",
+        "1030KiB",
+        "1100KiB",
+        "2000KiB",
+        "10000KiB",
+        "1049KB",
+        "1048KB",
+        "1050KB",
+        "1100KB",
+        "2000KB",
+        "10000KB",
+        "1048576B",
+        "1048575B",
+        "1048580B",
+        "1048600B",
+        "1049000B",
+        "1050000B",
+        "1100000B",
+        "2000000B",
+        "999999B",
+        "10000000B",
+        "0001048576B",
+        "0B",
+        "",
+        "512",
+        "512m",
+        "512M",
+        "1kB",
+        "1KIB",
+        "1mib",
+        "1TiB",
+        "1.5GiB",
+        "512 MiB",
+        " 512MiB",
+        "512MiB ",
+        "-1MiB",
+        "+1MiB",
+        "MiB",
+    ];
+    agrees_on_strings(&with_app("shm_size = @@"), &sizes);
+    agrees_on_strings(&with_app("tmpfs = { \"/tmp\" = @@ }"), &sizes);
+    // A bare integer is not a size.
+    agrees(
+        &with_app("shm_size = @@"),
+        &["\"64MiB\"", "67108864", "true", "1.5"],
+    );
+}
+
+#[test]
+fn tmpfs_paths_agree() {
+    // The value is a table key here, so `@@` is the quoted path.
+    agrees_on_strings(
+        &with_app("[services.app.tmpfs]\n@@ = \"1MiB\""),
+        &[
+            "/tmp",
+            "/var/cache/nginx",
+            "/run",
+            "/.hidden",
+            "/..x",
+            "/ä",
+            "/a b",
+            "/devices",
+            "/proc2",
+            "/sys-x",
+            "/dev2/shm",
+            "/",
+            "tmp",
+            "/tmp/",
+            "//tmp",
+            "/a/./b",
+            "/a/../b",
+            "/a:b",
+            "/a,b",
+            "/a\tb",
+            "/proc",
+            "/proc/x",
+            "/sys",
+            "/sys/fs/cgroup",
+            "/dev",
+            "/dev/shm",
+            "/dev/shm/x",
+            "",
+        ],
+    );
+    agrees(&with_app("init = @@"), &["true", "false", "\"true\"", "1"]);
+}
+
 #[test]
 fn file_paths_agree() {
     // The value is a table key here, so `@@` is the quoted path.
@@ -947,6 +1049,34 @@ fn semantic_rules_are_parser_only() {
         (
             "an overflowing duration",
             with_app("stop_timeout = \"99999999999999999999s\""),
+        ),
+        (
+            "a size over i64::MAX bytes",
+            with_app("shm_size = \"8589934592GiB\""),
+        ),
+        (
+            "a tmpfs at a volume",
+            with_app(
+                "update = \"stop-first\"\nvolumes = { a = \"/data\" }\ntmpfs = { \"/data\" = \"1MiB\" }",
+            ),
+        ),
+        (
+            "a tmpfs in a volume",
+            with_app(
+                "update = \"stop-first\"\nvolumes = { a = \"/data\" }\n\
+                 tmpfs = { \"/data/cache\" = \"1MiB\" }",
+            ),
+        ),
+        (
+            "a tmpfs above a config file",
+            with_app(
+                "files = { \"/etc/app/a.conf\" = { content = \"\" } }\n\
+                 tmpfs = { \"/etc/app\" = \"1MiB\" }",
+            ),
+        ),
+        (
+            "a tmpfs above another",
+            with_app("tmpfs = { \"/var\" = \"1MiB\", \"/var/cache\" = \"1MiB\" }"),
         ),
     ];
     let validators = Validators::get();
