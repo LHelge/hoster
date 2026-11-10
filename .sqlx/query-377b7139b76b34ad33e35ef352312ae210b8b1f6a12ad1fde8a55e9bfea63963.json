@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM notified_problems",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "377b7139b76b34ad33e35ef352312ae210b8b1f6a12ad1fde8a55e9bfea63963"
+}

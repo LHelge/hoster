@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM events WHERE at < ? AND id < (SELECT max(id) FROM events)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e097747b5378305cc295e7654d31f68b9a45ae57c02df6c6fe67177f5f12a851"
+}

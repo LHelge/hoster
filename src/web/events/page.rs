@@ -36,7 +36,7 @@ pub(in crate::web) enum EventGroup {
     Deploys,
     Containers,
     Certificates,
-    /// Operator actions and hoster's own (started, updated, rolled back).
+    /// Operator actions and hoster's own (started, updated, rolled back, a mail not delivered).
     Operator,
 }
 
@@ -89,7 +89,8 @@ impl From<EventKind> for EventGroup {
             | K::SecretDeleted
             | K::HosterStarted
             | K::HosterUpdated
-            | K::HosterRolledBack => Self::Operator,
+            | K::HosterRolledBack
+            | K::NotificationFailed => Self::Operator,
         }
     }
 }
@@ -425,6 +426,11 @@ mod tests {
             EventGroup::Operator
                 .kinds()
                 .contains(&EventKind::HosterUpdated)
+        );
+        assert!(
+            EventGroup::Operator
+                .kinds()
+                .contains(&EventKind::NotificationFailed)
         );
         for group in EventGroup::ALL {
             assert_eq!(group.to_string().parse(), Ok(group));

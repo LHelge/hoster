@@ -671,6 +671,33 @@ impl HosterEvents {
     }
 }
 
+/// The events of notifications (ADR-0058 §9): a mail that could not be delivered, with the
+/// provider's reason. It belongs to no stack, links to Settings → Notifications and is never
+/// mailed itself.
+#[derive(Debug, Clone, Copy)]
+pub struct NotificationEvents;
+
+impl NotificationEvents {
+    /// The page the events link to.
+    const SUBJECT: &'static str = "/settings/notifications";
+
+    /// A notification mail was dropped because of `reason`, the delivery error as
+    /// `notify::DeliveryError` writes it (it never holds the key).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "recorded by the notifier as it lands")
+    )]
+    pub fn failed(reason: &str) -> NewEvent {
+        NewEvent::new(
+            EventKind::NotificationFailed,
+            Severity::Warning,
+            "A notification mail could not be delivered",
+        )
+        .subject(Self::SUBJECT)
+        .meta(reason)
+    }
+}
+
 /// Addresses as a comma-separated list, or "none".
 struct Addresses<'a>(&'a [IpAddr]);
 
@@ -774,6 +801,17 @@ mod tests {
         assert_eq!(rolled_back.severity, Severity::Warning);
         assert_eq!(rolled_back.message, "Rolled hoster back to v0.2.0");
         assert_eq!(rolled_back.meta.as_deref(), Some("v0.3.0 → v0.2.0"));
+    }
+
+    #[test]
+    fn a_failed_notification_is_a_warning_with_the_reason_linking_to_its_settings() {
+        let reason = "Resend answered 403 Forbidden (validation_error): domain not verified";
+        let failed = NotificationEvents::failed(reason);
+        assert_eq!(failed.kind, EventKind::NotificationFailed);
+        assert_eq!(failed.severity, Severity::Warning);
+        assert_eq!(failed.stack, None);
+        assert_eq!(failed.subject.as_deref(), Some("/settings/notifications"));
+        assert_eq!(failed.meta.as_deref(), Some(reason));
     }
 
     #[test]

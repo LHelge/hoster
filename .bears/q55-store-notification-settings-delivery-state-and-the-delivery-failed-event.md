@@ -1,10 +1,10 @@
 ---
 id: q55
 title: "Store: notification settings, delivery state and the delivery-failed event"
-status: open
+status: done
 priority: P3
 created: "2026-11-09T23:22:59.495412641Z"
-updated: "2026-11-09T23:29:11.796803291Z"
+updated: "2026-11-10T00:29:51.983134240Z"
 tags:
   - store
   - notify
@@ -12,6 +12,7 @@ depends_on:
   - rja
   - mxq
 parent: c5s
+attempts: 1
 ---
 
 ## Summary

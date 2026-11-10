@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cursor AS \"cursor: EventId\" FROM notifier_state WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "cursor: EventId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notifier_state",
+            "name": "cursor"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4253d21505b8e388f0dbdc5fa21cc9b1c2dbbc4ad64856a6775817aaf8544f4b"
+}

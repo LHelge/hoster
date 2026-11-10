@@ -977,7 +977,8 @@ same card on each stack's overview, and the Events page at `/activity`.
   (`Store::insert_event`), so a rolled-back change leaves no event. Secret events carry the
   name only.
 - **Retention.** `EventLog::run_retention` deletes rows older than 30 days once at startup and
-  then daily. It is not configurable. Down-migrating drops the table and the history.
+  then daily, except the newest row, so event ids (no AUTOINCREMENT) are never reused below the
+  notifier's cursor. It is not configurable. Down-migrating drops the table and the history.
 - **The `UiEvent` hand-off.** After the write, `EventLog` sends `UiEvent::Event(event)` on
   `ui_events` (§3.3 #5). The broadcast is only a nudge: the log never depends on a receiver
   keeping up, and a lagged page reads the card from the store again. The dashboard stream

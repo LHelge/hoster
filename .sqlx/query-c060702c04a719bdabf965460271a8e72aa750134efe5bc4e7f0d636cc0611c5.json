@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM notified_problems WHERE kind = ? AND stack = ? AND subject = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "c060702c04a719bdabf965460271a8e72aa750134efe5bc4e7f0d636cc0611c5"
+}

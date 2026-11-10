@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT coalesce(max(id), 0) AS \"id!: EventId\" FROM events",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: EventId",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "75618f1b87ef34dce834ee9dd2e68c878d192ceb0d66a1981434aa27c4af890f"
+}

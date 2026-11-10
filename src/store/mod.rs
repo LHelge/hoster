@@ -18,6 +18,7 @@
 mod events;
 mod images;
 mod instance;
+mod notifications;
 mod secrets;
 mod sessions;
 mod types;
@@ -37,6 +38,13 @@ use sqlx::sqlite::{
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 use thiserror::Error;
 
+#[allow(
+    unused_imports,
+    reason = "used by the notifier and Settings → Notifications as they land"
+)]
+pub use notifications::{
+    DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,
+};
 #[allow(
     unused_imports,
     reason = "part of the Store API for its future callers"
@@ -99,6 +107,8 @@ pub enum StoreError {
     UnknownDeployment(DeploymentId),
     #[error("port {0} is already allocated")]
     PortTaken(u16),
+    #[error("notifications need a from address and a recipient before they can be enabled")]
+    NotificationsIncomplete,
     #[error("state database error")]
     Database(#[from] sqlx::Error),
 }
