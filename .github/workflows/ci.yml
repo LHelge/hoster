@@ -59,8 +59,12 @@ jobs:
           output: site/dist
 
   podman:
+    # The name is a required status check on main: renaming it blocks every PR until the
+    # branch protection is changed too. It also runs the config-files tests (ADR-0057).
     name: zero-downtime deploy on rootless podman
-    runs-on: ubuntu-latest
+    # Named, not ubuntu-latest: config files need podman 5.4 (ADR-0057), 26.04 ships 5.7, and
+    # the version under test should change when this line does.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -69,22 +73,31 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # ubuntu-latest ships podman; its rootless API socket is a systemd user unit.
+      # The runner ships podman; its rootless API socket is a systemd user unit.
       - name: Start the rootless podman socket
         run: |
           podman --version
+          version="$(podman version --format '{{.Client.Version}}')"
+          # The config-files tests skip themselves on an older podman; here that is a failure.
+          if [ "$(printf '%s\n' 5.4.0 "$version" | sort -V | head -n1)" != 5.4.0 ]; then
+            echo "::error::podman $version is older than 5.4, which config files need (ADR-0057)"
+            exit 1
+          fi
           systemctl --user start podman.socket
           echo "HOSTER_PODMAN_SOCKET=/run/user/$(id -u)/podman/podman.sock" >> "$GITHUB_ENV"
 
-      # ADR-0017 end to end: hoster's orchestrator and proxy in-process against real podman,
-      # deploying under continuous load (src/e2e_tests.rs).
       - name: Install cargo-nextest
         run: scripts/install-nextest.sh
 
-      - name: End-to-end deploy under load
+      # ADR-0017 end to end: hoster's orchestrator and proxy in-process against real podman,
+      # deploying under continuous load (src/e2e_tests.rs). ADR-0057: config files written into
+      # real containers, as root and as another user (src/runtime/podman.rs).
+      - name: End-to-end deploy under load, and config files
         env:
           TEST_HOSTER_PODMAN: "1"
-        run: cargo nextest run --profile ci --locked --no-capture e2e_tests
+        run: >-
+          cargo nextest run --profile ci --locked --no-capture
+          e2e_tests config_files_reach_the_container a_refused_config_file_leaves_no_container
 
   systemd:
     name: systemd unit and sysctl drop-in
