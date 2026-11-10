@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-35 is open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-35, OQ-36 and OQ-38 are open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -45,6 +45,7 @@ Index:
 | [OQ-33](#oq-33-orchestrator-actor-or-shared-handle) | ~~Orchestrator: actor + Command enum, or shared handle with async methods~~ **Resolved → ADR-0050 (handle)** | — |
 | [OQ-34](#oq-34-poller-bootstrap-advisory-dns-check-health-default-path-port-host-redirects) | ~~Poller bootstrap, advisory DNS check, health default path, `PORT` injection, host redirects~~ **Resolved → ADR-0051** | — |
 | [OQ-35](#oq-35-ambiguous-podman-object-names-across-stacks) | Ambiguous podman object names across stacks (`-` in stack, service and volume names) | M1 (deploys), ADR-0030 volumes |
+| [OQ-38](#oq-38-client-supplied-forwarding-headers-at-the-edge) | Client-supplied forwarding headers at the edge (`X-Forwarded-For` appended, `Forwarded` and `X-Real-IP` passed through) | — |
 
 ---
 
@@ -427,3 +428,43 @@ current state. B is a reasonable stopgap if the owner wants the sandbox on Ubunt
 ## OQ-37: Notifications: channel, provider, configuration and which events
 
 **Resolved 2026-11-10 → [ADR-0058](adr/0058-email-notifications.md): Email on problems and recoveries through a provider trait (Resend first); run-time settings in SQLite; a notifier over the event log.**
+
+## OQ-38: Client-supplied forwarding headers at the edge
+
+**Problem.** hoster is the edge: nothing trusted sits in front of it. `Forwarding::apply`
+(`src/proxy/router.rs`) overwrites client-supplied `X-Forwarded-Prefix`, `-Proto` and `-Host` for
+that reason (ADR-0010, architecture §6.3), but two things still let a client choose what an app
+believes about the connection:
+
+- **`X-Forwarded-For` is appended to.** The client's own values are kept and the peer address is
+  added last. Every entry but the last is attacker-chosen. An app that reads the leftmost entry
+  (a common default) or trusts a fixed number of hops other than one gets a spoofed client
+  address for rate limits, allowlists and audit logs.
+- **Other forwarding headers pass through untouched.** `Forwarded` (RFC 7239), `X-Real-IP`,
+  `X-Forwarded-Port`, `X-Forwarded-Ssl`, `X-Forwarded-Scheme`, `X-Original-URL` and
+  `X-Rewrite-URL` are neither set nor removed. Some frameworks prefer `Forwarded` or `X-Real-IP`
+  over the `X-Forwarded-*` set hoster does control, and a few honour `X-Original-URL` for
+  routing.
+
+Found by reading the proxy code on 2026-11-10. hoster's own admin app reads none of these
+headers.
+
+**Options.**
+
+- **A. Keep appending; document it.** The stack-format guide says that only the last
+  `X-Forwarded-For` entry is hoster's and that the other headers are unfiltered. No code change;
+  every app has to be configured for exactly one trusted hop.
+- **B. Replace `X-Forwarded-For` with the peer address and strip the rest.** hoster sends exactly
+  one `X-Forwarded-For` value and removes `Forwarded`, `X-Real-IP`, `X-Forwarded-Port`,
+  `X-Forwarded-Ssl`, `X-Forwarded-Scheme`, `X-Original-URL` and `X-Rewrite-URL` from the request.
+  Consistent with how the other three headers are treated. A host behind a CDN or another proxy
+  loses the real client address, which today's append keeps (unauthenticated).
+- **C. B, and also set `X-Real-IP` and `Forwarded`.** Apps that read those get a correct value
+  instead of none. More headers to keep in step.
+- **D. B, plus a `trusted_proxies` setting.** Forwarding headers are kept only when the peer
+  address is in a configured list (a CDN's ranges). Covers the CDN case properly; a new
+  `hoster.toml` key and a list to maintain.
+
+**Recommendation.** B now. It matches the stated rule that incoming values are untrusted, and a
+single-VPS install is normally reached directly. D when someone actually runs hoster behind a
+CDN. The decision amends ADR-0010 and architecture §6.3.
