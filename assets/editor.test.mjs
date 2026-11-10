@@ -4,7 +4,18 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { INDENT, indent, lineCount, newline, offsetAt, outdent, tokenize } from "./editor.js";
+import {
+  INDENT,
+  indent,
+  lineCount,
+  newline,
+  offsetAt,
+  outdent,
+  retarget,
+  serviceAt,
+  snippetEdit,
+  tokenize,
+} from "./editor.js";
 
 /** The tokens of `text` that aren't plain, as `kind:text` strings. */
 function coloured(text) {
@@ -314,4 +325,54 @@ test("offsetAt counts characters, not UTF-16 units", () => {
   const text = 'a = "\u{1F600}é" # x\n';
   assert.equal(offsetAt(text, 1, 7), text.indexOf("é"));
   assert.equal(offsetAt(text, 1, 10), text.indexOf("#"));
+});
+
+test("serviceAt finds the service whose table the caret is in", () => {
+  const text = 'name = "x"\n\n[services.web]\nimage = "a"\n\n[[services.web.routes]]\nport = 1\n\n[services.db-1]\nimage = "b"\n\n[deploy]\nrepository_id = 1\n';
+  assert.equal(serviceAt(text, 3), null, "the top level");
+  assert.equal(serviceAt(text, text.indexOf('image = "a"')), "web");
+  assert.equal(serviceAt(text, text.indexOf("port")), "web");
+  assert.equal(serviceAt(text, text.indexOf('image = "b"') + 3), "db-1");
+  assert.equal(serviceAt(text, text.indexOf("repository_id")), null, "another table");
+  // On the header line itself.
+  assert.equal(serviceAt(text, text.indexOf("[services.db-1]") + 2), "db-1");
+});
+
+test("retarget moves a snippet written for web to another service", () => {
+  const route = '[[services.web.routes]]\nhost = "app.example.com"\n';
+  assert.equal(retarget(route, "api"), '[[services.api.routes]]\nhost = "app.example.com"\n');
+  assert.equal(retarget("[services.web.files.\"/a\"]\n", "db"), "[services.db.files.\"/a\"]\n");
+  assert.equal(retarget(route, null), route);
+  // Only headers move, and only the web service, not a service whose name starts with web.
+  assert.equal(retarget("[services.webapp]\n# services.web\n", "api"), "[services.webapp]\n# services.web\n");
+});
+
+/** Applies a snippetEdit and returns the text and the selected part. */
+function inserted(text, pos, snippet) {
+  const edit = snippetEdit(text, pos, snippet);
+  const result = text.slice(0, edit.from) + edit.insert + text.slice(edit.to);
+  return [result, result.slice(edit.selStart, edit.selEnd)];
+}
+
+test("a snippet goes after the caret's line, set off by a blank line, and is selected", () => {
+  const text = 'name = "x"\n\n[services.web]\nimage = "a"\n';
+  // Caret in the middle of the image line.
+  const [result, selected] = inserted(text, text.indexOf('"a"'), "[services.web.volumes]\ndata = \"/d\"\n");
+  assert.equal(result, 'name = "x"\n\n[services.web]\nimage = "a"\n\n[services.web.volumes]\ndata = "/d"\n');
+  assert.equal(selected, '[services.web.volumes]\ndata = "/d"');
+});
+
+test("a snippet between two tables keeps a blank line on both sides", () => {
+  const text = "[a]\nx = 1\n\n[b]\ny = 2\n";
+  // On a header line: after it, which is where the caret asked for it.
+  const [mid] = inserted(text, 3, "[c]\n");
+  assert.equal(mid, "[a]\n\n[c]\n\nx = 1\n\n[b]\ny = 2\n");
+  // On the blank line between them.
+  const [between] = inserted(text, text.indexOf("\n\n") + 1, "[c]\n");
+  assert.equal(between, "[a]\nx = 1\n\n[c]\n\n[b]\ny = 2\n");
+});
+
+test("a snippet into an empty editor starts at the top", () => {
+  assert.deepEqual(inserted("", 0, "[deploy]\n"), ["[deploy]\n", "[deploy]"]);
+  assert.deepEqual(inserted("\n\n", 1, "[deploy]\n"), ["[deploy]\n", "[deploy]"]);
 });
