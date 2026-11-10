@@ -43,12 +43,13 @@ Implement ADR-0059 §2, §4 and §5: the per-service `limits` table end to end, 
   - `cpu.max` reads `150000 100000` for `cpus = 1.5`;
   - a stack with a limit on a host missing that controller is rejected at apply.
 - [ ] The stack JSON Schema covers `limits` (see Implementation Notes).
+- [ ] The third-party images guide (`site/content/wiki/third-party-images.md`, task k2v) fills in its `deploy.resources.limits` compose-mapping row and adds `limits` to its worked example, plus the start-first peak memory pitfall.
 
 ## Implementation Notes
 - `Cpus` is a newtype over `f64` with `FromStr`/`TryFrom`. The rounding to nano-CPUs lives on it (`i64`), so create and the hash share one conversion.
 - Reuse the `MemTotal` and CPU-count readers in `src/web/system/host.rs`. Move them to a shared home if needed, rather than parsing `/proc` twice. Warnings travel in `ApplyOutcome.warnings`.
 - `Validating` failures go to `Rejected` with reservations released (architecture §5.1). Use the same error text as apply.
-- **Schema:** the stack JSON Schema (`src/stack/schema.rs`, `site/static/stack.schema.json` with a drift test) and `hoster stack check` land on `epic/emu-stack-authoring` first. After rebasing, add `limits` to the raw types' schema (with bounds where the schema can express them) and regenerate. `hoster stack check` gets the parser errors and the shm/tmpfs warning, but not the host-dependent checks.
+- **Schema:** the stack JSON Schema (`src/stack/schema.rs`, `site/static/stack.schema.json` with a drift test) and `hoster stack check` are on main. Add `limits` to the raw types' schema (with bounds where the schema can express them) and regenerate. If the editor-help task (qjx) has landed, add a `limits` snippet. `hoster stack check` gets the parser errors and the shm/tmpfs warning, but not the host-dependent checks.
 - install.sh changes are checked by shellcheck in CI and `scripts/test-install.sh`.
 
 ## Edge Cases
