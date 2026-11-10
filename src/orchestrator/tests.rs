@@ -127,8 +127,11 @@ impl FakeProber {
     }
 
     /// From now on, probes on container port `port` do not answer until it is
-    /// [`release`](Self::release)d.
+    /// [`release`](Self::release)d. The probes made on it so far are forgotten, so
+    /// [`probed`](Self::probed) waits for one that is held, not for one from an earlier deploy.
     pub(super) fn hold(&self, port: u16) {
+        let pattern = Self::pattern(port);
+        self.probes.lock().unwrap().retain(|p| !p.contains(&pattern));
         self.held.lock().unwrap().insert(port);
     }
 
