@@ -7,12 +7,16 @@
 //! variant and a new type implementing [`Provider`], with no change to callers.
 //!
 //! The trait is for mail only; SMS and chat are not designed for.
+//!
+//! What a notification says is rendered by [`Mail`] (`mail.rs`, ADR-0058 §10): a [`Notice`]
+//! under a [`Letterhead`] gives the subject, plain text and HTML of a [`Message`].
 
 #![allow(
     dead_code,
     reason = "consumed by the notifier and the Settings page as they land"
 )]
 
+mod mail;
 mod resend;
 
 use std::fmt;
@@ -25,6 +29,15 @@ use reqwest::{StatusCode, Url};
 use thiserror::Error;
 
 use crate::secrets::SecretValue;
+
+/// Sample events for the mail's tests and the UI preview.
+#[cfg(test)]
+pub(crate) use self::mail::tests as mail_fixtures;
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "used by the notifier as it lands")
+)]
+pub use self::mail::{Letterhead, Mail, Notice};
 
 /// Longest a single delivery request may take. The notifier retries a timeout (ADR-0058 §9),
 /// so this is short.

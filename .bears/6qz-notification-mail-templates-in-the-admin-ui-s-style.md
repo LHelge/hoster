@@ -1,16 +1,17 @@
 ---
 id: "6qz"
 title: Notification mail templates in the admin UI's style
-status: open
+status: done
 priority: P3
 created: "2026-11-09T23:22:59.540441772Z"
-updated: "2026-11-09T23:22:59.540441772Z"
+updated: "2026-11-10T00:15:33.436395721Z"
 tags:
   - notify
   - ui
 depends_on:
   - rja
 parent: c5s
+attempts: 1
 ---
 
 ## Summary
@@ -19,7 +20,7 @@ Askama templates that turn an event into a mail that is recognisably hoster: the
 ## Acceptance Criteria
 - [ ] A typed notification built from an `Event` (`From`/`TryFrom`, not a free function) that yields the message parts of the provider trait: subject, plain text and HTML.
 - [ ] Subject is `[<instance name>] <readable line>` (ADR-0058 §10). The instance name is passed in; this task does not read it from the store.
-- [ ] HTML template: table layout, inline styles only, colours taken from the light (Latte) design tokens in `assets/hoster.css`, system sans and monospace font stacks, the tone shown as a coloured cell (no SVG, no remote images, no web fonts), one button linking to the stack or the Events page on the admin host.
+- [ ] HTML template: table layout, inline styles only, colours taken from the light (Latte) design tokens in `assets/hoster.css`, system sans and monospace font stacks, the tone shown as a coloured cell (no SVG, no remote images, no web fonts), one button on the admin host linking where the event's feed row does (the page it names, else its stack, else the Events page; ADR-0058 §10).
 - [ ] A plain-text template with the same content.
 - [ ] Variants: a problem, a recovery, the "N more events" summary, and the test message.
 - [ ] Every interpolated value is escaped by Askama; event messages can contain image names and error text from outside.

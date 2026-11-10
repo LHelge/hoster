@@ -1,0 +1,15 @@
+[{{ m.label }}] {{ m.message }}
+{%- if let Some(meta) = m.meta %}
+{{ meta }}
+{%- endif %}
+{{ m.at }}
+{%- if let Some(note) = m.note %}
+
+{{ note }}
+{%- endif %}
+
+{{ m.link_label }}: {{ m.link }}
+
+--
+Sent by hoster on {{ m.instance }} ({{ m.admin_host }}).
+Notifications are set in Settings → Notifications.
