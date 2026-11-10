@@ -24,7 +24,7 @@ Many third-party images (Prometheus, Grafana provisioning, Caddy, nginx, Mosquit
 
 hoster uploads each file into the container's own layer between create and start (`PUT …/archive`), so there is no host path, podman object or label to manage. Files are not writable by a non-root container user, and read-only with `read_only = true`. Their content (or secret version) is part of the service's config hash, so a change redeploys the service and rolls back with the deployment. Stacks with `files` need podman 5.4 or later.
 
-Tasks: nnq (format and validation), rp5 (upload and secrets), nhn (UI and docs).
+Tasks: nnq (format and validation), then m9b (secret references of env and files) and 2eq (podman 5.4 gate) in either order, rp5 (upload), then nhn (UI and docs) and dgq (CI run on podman 5.7). M13 touches the same code (`raw.rs`, `ConfigHash`, `ContainerSpec`, container create), so this epic merges first and M13 rebases onto it.
 
 ## Acceptance Criteria
 
@@ -34,6 +34,7 @@ Tasks: nnq (format and validation), rp5 (upload and secrets), nhn (UI and docs).
 - [ ] Missing secrets reject the deployment by name and path, never showing a value. Secret file content is redacted from exec output, each line too.
 - [ ] File material goes away with its container: container removal is the GC, and nothing else needs cleaning up.
 - [ ] A stack with `files` is rejected on podman older than 5.4, naming both versions. Other stacks are unaffected, and `hoster doctor` reports the podman version.
+- [ ] CI runs the live config-files test on podman 5.4 or later on every PR (dgq).
 - [ ] The stack overview lists files (path, mode, owner, size or secret name) without ever showing secret content. The stack-format reference documents `files`.
 
 ## References
