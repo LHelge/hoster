@@ -2,10 +2,10 @@
 id: c5s
 title: "Notifications: email on problems and recoveries"
 type: epic
-status: open
+status: done
 priority: P3
 created: "2026-11-08T18:22:30.061186156Z"
-updated: "2026-11-09T23:23:38.058933915Z"
+updated: "2026-11-10T01:35:18.477088104Z"
 tags:
   - design-followup
   - observability

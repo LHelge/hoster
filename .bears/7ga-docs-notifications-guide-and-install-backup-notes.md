@@ -1,10 +1,10 @@
 ---
 id: "7ga"
 title: "Docs: notifications guide and install/backup notes"
-status: open
+status: done
 priority: P3
 created: "2026-11-09T23:23:38.041736865Z"
-updated: "2026-11-09T23:23:38.041736865Z"
+updated: "2026-11-10T01:35:18.476796354Z"
 tags:
   - docs
   - notify
@@ -12,6 +12,7 @@ depends_on:
   - pym
   - "5sp"
 parent: c5s
+attempts: 1
 ---
 
 ## Summary
