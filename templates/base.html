@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="{{ layout.stylesheet() }}">
   <script src="{{ layout.htmx() }}" defer></script>
   <script src="{{ layout.htmx_sse() }}" defer></script>
+  {%- block scripts %}{% endblock %}
 </head>
 <body{% if let Some(headers) = layout.hx_headers() %} hx-headers:inherited="{{ headers }}"{% endif %}>
 {%- if let Some(user) = layout.user %}

@@ -44,6 +44,21 @@ jobs:
       - name: Test
         run: cargo nextest run --profile ci --all-targets --locked
 
+  # hoster's own stack editor script (ADR-0060): its pure parts (tokenizer, editing helpers) are
+  # tested with node's built-in test runner. Nothing is installed from npm.
+  editor-script:
+    name: editor script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: node --test
+        run: node --test 'assets/*.test.mjs'
+
   # The documentation site (site/, published by release.yml). aphid fails the build on a broken
   # [[wiki-link]], so a moved or renamed page breaks the PR rather than the site.
   site:

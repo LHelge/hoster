@@ -1370,6 +1370,23 @@ async fn read_only_pages_need_a_session_but_no_javascript() {
         apply.contains(r#"<button class="primary" type="submit">Check</button>"#),
         "{apply}"
     );
+    // ADR-0060: the editor script enhances the textarea, which works as a plain form field
+    // without it.
+    assert!(
+        apply.contains(&format!(
+            r#"<script type="module" src="{}"></script>"#,
+            crate::web::assets::Assets::get().editor.url()
+        )),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(r#"<textarea id="stack-toml" name="toml" rows="22" data-editor="toml""#),
+        "{apply}"
+    );
+
+    // Other pages don't load the editor.
+    let stacks = body(app.get("/stacks", Some(&browser.cookie)).await).await;
+    assert!(!stacks.contains("/assets/editor."), "{stacks}");
 }
 
 #[tokio::test]

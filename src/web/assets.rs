@@ -1,5 +1,6 @@
 //! Static assets embedded in the binary (ADR-0021): the vendored HTMX build, its SSE extension,
-//! the JetBrains Mono subset (ADR-0054), hoster's stylesheet and the icon sprite (ADR-0053). Each
+//! the JetBrains Mono subset (ADR-0054), hoster's stylesheet, its stack editor script (ADR-0060)
+//! and the icon sprite (ADR-0053). Each
 //! is served under a content-hashed name such as `/assets/htmx.min.a0abb04f2f45.js`, so it can be
 //! cached for a year; a changed file gets a new URL.
 //!
@@ -123,6 +124,8 @@ pub struct Assets {
     /// HTMX's SSE extension, for live views such as container logs (ADR-0044).
     pub htmx_sse: Asset,
     pub stylesheet: Asset,
+    /// hoster's own stack editor script (ADR-0060), an ES module.
+    pub editor: Asset,
     /// Every [`Icon`] as one SVG sprite, generated at startup.
     pub icons: Asset,
     /// JetBrains Mono, Latin subset, at the weights the stylesheet uses (400, 500, 600).
@@ -163,6 +166,11 @@ impl Assets {
                     include_bytes!("../../assets/hx-sse.min.js"),
                 ),
                 stylesheet,
+                editor: Asset::new(
+                    "editor.js",
+                    "text/javascript; charset=utf-8",
+                    include_bytes!("../../assets/editor.js"),
+                ),
                 icons: Asset::new(
                     "icons.svg",
                     "image/svg+xml; charset=utf-8",
@@ -176,9 +184,15 @@ impl Assets {
 
     /// Every asset, in no particular order.
     pub fn all(&'static self) -> impl Iterator<Item = &'static Asset> {
-        [&self.htmx, &self.htmx_sse, &self.stylesheet, &self.icons]
-            .into_iter()
-            .chain(&self.fonts)
+        [
+            &self.htmx,
+            &self.htmx_sse,
+            &self.stylesheet,
+            &self.editor,
+            &self.icons,
+        ]
+        .into_iter()
+        .chain(&self.fonts)
     }
 
     /// The asset served as `hashed_name`. Unhashed or stale names are not found, so a cached
@@ -338,6 +352,64 @@ mod tests {
             assert!(
                 ratio >= 4.5,
                 "{flavour}: --on-accent on --accent is {ratio:.2}:1"
+            );
+        }
+    }
+
+    /// ADR-0060: the editor script keeps to the CSP and the rules for hoster's own scripts. It
+    /// never parses markup from text, evaluates code or writes `style=` attributes.
+    #[test]
+    fn the_editor_script_keeps_to_the_csp() {
+        let assets = Assets::get();
+        let js = std::str::from_utf8(&assets.editor.bytes).unwrap();
+        assert!(assets.editor.hashed_name.starts_with("editor."));
+        assert!(assets.find(&assets.editor.hashed_name).is_some());
+        assert!(assets.find("editor.js").is_none());
+        for banned in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+            "eval(",
+            "new Function",
+            "setAttribute(\"style\"",
+            "hx-on",
+            "import(",
+            "http",
+        ] {
+            assert!(!js.contains(banned), "editor.js uses {banned}");
+        }
+        assert!(js.contains(r#"textarea[data-editor="toml"]"#));
+    }
+
+    /// The editor's syntax colours are aliases of the text and status colours the contrast test
+    /// checks, so they meet 4.5:1 on `--inset` in both themes too.
+    #[test]
+    fn syntax_colours_alias_checked_text_colours() {
+        let css = include_str!("../../assets/hoster.css");
+        let checked = [
+            "text", "text-2", "muted", "accent", "link", "ok", "progress", "warn", "fail", "p50",
+            "p95",
+        ];
+        let syntax: Vec<_> = css
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("--syn-"))
+            .collect();
+        assert!(syntax.len() >= 8, "{syntax:?}");
+        for line in syntax {
+            let (name, value) = line.split_once(':').unwrap();
+            let alias = value
+                .trim()
+                .strip_prefix("var(--")
+                .and_then(|v| v.strip_suffix(");"))
+                .unwrap_or_else(|| panic!("--syn-{name} is a var() alias: {value}"));
+            assert!(
+                checked.contains(&alias),
+                "--syn-{name} uses --{alias}, which the contrast test doesn't check"
+            );
+            assert!(
+                css.contains(&format!("var(--syn-{name})")),
+                "--syn-{name} is used"
             );
         }
     }
