@@ -21,6 +21,7 @@ The library behaviour this design depends on was checked against crate sources a
 | Admin UI stack (ADR-0021) | `axum` 0.8.9, `askama` 0.16.1, `oauth2` 5.0.0, `tower-sessions` 0.15.0, htmx.org **4.0.1** (npm, 2026-11-01; npm `latest` tag still points at 2.0.11, `next` at 4.0.1) | crates.io / npm registry | Versions noted for the plan. APIs not yet exercised. |
 | Pingora Unix-socket upstreams | pingora-core 0.9.1 | crate source | `HttpPeer::new_uds(path, tls, sni)` exists, so the proxy can reach the admin Axum app over a Unix socket (ADR-0031). |
 | Exec API, exec session removal, `Healthcheck NONE` (ADR-0056) | podman **6.1.4** (runc, rootless), bollard 0.21.1, checked 2026-11-09 | live, through the compat API and the podman-gated tests in `src/runtime/podman.rs` | See §1.6. |
+| Container archive upload (ADR-0057) | podman **6.1.4** (runc, rootless, overlay); 5.7.0 and 5.4.2 rootful (crun); bollard 0.21.1 (source), checked 2026-11-10 | live through the compat API (curl); bollard's upload options checked in crate source | See §1.7. |
 
 ### 1.1 Pingora 0.9.1
 
@@ -164,6 +165,50 @@ Checked live on a rootless podman 6.1.4 with runc, through the compat API (curl 
   API podman fills in its defaults (`Interval` 30 s) and still registers a transient
   `<id>-<hash>.timer`/`.service` pair, but the timer never elapses (`NextElapseUSecMonotonic=
   infinity`, no trigger); `podman create --no-healthcheck` registers none.
+
+### 1.7 Container archive upload (podman 6.1.4, 5.7.0, 5.4.2)
+
+Checked live on a rootless podman 6.1.4 with runc and overlay, through the compat API (curl;
+bollard's `upload_to_container` sends the same `PUT /containers/{id}/archive?path=`). A nested,
+rootful podman 4.9.3 (`quay.io/podman/stable:v4.9.3`) behaved the same for `copyUIDGID`,
+`noOverwriteDirNonDir` and the 404 stat, and so did nested, rootful podman 5.7.0 (Ubuntu 26.04)
+and 5.4.2 (Debian 13) with crun 1.21 (2026-11-10: `copyUIDGID` gives `999:1000 0400` for
+`User: 999`, the `HEAD` stat follows `/var/run` to `/run`, a read-only root refuses writes).
+ADR-0057 requires podman 5.4. No rootless 5.x and no SELinux host were tested.
+
+- **Upload.** Into a created, unstarted container it answers 200, also with `ReadonlyRootfs`;
+  into a running read-only container it fails. Files keep the tar header's uid, gid and mode,
+  survive stop/start and go away with the container.
+- **`copyUIDGID=true`.** Files, and every missing parent directory the upload creates, are owned
+  by the container's user (`redis:7-alpine` with `User=999`: `999:1000 0755`). Existing
+  directories are left alone. Without it, missing parents are created `0:0 0755`. Explicit
+  directory entries create them with the header's owner and mode, and a later `copyUIDGID`
+  upload leaves them alone.
+- **Stat.** `HEAD /containers/{id}/archive?path=` answers 200 with `X-Docker-Container-Path-Stat`
+  (base64 JSON with `isDir`, `mode` and `linkTarget`, the resolved path) for an existing path,
+  following symlinks (`/var/run` in `alpine:3.20`: `isDir`, `linkTarget` `/run`). It answers 404
+  for a missing path, and also for a dangling symlink, but then with the stat header (`nginx`'s
+  `/var/log/nginx/access.log` → `/dev/stdout` before start); creating a directory there fails
+  with `mkdir …: file exists`.
+- **Symlinked ancestors.** A file uploaded under a symlink to a volume path (`/var/run/app/x.conf`,
+  empty volume at `/run`) answers 200 and is copied up into the empty volume at first start; later
+  generations read the volume's copy, not their own.
+- **Container user files.** With a `User` not in the image's `/etc/passwd` (`12345`), podman
+  appends a line for it to `/etc/passwd` at start, also to an uploaded one. On RHEL-family hosts
+  podman's `mounts.conf` can mount host directories under `/run/secrets/`.
+- **Directories.** A file over an image directory (`/etc/apk`) replaces it by default; with
+  `noOverwriteDirNonDir=true` it fails with `file exists`.
+- **Volumes.** An upload under an image `VOLUME` that holds content is silently lost. A file at an
+  ancestor of a volume mount (`/data`, volume at `/data/db`) uploads, but the start fails with 500
+  `identifying source directory for copy up into volume …: not a directory`.
+- **Read-only root.** With `ReadonlyRootfs`, `/run`, `/tmp` and `/var/tmp` are tmpfs; uploaded
+  files there are copied in at each start with their mode and stay writable by root, while
+  `/etc/app/a.conf` gives `Read-only file system`. `/dev/shm` files are lost.
+- **Errors.** An owner outside the user namespace (uid 70000) fails with 500 `error setting
+  ownership …` inside a multi-KB `copier.request` dump that contains host storage paths, and can
+  leave a partial file behind.
+- **User gid.** A numeric `User` listed in the image's `/etc/passwd` runs with its passwd gid
+  (`999` in `redis:7-alpine` is `999:1000`); an unlisted uid gets gid 0.
 
 ## 2. Component overview
 
@@ -434,7 +479,7 @@ stateDiagram-v2
 |---|---|---|---|
 | **Received** | Compare target digests with running ones per service. | none | — |
 | **Validating** | Parse the stack, check route collisions against other stacks' routes, allocate new ports for routed services that change, assign generation *n+1*. | Port allocations reserved (persisted). | → `Rejected`, reservations released. |
-| **Pulling** | Pull every changed image `repo@digest`, with credentials if configured. | Images in local storage. | → `Aborting`. |
+| **Pulling** | Pull every changed image `repo@digest`, with credentials if configured. Fail if a config file is equal to, under or an ancestor of an image `VOLUME` (ADR-0057). | Images in local storage. | → `Aborting`. |
 | **Starting** | Ensure network `hoster-<stack>`. For each changed **start-phase** service (see below) that is not held back and has no `depends_on` service left to start in this phase, create and start `hoster-<stack>-<svc>-g<n+1>` with labels, the network alias `<svc>`, and `127.0.0.1:<port>` publishing for routed services. | New containers running next to the old ones. | → `Aborting`. |
 | **HealthChecking** | Probe the started start-phase containers concurrently, each by its check (§5.5), until it passes, it times out, or the container exits. As soon as every in-phase dependency of a waiting service has passed, create and start it and probe it too (a start wave). Services held back for the replace phase (below) are not started here. Done when every other start-phase container has passed. | Dependents' containers created and started. | → `Aborting`; dependents not yet started are never created. |
 | **Replacing** | For each changed **replace-phase** service, one at a time in dependency order, name as tie-break (ADR-0048, ADR-0056): publish a `RouteTable` with its routes `Unavailable`, stop the old container (keep it), start the new one, probe it. Start each held-back start-phase service, and probe it, once its dependencies have passed, after re-checking that its unchanged dependencies run; a replacement that depends on one waits for it. After a replacement passes, start again, in dependency order, every unchanged service depending on it that was running when the deployment began and has exited since (no restart record), and probe each within its `start_period` before any changed service depending on it starts. Empty when no replace-phase service and no held-back service exists. | Old stop-first containers stopped; new ones running. 503 for their routes meanwhile. | → `Aborting`. |
@@ -605,7 +650,8 @@ ordinary failure retried until the deadline. Exec defaults are `interval = "1s"`
 
 - **Output.** It goes into a 4 KiB ring. The last 256 characters go to the deployment log as one
   escaped line, with podman's `read unixpacket` trailer stripped and secret values of 4 or more
-  characters redacted. The monitor, SSE and the ADR-0055 event log record the exit code only.
+  characters redacted, as is each trimmed line (4+ characters) of a secret used as a file
+  (ADR-0057). The monitor, SSE and the ADR-0055 event log record the exit code only.
 - **Timeout.** The probe fails at `timeout` whether or not the exec ends, and the deploy deadline
   never waits for it. hoster reads the exec's host PID while the session is `Running`, opens a
   pidfd for it, re-inspects that the session is still `Running` with that PID, and reads the
@@ -857,6 +903,14 @@ certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
   distinct container port.
 - **No host access for apps.** No container is ever given the podman socket, a bind mount of
   host paths outside its volumes, `--privileged`, or host networking (ADR-0019).
+- **Config files (ADR-0057).** A service's `files` are uploaded with `PUT /containers/{id}/archive`
+  after create and before the first start, both with `noOverwriteDirNonDir=true`, to paths
+  resolved through `HEAD …/archive?path=` (`linkTarget`). The first tar holds `0:0 0755` entries
+  for every missing parent of any file, and the files with an explicit or `0:0` owner; the second
+  holds the container-user files and is sent with `copyUIDGID=true`, which would otherwise give
+  new parents to that user (§1.7). They live in the
+  container's own layer, so restarts keep them and removing the container removes them. They
+  need no host path, podman object or label.
 
 ## 9. Security boundaries
 
@@ -868,7 +922,7 @@ certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
 | CI → hoster | A GitHub Actions OIDC ID token in `Authorization: Bearer`. hoster checks the RS256 signature against GitHub's JWKS, the issuer, the audience (the admin host by default), the expiry, and that the `jti` hasn't been used before. The claims must satisfy the stack's `[deploy]` rule (`repository_id` required, optional refs/environment/workflow). Each digest must belong to its service's configured repo. No shared secret exists (ADR-0042, ADR-0047). |
 | hoster → podman | The rootless socket of hoster's own user. A podman compromise is bounded by that user's privileges. |
 | Apps → host | Rootless user namespaces. No socket, no privileged mode, own network per stack. The admin app listens on a 0600 Unix socket, so containers cannot reach it even if they can reach host loopback (ADR-0031). |
-| Secrets at rest | Account key and cert keys are `0600`. App secrets are encrypted with XChaCha20-Poly1305 in SQLite, with the key in a separate 0600 file or a user systemd credential (ADR-0029). |
+| Secrets at rest | Account key and cert keys are `0600`. App secrets are encrypted with XChaCha20-Poly1305 in SQLite, with the key in a separate 0600 file or a user systemd credential (ADR-0029). Once revealed, they are plaintext in the hoster user's podman storage: env secrets in the container config, and secret files in the container's layer (ADR-0057). |
 
 ## 10. Crate and module layout (proposal)
 
