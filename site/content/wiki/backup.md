@@ -24,8 +24,9 @@ use that instead. Run every command as the `hoster` user.
 
 ## State database
 
-The database holds stacks and their revisions, deployment history, port allocations, sessions and
-the encrypted secrets ([ADR-0022](https://github.com/LHelge/hoster/blob/main/docs/adr/0022-sqlite-via-sqlx-state-store.md), [ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). Never copy `hoster.db` with `cp` while hoster runs:
+The database holds stacks and their revisions, deployment history, port allocations, sessions,
+the settings edited in the admin UI (the instance name and the [[notifications|notification]]
+settings) and the encrypted secrets, the notification provider's API key among them ([ADR-0022](https://github.com/LHelge/hoster/blob/main/docs/adr/0022-sqlite-via-sqlx-state-store.md), [ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). Never copy `hoster.db` with `cp` while hoster runs:
 the newest writes may still be in `hoster.db-wal`, and a plain copy can be torn. Use:
 
 ```sh
@@ -54,7 +55,8 @@ not delete them; remove old ones by hand once the new version runs well.
 The key that encrypts secrets lives outside the state directory on purpose ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)): either a
 `0600` key file in `~/.config/hoster/` or a user-scoped systemd credential. **Back it up
 separately from the database**, for example in a password manager or on different storage. If
-you lose it, every secret (app secrets and registry credentials) has to be set again; there is
+you lose it, every secret (app secrets, registry credentials and the notification API key) has to be set
+again; there is
 no recovery. If someone gets both the key and a database backup, they have every secret.
 
 ## ACME account and certificates

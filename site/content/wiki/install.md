@@ -215,6 +215,17 @@ systemctl --user status hoster
 `enable` adds it to `default.target`, which the lingering user instance reaches at boot.
 `Type=notify` means the unit only becomes `active` once hoster reports it is serving.
 
+## After the first login
+
+Open `https://<admin_host>` and log in with the GitHub account you named. Then, as suggested
+next steps:
+
+- Give the instance a name under **Settings → General** if the hostname is not what you want to
+  see in the sidebar and in mail subjects.
+- Set up [[notifications|mail notifications]], so that hoster mails you about failed deploys,
+  crash loops and failing certificates. They are off until you configure them.
+- Plan your backups: [[backup]].
+
 # Updates and rollback
 
 hoster never checks for updates by itself ([ADR-0052](https://github.com/LHelge/hoster/blob/main/docs/adr/0052-release-install-and-self-update.md)). There are three ways to update:

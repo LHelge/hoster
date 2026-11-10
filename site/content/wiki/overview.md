@@ -49,7 +49,7 @@ colours follow your system's light or dark mode.
 | **Stacks** | Every stack as a card with its services, routes and traffic, filterable by status. **New stack** applies a stack file, with a plan and pre-flight checks before you confirm. |
 | **Stack** | One stack under four tabs that share a header with **Redeploy** and **Re-resolve tags**. **Overview**: traffic figures, the slowest routes, the services with their containers, generations, uptime and ports, routes, volumes, deploying explicit digests, applying a new revision of the stack file (with a diff), refused webhook attempts, the stack's recent events, and removing the stack at the bottom. **Logs**: tail and follow the logs of each service's containers. **Environment**: the environment variables and the secrets, whose values are write-only. **Deployments**: the history, with each step and failure reasons; "Redeploy this one" or "Roll back to this one" is the rollback. |
 | **Certificates** | Hosts, issuer, expiry, the last ACME error and the DNS check, per host or for all at once; retry the failing ones. |
-| **Settings** | General, registries (credentials for private images), deploy webhook, reverse proxy and certificates. Only registries are edited here; the rest shows the effective `hoster.toml`. |
+| **Settings** | General, notifications, registries (credentials for private images), deploy webhook, reverse proxy and certificates. The instance name, [[notifications|mail notifications]] and registries are edited here; the rest shows the effective `hoster.toml`. |
 | **System** | The running and previous versions, the host; check for updates, read the release notes and update. |
 
 There is no separate containers page: a container and its logs are on its stack's pages.

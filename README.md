@@ -1,7 +1,9 @@
 # hoster
 
 A single-binary deployment orchestrator for one VPS: rootless podman, an embedded Pingora reverse
-proxy with ACME certificates, zero-downtime deploys by image digest, and a small web admin UI.
+proxy with ACME certificates, zero-downtime deploys by image digest, and a small web admin UI
+with an event log and mail notifications for failed deploys, crash loops, failing certificates
+and their recoveries.
 
 **Documentation: <https://docs.hoster.lhelge.se>**, built from [site/](site/) with
 [aphid](https://aphid.lhelge.se). See [spec.md](spec.md) for the specification and [docs/](docs/)
