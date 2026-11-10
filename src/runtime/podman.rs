@@ -26,8 +26,9 @@ use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     ListNetworksOptionsBuilder, LogsOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
     RemoveImageOptionsBuilder, RemoveVolumeOptions, StopContainerOptionsBuilder,
+    UploadToContainerOptionsBuilder,
 };
-use bollard::{API_DEFAULT_VERSION, Docker};
+use bollard::{API_DEFAULT_VERSION, Docker, body_full};
 use futures_util::StreamExt;
 use futures_util::stream::{self, BoxStream};
 use time::OffsetDateTime;
@@ -37,6 +38,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::exec::{Argv, ExecProcess, OutputTail};
+use super::files::{Layout, PathStat, StatPath, UploadFailure};
 use super::{
     ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, EngineInfo,
     ExecGuard, ExecOutcome, ExecOutput, LogLine, LogOptions, LogStream, NetworkSpec, ObjectKind,
@@ -573,6 +575,117 @@ impl ContainerInfo {
     }
 }
 
+/// The file system of one created container, as podman stats it.
+struct ContainerPaths<'a> {
+    runtime: &'a PodmanRuntime,
+    id: &'a ContainerId,
+}
+
+impl StatPath for ContainerPaths<'_> {
+    async fn stat(&self, path: &str) -> Result<PathStat, RuntimeError> {
+        self.runtime.stat(self.id, path).await
+    }
+}
+
+/// Writing config files into a created container (ADR-0057 §3, architecture §8).
+impl PodmanRuntime {
+    /// How long one stat of a container path may take.
+    const STAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Uploads `spec.files` into the created, unstarted container `id`: resolves each path
+    /// through the image's symbolic links, checks the resolved paths, then sends the
+    /// directories and the files with numeric owners, and the container user's files with
+    /// `copyUIDGID`. Neither upload replaces a directory with a file or the other way round.
+    async fn upload_files(
+        &self,
+        id: &ContainerId,
+        spec: &ContainerSpec,
+    ) -> Result<(), RuntimeError> {
+        if spec.files.is_empty() {
+            return Ok(());
+        }
+        let mut volumes: Vec<String> = spec.volumes.iter().map(|v| v.target().to_owned()).collect();
+        volumes.extend(self.image_volumes(&spec.image).await?);
+        let paths = ContainerPaths { runtime: self, id };
+        let layout = Layout::resolve(&spec.files, &volumes, &paths).await?;
+        let mtime = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let archives = layout.archives(mtime).map_err(|err| RuntimeError::Api {
+            operation: Operation::UploadFiles,
+            message: format!("cannot pack the files of {}: {err}", spec.name),
+        })?;
+        for (archive, copy_uidgid) in [(archives.ids, false), (archives.container_user, true)] {
+            let Some(archive) = archive else {
+                continue;
+            };
+            let mut options = UploadToContainerOptionsBuilder::new()
+                .path("/")
+                .no_overwrite_dir_non_dir("true");
+            if copy_uidgid {
+                options = options.copy_uidgid("true");
+            }
+            self.docker
+                .upload_to_container(
+                    id.as_ref(),
+                    Some(options.build()),
+                    body_full(archive.into()),
+                )
+                .await
+                .map_err(|err| match err {
+                    BollardError::DockerResponseServerError { message, .. } => {
+                        UploadFailure(&message).into()
+                    }
+                    err => Call::new(Operation::UploadFiles, ObjectKind::Container, &spec.name)
+                        .error(err),
+                })?;
+        }
+        tracing::debug!(container = %spec.name, files = spec.files.len(), "config files written");
+        Ok(())
+    }
+
+    /// `HEAD /containers/{id}/archive?path=`, a raw HTTP call over the podman socket next to
+    /// bollard: its own call fails on a 404, which is how podman answers for a missing path
+    /// and, with the stat header, for a dangling link.
+    async fn stat(&self, id: &ContainerId, path: &str) -> Result<PathStat, RuntimeError> {
+        let failed = |message: String| RuntimeError::Api {
+            operation: Operation::UploadFiles,
+            message,
+        };
+        let query: String = form_urlencoded::byte_serialize(path.as_bytes()).collect();
+        let request = format!(
+            "HEAD /containers/{}/archive?path={query} HTTP/1.1\r\nHost: d\r\n\
+             Connection: close\r\n\r\n",
+            id.as_ref()
+        );
+        let exchange = async {
+            let mut stream = tokio::net::UnixStream::connect(&self.socket).await?;
+            stream.write_all(request.as_bytes()).await?;
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await?;
+            std::io::Result::Ok(response)
+        };
+        let response = match tokio::time::timeout(Self::STAT_TIMEOUT, exchange).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => return Err(failed(format!("cannot stat `{path}`: {err}"))),
+            Err(_) => return Err(failed(format!("podman did not answer a stat of `{path}`"))),
+        };
+        let response = String::from_utf8_lossy(&response);
+        let mut lines = response.lines();
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .ok_or_else(|| failed(format!("podman's answer to a stat of `{path}` is not HTTP")))?;
+        let header = lines
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case(PathStat::HEADER))
+            .map(|(_, value)| value.trim());
+        PathStat::from_response(path, status, header).map_err(failed)
+    }
+}
+
 impl ContainerRuntime for PodmanRuntime {
     /// Creates `hoster-<stack>` unless it exists. A same-named network hoster did not create is
     /// a [`RuntimeError::Conflict`], never adopted.
@@ -747,7 +860,32 @@ impl ContainerRuntime for PodmanRuntime {
         for warning in &created.warnings {
             tracing::warn!(container = %spec.name, %warning, "podman warned on create");
         }
-        Ok(created.id.into())
+        let id = ContainerId::from(created.id);
+        if let Err(err) = self.upload_files(&id, spec).await {
+            // A container with half its files must never start: nothing else knows it exists
+            // yet, so it is removed here.
+            if let Err(removal) = self.remove(&id).await {
+                tracing::warn!(container = %spec.name, error = %removal, "cannot remove a container whose config files could not be written");
+            }
+            return Err(err);
+        }
+        Ok(id)
+    }
+
+    async fn image_volumes(&self, image: &PinnedImage) -> Result<Vec<String>, RuntimeError> {
+        let reference = image.to_string();
+        let call = Call::new(Operation::ImageVolumes, ObjectKind::Image, &reference);
+        let inspected = self
+            .docker
+            .inspect_image(&reference)
+            .await
+            .map_err(|err| call.error(err))?;
+        let mut volumes = inspected
+            .config
+            .and_then(|config| config.volumes)
+            .unwrap_or_default();
+        volumes.sort();
+        Ok(volumes)
     }
 
     async fn start(&self, id: &ContainerId) -> Result<(), RuntimeError> {
@@ -1886,7 +2024,7 @@ mod tests {
         );
     }
 
-    use super::super::{Labels, ServiceGeneration, VolumeMount};
+    use super::super::{ContainerFile, Labels, PodmanVersion, ServiceGeneration, VolumeMount};
     use crate::stack::Name;
     use crate::store::DeploymentId;
 
@@ -2811,6 +2949,273 @@ mod tests {
         if let Err(err) = result {
             std::panic::resume_unwind(err.into_panic());
         }
+    }
+
+    use crate::stack::{FileOwner, Ownership};
+
+    /// A config file of the tests below, with `content` naming it.
+    fn config_file(path: &str, mode: &str, owner: Ownership) -> ContainerFile {
+        ContainerFile {
+            path: path.parse().unwrap(),
+            content: format!("content of {path}\n").as_str().into(),
+            mode: mode.parse().unwrap(),
+            owner,
+        }
+    }
+
+    /// The three kinds of file: inline defaults, a numeric owner, and the container's user.
+    fn config_files() -> Vec<ContainerFile> {
+        vec![
+            config_file(
+                "/etc/app/conf.d/config.yml",
+                "0444",
+                Ownership::Ids(FileOwner::ROOT),
+            ),
+            config_file(
+                "/etc/app/shared.key",
+                "0440",
+                Ownership::Ids(FileOwner { uid: 0, gid: 65534 }),
+            ),
+            config_file("/run/secrets/creds.json", "0400", Ownership::ContainerUser),
+            // busybox links `/lib64` to `lib`.
+            config_file(
+                "/lib64/hoster/linked.conf",
+                "0444",
+                Ownership::Ids(FileOwner::ROOT),
+            ),
+            // An image file is replaced.
+            config_file(
+                "/etc/nsswitch.conf",
+                "0444",
+                Ownership::Ids(FileOwner::ROOT),
+            ),
+        ]
+    }
+
+    /// The combined output of `sh -c script` in the container, and its exit code.
+    async fn sh(runtime: &PodmanRuntime, id: &ContainerId, script: &str) -> (i64, String) {
+        let outcome = runtime
+            .exec(id, &argv(&["sh", "-c", script]), Duration::from_secs(20))
+            .await
+            .unwrap();
+        match outcome {
+            ExecOutcome::Exited { code, output } => (code, output.as_ref().to_owned()),
+            other => panic!("{script}: {other:?}"),
+        }
+    }
+
+    /// Whether podman is new enough for config files (ADR-0057 §9); says so when it is not.
+    fn uploads_supported(runtime: &PodmanRuntime) -> bool {
+        let supported = PodmanVersion::CONFIG_FILES
+            .require(&runtime.version(), "config files")
+            .inspect_err(|reason| eprintln!("skipped: {reason}"));
+        supported.is_ok()
+    }
+
+    /// ADR-0057 on real podman, for a container running as root and one running as another
+    /// user with a read-only root: content, owner and mode as documented, parents root's,
+    /// files kept over a restart and gone with the container.
+    #[tokio::test]
+    async fn config_files_reach_the_container_with_their_owner_and_mode() {
+        with_stack(|runtime, stack| async move {
+            if !uploads_supported(&runtime) {
+                return;
+            }
+            // A container that runs throughout, so the stops below never leave the rootless
+            // network namespace empty: tearing it down fails on GitHub's ubuntu-26.04 runner
+            // ("rootless netns: kill network process: permission denied", Bears ghd), which
+            // is not what this test is about. It also creates the network and pulls the image.
+            running_sleeper(&runtime, &stack).await;
+            assert_eq!(
+                runtime.image_volumes(&run_image()).await.unwrap(),
+                Vec::<String>::new()
+            );
+            let listing = "stat -c '%u:%g %a %n' /etc/app /etc/app/conf.d \
+                           /etc/app/conf.d/config.yml /etc/app/shared.key /run/secrets \
+                           /run/secrets/creds.json /lib/hoster /lib/hoster/linked.conf \
+                           /etc/nsswitch.conf /etc /lib";
+
+            // As root, writable root file system.
+            let mut spec = spec_for(stack.as_ref(), "root");
+            spec.command = Some(vec!["sleep".into(), "600".into()]);
+            spec.stop_timeout = Duration::from_secs(1);
+            spec.files = config_files();
+            let id = runtime.create_container(&spec).await.unwrap();
+            runtime.start(&id).await.unwrap();
+            let (code, listed) = sh(&runtime, &id, listing).await;
+            assert_eq!(code, 0, "{listed}");
+            assert_eq!(
+                listed.lines().collect::<Vec<_>>(),
+                [
+                    "0:0 755 /etc/app",
+                    "0:0 755 /etc/app/conf.d",
+                    "0:0 444 /etc/app/conf.d/config.yml",
+                    "0:65534 440 /etc/app/shared.key",
+                    "0:0 755 /run/secrets",
+                    "0:0 400 /run/secrets/creds.json",
+                    "0:0 755 /lib/hoster",
+                    "0:0 444 /lib/hoster/linked.conf",
+                    "0:0 444 /etc/nsswitch.conf",
+                    // Existing directories keep their owner and mode.
+                    "0:0 755 /etc",
+                    "0:0 755 /lib",
+                ]
+            );
+            let (_, content) = sh(
+                &runtime,
+                &id,
+                "cat /etc/app/conf.d/config.yml /run/secrets/creds.json /lib64/hoster/linked.conf \
+                 /etc/nsswitch.conf",
+            )
+            .await;
+            assert_eq!(
+                content,
+                "content of /etc/app/conf.d/config.yml\ncontent of /run/secrets/creds.json\n\
+                 content of /lib64/hoster/linked.conf\ncontent of /etc/nsswitch.conf\n"
+            );
+            // Files live in the container's layer: a restart keeps them.
+            runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
+            runtime.start(&id).await.unwrap();
+            let (code, again) = sh(&runtime, &id, listing).await;
+            assert_eq!((code, again), (0, listed));
+
+            // As another user, with a read-only root file system.
+            let mut spec = spec_for(stack.as_ref(), "user");
+            spec.command = Some(vec!["sleep".into(), "600".into()]);
+            spec.stop_timeout = Duration::from_secs(1);
+            spec.user = Some("1000:1000".into());
+            spec.read_only = true;
+            spec.files = config_files();
+            let id = runtime.create_container(&spec).await.unwrap();
+            runtime.start(&id).await.unwrap();
+            let (code, listed) = sh(&runtime, &id, listing).await;
+            assert_eq!(code, 0, "{listed}");
+            let listed: Vec<&str> = listed.lines().collect();
+            assert_eq!(
+                listed[..6],
+                [
+                    "0:0 755 /etc/app",
+                    "0:0 755 /etc/app/conf.d",
+                    "0:0 444 /etc/app/conf.d/config.yml",
+                    "0:65534 440 /etc/app/shared.key",
+                    // The parents of the user's file are still root's.
+                    "0:0 755 /run/secrets",
+                    "1000:1000 400 /run/secrets/creds.json",
+                ]
+            );
+            // The user reads what the modes allow.
+            let (code, content) = sh(
+                &runtime,
+                &id,
+                "id -u; cat /etc/app/conf.d/config.yml /run/secrets/creds.json",
+            )
+            .await;
+            assert_eq!(
+                (code, content.as_str()),
+                (
+                    0,
+                    "1000\ncontent of /etc/app/conf.d/config.yml\n\
+                     content of /run/secrets/creds.json\n"
+                )
+            );
+            let (code, _) = sh(&runtime, &id, "cat /etc/app/shared.key").await;
+            assert_ne!(code, 0, "0440 for 0:65534 is not readable by 1000:1000");
+            // And changes none of it, nor adds to it.
+            for write in [
+                "echo x >> /etc/app/conf.d/config.yml",
+                "rm /etc/app/conf.d/config.yml",
+                "echo x > /etc/app/new.conf",
+                "echo x > /run/secrets/new.json",
+                "rm /run/secrets/creds.json",
+            ] {
+                let (code, output) = sh(&runtime, &id, write).await;
+                assert_ne!(code, 0, "{write}: {output}");
+            }
+            runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
+            runtime.start(&id).await.unwrap();
+            let (code, content) = sh(&runtime, &id, "cat /run/secrets/creds.json").await;
+            assert_eq!(
+                (code, content.as_str()),
+                (0, "content of /run/secrets/creds.json\n"),
+                "a read-only root refills /run from the layer at each start"
+            );
+
+            // Removing the container is the only cleanup there is.
+            runtime.remove(&id).await.unwrap();
+            assert!(matches!(
+                runtime.inspect(&id).await,
+                Err(RuntimeError::NotFound { .. })
+            ));
+        })
+        .await;
+    }
+
+    /// A file that cannot be written fails the create, names container paths only and leaves
+    /// no container behind.
+    #[tokio::test]
+    async fn a_refused_config_file_leaves_no_container() {
+        with_stack(|runtime, stack| async move {
+            if !uploads_supported(&runtime) {
+                return;
+            }
+            runtime
+                .ensure_network(&NetworkSpec::for_stack(&stack))
+                .await
+                .unwrap();
+            runtime
+                .pull_image(&run_image())
+                .await
+                .expect("pull busybox");
+            let root = Ownership::Ids(FileOwner::ROOT);
+            // No subuid range reaches this far.
+            let far = Ownership::Ids(FileOwner {
+                uid: 2_000_000_000,
+                gid: 0,
+            });
+            let cases = [
+                (
+                    config_file("/etc/network", "0444", root),
+                    "`/etc/network` is a directory in the image",
+                ),
+                (
+                    config_file("/lib64", "0444", root),
+                    "`/lib64` is a symbolic link in the image (to `/lib`)",
+                ),
+                (
+                    config_file("/etc/passwd/x.conf", "0444", root),
+                    "`/etc/passwd/x.conf` is below `/etc/passwd`, which is a file in the image",
+                ),
+                (
+                    config_file("/etc/app/far.conf", "0444", far),
+                    "error setting ownership of \"/etc/app/far.conf\" to 2000000000:0",
+                ),
+            ];
+            for (i, (file, expected)) in cases.into_iter().enumerate() {
+                let mut spec = spec_for(stack.as_ref(), &format!("refused{i}"));
+                spec.command = Some(vec!["sleep".into(), "600".into()]);
+                // A good file next to the bad one must not survive either.
+                spec.files = vec![config_file("/etc/app/good.conf", "0444", root), file];
+                let err = match runtime.create_container(&spec).await {
+                    Err(err) => err,
+                    Ok(_) => panic!("created with a file that must be refused: {expected}"),
+                };
+                let RuntimeError::ConfigFiles { message } = &err else {
+                    panic!("{err:?}");
+                };
+                assert!(message.contains(expected), "{message}");
+                assert!(
+                    !message.contains("/home") && !message.contains("storage"),
+                    "host paths in: {message}"
+                );
+                // By name, not by listing: other tests' containers come and go meanwhile.
+                let left = runtime.inspect(&ContainerId::from(spec.name.clone())).await;
+                assert!(
+                    matches!(left, Err(RuntimeError::NotFound { .. })),
+                    "{expected}: {left:?}"
+                );
+            }
+        })
+        .await;
     }
 
     /// A running busybox container of a fresh stack, for the exec tests.

@@ -1116,6 +1116,43 @@ async fn a_secret_containing_another_is_redacted_whole() {
     );
 }
 
+/// ADR-0057 §6: a check that prints one line of a credentials file shows none of it.
+#[tokio::test]
+async fn file_secrets_are_redacted_whole_and_line_by_line() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(&dir.path().join("state")).await.unwrap();
+    let env = [SecretValue::from("hunter22")];
+    let files = [
+        SecretValue::from("  user = admin  \n\tpassword = s3cr3t-value\r\n\nkey\nab\n"),
+        SecretValue::from("single-line-token"),
+    ];
+    let log = DeploymentLog::new(
+        store,
+        DeploymentId::from(1),
+        DeploymentState::HealthChecking,
+    )
+    .redacting(&env)
+    .redacting_lines(&files);
+
+    assert_eq!(
+        log.redact("cannot log in: password = s3cr3t-value (user = admin) with hunter22"),
+        "cannot log in: <redacted> (<redacted>) with <redacted>"
+    );
+    assert_eq!(log.redact("token single-line-token"), "token <redacted>");
+    // The whole file is one redaction, not one per line.
+    assert_eq!(log.redact(files[0].expose()), "<redacted>");
+    // Lines under four characters would match everywhere, as short secrets would.
+    assert_eq!(log.redact("key ab"), "key ab");
+    // An env secret is not split into lines.
+    let log = DeploymentLog::new(
+        Store::open(&dir.path().join("other")).await.unwrap(),
+        DeploymentId::from(1),
+        DeploymentState::HealthChecking,
+    )
+    .redacting(&[SecretValue::from("first-line\nsecond-line")]);
+    assert_eq!(log.redact("second-line"), "second-line");
+}
+
 #[tokio::test]
 async fn services_without_routes_settle() {
     let toml = format!(

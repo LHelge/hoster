@@ -30,11 +30,11 @@ use crate::health::{Check, DeploymentLog, ProbeLog, Probes};
 use crate::logging::LogSpan;
 use crate::routing::{DesiredStack, DrainOutcome, RouteClaims, ServiceState, Upstream};
 use crate::runtime::{
-    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, NetworkSpec, PortBinding,
-    ServiceGeneration, VolumeMount, label,
+    ContainerFile, ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, NetworkSpec,
+    PortBinding, ServiceGeneration, VolumeMount, label,
 };
 use crate::secrets::SecretValue;
-use crate::stack::{Name, SecretRef, Stack};
+use crate::stack::{ConfigFile, ContainerPath, FileSource, Name, SecretRef, SecretUse, Stack};
 use crate::store::{
     Deployment, DeploymentId, DeploymentState, DigestSet, NewEvent, PortMap, RevisionId,
     ServicePointer, StackRevision, Timestamp,
@@ -120,6 +120,9 @@ pub(super) struct Run {
     created: Vec<(Name, ContainerId)>,
     /// The secret values given to the new containers, redacted from exec check output.
     secrets: Vec<SecretValue>,
+    /// The secret values written into the containers' config files (ADR-0057): redacted from
+    /// exec check output too, and line by line.
+    file_secrets: Vec<SecretValue>,
     /// Old stop-first containers `Replacing` stopped (kept until clean-up), by service.
     stopped: Vec<(Name, ContainerId)>,
     /// The start-phase services `HealthChecking` has yet to start.
@@ -153,6 +156,7 @@ impl Run {
             ports: BTreeMap::new(),
             created: Vec::new(),
             secrets: Vec::new(),
+            file_secrets: Vec::new(),
             stopped: Vec::new(),
             waves: StartWaves::default(),
             running_at_start: BTreeSet::new(),
@@ -556,7 +560,37 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 tracing::warn!(%image, %err, "cannot record the pulled image; it will not be pruned");
             }
         }
-        Event::Pulled
+        match self.check_image_volumes(run).await {
+            Ok(()) => Event::Pulled,
+            Err(reason) => Event::Failed(reason),
+        }
+    }
+
+    /// A config file may not be in or above a volume the image declares (ADR-0057 §3): podman
+    /// mounts an anonymous volume there, which hides the file or fails the start. Only the
+    /// pulled image knows its volumes, so this is the first place to look.
+    async fn check_image_volumes(&self, run: &Run) -> Result<(), String> {
+        for change in &run.plan().changes {
+            let files = &run.target.definition.services[&change.service].files;
+            if files.is_empty() {
+                continue;
+            }
+            let volumes = self
+                .runtime
+                .image_volumes(&change.image)
+                .await
+                .map_err(|err| format!("service {}: {err}", change.service))?;
+            for path in files.keys() {
+                path.check_placement(volumes.iter().map(String::as_str))
+                    .map_err(|reason| {
+                        format!(
+                            "service {}: {reason}; the image {} declares that volume",
+                            change.service, change.image
+                        )
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     /// `Starting`: the stack network, then the start phase's first wave: every start-phase
@@ -878,7 +912,10 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
             for SecretRef { secret, usage } in definition.services[service].secret_refs() {
                 match self.secrets.reveal(secret).await {
-                    Ok(Some((value, _))) => run.secrets.push(value),
+                    Ok(Some((value, _))) => match usage {
+                        SecretUse::Env(_) => run.secrets.push(value),
+                        SecretUse::File(_) => run.file_secrets.push(value),
+                    },
                     Ok(None) => {}
                     Err(err) => {
                         return Err((
@@ -937,6 +974,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     fn probe_log(&self, run: &Run) -> DeploymentLog {
         DeploymentLog::new(self.store.clone(), run.id, run.state)
             .redacting(&run.secrets)
+            .redacting_lines(&run.file_secrets)
             .serialized(&run.notes)
     }
 
@@ -1111,21 +1149,55 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         async {
             let mut spec = run.spec(change)?;
             let service = &run.target.definition.services[&change.service];
-            for (env, secret) in &service.secrets {
-                match self.secrets.reveal(secret).await {
-                    Ok(Some((value, _))) => {
-                        run.secrets.push(value.clone());
-                        spec.secrets.insert(env.clone(), value);
-                    }
+            // Inline files come from the revision; a secret file's content is added below.
+            let mut files: BTreeMap<&ContainerPath, ContainerFile> = service
+                .files
+                .iter()
+                .filter_map(|(path, file)| match &file.source {
+                    FileSource::Inline(content) => Some((
+                        path,
+                        Self::container_file(path, file, content.as_str().into()),
+                    )),
+                    FileSource::Secret(_) => None,
+                })
+                .collect();
+            for SecretRef { secret, usage } in service.secret_refs() {
+                let value = match self.secrets.reveal(secret).await {
+                    Ok(Some((value, _))) => value,
                     Ok(None) => {
                         return Err(format!(
-                            "cannot create {}: secret `{secret}` (for {env}) is not set",
+                            "cannot create {}: secret `{secret}` (for {usage}) is not set",
                             spec.name
                         ));
                     }
                     Err(err) => return Err(format!("cannot create {}: {err}", spec.name)),
+                };
+                match usage {
+                    SecretUse::Env(env) => {
+                        run.secrets.push(value.clone());
+                        spec.secrets.insert(env.to_owned(), value);
+                    }
+                    SecretUse::File(path) => {
+                        // A secret can change after apply, so its size is checked here; the
+                        // stack file's own content was at apply (ADR-0057 §6).
+                        let len = value.expose().len();
+                        if len > ConfigFile::MAX_BYTES {
+                            return Err(format!(
+                                "cannot create {}: secret `{secret}` (for {usage}) is {len} \
+                                 bytes; a file holds at most {} KiB",
+                                spec.name,
+                                ConfigFile::MAX_BYTES / 1024
+                            ));
+                        }
+                        run.file_secrets.push(value.clone());
+                        files.insert(
+                            path,
+                            Self::container_file(path, &service.files[path], value),
+                        );
+                    }
                 }
             }
+            spec.files = files.into_values().collect();
             for volume in &spec.volumes {
                 self.runtime
                     .ensure_volume(volume.spec())
@@ -1147,6 +1219,20 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
         .instrument(span)
         .await
+    }
+
+    /// `file` as the runtime writes it at `path`, with its mode and owner resolved.
+    fn container_file(
+        path: &ContainerPath,
+        file: &ConfigFile,
+        content: SecretValue,
+    ) -> ContainerFile {
+        ContainerFile {
+            path: path.clone(),
+            content,
+            mode: file.resolved_mode(),
+            owner: file.ownership(),
+        }
     }
 
     /// The health check of `service`'s new container on the ports this deployment reserved.
