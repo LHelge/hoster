@@ -50,7 +50,7 @@
   </table></div>
   {%- endif %}
   <div id="delete-result" class="card-result" aria-live="polite"></div>
-  <p class="card-foot">Variables come from the stack file's <code>env</code> and change only with it: apply a new revision. Secrets are encrypted at rest and write-only, so their values are never shown again; a service gets one as a variable through <code>secrets = { ENV_NAME = "{{ header.name }}/&lt;name&gt;" }</code>.</p>
+  <p class="card-foot">Variables come from the stack file's <code>env</code> and change only with it: apply a new revision. Secrets are encrypted at rest and write-only, so their values are never shown again; a service gets one as a variable through <code>secrets = { ENV_NAME = "{{ header.name }}/&lt;name&gt;" }</code>, or as a file through <code>files = { "/path" = { secret = "{{ header.name }}/&lt;name&gt;" } }</code>.</p>
 </section>
 
 <section class="card" id="set-secret" aria-labelledby="set-secret-title">

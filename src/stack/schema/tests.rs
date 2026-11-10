@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use super::{Field, StackSchema};
 use crate::health;
-use crate::stack::tests::{MINIMAL, dependency_example, worked_example};
+use crate::stack::tests::{MINIMAL, dependency_example, files_example, worked_example};
 use crate::stack::{
     DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH, DEFAULT_STOP_TIMEOUT, SUPPORTED_VERSION, Stack,
 };
@@ -263,6 +263,7 @@ fn documented_stacks_validate() {
     for (name, source) in [
         ("stack-format.md §3", worked_example()),
         ("stack-format.md §3.2", dependency_example()),
+        ("stack-format.md §3.3", files_example()),
         (
             "site/docs.stack.toml",
             include_str!("../../../site/docs.stack.toml"),

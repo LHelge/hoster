@@ -279,6 +279,9 @@ pub struct ServiceRow {
     pub state_detail: String,
     /// The services it names in `depends_on`, in name order.
     pub depends_on: Vec<String>,
+    /// How many config files the active revision gives it (ADR-0057); the files card lists
+    /// them.
+    pub files: usize,
     /// The health check in effect; `None` when no revision declares the service (it does not
     /// parse).
     pub check: Option<CheckView>,
@@ -343,6 +346,7 @@ impl ServiceRow {
                 .flat_map(|s| &s.depends_on)
                 .map(ToString::to_string)
                 .collect(),
+            files: declared.active.map_or(0, |s| s.files.len()),
             check: declared.in_effect.map(CheckView::from),
             restarts: service.restarts.restarts,
             port,

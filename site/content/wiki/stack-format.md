@@ -132,6 +132,7 @@ name = "notes"       # required; stack name
 | `env` | table string → string | no | Plain, non-secret environment variables. For a routed service with exactly one distinct container port, hoster adds `PORT=<that port>` unless `env` (or `secrets`) sets `PORT` itself ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). A service whose routes use two or more different container ports, or that has no routes, gets no `PORT`; set what it needs in `env`. The injected value is part of the service's config hash, so changing the route's `port` redeploys the service. |
 | `secrets` | table string → string | no | Env var name → secret name `<stack>/<name>` in hoster's encrypted secret store ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). The value never appears in the stack file. Values are injected as environment variables at container create; a deployment that references a secret which is not set is rejected, naming the secret (never its value). Replacing a secret changes its version, which is part of the service's config hash. |
 | `volumes` | table string → string | no | Volume name → mount path. Named podman volumes `hoster-<stack>-<volume>` only, kept on stack removal ([ADR-0030](https://github.com/LHelge/hoster/blob/main/docs/adr/0030-named-volumes-and-documented-backups.md)). Host bind mounts are not expressible ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)). hoster creates each volume on first use, labelled `hoster.managed=true` and `hoster.stack=<stack>`, and refuses to mount an existing one labelled for another stack. Validation warns when a service with volumes uses `update = "start-first"`, since old and new containers would mount the volume at the same time during a deploy ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
+| `files` | table path → file | no | Config files hoster writes into each container before it starts: absolute container path → `{ content = "…" }` or `{ secret = "<stack>/<name>" }`, with optional `mode` and `owner`. See §2.2.1 ([ADR-0057](https://github.com/LHelge/hoster/blob/main/docs/adr/0057-config-files-in-stack-files.md)). Needs podman 5.4 or later. A file's content, mode and owner are part of the service's config hash, so changing one redeploys the service. |
 | `health` | table | no | See §2.4 ([ADR-0038](https://github.com/LHelge/hoster/blob/main/docs/adr/0038-host-driven-health-probes-no-limits-v1.md), [ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md), [ADR-0056](https://github.com/LHelge/hoster/blob/main/docs/adr/0056-service-dependencies-and-exec-health-checks.md)). Defaults: HTTP `GET /healthz` on the first route's container port for routed services, "running for 5 s" for others. Services whose health endpoint is elsewhere (including prefix-mounted ones) declare it; a service without routes may only declare an `exec` check. |
 | `depends_on` | array of string | no | Services of this stack that must pass their health check before this one starts, e.g. `["db", "cache"]` ([ADR-0056](https://github.com/LHelge/hoster/blob/main/docs/adr/0056-service-dependencies-and-exec-health-checks.md)). Each must name another service of the stack, at most once; cycles are rejected and named in order (`app → worker → app`). There are no compose-style `condition` variants. Each service starts as soon as its own dependencies pass, during deploys and after a reboot or crash. Outside a deploy, a running dependency that has not passed within min(`start_period`, 5 min) no longer holds its dependents, and a dependency that has never run is ignored. A dependency going down never stops its dependents. Not part of the config hash: changing it reorders starts but never recreates a container. The apply preview lists the start order, and the stack overview shows each service's dependencies and "waiting for db" while the reconciler holds it back. A worked example is in §3.2. |
 | `update` | string | no | `"start-first"` (default; zero-downtime) or `"stop-first"` (for services that cannot run twice; short outage with 503 + `Retry-After`) ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
@@ -142,6 +143,84 @@ name = "notes"       # required; stack name
 
 There are intentionally **no** fields for `ports`, `privileged`, `network_mode`, `cap_add`,
 `devices`, bind mounts, or the podman socket ([ADR-0007](https://github.com/LHelge/hoster/blob/main/docs/adr/0007-route-model-and-loopback-only-publishing.md), [ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)).
+
+## 2.2.1 Config files ([ADR-0057](https://github.com/LHelge/hoster/blob/main/docs/adr/0057-config-files-in-stack-files.md))
+
+Many images are configured by a file, not by environment variables. Host bind mounts are not
+expressible, so the stack file carries the file itself:
+
+```toml
+[services.prometheus.files]
+"/etc/prometheus/prometheus.yml" = { content = """
+global:
+  scrape_interval: 15s
+""" }
+"/etc/prometheus/web.yml" = { secret = "monitoring/web-config", mode = "0440", owner = "0:65534" }
+```
+
+Each key is an absolute path inside the container. hoster writes the files into every new
+container of the service after it is created and before it starts. They live in the container's
+own layer: a restart or a reboot keeps them, and they go away with the container. There is no
+directory on the host to manage or back up.
+
+| Field | Type | Required | Default | Rules |
+|---|---|---|---|---|
+| `content` | string | one of the two | — | The file's text. A TOML multi-line string (`"""…"""`, or `'''…'''` to keep backslashes as written) holds a whole file; the newline right after the opening quotes is dropped. At most 256 KiB per file, and 1 MiB for all `content` of a stack together. `content = ""` is an empty file. |
+| `secret` | string | one of the two | — | A secret `<stack>/<name>` of this stack ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)) whose value becomes the file's content. Set it on the stack's environment tab, where the file is listed with its secret. At most 256 KiB, checked when the service deploys. |
+| `mode` | string | no | `"0444"` for `content`, `"0400"` for `secret` | Four octal digits from `"0000"` to `"0777"`. No setuid, setgid or sticky bit. |
+| `owner` | string | no | `"0:0"` for `content`; the container's user for `secret` | Numeric `"uid:gid"` inside the container, both required, each at most 65535. Names are not accepted. |
+
+**Paths.** A path is absolute and written exactly one way: no `.`, `..` or empty component and no
+trailing `/`. hoster creates missing parent directories, owned by root with mode `0755`. A file
+replaces a file the image has at that path, but never a directory or a symbolic link. A path may
+not be:
+
+- in, or a parent directory of, one of the service's `volumes`, or a volume the image declares
+  (`VOLUME`); the image's volumes are known once it is pulled, so that check fails the deploy,
+  not the apply;
+- a parent directory of another file of the service;
+- in `/proc`, `/sys` or `/dev`;
+- one of `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/etc/passwd`, `/etc/group` or
+  `/run/.containerenv`, which podman writes itself.
+
+Paths are followed through the image's symbolic links (`/var/run` is `/run` in many images), and
+the rules above apply to where a file really lands.
+
+**Who can read and change a file.** With the defaults, everyone in the container reads a
+`content` file and only root can change it, and a `secret` file is readable by the user the
+container runs as (the service's `user`, else the image's) and nobody else. A container that runs
+as root can rewrite any of them until it is replaced. Set `read_only = true` to make them
+read-only for everyone; the exceptions are `/run`, `/tmp` and `/var/tmp`, which stay writable
+for root because podman mounts a tmpfs there and refills it from the files at each start.
+
+**Images that start as root and switch user themselves** (nginx, postgres, Mosquitto) run as root
+as far as podman knows, so a `secret` file is owned by root with mode `0400` and the process that
+reads it, after the switch, is refused. Give such a file to the user the image switches to, e.g.
+`owner = "101:101"` for nginx, or widen its `mode`.
+
+**Changes and rollback.** Changing a file's `content`, `mode` or `owner`, adding or removing a
+file, or setting its secret to a new value redeploys that service and no other; the apply preview
+names the file next to the service (`redeploy prometheus`, `file
+/etc/prometheus/prometheus.yml changed`). Rolling back
+restores the `content` of the revision rolled back to. A `secret` file gets the secret's current
+value: secrets are not versioned with revisions.
+
+**Secrets in files.** A deployment whose file names a secret that is not set is rejected, naming
+the secret and the path. A secret file is plaintext inside the container's layer in the hoster
+user's podman storage, as an environment secret is in the container's configuration. Health check
+output is redacted for the whole value and for each of its lines of four characters or more.
+
+**Requirements and limits.**
+
+- podman 5.4 or later. On an older podman (Ubuntu 24.04 ships 4.9, Debian 12 ships 4.3) a stack
+  with `files` is rejected when it is applied, naming both versions; stacks without `files` are
+  unaffected. `hoster doctor` shows the podman version.
+- Text only: there is no templating, no binary content, no whole directories and no files
+  fetched from a URL or the host. A file the app must write to, or keep, belongs in a volume.
+- On RHEL-family hosts podman's own `mounts.conf` can mount host directories over
+  `/run/secrets/`, hiding files written there. Use another directory on those hosts.
+
+A worked example is in §3.3.
 
 ## 2.3 Route
 
@@ -199,7 +278,8 @@ exec API without a shell, as the container's user and with its environment. Exit
 other exit (a shell's 126 or 127 included) is an ordinary failure. If podman cannot execute the
 program at all, a deploy aborts at once with podman's error. Use `exec = ["sh", "-c", "…"]` when
 the check needs a shell. On a routed service an `exec` check also requires a TCP connect to the
-first route's port. Its output tail (the last 256 characters, secret values redacted) is
+first route's port. Its output tail (the last 256 characters, with the service's secret values
+redacted, and each line of a secret used as a config file, §2.2.1) is
 recorded in the deployment's events. A probe fails at `timeout` whether or not the command has
 ended; hoster then ends it if it can, and otherwise leaves it to finish. With three such checks
 still running in a container, a deploy waits for one of them to end (until `start_period` runs
@@ -467,6 +547,55 @@ until the switch, but its start and probe add to `db`'s downtime.
 `worker` once both of its dependencies run and have passed their checks. Until then the overview
 shows them as "waiting for cache, db". A dependency that runs but has not passed within
 min(`start_period`, 5 min) stops holding them back.
+
+## 3.3 Worked example: an image configured by files
+
+A reverse proxy that reads its configuration from a file and a credentials file from a secret.
+Nothing here is specific to the image: hoster only writes files.
+
+```toml
+version = 1
+name = "edge"
+
+[services.proxy]
+image = "docker.io/library/nginx:1.27"
+
+[services.proxy.files]
+# Replaces the image's default site.
+"/etc/nginx/conf.d/default.conf" = { content = """
+server {
+    listen 8080;
+    location /healthz { return 204; }
+    location / {
+        auth_basic "edge";
+        auth_basic_user_file /etc/nginx/htpasswd;
+        root /usr/share/nginx/html;
+    }
+}
+""" }
+# nginx starts as root and its workers run as uid 101: root owns the file, group 101 reads it.
+"/etc/nginx/htpasswd" = { secret = "edge/htpasswd", mode = "0440", owner = "0:101" }
+
+[[services.proxy.routes]]
+host = "edge.example.com"
+port = 8080
+```
+
+**Before the first apply**, set the secret `edge/htpasswd` on the stack's environment tab, or
+with the stack applied and its deployment rejected for the missing secret, set it there and the
+service deploys. The value is the whole file: one `user:hash` line per user.
+
+**What the overview shows.** The Config files card lists both files with their mode and owner:
+`/etc/nginx/conf.d/default.conf` as `inline` with its size, `/etc/nginx/htpasswd` with the
+secret's name. Neither file's content is shown anywhere but in the stack file's own diff.
+
+**Changing the config.** Edit `content` and apply: the preview reads `redeploy proxy`, noting
+`file /etc/nginx/conf.d/default.conf changed`, and a new container starts with the new file next
+to the old one. If nginx rejects the config, the new container never passes its health check, the
+deployment aborts and the old container keeps serving.
+
+**Changing the password.** Set `edge/htpasswd` to a new value on the environment tab: the
+confirmation names `proxy` as the service to redeploy.
 
 # 4. Versioning
 

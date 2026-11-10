@@ -7,7 +7,7 @@ use axum::http::{Request, header};
 use super::*;
 use crate::orchestrator::Operator;
 use crate::web::auth::tests::{ORIGIN, TestApp, header as response_header};
-use crate::web::stacks::tests::{Call, FORM, SECRET_VALUE, body, encoded, post};
+use crate::web::stacks::tests::{Call, FORM, NOTES, SECRET_VALUE, body, encoded, post, revision};
 
 /// The body of `response`, asserted to be free of the secret's value.
 async fn clean(response: Response) -> (StatusCode, String) {
@@ -580,6 +580,64 @@ fn the_delete_confirmation_carries_no_value() {
     assert!(!html.contains(r#"name="value""#), "{html}");
 }
 
+/// ADR-0057 §10: secrets used by config files are listed with the env secrets, keyed by the
+/// file's path, so a missing one is obvious before deploying.
+#[tokio::test]
+async fn the_tab_lists_the_secrets_of_config_files() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let toml = format!(
+        "{NOTES}\n[services.storage.files]\n\
+         \"/etc/rustfs/config.toml\" = {{ content = \"inline-not-a-secret\" }}\n\
+         \"/run/secrets/db.json\" = {{ secret = \"notes/db\" }}\n\
+         \"/run/secrets/license\" = {{ secret = \"notes/license\" }}\n"
+    );
+    app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 4, &toml);
+    app.stacks.secrets.lock().unwrap().push(StackSecret {
+        name: "license".into(),
+        updated_at: None,
+        services: vec!["storage".into()],
+    });
+    let (status, html) = clean(
+        app.get("/stacks/notes/environment", Some(&browser.cookie))
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let row = |key: &str| {
+        let start = html
+            .find(&format!(r#"<code class="env-key">{key}</code>"#))
+            .unwrap_or_else(|| panic!("no row for {key} in {html}"));
+        let row = &html[start..];
+        &row[..row.find("</tr>").unwrap()]
+    };
+    // A set secret used by a file: its name, when it was set, the service and the type.
+    let db = row("/run/secrets/db.json");
+    assert!(
+        db.contains(
+            r#"<code class="env-secret">notes/db</code><span class="env-changed">set <time"#
+        ),
+        "{db}"
+    );
+    assert!(
+        db.contains(r#"<span class="mono env-service">storage</span>"#),
+        "{db}"
+    );
+    assert!(
+        db.contains(r#"<span class="tag env-type">secret file</span>"#),
+        "{db}"
+    );
+    // One that is not set is flagged and offered to set.
+    let license = row("/run/secrets/license");
+    assert!(license.contains("not set"), "{license}");
+    assert!(license.contains("?set=license#set-secret"), "{license}");
+    // Inline files are not environment, and their content is nowhere.
+    assert!(!html.contains("/etc/rustfs/config.toml"), "{html}");
+    assert!(!html.contains("inline-not-a-secret"), "{html}");
+    // db, missing, old and license: db is a variable of api and a file of storage, once.
+    assert!(html.contains("· 4 secrets</span>"), "{html}");
+}
+
 #[test]
 fn the_head_counts_each_secret_once() {
     let secret = |key: &str, service: &str| EnvRow {
@@ -592,6 +650,7 @@ fn the_head_counts_each_secret_once() {
                 changed: None,
                 referenced: true,
             },
+            file: false,
         },
     };
     let table = EnvTable {

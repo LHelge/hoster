@@ -12,7 +12,7 @@
 //! active revision and the new file, compared. "Re-resolve tags" (ADR-0025) uses the same plan
 //! list for its pins and redeploys.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 
@@ -22,7 +22,7 @@ use similar::{ChangeTag, TextDiff};
 
 use super::{Outcome, Problem, StackView};
 use crate::orchestrator::{ApplyPreview, PinChange, Wave};
-use crate::stack::{Counted, Stack};
+use crate::stack::{Counted, FileSource, Stack};
 use crate::web::pages::{Layout, Page};
 
 /// `GET /apply`.
@@ -209,6 +209,35 @@ struct Shape {
     services: BTreeSet<String>,
     /// `host/prefix → service:port`.
     routes: BTreeSet<String>,
+    /// Each service's config files (ADR-0057) by path, as everything the stack file says
+    /// about one: mode, owner and the content or the secret's name.
+    files: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl Shape {
+    /// The config files of `service` that differ between this shape and `after`, as the plan
+    /// notes them: `file /etc/app/config.yml changed`. `None` when none does. A secret file
+    /// whose secret changes is not a change to the stack file, and redeploys on its own.
+    fn file_changes(&self, after: &Shape, service: &str) -> Option<String> {
+        let none = BTreeMap::new();
+        let old = self.files.get(service).unwrap_or(&none);
+        let new = after.files.get(service).unwrap_or(&none);
+        let changes: Vec<String> = old
+            .keys()
+            .chain(new.keys().filter(|path| !old.contains_key(*path)))
+            .filter_map(|path| match (old.get(path), new.get(path)) {
+                (Some(before), Some(after)) if before != after => Some(format!("{path} changed")),
+                (Some(_), None) => Some(format!("{path} removed")),
+                (None, Some(_)) => Some(format!("{path} added")),
+                _ => None,
+            })
+            .collect();
+        match changes.as_slice() {
+            [] => None,
+            [one] => Some(format!("file {one}")),
+            many => Some(format!("files {}", many.join(", "))),
+        }
+    }
 }
 
 impl From<&Stack> for Shape {
@@ -222,6 +251,27 @@ impl From<&Stack> for Shape {
                     service.routes.iter().map(move |route| {
                         format!("{}{} → {name}:{}", route.host, route.prefix, route.port)
                     })
+                })
+                .collect(),
+            files: stack
+                .services
+                .iter()
+                .filter(|(_, service)| !service.files.is_empty())
+                .map(|(name, service)| {
+                    let files = service
+                        .files
+                        .iter()
+                        .map(|(path, file)| {
+                            let source = match &file.source {
+                                FileSource::Inline(content) => format!("content {content}"),
+                                FileSource::Secret(secret) => format!("secret {secret}"),
+                            };
+                            let said =
+                                format!("{} {} {source}", file.resolved_mode(), file.ownership());
+                            (path.to_string(), said)
+                        })
+                        .collect();
+                    (name.to_string(), files)
                 })
                 .collect(),
         }
@@ -298,6 +348,12 @@ impl PreviewView {
             after.as_ref().map(|s| &s.services),
         ));
         if let (Some(before), Some(after)) = (&before, &after) {
+            // A redeploy says why when a config file is the reason (ADR-0057 §10).
+            for step in steps.iter_mut().filter(|step| step.verb == "redeploy") {
+                if let Some(files) = before.file_changes(after, &step.subject) {
+                    step.note = Some(files);
+                }
+            }
             steps.extend(Step::routes(&before.routes, &after.routes));
         }
 

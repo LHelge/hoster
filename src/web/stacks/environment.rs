@@ -37,7 +37,7 @@ use super::list::Ago;
 use super::{DeploymentView, Outcome, StackView, Stacks, When};
 use crate::orchestrator::{SecretChange, StackSecret, StackStatus};
 use crate::secrets::SecretValue;
-use crate::stack::Stack;
+use crate::stack::{SecretUse, Stack};
 use crate::web::auth::Session;
 use crate::web::pages::{Layout, Page, Section, Shell};
 
@@ -249,11 +249,13 @@ enum EnvValue {
         /// with one container port (ADR-0051).
         injected: bool,
     },
-    /// A secret from the store, referenced through `secrets` or only stored.
+    /// A secret from the store, referenced through `secrets` or a config file, or only stored.
     Secret {
         /// The secret's full name `<stack>/<name>`.
         full: String,
         cell: SecretCell,
+        /// Whether it is the content of a config file (ADR-0057), whose path is the row's key.
+        file: bool,
     },
 }
 
@@ -278,11 +280,12 @@ impl EnvValue {
     }
 }
 
-/// The type pill: `var` or `secret`.
+/// The type pill: `var`, `secret` or `secret file`.
 impl std::fmt::Display for EnvValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             EnvValue::Var { .. } => "var",
+            EnvValue::Secret { file: true, .. } => "secret file",
             EnvValue::Secret { .. } => "secret",
         })
     }
@@ -341,19 +344,32 @@ impl EnvTable {
                             service: Some(service.to_string()),
                         });
                     }
-                    for (key, full) in &spec.secrets {
+                    // Every use of a secret: as a variable, or as a config file (ADR-0057),
+                    // whose row is keyed by the file's path.
+                    for reference in spec.secret_refs() {
+                        let full = reference.secret;
                         let name = full.strip_prefix(&prefix).unwrap_or(full);
                         referenced.push(name.to_owned());
+                        let (key, file) = match reference.usage {
+                            SecretUse::Env(key) => (key.to_owned(), false),
+                            SecretUse::File(path) => (path.to_string(), true),
+                        };
                         rows_of_service.push(EnvRow {
-                            key: Some(key.clone()),
+                            key: Some(key),
                             service: Some(service.to_string()),
                             value: EnvValue::Secret {
-                                full: full.clone(),
+                                full: full.to_owned(),
                                 cell: cell(name, true),
+                                file,
                             },
                         });
                     }
-                    rows_of_service.sort_by(|a, b| a.key.cmp(&b.key));
+                    // Variables in name order, then the files in path order.
+                    rows_of_service.sort_by(|a, b| {
+                        let file =
+                            |row: &EnvRow| matches!(row.value, EnvValue::Secret { file: true, .. });
+                        (file(a), &a.key).cmp(&(file(b), &b.key))
+                    });
                     rows.extend(rows_of_service);
                 }
                 None
@@ -371,6 +387,7 @@ impl EnvTable {
                 value: EnvValue::Secret {
                     full: format!("{prefix}{}", secret.name),
                     cell: cell(&secret.name, !secret.services.is_empty()),
+                    file: false,
                 },
             });
         }
