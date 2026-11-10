@@ -92,7 +92,9 @@ use certs::CertHosts;
 pub use certs::CertStatus;
 use engine::{Run, Target};
 use event_log::OperatorEvents;
-pub use event_log::{EventLog, HosterEvents, Operator, RegistryEvents};
+pub use event_log::{
+    EventLog, EventTopic, HosterEvents, NotificationEvents, Operator, RegistryEvents,
+};
 pub use gc::GcSettings;
 use machine::Event;
 pub use notes::NoteKind;

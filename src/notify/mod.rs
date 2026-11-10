@@ -10,13 +10,12 @@
 //!
 //! What a notification says is rendered by [`Mail`] (`mail.rs`, ADR-0058 §10): a [`Notice`]
 //! under a [`Letterhead`] gives the subject, plain text and HTML of a [`Message`].
-
-#![allow(
-    dead_code,
-    reason = "consumed by the notifier and the Settings page as they land"
-)]
+//!
+//! The [`Notifier`] (`notifier.rs`, ADR-0058 §6–§9) is the background task that reads the event
+//! log and sends those mails.
 
 mod mail;
+mod notifier;
 mod resend;
 
 use std::fmt;
@@ -28,16 +27,13 @@ use futures_util::future::BoxFuture;
 use reqwest::{StatusCode, Url};
 use thiserror::Error;
 
-use crate::secrets::SecretValue;
+use crate::secrets::{SecretName, SecretValue};
 
 /// Sample events for the mail's tests and the UI preview.
 #[cfg(test)]
 pub(crate) use self::mail::tests as mail_fixtures;
-#[cfg_attr(
-    not(test),
-    expect(unused_imports, reason = "used by the notifier as it lands")
-)]
 pub use self::mail::{Letterhead, Mail, Notice};
+pub use self::notifier::{Mailer, Notifier};
 
 /// Longest a single delivery request may take. The notifier retries a timeout (ADR-0058 §9),
 /// so this is short.
@@ -216,6 +212,15 @@ impl ProviderKind {
         }
     }
 
+    /// The secret-store name of this provider's API key: `_notify/<name>`, beside the registry
+    /// credentials' `_registry/` (ADR-0029). Stack names cannot start with `_`, so no app
+    /// secret can take it.
+    pub fn secret_name(self) -> SecretName {
+        format!("_notify/{}", self.name())
+            .parse()
+            .expect("a provider name is a valid secret name")
+    }
+
     /// The provider's public API endpoint.
     fn default_base(self) -> Url {
         let base = match self {
@@ -348,6 +353,10 @@ impl DeliveryError {
     }
 
     /// The HTTP status the provider answered, if it answered.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "shown by Settings → Notifications as it lands")
+    )]
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             Self::Unavailable { status, .. } | Self::Rejected { status, .. } => Some(*status),
@@ -356,6 +365,10 @@ impl DeliveryError {
     }
 
     /// The provider's own error code (Resend: `validation_error`, `daily_quota_exceeded`, …).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "shown by Settings → Notifications as it lands")
+    )]
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Unavailable { code, .. } | Self::Rejected { code, .. } => code.as_deref(),
@@ -364,6 +377,10 @@ impl DeliveryError {
     }
 
     /// The provider's explanation, for the UI.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "shown by Settings → Notifications as it lands")
+    )]
     pub fn provider_message(&self) -> Option<&str> {
         match self {
             Self::Unavailable { message, .. } | Self::Rejected { message, .. } => {

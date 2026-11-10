@@ -1,10 +1,10 @@
 ---
 id: pym
 title: "Notifier task: select events, de-duplicate, rate-limit, deliver with retry"
-status: open
+status: done
 priority: P3
 created: "2026-11-09T23:23:24.824853270Z"
-updated: "2026-11-09T23:29:11.817915574Z"
+updated: "2026-11-10T00:50:00.090887606Z"
 tags:
   - notify
   - orchestrator
@@ -14,6 +14,7 @@ depends_on:
   - "6qz"
   - mxq
 parent: c5s
+attempts: 1
 ---
 
 ## Summary

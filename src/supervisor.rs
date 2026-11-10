@@ -25,6 +25,7 @@ use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap, DnsCheck, Pub
 use crate::config::{Config, ProxyConfig};
 use crate::installation::Version;
 use crate::instance::Instance;
+use crate::notify::Notifier;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
 use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
@@ -804,6 +805,23 @@ impl Startup for Supervisor {
 
                 // The instance name (ADR-0058 §2), cached for the sidebar and the notifier.
                 let instance = Instance::load(store.clone()).await?;
+                // The notifier: mails problems and recoveries from the event log (ADR-0058).
+                let secrets = self
+                    .secrets
+                    .clone()
+                    .context("the secret store opens before the notifier")?;
+                let notifier = Notifier::new(
+                    store.clone(),
+                    orchestrator.event_log(),
+                    Arc::new(secrets),
+                    instance.clone(),
+                    self.config
+                        .admin_origin()
+                        .parse()
+                        .context("the admin origin is not a URL")?,
+                    orchestrator.subscribe(),
+                );
+                tokio::spawn(notifier.run(self.teardown.token.child_token()));
                 let web = WebApp::from_config(
                     &self.config,
                     store,
