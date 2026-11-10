@@ -38,6 +38,7 @@ use super::system::{Facts, System};
 use crate::acme::{Backoff, DnsMismatch, DnsVerdict, Validity};
 use crate::config::ConfigSource;
 use crate::health::{HealthStats, HealthStatus};
+use crate::notify::{Letterhead, Mail, Notice};
 use crate::orchestrator::{CertStatus, RestartStats, ServiceState, ServiceStatus, StackStatus};
 use crate::registry::{RegistryCheck, RegistryCredential};
 use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
@@ -1695,6 +1696,43 @@ async fn ui_preview() {
             &format!("states/settings-{slug}-staging.html"),
             label,
             &html,
+        );
+    }
+
+    // Notification mails (ADR-0058 §10): each variant's HTML part, with its plain-text part
+    // beside it.
+    let letterhead = Letterhead::new(
+        "srv-01".parse().unwrap(),
+        "https://hoster.example.com".parse().unwrap(),
+    );
+    let problem = crate::notify::mail_fixtures::problem();
+    let recovery = crate::notify::mail_fixtures::recovery();
+    let now = Timestamp::now();
+    for (name, label, notice) in [
+        ("problem", "Mail: a failed deploy", Notice::from(&problem)),
+        (
+            "recovery",
+            "Mail: a crash loop left",
+            Notice::from(&recovery),
+        ),
+        (
+            "reminder",
+            "Mail: still failing a day later",
+            Notice::Reminder(&problem),
+        ),
+        (
+            "summary",
+            "Mail: the hourly cap's summary",
+            Notice::Summary { more: 7, at: now },
+        ),
+        ("test", "Mail: the test message", Notice::Test { at: now }),
+    ] {
+        let mail = Mail::try_from((&letterhead, notice)).unwrap();
+        preview.write(&format!("mail/{name}.html"), label, &mail.html);
+        preview.write(
+            &format!("mail/{name}.txt"),
+            &format!("{label} (plain text)"),
+            &mail.text,
         );
     }
 

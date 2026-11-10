@@ -3,8 +3,17 @@
  * The @font-face rules and the colour tokens below are copied from assets/hoster.css, so the docs
  * and the admin UI share one palette: Catppuccin Latte in light mode (hues darkened to 4.5:1),
  * Mocha in dark mode, picked by prefers-color-scheme. Change them there first, then copy them
- * here. The components (sidebar shell, crumb, cards, pills, tables) follow the admin UI's rules;
- * the prose rules are the docs site's own, a little larger than the admin UI for long reading.
+ * here.
+ *
+ * The copies of the tokens, all to update on a change (ADR-0058 consequences):
+ *   1. assets/hoster.css: the source, Latte and Mocha.
+ *   2. this file: Latte and Mocha.
+ *   3. src/notify/mail.rs, Tokens::LATTE: the notification mail's inline styles, Latte only, with
+ *      bg, surface, border, text, muted, accent, on-accent, ok, progress, warn and fail, plus the
+ *      ok/progress/warn/fail tints worked out over surface (mail clients have no color-mix).
+ *
+ * The components (sidebar shell, crumb, cards, pills, tables) follow the admin UI's rules; the
+ * prose rules are the docs site's own, a little larger than the admin UI for long reading.
  *
  * JetBrains Mono for machine-derived text (code, paths, dates, labels, the crumb), system-ui for
  * prose, as in the admin UI.

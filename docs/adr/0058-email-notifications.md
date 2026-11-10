@@ -103,8 +103,10 @@ while the provider keeps failing, and updates the last-delivery state. `Notifica
 never sends mail.
 
 **10. The mail.** Subject `[<instance name>] <the event's readable line>`. The body is the event
-as the UI shows it: tone, message, the mono meta line, the time, and one button linking to the
-stack or the Events page on the admin host. It is rendered with Askama from its own templates:
+as the UI shows it: tone, message, the mono meta line, the time, and one button on the admin
+host linking where the event's feed row does: the page it names, else its stack, else the Events
+page. The summary links to the Events page and the test message to Settings → Notifications. It
+is rendered with Askama from its own templates:
 
 - HTML with table layout and inline styles only, colours copied from the design tokens of
   ADR-0054 (Latte, light), system sans and monospace font stacks, the tone as a coloured cell.

@@ -14,6 +14,9 @@
  * Fonts: JetBrains Mono (OFL, Latin subset, vendored in assets/) for everything machine-derived,
  * through .mono and the table, pill, KPI and code rules; system-ui for prose. The font URLs are
  * plain file names that the server rewrites to their hashed names (src/web/assets.rs).
+ *
+ * The colour tokens are copied to the docs theme and the notification mail; the list of copies
+ * is at the top of site/theme/static/css/theme.css.
  */
 
 @font-face {

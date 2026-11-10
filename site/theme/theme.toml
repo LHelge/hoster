@@ -4,6 +4,7 @@
 #
 # static/css/theme.css copies its colour tokens from assets/hoster.css, and static/fonts/ holds
 # copies of the admin UI's vendored JetBrains Mono (assets/VENDORED.md). Change either there first.
+# The notification mail holds a third copy of the tokens; theme.css lists every copy.
 name = "hoster"
 version = "0.1.0"
 description = "The hoster admin UI's look, for the documentation site."
