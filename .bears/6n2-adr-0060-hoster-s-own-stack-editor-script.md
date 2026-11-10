@@ -1,16 +1,17 @@
 ---
 id: "6n2"
 title: "ADR-0060: hoster's own stack editor script"
-status: open
+status: done
 priority: P2
 created: "2026-11-10T17:51:13.984156840Z"
-updated: "2026-11-10T17:51:13.984156840Z"
+updated: "2026-11-10T18:30:04.474752298Z"
 tags:
   - decision
   - docs
   - adr
   - web
 parent: emu
+attempts: 1
 ---
 
 ## Summary
@@ -41,10 +42,10 @@ Record the editor decisions the owner made while planning M15 (2026-11-10) as AD
 - **No editor (server-side help only)** and **schema-driven key completion in JS:** not now. Completion could be a later follow-up on top of this script.
 
 ## Acceptance Criteria
-- [ ] `docs/adr/0060-*.md` written in the template's shape (Context, Decision, Alternatives, Consequences), Status Accepted, dated 2026-11-10.
-- [ ] `docs/adr/README.md` gets the 0060 row, and the 0021 and 0054 rows note the amendment ("own editor script per 0060").
-- [ ] `assets/VENDORED.md`'s CSP notes mention that `editor.js` is hoster's own and follows the same rules.
-- [ ] The Context section explains why the editor matters (stack files are hand-written, compose is deferred, ADR-0018 forbids templates).
+- [x] `docs/adr/0060-*.md` written in the template's shape (Context, Decision, Alternatives, Consequences), Status Accepted, dated 2026-11-10.
+- [x] `docs/adr/README.md` gets the 0060 row, and the 0021 and 0054 rows note the amendment ("own editor script per 0060").
+- [x] `assets/VENDORED.md`'s CSP notes mention that `editor.js` is hoster's own and follows the same rules.
+- [x] The Context section explains why the editor matters (stack files are hand-written, compose is deferred, ADR-0018 forbids templates).
 
 ## References
 - ADR-0018, ADR-0021, ADR-0053 (hashed assets), ADR-0054
