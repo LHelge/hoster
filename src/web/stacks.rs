@@ -32,7 +32,7 @@ use std::time::SystemTime;
 use askama::Template;
 use axum::Extension;
 use axum::extract::rejection::FormRejection;
-use axum::extract::{Form, FromRequest, Multipart, Path, Request};
+use axum::extract::{Form, FromRequest, Multipart, Path, Query, Request};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -338,22 +338,31 @@ impl Stacks {
             })
     }
 
-    /// `GET /apply`: the form to paste or upload a stack file.
-    pub async fn apply_form(shell: Shell) -> Page<ApplyPage> {
-        Page(ApplyPage {
-            layout: shell.layout(Section::Stacks),
-            help: EditorHelp::get(),
-            skeleton: EditorHelp::SKELETON,
-        })
+    /// `GET /apply`: the form to paste or upload a stack file, or with `?stack=<name>` the
+    /// active revision of that stack to edit. An unknown stack is a 404.
+    pub async fn apply_form(
+        Extension(stacks): Extension<Stacks>,
+        shell: Shell,
+        Query(query): Query<EditQuery>,
+    ) -> Response {
+        let layout = shell.layout(Section::Stacks);
+        match query.stack.filter(|name| !name.is_empty()) {
+            None => Page(ApplyPage::new_stack(layout)).into_response(),
+            Some(name) => match stacks.find(&name).await {
+                Ok(status) => Page(ApplyPage::editing(layout, &status.revision)).into_response(),
+                Err(outcome) => outcome.page(layout),
+            },
+        }
     }
 
     /// `POST /apply/preview`: the file's validation errors, or what applying it would do.
+    /// A file edited from a revision says so when another one became active meanwhile.
     pub async fn preview(
         Extension(stacks): Extension<Stacks>,
-        StackFile(toml): StackFile,
+        StackFile { toml, base }: StackFile,
     ) -> Response {
         match stacks.0.preview(&toml).await {
-            Ok(preview) => Page(PreviewView::new(preview, toml)).into_response(),
+            Ok(preview) => Page(PreviewView::new(preview, toml, base.as_ref())).into_response(),
             Err(err) => {
                 ApplyFailed::new(Attempt::Check, Outcome::from(err).quoting(&toml)).into_response()
             }
@@ -385,7 +394,7 @@ impl Stacks {
     pub async fn apply(
         Extension(stacks): Extension<Stacks>,
         Extension(session): Extension<Session>,
-        StackFile(toml): StackFile,
+        StackFile { toml, .. }: StackFile,
     ) -> Response {
         match stacks.0.apply(&toml, &session.login().into()).await {
             Ok(outcome) => Self::applied(outcome),
@@ -539,7 +548,11 @@ impl Stacks {
 /// The stack file of an apply form: the uploaded file if one was chosen, else the pasted text.
 /// Accepts `multipart/form-data` (the upload form) and `application/x-www-form-urlencoded` (the
 /// confirm form). Line endings are normalized to `\n`: browsers send form text with `\r\n`.
-pub struct StackFile(String);
+/// An edit of the active revision also sends the revision it started from.
+pub struct StackFile {
+    toml: String,
+    base: Option<BaseRevision>,
+}
 
 impl StackFile {
     /// The largest apply form accepted, in bytes (8 MiB; ADR-0057 §2). A stack file may hold
@@ -549,7 +562,11 @@ impl StackFile {
     const PASTED: &str = "toml";
     const UPLOADED: &str = "file";
 
-    fn choose(pasted: Option<String>, uploaded: Option<Vec<u8>>) -> Result<Self, Outcome> {
+    fn choose(
+        pasted: Option<String>,
+        uploaded: Option<Vec<u8>>,
+        base: Option<BaseRevision>,
+    ) -> Result<Self, Outcome> {
         let uploaded = uploaded
             .filter(|bytes| !bytes.iter().all(u8::is_ascii_whitespace))
             .map(|bytes| {
@@ -564,7 +581,10 @@ impl StackFile {
         let pasted = pasted.filter(|text| !text.trim().is_empty());
         uploaded
             .or(pasted)
-            .map(|text| Self(text.replace("\r\n", "\n")))
+            .map(|text| Self {
+                toml: text.replace("\r\n", "\n"),
+                base,
+            })
             .ok_or_else(|| {
                 Outcome::error(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -591,12 +611,14 @@ impl<S: Send + Sync> FromRequest<S> for StackFile {
             let Form(form) = Form::<PastedFile>::from_request(request, state)
                 .await
                 .map_err(|err| unreadable(err.status(), &err))?;
-            return Self::choose(form.toml, None);
+            let base = BaseRevision::from_fields(form.base_stack, form.base_revision);
+            return Self::choose(form.toml, None, base);
         }
         let mut fields = Multipart::from_request(request, state)
             .await
             .map_err(|err| unreadable(err.status(), &err))?;
         let (mut pasted, mut uploaded) = (None, None);
+        let (mut base_stack, mut base_revision) = (None, None);
         while let Some(field) = fields
             .next_field()
             .await
@@ -620,10 +642,24 @@ impl<S: Send + Sync> FromRequest<S> for StackFile {
                             .into(),
                     );
                 }
+                Some(name @ (BaseRevision::STACK | BaseRevision::REVISION)) => {
+                    let slot = if name == BaseRevision::STACK {
+                        &mut base_stack
+                    } else {
+                        &mut base_revision
+                    };
+                    *slot = Some(
+                        field
+                            .text()
+                            .await
+                            .map_err(|err| unreadable(err.status(), &err))?,
+                    );
+                }
                 _ => {}
             }
         }
-        Self::choose(pasted, uploaded)
+        let base = BaseRevision::from_fields(base_stack, base_revision);
+        Self::choose(pasted, uploaded, base)
     }
 }
 
@@ -632,6 +668,16 @@ impl<S: Send + Sync> FromRequest<S> for StackFile {
 #[derive(Deserialize)]
 pub struct PastedFile {
     toml: Option<String>,
+    /// [`BaseRevision::STACK`].
+    base_stack: Option<String>,
+    /// [`BaseRevision::REVISION`].
+    base_revision: Option<String>,
+}
+
+/// The query of `GET /apply`: the stack to edit, if any.
+#[derive(Deserialize)]
+pub struct EditQuery {
+    stack: Option<String>,
 }
 
 /// The manual deploy form.
@@ -909,9 +955,8 @@ mod list;
 mod logs;
 mod overview;
 
-use apply::{ApplyFailed, ApplyPage, Attempt, LiveCheck, PreviewView, ReresolveView};
+use apply::{ApplyFailed, ApplyPage, Attempt, BaseRevision, LiveCheck, PreviewView, ReresolveView};
 pub use deployments::DeploymentView;
-use editor_help::EditorHelp;
 pub(super) use list::{Ago, Condition, LastDeploy, TrafficLine};
 pub(super) use overview::StackView;
 

@@ -1,13 +1,17 @@
 {% extends "base.html" %}
 {%- macro prose(text) %}{% for span in text.0 %}{% if span.code %}<code>{{ span.text }}</code>{% else %}{{ span.text }}{% endif %}{% endfor %}{% endmacro %}
-{% block title %}Apply a stack file{% endblock %}
+{% block title %}{% if let Some(base) = base %}Edit {{ base.stack }}{% else %}Apply a stack file{% endif %}{% endblock %}
 {% block scripts %}
   <script type="module" src="{{ layout.editor() }}"></script>
 {%- endblock %}
-{% block crumb %}<a href="/stacks">~/stacks</a>/new{% endblock %}
-{% block heading %}Apply a stack file{% endblock %}
+{% block crumb %}<a href="/stacks">~/stacks</a>/{% if let Some(base) = base %}<a href="/stacks/{{ base.stack }}">{{ base.stack }}</a>/edit{% else %}new{% endif %}{% endblock %}
+{% block heading %}{% if let Some(base) = base %}Edit {{ base.stack }}{% else %}Apply a stack file{% endif %}{% endblock %}
 {% block content %}
+{%- if let Some(base) = base %}
+<p class="page-help">The stack file of revision {{ base.revision }}, as it was applied. Change it, or upload a new one. hoster checks it and shows what changes before anything is applied.</p>
+{%- else %}
 <p class="page-help">Paste the stack file or upload it. hoster checks it and shows what changes before anything is applied.</p>
+{%- endif %}
 <div class="apply-layout">
   <section class="card apply-editor" aria-labelledby="apply-file">
     <div class="card-head step-head">
@@ -16,7 +20,12 @@
     </div>
     <form class="apply-form" hx-post="/apply/preview" hx-target="#apply-result" enctype="multipart/form-data">
       <label class="visually-hidden" for="stack-toml">Stack file</label>
-      <textarea id="stack-toml" name="toml" rows="22" data-editor="toml" hx-post="/apply/check" hx-trigger="input changed delay:500ms" hx-target="#apply-check" hx-swap="innerMorph" hx-sync="this:replace" hx-encoding="application/x-www-form-urlencoded" spellcheck="false" autocomplete="off">{{ skeleton }}</textarea>
+      {%- if let Some(base) = base %}
+      <input type="hidden" name="{{ BaseRevision::STACK }}" value="{{ base.stack }}">
+      <input type="hidden" name="{{ BaseRevision::REVISION }}" value="{{ base.revision }}">
+      {%- endif %}
+      <textarea id="stack-toml" name="toml" rows="22" data-editor="toml" hx-post="/apply/check" hx-trigger="{% if base.is_some() %}load, {% endif %}input changed delay:500ms" hx-target="#apply-check" hx-swap="innerMorph" hx-sync="this:replace" hx-encoding="application/x-www-form-urlencoded" spellcheck="false" autocomplete="off">
+{{ text }}</textarea>
       <div id="apply-check" class="live-check" data-editor-for="stack-toml"></div>
       <div class="apply-form-foot">
         <label class="apply-upload">or upload <input type="file" name="file" accept=".toml,text/plain,application/toml"></label>

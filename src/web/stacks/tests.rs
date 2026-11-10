@@ -218,7 +218,16 @@ impl FakeStacks {
         self.calls.lock().unwrap().clone()
     }
 
-    fn current(&self, stack: &str) -> Option<StackStatus> {
+    /// Makes `number` the active revision of `stack`, its file unchanged.
+    pub fn set_revision(&self, stack: &str, number: u32) {
+        for status in self.stacks.lock().unwrap().iter_mut() {
+            if status.name == stack {
+                status.revision.revision = number;
+            }
+        }
+    }
+
+    pub fn current(&self, stack: &str) -> Option<StackStatus> {
         self.stacks
             .lock()
             .unwrap()
@@ -1419,7 +1428,7 @@ async fn read_only_pages_need_a_session_but_no_javascript() {
     // An empty editor starts with the skeleton (escaped), and the aside offers the snippets and
     // the field reference, closed. Without the editor script the snippets are only to copy.
     assert!(
-        apply.contains(r#"spellcheck="false" autocomplete="off">#:schema https://docs.hoster.lhelge.se/stack.schema.json"#),
+        apply.contains("spellcheck=\"false\" autocomplete=\"off\">\n#:schema https://docs.hoster.lhelge.se/stack.schema.json"),
         "{apply}"
     );
     assert!(apply.contains("name = &#34;&#34;"), "{apply}");
@@ -1597,6 +1606,163 @@ async fn preview_takes_an_uploaded_file_over_the_pasted_text() {
         .await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body(response).await.contains("Paste the stack file"));
+}
+
+/// `text` as the templates escape it.
+fn escaped(text: &str) -> String {
+    askama::filters::escape(text, askama::filters::Html)
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn editing_starts_from_the_active_revision_byte_for_byte() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    // A blank first line, comments, quotes and a trailing newline all survive the editor.
+    let file = format!("\n# The notes app.\n{NOTES}# end <of> file & 'all'\n");
+    app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 6, &file);
+
+    let stack = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
+    assert!(
+        stack.contains(r#"<a class="button primary" href="/apply?stack=notes">"#),
+        "{stack}"
+    );
+    assert!(
+        stack.contains(r#"<a class="button" href="/apply">Apply a new file</a>"#),
+        "{stack}"
+    );
+
+    let edit = body(app.get("/apply?stack=notes", Some(&browser.cookie)).await).await;
+    assert!(
+        edit.contains("<title>Edit notes · hoster</title>"),
+        "{edit}"
+    );
+    assert!(edit.contains("<h1>Edit notes</h1>"), "{edit}");
+    assert!(
+        edit.contains(r#"<a href="/stacks">~/stacks</a>/<a href="/stacks/notes">notes</a>/edit"#),
+        "{edit}"
+    );
+    assert!(edit.contains("The stack file of revision 6"), "{edit}");
+    // HTML drops one newline after `<textarea>`, so the page always starts with one.
+    assert!(
+        edit.contains(&format!(
+            "autocomplete=\"off\">\n{}</textarea>",
+            escaped(&file)
+        )),
+        "{edit}"
+    );
+    assert!(
+        edit.contains(r#"<input type="hidden" name="base_stack" value="notes">"#),
+        "{edit}"
+    );
+    assert!(
+        edit.contains(r#"<input type="hidden" name="base_revision" value="6">"#),
+        "{edit}"
+    );
+    // The file is checked as soon as the page loads, not only once the admin types.
+    assert!(
+        edit.contains(r#"hx-trigger="load, input changed delay:500ms""#),
+        "{edit}"
+    );
+
+    // The New stack page has no base and starts with the skeleton.
+    let new = body(app.get("/apply?stack=", Some(&browser.cookie)).await).await;
+    assert!(new.contains("<h1>Apply a stack file</h1>"), "{new}");
+    assert!(!new.contains("base_revision"), "{new}");
+    assert!(
+        new.contains(r#"hx-trigger="input changed delay:500ms""#),
+        "{new}"
+    );
+
+    let missing = app.get("/apply?stack=nope", Some(&browser.cookie)).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert!(
+        body(missing)
+            .await
+            .contains("There is no stack called nope.")
+    );
+}
+
+#[tokio::test]
+async fn the_preview_warns_when_another_revision_became_active_since_the_edit_began() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 7, NOTES);
+    let edited = NOTES.replace("port = 8080", "port = 9090");
+    let preview = async |toml: &str, base: &str, revision: &str| {
+        let response = app
+            .send(post(
+                "/apply/preview",
+                &browser,
+                FORM,
+                encoded(&[
+                    ("toml", toml),
+                    ("base_stack", base),
+                    ("base_revision", revision),
+                ]),
+            ))
+            .await;
+        let status = response.status();
+        let html = body(response).await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        html
+    };
+    let stale = "Revision 7 became active after you opened the editor at revision 6.";
+
+    // Opened at 6, and 7 is active now: a warning, and the diff is against 7.
+    let html = preview(&edited, "notes", "6").await;
+    assert!(html.contains(stale), "{html}");
+    assert!(
+        html.contains(r#"<span class="card-note">1 warning</span>"#),
+        "{html}"
+    );
+    assert!(html.contains("against revision 7"), "{html}");
+    // The warning doesn't stop the apply.
+    assert!(html.contains(r#"<form class="plan-confirm""#), "{html}");
+
+    // Opened at the active revision: nothing to warn about.
+    let html = preview(&edited, "notes", "7").await;
+    assert!(!html.contains("became active"), "{html}");
+
+    // Renamed in the editor: a new stack, never compared with the one it came from.
+    let renamed = edited
+        .replace(r#"name = "notes""#, r#"name = "jottings""#)
+        .replace("\"notes/", "\"jottings/");
+    let html = preview(&renamed, "notes", "6").await;
+    assert!(!html.contains("became active"), "{html}");
+    assert!(html.contains("create stack"), "{html}");
+
+    // A file from the upload form carries the base as well.
+    let boundary = "XhosterBoundaryX";
+    let field = |name: &str, value: &str| {
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        )
+    };
+    let form = format!(
+        "{}{}{}--{boundary}--\r\n",
+        field("base_stack", "notes"),
+        field("base_revision", "6"),
+        field("toml", &edited),
+    );
+    let response = app
+        .send(post(
+            "/apply/preview",
+            &browser,
+            &format!("multipart/form-data; boundary={boundary}"),
+            form,
+        ))
+        .await;
+    assert!(body(response).await.contains(stale));
+
+    // A removed stack is created again.
+    app.stacks.stacks.lock().unwrap().clear();
+    let html = preview(&edited, "notes", "6").await;
+    assert!(
+        html.contains("notes was removed after you opened the editor at revision 6."),
+        "{html}"
+    );
 }
 
 #[tokio::test]
@@ -2075,7 +2241,9 @@ fn preview_lists_warnings_as_pre_flight_lines_with_their_source() {
         changed: vec!["web".into()],
         start_order: Vec::new(),
     };
-    let html = PreviewView::new(preview, toml.into()).render().unwrap();
+    let html = PreviewView::new(preview, toml.into(), None)
+        .render()
+        .unwrap();
     assert!(
         html.contains(r#"<span class="card-note">1 warning</span>"#),
         "{html}"
@@ -2106,7 +2274,9 @@ fn preview_of_a_new_stack_says_so_and_lists_no_redeploy() {
         changed: Vec::new(),
         start_order: Vec::new(),
     };
-    let html = PreviewView::new(preview, NOTES.into()).render().unwrap();
+    let html = PreviewView::new(preview, NOTES.into(), None)
+        .render()
+        .unwrap();
     assert!(
         html.contains("create stack <strong>notes</strong>"),
         "{html}"

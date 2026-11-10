@@ -8,10 +8,16 @@
 //! aside can stay in view while the editor scrolls. When the file fails a check, the aside shows
 //! the problems in a fail-tinted Pre-flight card and the diff is cleared.
 //!
+//! `GET /apply?stack=<name>` is the same page as "Edit <name>": the editor starts from the
+//! active revision's file byte for byte, and the form sends that revision back, so the preview
+//! can warn when another one became active since the edit began (the diff is always against
+//! the active revision, and the warning never blocks the apply).
+//!
 //! Everything here comes from the preview and the two files: the plan's routes are those of the
 //! active revision and the new file, compared. "Re-resolve tags" (ADR-0025) uses the same plan
 //! list for its pins and redeploys.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
@@ -24,17 +30,91 @@ use super::editor_help::EditorHelp;
 use super::{Outcome, Problem, StackView};
 use crate::orchestrator::{ApplyPreview, CheckReport, PinChange, Wave};
 use crate::stack::{Counted, FileSource, Stack};
+use crate::store::StackRevision;
 use crate::web::pages::{Layout, Page};
 
-/// `GET /apply`.
+/// `GET /apply`: "New stack", or with `?stack=<name>` "Edit <name>", which starts from the
+/// active revision's file as it was applied.
 #[derive(Template)]
 #[template(path = "apply.html")]
 pub struct ApplyPage {
-    pub(super) layout: Layout,
+    layout: Layout,
     /// The field reference and snippets beside the editor.
-    pub(super) help: &'static EditorHelp,
-    /// What the editor starts with.
-    pub(super) skeleton: &'static str,
+    help: &'static EditorHelp,
+    /// What the editor starts with: the skeleton, or the file being edited.
+    text: Cow<'static, str>,
+    /// The revision being edited, which the form sends back with the file.
+    base: Option<BaseRevision>,
+}
+
+impl ApplyPage {
+    /// The empty "New stack" page, its editor holding the skeleton.
+    pub(super) fn new_stack(layout: Layout) -> Self {
+        Self {
+            layout,
+            help: EditorHelp::get(),
+            text: Cow::Borrowed(EditorHelp::SKELETON),
+            base: None,
+        }
+    }
+
+    /// The page that edits `revision`, its editor holding the file byte for byte.
+    pub(super) fn editing(layout: Layout, revision: &StackRevision) -> Self {
+        Self {
+            layout,
+            help: EditorHelp::get(),
+            text: Cow::Owned(revision.toml.clone()),
+            base: Some(BaseRevision {
+                stack: revision.stack.clone(),
+                revision: revision.revision,
+            }),
+        }
+    }
+}
+
+/// The revision an edit started from, carried by the apply form so the preview can say when
+/// another one became active in the meantime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BaseRevision {
+    stack: String,
+    revision: u32,
+}
+
+impl BaseRevision {
+    /// The form field with the stack's name.
+    pub(super) const STACK: &str = "base_stack";
+    /// The form field with the revision number.
+    pub(super) const REVISION: &str = "base_revision";
+
+    /// The base the form's fields name; `None` when either is missing or not a number, as on
+    /// the New stack page.
+    pub(super) fn from_fields(stack: Option<String>, revision: Option<String>) -> Option<Self> {
+        let stack = stack.filter(|s| !s.trim().is_empty())?;
+        let revision = revision?.trim().parse().ok()?;
+        Some(Self { stack, revision })
+    }
+
+    /// What the preview warns about when `preview` no longer replaces this revision: another
+    /// one became active, or the stack was removed. A file renamed to another stack is a new
+    /// stack, and is not compared with this one.
+    fn stale(&self, preview: &ApplyPreview) -> Option<String> {
+        if preview.stack != self.stack {
+            return None;
+        }
+        match &preview.current {
+            Some(current) if current.revision == self.revision => None,
+            Some(current) => Some(format!(
+                "Revision {} became active after you opened the editor at revision {}. The \
+                 diff is against revision {}; applying replaces it.",
+                current.revision, self.revision, current.revision
+            )),
+            None => Some(format!(
+                "{} was removed after you opened the editor at revision {}. Applying creates it \
+                 again.",
+                self.stack, self.revision
+            )),
+        }
+    }
 }
 
 /// The editor's diagnostics panel (ADR-0060), answered by `POST /apply/check` while the admin
@@ -385,7 +465,8 @@ pub(super) struct PreviewView {
 }
 
 impl PreviewView {
-    pub(super) fn new(preview: ApplyPreview, toml: String) -> Self {
+    /// The preview of applying `toml`, edited from `base` if it was.
+    pub(super) fn new(preview: ApplyPreview, toml: String, base: Option<&BaseRevision>) -> Self {
         let current = preview.current.as_ref();
         let old = current.map_or("", |r| r.toml.as_str());
         let before = match current {
@@ -395,14 +476,16 @@ impl PreviewView {
         let after = toml.parse::<Shape>().ok();
 
         let lines: Vec<&str> = toml.lines().collect();
-        let warnings: Vec<Problem> = preview
-            .warnings
-            .iter()
-            .map(|w| {
+        let stale = base
+            .and_then(|base| base.stale(&preview))
+            .map(Problem::from);
+        let warnings: Vec<Problem> = stale
+            .into_iter()
+            .chain(preview.warnings.iter().map(|w| {
                 let mut problem = Problem::from(w);
                 problem.quote(&lines);
                 problem
-            })
+            }))
             .collect();
 
         let stack_url = StackView::url(&preview.stack);
