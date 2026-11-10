@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT delivered_at AS \"delivered_at: Timestamp\", delivery_id, delivery_error\n               FROM notifier_state WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "delivered_at: Timestamp",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notifier_state",
+            "name": "delivered_at"
+          }
+        }
+      },
+      {
+        "name": "delivery_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notifier_state",
+            "name": "delivery_id"
+          }
+        }
+      },
+      {
+        "name": "delivery_error",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notifier_state",
+            "name": "delivery_error"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "c3cd5f53deb1433392a25c1815709ca978fdc82a71bb3b181944ccd0af0d96b7"
+}

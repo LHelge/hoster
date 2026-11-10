@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT provider, from_address, recipient, enabled AS \"enabled: bool\",\n                      also_successes AS \"also_successes: bool\"\n               FROM notification_settings WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "provider",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notification_settings",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "from_address",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notification_settings",
+            "name": "from_address"
+          }
+        }
+      },
+      {
+        "name": "recipient",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notification_settings",
+            "name": "recipient"
+          }
+        }
+      },
+      {
+        "name": "enabled: bool",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notification_settings",
+            "name": "enabled"
+          }
+        }
+      },
+      {
+        "name": "also_successes: bool",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notification_settings",
+            "name": "also_successes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "db4078c2d676fb362c091c1eb38006a443a3ea006bca3b75c1e22c00dd8a6de0"
+}

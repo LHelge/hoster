@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO notifier_state (id, delivered_at, delivery_id, delivery_error)\n             VALUES (1, ?, ?, ?)\n             ON CONFLICT (id) DO UPDATE SET delivered_at = excluded.delivered_at,\n                                            delivery_id = excluded.delivery_id,\n                                            delivery_error = excluded.delivery_error",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "92914fb240305424d8b096cd9db3063c5690083c7e33c2e3b5246729fff7d5f4"
+}

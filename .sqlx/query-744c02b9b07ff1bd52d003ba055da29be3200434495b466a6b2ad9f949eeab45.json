@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT kind AS \"kind: EventKind\", stack, subject, event_id AS \"event_id: EventId\",\n                      notified_at AS \"notified_at: Timestamp\"\n               FROM notified_problems ORDER BY notified_at, event_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "kind: EventKind",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notified_problems",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "stack",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notified_problems",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "subject",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notified_problems",
+            "name": "subject"
+          }
+        }
+      },
+      {
+        "name": "event_id: EventId",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notified_problems",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "name": "notified_at: Timestamp",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notified_problems",
+            "name": "notified_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "744c02b9b07ff1bd52d003ba055da29be3200434495b466a6b2ad9f949eeab45"
+}

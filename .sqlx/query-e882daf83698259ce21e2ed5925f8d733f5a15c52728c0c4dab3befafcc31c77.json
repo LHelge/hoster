@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO notification_settings\n                 (id, provider, from_address, recipient, enabled, also_successes, updated_at)\n             VALUES (1, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT (id) DO UPDATE SET provider = excluded.provider,\n                                            from_address = excluded.from_address,\n                                            recipient = excluded.recipient,\n                                            enabled = excluded.enabled,\n                                            also_successes = excluded.also_successes,\n                                            updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "e882daf83698259ce21e2ed5925f8d733f5a15c52728c0c4dab3befafcc31c77"
+}

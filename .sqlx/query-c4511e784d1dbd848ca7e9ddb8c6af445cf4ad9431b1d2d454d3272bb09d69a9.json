@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO notifier_state (id, cursor) VALUES (1, ?1)\n             ON CONFLICT (id) DO UPDATE SET cursor = max(coalesce(cursor, ?1), ?1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "c4511e784d1dbd848ca7e9ddb8c6af445cf4ad9431b1d2d454d3272bb09d69a9"
+}

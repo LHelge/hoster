@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO notified_problems (kind, stack, subject, event_id, notified_at)\n                 VALUES (?, ?, ?, ?, ?)\n                 ON CONFLICT (kind, stack, subject) DO UPDATE\n                     SET event_id = excluded.event_id, notified_at = excluded.notified_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "9247154668d80284211c62b521e4a530d9d5046b43966f7d9ca412cfa1e477eb"
+}

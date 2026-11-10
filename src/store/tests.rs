@@ -678,6 +678,347 @@ async fn the_instance_name_is_set_replaced_and_cleared() {
     assert!(second.is_err());
 }
 
+fn mail(raw: &str) -> crate::notify::MailAddress {
+    raw.parse().unwrap()
+}
+
+fn configured(enabled: bool) -> NotificationSettings {
+    NotificationSettings {
+        provider: crate::notify::ProviderKind::Resend,
+        from: Some(mail("hoster@example.com")),
+        recipient: Some(mail("ops@example.com")),
+        enabled,
+        also_successes: false,
+    }
+}
+
+async fn log_events(store: &Store, n: usize) -> Vec<Event> {
+    let mut events = Vec::new();
+    for i in 0..n {
+        let event =
+            NewEvent::new(EventKind::DeployFailed, Severity::Error, format!("#{i}")).stack("notes");
+        events.push(store.record_event(&event).await.unwrap());
+    }
+    events
+}
+
+#[tokio::test]
+async fn notification_settings_round_trip_and_hold_one_row() {
+    let (_dir, store) = open().await;
+    assert_eq!(store.notification_settings().await.unwrap(), None);
+
+    // A configuration may be saved disabled and incomplete.
+    let draft = NotificationSettings {
+        from: Some(mail("hoster@example.com")),
+        ..NotificationSettings::default()
+    };
+    store.set_notification_settings(&draft).await.unwrap();
+    let stored = store.notification_settings().await.unwrap().unwrap();
+    assert_eq!(stored, draft);
+    assert_eq!(stored.active(), None);
+
+    let mut settings = configured(true);
+    settings.also_successes = true;
+    store.set_notification_settings(&settings).await.unwrap();
+    let stored = store.notification_settings().await.unwrap().unwrap();
+    assert_eq!(stored, settings);
+    assert_eq!(
+        stored.active(),
+        Some((&mail("hoster@example.com"), &mail("ops@example.com")))
+    );
+    let raw: (String, String) =
+        sqlx::query_as("SELECT provider, recipient FROM notification_settings")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+    assert_eq!(raw, ("resend".to_owned(), "ops@example.com".to_owned()));
+
+    // Enabled without both addresses is refused, by the store and by the table.
+    let incomplete = NotificationSettings {
+        recipient: None,
+        ..configured(true)
+    };
+    assert!(matches!(
+        store.set_notification_settings(&incomplete).await,
+        Err(StoreError::NotificationsIncomplete)
+    ));
+    let unchecked = sqlx::query("UPDATE notification_settings SET recipient = NULL")
+        .execute(&store.pool)
+        .await;
+    assert!(unchecked.is_err());
+    let second = sqlx::query(
+        "INSERT INTO notification_settings (id, provider, enabled, also_successes, updated_at)
+         VALUES (2, 'resend', 0, 0, 1)",
+    )
+    .execute(&store.pool)
+    .await;
+    assert!(second.is_err());
+
+    // A row that no longer validates reads as not configured.
+    sqlx::query("UPDATE notification_settings SET provider = 'carrier-pigeon'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(store.notification_settings().await.unwrap(), None);
+    sqlx::query("UPDATE notification_settings SET provider = 'resend', from_address = 'nope'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(store.notification_settings().await.unwrap(), None);
+
+    store.clear_notification_settings().await.unwrap();
+    assert_eq!(store.notification_settings().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn the_notifier_cursor_starts_at_the_newest_event_and_never_moves_back() {
+    let (_dir, store) = open().await;
+    // An empty log starts at 0, and every event is after it.
+    assert_eq!(store.notifier_cursor().await.unwrap(), EventId::from(0));
+    let events = log_events(&store, 3).await;
+    assert_eq!(store.notifier_cursor().await.unwrap(), EventId::from(0));
+    let after = store.events_after(EventId::from(0), 10).await.unwrap();
+    assert_eq!(after, events);
+    let after = store.events_after(events[0].id, 1).await.unwrap();
+    assert_eq!(after, events[1..2]);
+
+    store
+        .advance_notifier(&NotifierStep::to(events[1].id))
+        .await
+        .unwrap();
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[1].id);
+    store
+        .advance_notifier(&NotifierStep::to(events[0].id))
+        .await
+        .unwrap();
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[1].id);
+
+    // Switching notifications on moves the cursor past everything logged so far, saving them
+    // again while on does not, and off then on moves it again.
+    store
+        .set_notification_settings(&configured(true))
+        .await
+        .unwrap();
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[2].id);
+    let later = log_events(&store, 2).await;
+    store
+        .set_notification_settings(&configured(true))
+        .await
+        .unwrap();
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[2].id);
+    store
+        .set_notification_settings(&configured(false))
+        .await
+        .unwrap();
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[2].id);
+    store
+        .set_notification_settings(&configured(true))
+        .await
+        .unwrap();
+    assert_eq!(store.notifier_cursor().await.unwrap(), later[1].id);
+}
+
+#[tokio::test]
+async fn switching_notifications_on_forgets_the_problems_mailed_before() {
+    let (_dir, store) = open().await;
+    let events = log_events(&store, 1).await;
+    store
+        .set_notification_settings(&configured(true))
+        .await
+        .unwrap();
+    let problem = NotifiedProblem {
+        key: ProblemKey::from(&events[0]),
+        event: events[0].id,
+        at: Timestamp::now(),
+    };
+    store
+        .advance_notifier(&NotifierStep {
+            cursor: events[0].id,
+            notified: vec![problem.clone()],
+            closed: Vec::new(),
+        })
+        .await
+        .unwrap();
+    // Saving while on keeps the record; off keeps it too.
+    store
+        .set_notification_settings(&configured(true))
+        .await
+        .unwrap();
+    store
+        .set_notification_settings(&configured(false))
+        .await
+        .unwrap();
+    assert_eq!(store.notified_problems().await.unwrap(), [problem]);
+    // On again skips the recoveries logged meanwhile, so the record goes.
+    store
+        .set_notification_settings(&configured(true))
+        .await
+        .unwrap();
+    assert_eq!(store.notified_problems().await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn the_cursor_and_the_notified_problems_advance_together() {
+    let (_dir, store) = open().await;
+    let events = log_events(&store, 3).await;
+    let crash = ProblemKey {
+        kind: EventKind::CrashLoopEntered,
+        stack: Some("notes".to_owned()),
+        subject: Some("api".to_owned()),
+    };
+    let cert = ProblemKey {
+        kind: EventKind::CertificateFailed,
+        stack: None,
+        subject: Some("/certificates".to_owned()),
+    };
+    let at = Timestamp::now();
+    store
+        .advance_notifier(&NotifierStep {
+            cursor: events[0].id,
+            notified: vec![
+                NotifiedProblem {
+                    key: crash.clone(),
+                    event: events[0].id,
+                    at,
+                },
+                NotifiedProblem {
+                    key: cert.clone(),
+                    event: events[0].id,
+                    at: at + Duration::from_secs(1),
+                },
+            ],
+            closed: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let problems = store.notified_problems().await.unwrap();
+    assert_eq!(
+        problems.iter().map(|p| &p.key).collect::<Vec<_>>(),
+        [&crash, &cert]
+    );
+
+    // A reminder updates the record, a recovery closes it, in the step that moves the cursor.
+    let reminded = NotifiedProblem {
+        key: crash.clone(),
+        event: events[1].id,
+        at: at + Duration::from_secs(86_400),
+    };
+    store
+        .advance_notifier(&NotifierStep {
+            cursor: events[2].id,
+            notified: vec![reminded.clone()],
+            closed: vec![cert.clone()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.notified_problems().await.unwrap(), [reminded]);
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[2].id);
+
+    // A key without a stack or subject is its own key, not the one with an empty name.
+    let bare = ProblemKey {
+        kind: EventKind::HosterRolledBack,
+        stack: None,
+        subject: None,
+    };
+    assert_eq!(ProblemKey::from(&events[0]).stack.as_deref(), Some("notes"));
+    store
+        .advance_notifier(&NotifierStep {
+            cursor: events[2].id,
+            notified: vec![NotifiedProblem {
+                key: bare.clone(),
+                event: events[2].id,
+                at,
+            }],
+            closed: vec![crash],
+        })
+        .await
+        .unwrap();
+    let problems = store.notified_problems().await.unwrap();
+    assert_eq!(
+        problems.into_iter().map(|p| p.key).collect::<Vec<_>>(),
+        [bare]
+    );
+
+    // A step that fails part-way leaves nothing behind: the cursor stays with the record.
+    sqlx::query(
+        "CREATE TRIGGER no_certs BEFORE INSERT ON notified_problems
+         WHEN NEW.kind = 'certificate_failed' BEGIN SELECT RAISE(ABORT, 'no'); END",
+    )
+    .execute(&store.pool)
+    .await
+    .unwrap();
+    let more = log_events(&store, 1).await;
+    let failed = store
+        .advance_notifier(&NotifierStep {
+            cursor: more[0].id,
+            notified: vec![NotifiedProblem {
+                key: cert,
+                event: more[0].id,
+                at,
+            }],
+            closed: Vec::new(),
+        })
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[2].id);
+    assert_eq!(store.notified_problems().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_last_delivery_is_recorded_without_moving_the_cursor() {
+    let (_dir, store) = open().await;
+    assert_eq!(store.last_delivery().await.unwrap(), None);
+    // Recorded before the notifier ever ran, the cursor still starts at the newest event.
+    let events = log_events(&store, 2).await;
+    let at = Timestamp::now();
+    let sent = LastDelivery {
+        at,
+        outcome: DeliveryOutcome::Sent {
+            id: Some("4ef9a417-02e9-4d39-ad75-9611e0fcc33c".to_owned()),
+        },
+    };
+    store.record_delivery(&sent).await.unwrap();
+    assert_eq!(store.last_delivery().await.unwrap(), Some(sent));
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[1].id);
+
+    store
+        .advance_notifier(&NotifierStep::to(events[1].id))
+        .await
+        .unwrap();
+    let failed = LastDelivery {
+        at: at + Duration::from_secs(60),
+        outcome: DeliveryOutcome::Failed {
+            error: "Resend answered 401 Unauthorized (missing_api_key)".to_owned(),
+        },
+    };
+    store.record_delivery(&failed).await.unwrap();
+    assert_eq!(store.last_delivery().await.unwrap(), Some(failed));
+    let unknown_id = LastDelivery {
+        at: at + Duration::from_secs(120),
+        outcome: DeliveryOutcome::Sent { id: None },
+    };
+    store.record_delivery(&unknown_id).await.unwrap();
+    assert_eq!(store.last_delivery().await.unwrap(), Some(unknown_id));
+    assert_eq!(store.notifier_cursor().await.unwrap(), events[1].id);
+}
+
+#[tokio::test]
+async fn a_failed_delivery_event_is_stored_as_its_text() {
+    let (_dir, store) = open().await;
+    let event = NewEvent::new(EventKind::NotificationFailed, Severity::Warning, "not sent");
+    let recorded = store.record_event(&event).await.unwrap();
+    let kind: String = sqlx::query_scalar("SELECT kind FROM events")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(kind, "notification_failed");
+    let query = EventQuery {
+        kinds: [EventKind::NotificationFailed].into(),
+        ..EventQuery::default()
+    };
+    assert_eq!(store.event_page(&query).await.unwrap().events, [recorded]);
+}
+
 /// Deploy tasks of different stacks persist their transitions in parallel (ADR-0050), next to
 /// other writers. A transaction that reads before it writes must not fail with
 /// `SQLITE_BUSY_SNAPSHOT` when another connection commits in between.
@@ -1228,6 +1569,25 @@ async fn pruning_deletes_only_events_older_than_the_cutoff() {
     assert_eq!(store.prune_events(cutoff).await.unwrap(), 0);
 }
 
+#[tokio::test]
+async fn pruning_keeps_the_newest_event_so_ids_are_never_reused() {
+    let (_dir, store) = open().await;
+    let new = event(EventKind::HosterStarted, Severity::Info, None);
+    let old = Timestamp::now() - Duration::from_secs(86_400);
+    store.record_event_at(&new, old).await.unwrap();
+    let newest = store.record_event_at(&new, old).await.unwrap();
+    store
+        .advance_notifier(&NotifierStep::to(newest.id))
+        .await
+        .unwrap();
+    // Every event is past retention, but the newest stays, so the next id is above the cursor.
+    assert_eq!(store.prune_events(Timestamp::now()).await.unwrap(), 1);
+    let next = store.record_event(&new).await.unwrap();
+    assert!(next.id > newest.id);
+    let cursor = store.notifier_cursor().await.unwrap();
+    assert_eq!(store.events_after(cursor, 10).await.unwrap(), [next]);
+}
+
 /// Every migration is reversible and every down script restores its predecessor's schema exactly
 /// (ADR-0052): what lets a newer binary roll the database back for an older one.
 mod migrations {
@@ -1353,8 +1713,13 @@ mod migrations {
             VALUES ('notes', 'ref', 'o/r', '1', 'refs/heads/x', 'me', '43', 1);
         INSERT INTO images VALUES ('docker.io/library/postgres', 'sha256:cc', 1);
         INSERT INTO events (at, kind, severity, stack, subject, message, meta)
-            VALUES (1, 'deploy_succeeded', 'success', 'gone', 'api', 'deployed', 'abc1234');
+            VALUES (1, 'deploy_succeeded', 'success', 'gone', 'api', 'deployed', 'abc1234'),
+                   (2, 'notification_failed', 'warning', NULL, NULL, 'not sent', NULL);
         INSERT INTO instance_settings VALUES (1, 'srv-01', 1);
+        INSERT INTO notification_settings VALUES
+            (1, 'resend', 'hoster@example.com', 'ops@example.com', 1, 0, 1);
+        INSERT INTO notifier_state VALUES (1, 1, 1, 'id', NULL);
+        INSERT INTO notified_problems VALUES ('crash_loop_entered', 'notes', 'api', 1, 1);
     ";
 
     #[tokio::test]
@@ -1398,6 +1763,14 @@ mod migrations {
                     .await
                     .unwrap();
                 assert_eq!((stacks, deployments), (2, 2), "after undo to {previous}");
+            }
+            if (8..10).contains(&previous) {
+                // The older release cannot decode a kind added after it; only those rows go.
+                let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM events")
+                    .fetch_all(pool)
+                    .await
+                    .unwrap();
+                assert_eq!(kinds, ["deploy_succeeded"], "after undo to {previous}");
             }
         }
         // And the emptied database migrates up again.

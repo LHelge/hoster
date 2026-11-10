@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO notifier_state (id, cursor) VALUES (1, ?)\n             ON CONFLICT (id) DO UPDATE SET cursor = excluded.cursor",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "5dd7fa14e3486d634d22733e783c7d0a427f1bb73f5fc67290fdac6d6fdef596"
+}

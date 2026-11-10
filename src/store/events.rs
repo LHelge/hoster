@@ -108,11 +108,34 @@ impl Store {
         Ok(EventPage { events, next })
     }
 
-    /// Deletes every event older than `cutoff` (the retention sweep). Returns how many.
+    /// The events after `cursor` (by id, the order they were recorded in), oldest first, at
+    /// most `limit` of them: what the notifier has not handled yet (ADR-0058 §6).
+    pub async fn events_after(&self, cursor: EventId, limit: u32) -> Result<Vec<Event>> {
+        Ok(sqlx::query_as!(
+            Event,
+            r#"SELECT id AS "id: EventId", at AS "at: Timestamp", kind AS "kind: EventKind",
+                      severity AS "severity: Severity", stack, subject, message, meta
+               FROM events WHERE id > ? ORDER BY id LIMIT ?"#,
+            cursor,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Deletes every event older than `cutoff` (the retention sweep) except the newest one.
+    /// Returns how many.
+    ///
+    /// `events.id` has no AUTOINCREMENT, so SQLite gives a new row `max(id) + 1`: emptying the
+    /// table would hand out ids again from 1, below the notifier's cursor, and those events
+    /// would never be mailed (ADR-0058 §6). Keeping the newest row keeps ids increasing.
     pub async fn prune_events(&self, cutoff: Timestamp) -> Result<u64> {
-        let done = sqlx::query!("DELETE FROM events WHERE at < ?", cutoff)
-            .execute(&self.pool)
-            .await?;
+        let done = sqlx::query!(
+            "DELETE FROM events WHERE at < ? AND id < (SELECT max(id) FROM events)",
+            cutoff
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(done.rows_affected())
     }
 }
