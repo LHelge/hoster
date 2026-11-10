@@ -174,6 +174,54 @@ The `202` means the deployment was accepted, not that it went live: a failed hea
 it and leaves the old containers serving ([ADR-0017](https://github.com/LHelge/hoster/blob/main/docs/adr/0017-zero-downtime-deploy-sequence.md)). Watch the deployment page or the stack's
 **Deployments** tab.
 
+## 2.6 Check the stack file on every push
+
+If the stack file lives in the app repository, `hoster stack check` validates it in CI before
+anyone applies it. It runs the same parser as the apply preview, needs no running hoster, no
+`hoster.toml` and no podman, and prints each problem as `file:line:column: severity: field: message`.
+It exits non-zero on errors; warnings print but pass unless `--deny-warnings` is given.
+`--format json` prints one JSON object instead (`{ok, errors, warnings, files, skipped}`).
+
+`hoster stack check` is new in hoster 0.4.0; older releases reject it as an unknown subcommand.
+The release binaries are static, so a job downloads one and runs it. Pin the version the server
+runs, so CI accepts exactly what the apply preview will. If the server runs a release older than
+0.4.0, update it first, or pin v0.4.0 until you do:
+
+```yaml
+name: Stack file
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # The release tag of your hoster (0.4.0 or later): `v` and the version `hoster version` prints.
+      HOSTER_VERSION: v0.4.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the stack file
+        run: |
+          set -euo pipefail
+          base="https://github.com/LHelge/hoster/releases/download/$HOSTER_VERSION"
+          curl -fsSLO "$base/hoster-x86_64-unknown-linux-musl" -O "$base/SHA256SUMS"
+          sha256sum --check --ignore-missing SHA256SUMS
+          install -m 755 hoster-x86_64-unknown-linux-musl hoster
+          ./hoster stack check --deny-warnings deploy/notes.stack.toml
+```
+
+A passing check means the file parses and validates on its own. The pre-flight checks that need
+the server still run when the stack is applied in the UI, and the output ends with a note naming
+them: routes taken by another stack, the reserved admin host, secrets being set, third-party tags
+resolving to a digest, and cgroup controllers for resource limits.
+
 # 3. What hoster checks in the token
 
 hoster verifies the RS256 signature against GitHub's published keys, then `iss`

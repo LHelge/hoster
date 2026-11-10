@@ -46,8 +46,25 @@ async fn healthz_answers_ok_without_a_session() {
 }
 
 #[tokio::test]
+async fn stack_schema_is_served_without_a_session() {
+    let response = get("/schema/stack-v1.json").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header(&response, "content-type"), "application/schema+json");
+    assert_eq!(header(&response, "cache-control"), "public, max-age=3600");
+    let schema: serde_json::Value = serde_json::from_str(&body(response).await).unwrap();
+    assert_eq!(schema["$id"], StackSchema::URL);
+    assert_eq!(schema["title"], "hoster stack file");
+}
+
+#[tokio::test]
 async fn every_response_carries_the_security_headers() {
-    for path in ["/", "/healthz", "/no-such-page", "/assets/missing.js"] {
+    for path in [
+        "/",
+        "/healthz",
+        "/no-such-page",
+        "/assets/missing.js",
+        StackSchema::ADMIN_PATH,
+    ] {
         let response = get(path).await;
         let csp = header(&response, "content-security-policy");
         assert!(csp.starts_with("default-src 'self';"), "{path}: {csp}");

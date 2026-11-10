@@ -5,3 +5,6 @@ FROM docker.io/nginxinc/nginx-unprivileged:stable-alpine
 
 COPY default.conf /etc/nginx/conf.d/default.conf
 COPY dist/ /usr/share/nginx/html/
+# The stack file JSON Schema at the URL stack files name in `#:schema` (aphid copies static/ to
+# dist/static/; `hoster stack schema` regenerates it).
+COPY dist/static/stack.schema.json /usr/share/nginx/html/stack.schema.json
