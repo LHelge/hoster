@@ -93,6 +93,121 @@ async fn deleting_a_referenced_secret_redeploys_and_fails_visibly() {
     assert_eq!(again.deployment, None);
 }
 
+/// `api` reads `notes/creds` from a file only, `worker` takes `notes/shared` in its environment
+/// and `api` the same secret as a file; `multi` uses no secret.
+const WITH_FILE_SECRETS: &str = r#"
+version = 1
+name = "notes"
+
+[services.api]
+image = "ghcr.io/acme/notes-api"
+
+[services.api.files]
+"/etc/api/config.yml" = { content = "log: info" }
+"/run/secrets/creds.json" = { secret = "notes/creds" }
+"/run/secrets/shared" = { secret = "notes/shared" }
+
+[[services.api.routes]]
+host = "notes.example.com"
+port = 8080
+
+[services.multi]
+image = "ghcr.io/acme/notes-multi"
+files = { "/etc/multi.conf" = { content = "x" } }
+
+[services.worker]
+image = "ghcr.io/acme/notes-worker"
+secrets = { SHARED = "notes/shared" }
+"#;
+
+/// ADR-0057 §6 and §7: a secret that only a file uses is versioned, listed and redeployed like
+/// one in the environment.
+#[tokio::test]
+async fn a_file_secret_redeploys_only_the_services_that_use_it() {
+    let h = harness().await;
+    h.set_secret("notes/creds", "one").await;
+    h.set_secret("notes/shared", "s1").await;
+    h.apply(WITH_FILE_SECRETS).await;
+    let first = h.deploy(&[("api", 1), ("multi", 1), ("worker", 1)]).await;
+    assert_eq!(h.finish(&first).await.state, S::Live);
+
+    let change = h
+        .orchestrator
+        .set_secret("notes", "creds", &"two".into())
+        .await
+        .unwrap();
+    assert!(change.existed);
+    assert_eq!(change.services, ["api"]);
+    let deployment = h.finish(change.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+    assert_eq!(
+        h.generations().await,
+        [("api".into(), 2), ("multi".into(), 1), ("worker".into(), 1)]
+    );
+
+    // The same digests again change nothing: the version is part of the hash, not the time.
+    let again = h.deploy(&[("api", 1), ("multi", 1), ("worker", 1)]).await;
+    assert_eq!(h.finish(&again).await.state, S::Noop);
+    assert_eq!(h.generations().await[0], ("api".into(), 2));
+
+    // A secret used as a file by one service and in the environment of another moves both.
+    let change = h
+        .orchestrator
+        .set_secret("notes", "shared", &"s2".into())
+        .await
+        .unwrap();
+    assert_eq!(change.services, ["api", "worker"]);
+    let deployment = h.finish(change.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+    assert_eq!(
+        h.generations().await,
+        [("api".into(), 3), ("multi".into(), 1), ("worker".into(), 3)]
+    );
+
+    let listed = h.orchestrator.secrets("notes").await.unwrap();
+    let users: Vec<_> = listed
+        .iter()
+        .map(|s| (s.name.as_str(), s.services.join(",")))
+        .collect();
+    assert_eq!(
+        users,
+        [
+            ("creds", "api".to_owned()),
+            ("shared", "api,worker".to_owned())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_missing_file_secret_rejects_the_deployment_by_name_and_path() {
+    let h = harness().await;
+    h.set_secret("notes/creds", "s3cret-value").await;
+    h.set_secret("notes/shared", "s1").await;
+    h.apply(WITH_FILE_SECRETS).await;
+    let first = h.deploy(&[("api", 1), ("multi", 1), ("worker", 1)]).await;
+    assert_eq!(h.finish(&first).await.state, S::Live);
+
+    let change = h
+        .orchestrator
+        .delete_secret("notes", "creds")
+        .await
+        .unwrap();
+    assert_eq!(change.services, ["api"]);
+    let failed = h.finish(change.deployment.as_ref().unwrap()).await;
+    assert_eq!(failed.state, S::Rejected, "{failed:?}");
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("service api: secret `notes/creds` (for file /run/secrets/creds.json) is not set")
+    );
+    assert_eq!(h.generations().await[0], ("api".into(), 1));
+
+    // Still referenced, no longer set.
+    let listed = h.orchestrator.secrets("notes").await.unwrap();
+    assert_eq!(listed[0].name, "creds");
+    assert_eq!(listed[0].updated_at, None);
+    assert_eq!(listed[0].services, ["api"]);
+}
+
 #[tokio::test]
 async fn secret_names_are_checked_and_the_stack_must_exist() {
     let h = harness().await;

@@ -81,7 +81,7 @@ use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
 use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, VolumeMount, label};
 use crate::secrets::{SecretError, SecretStore, SecretValue};
 use crate::stack::{
-    DeployCaller, Diagnostic, Digest, ImageRef, Name, PinnedImage, Stack, StackError,
+    DeployCaller, Diagnostic, Digest, ImageRef, Name, PinnedImage, Service, Stack, StackError,
 };
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
@@ -1867,12 +1867,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// The current versions of every secret `stack` references; unset ones are left out.
     async fn secret_versions(&self, stack: &Stack) -> Result<SecretVersions> {
         let mut versions = SecretVersions::new();
-        for name in stack.services.values().flat_map(|s| s.secrets.values()) {
+        let references = stack.services.values().flat_map(Service::secret_refs);
+        for name in references.map(|reference| reference.secret) {
             if versions.contains_key(name) {
                 continue;
             }
             if let Some(version) = self.secrets.version(name).await? {
-                versions.insert(name.clone(), version);
+                versions.insert(name.to_owned(), version);
             }
         }
         Ok(versions)

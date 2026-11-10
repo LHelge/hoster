@@ -192,8 +192,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     fn secret_users(definition: &Stack) -> BTreeMap<String, Vec<String>> {
         let mut users: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (service, spec) in &definition.services {
-            for secret in spec.secrets.values() {
-                let list = users.entry(secret.clone()).or_default();
+            for reference in spec.secret_refs() {
+                let list = users.entry(reference.secret.to_owned()).or_default();
                 if !list.iter().any(|s| s == service.as_ref()) {
                     list.push(service.to_string());
                 }

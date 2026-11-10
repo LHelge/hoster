@@ -1625,3 +1625,43 @@ fn file_modes_and_owners_round_trip() {
         assert!(owner.parse::<FileOwner>().is_err(), "{owner}");
     }
 }
+
+#[test]
+fn secret_refs_list_env_then_files() {
+    let refs = |lines: &str| -> Vec<String> {
+        let parsed = parse(&app_with(lines)).expect("valid");
+        app(&parsed.stack)
+            .secret_refs()
+            .map(|r| format!("{} for {}", r.secret, r.usage))
+            .collect()
+    };
+    assert_eq!(refs(""), Vec::<String>::new());
+    assert_eq!(
+        refs("secrets = { DB = \"demo/db\", API_KEY = \"demo/key\" }"),
+        ["demo/key for API_KEY", "demo/db for DB"]
+    );
+    // Inline files reference nothing.
+    assert_eq!(
+        refs(
+            "[services.app.files]\n\"/etc/a.conf\" = { content = \"x\" }\n\
+             \"/run/secrets/b\" = { secret = \"demo/b\" }\n\
+             \"/etc/app/a.json\" = { secret = \"demo/a\" }"
+        ),
+        [
+            "demo/a for file /etc/app/a.json",
+            "demo/b for file /run/secrets/b"
+        ]
+    );
+    // One secret used for both is listed once per use, its env use first.
+    assert_eq!(
+        refs(
+            "secrets = { DB = \"demo/db\" }\n\
+             files = { \"/etc/db\" = { secret = \"demo/db\" }, \"/etc/db2\" = { secret = \"demo/db\" } }"
+        ),
+        [
+            "demo/db for DB",
+            "demo/db for file /etc/db",
+            "demo/db for file /etc/db2"
+        ]
+    );
+}

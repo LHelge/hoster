@@ -1,10 +1,10 @@
 ---
 id: "2eq"
 title: Require podman 5.4 for stacks with `files`; doctor reports the podman version
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-10T15:20:41.595347468Z"
-updated: "2026-11-10T15:20:41.595347468Z"
+updated: "2026-11-10T15:45:34.534917777Z"
 tags:
   - runtime
   - orchestrator
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - nnq
 parent: xgf
+attempts: 1
 ---
 
 ## Summary

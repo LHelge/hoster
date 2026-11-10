@@ -149,6 +149,30 @@ pub struct Service {
 }
 
 impl Service {
+    /// Every use of a secret by this service: its environment variables first, then its
+    /// config files, each in name order. A secret used twice is listed twice.
+    ///
+    /// This is the one place that knows where a stack file can name a secret (ADR-0057 §6):
+    /// collecting versions, checking that secrets are set, redeploying on a change and
+    /// redacting values all read it.
+    pub fn secret_refs(&self) -> impl Iterator<Item = SecretRef<'_>> {
+        let env = self.secrets.iter().map(|(name, secret)| SecretRef {
+            secret,
+            usage: SecretUse::Env(name),
+        });
+        let files = self
+            .files
+            .iter()
+            .filter_map(|(path, file)| match &file.source {
+                FileSource::Secret(secret) => Some(SecretRef {
+                    secret,
+                    usage: SecretUse::File(path),
+                }),
+                FileSource::Inline(_) => None,
+            });
+        env.chain(files)
+    }
+
     /// The plain environment hoster gives the container: `env`, plus `PORT=<container port>`
     /// for a routed service with exactly one distinct container port across its routes, unless
     /// `env` sets `PORT` itself (ADR-0051). A secret mapped to `PORT` also counts as setting it,
@@ -163,6 +187,33 @@ impl Service {
             env.entry("PORT".into()).or_insert_with(|| port.to_string());
         }
         env
+    }
+}
+
+/// One use of a secret by a service: the secret's name and what it is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretRef<'a> {
+    /// The secret's name in the store, `<stack>/<name>`.
+    pub secret: &'a str,
+    pub usage: SecretUse<'a>,
+}
+
+/// What a service uses a secret for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretUse<'a> {
+    /// The value of this environment variable (ADR-0029).
+    Env(&'a str),
+    /// The content of the config file at this path (ADR-0057).
+    File(&'a ContainerPath),
+}
+
+/// As messages name it after "for": `DATABASE_URL`, or `file /etc/app/credentials.json`.
+impl fmt::Display for SecretUse<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SecretUse::Env(name) => f.write_str(name),
+            SecretUse::File(path) => write!(f, "file {path}"),
+        }
     }
 }
 
