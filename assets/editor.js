@@ -345,6 +345,46 @@ export function offsetAt(text, line, column) {
   return offset;
 }
 
+/** A table header of a service: `[services.web]`, `[[services.web.routes]]`, … */
+const SERVICE_HEADER = /^[ \t]*\[\[?[ \t]*services[ \t]*\.[ \t]*([a-z][a-z0-9-]*)/;
+
+/** The service whose table the caret at `pos` is in, from the nearest header above it; `null`. */
+export function serviceAt(text, pos) {
+  const lines = text.slice(0, text.indexOf("\n", pos) === -1 ? text.length : text.indexOf("\n", pos)).split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i];
+    if (/^[ \t]*\[/.test(line)) {
+      const m = SERVICE_HEADER.exec(line);
+      return m ? m[1] : null;
+    }
+  }
+  return null;
+}
+
+/** A snippet written for `services.web`, moved to `service`. */
+export function retarget(snippet, service) {
+  return service ? snippet.replace(/(\[\[?)services\.web(?=[.\]])/g, `$1services.${service}`) : snippet;
+}
+
+/**
+ * The edit that inserts `snippet` for a caret at `pos`: at the end of the caret's line, set off
+ * from the text around it by a blank line, and selected afterwards so it is easy to see.
+ */
+export function snippetEdit(text, pos, snippet) {
+  const nl = text.indexOf("\n", pos);
+  const at = nl === -1 ? text.length : nl;
+  const before = text.slice(0, at);
+  const after = text.slice(at);
+  const body = snippet.replace(/\n+$/, "");
+  const lead = before.trim() === "" ? "" : before.endsWith("\n\n") ? "" : before.endsWith("\n") ? "\n" : "\n\n";
+  const trail = after === "" ? "\n" : after === "\n" || after.startsWith("\n\n") ? "" : "\n";
+  const insert = lead + body + trail;
+  // Into an empty editor (or one holding only blank lines above the caret), from the top.
+  const from = before.trim() === "" ? 0 : at;
+  const selStart = from + lead.length;
+  return { from, to: at, insert, selStart, selEnd: selStart + body.length };
+}
+
 // ---- DOM wiring --------------------------------------------------------------------------------
 
 /** One enhanced textarea. */
@@ -509,6 +549,7 @@ class Editor {
    */
   apply({ from, to, insert, selStart, selEnd }) {
     const ta = this.textarea;
+    ta.focus();
     ta.setSelectionRange(from, to);
     const doc = ta.ownerDocument;
     let done = false;
@@ -566,7 +607,31 @@ function follow(panel) {
   mark();
 }
 
+/**
+ * Offers the snippets of a panel (`[data-snippets-for="<textarea id>"]`, see apply.html): shows
+ * each one's Insert button, which puts the snippet's text (its `#snippet-<id>` block) at the
+ * caret. A snippet marked `data-per-service` is moved to the service the caret is in.
+ */
+function offerSnippets(panel) {
+  const textarea = panel.ownerDocument.getElementById(panel.dataset.snippetsFor);
+  const editor = editors.get(textarea);
+  if (!editor) return;
+  for (const button of panel.querySelectorAll("button[data-snippet]")) {
+    button.hidden = false;
+    button.addEventListener("click", () => {
+      const source = panel.querySelector(`#snippet-${button.dataset.snippet}`);
+      if (!source) return;
+      let text = source.textContent;
+      if ("perService" in button.dataset) {
+        text = retarget(text, serviceAt(textarea.value, textarea.selectionStart));
+      }
+      editor.apply(snippetEdit(textarea.value, textarea.selectionStart, text));
+    });
+  }
+}
+
 if (typeof document !== "undefined") {
   enhance(document);
   for (const panel of document.querySelectorAll("[data-editor-for]")) follow(panel);
+  for (const panel of document.querySelectorAll("[data-snippets-for]")) offerSnippets(panel);
 }

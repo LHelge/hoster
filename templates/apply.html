@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{%- macro prose(text) %}{% for span in text.0 %}{% if span.code %}<code>{{ span.text }}</code>{% else %}{{ span.text }}{% endif %}{% endfor %}{% endmacro %}
 {% block title %}Apply a stack file{% endblock %}
 {% block scripts %}
   <script type="module" src="{{ layout.editor() }}"></script>
@@ -15,7 +16,7 @@
     </div>
     <form class="apply-form" hx-post="/apply/preview" hx-target="#apply-result" enctype="multipart/form-data">
       <label class="visually-hidden" for="stack-toml">Stack file</label>
-      <textarea id="stack-toml" name="toml" rows="22" data-editor="toml" hx-post="/apply/check" hx-trigger="load, input changed delay:500ms" hx-target="#apply-check" hx-swap="innerMorph" hx-sync="this:replace" hx-encoding="application/x-www-form-urlencoded" spellcheck="false" autocomplete="off" placeholder="version = 1&#10;name = &#34;…&#34;&#10;&#10;[services.web]&#10;image = &#34;…&#34;"></textarea>
+      <textarea id="stack-toml" name="toml" rows="22" data-editor="toml" hx-post="/apply/check" hx-trigger="input changed delay:500ms" hx-target="#apply-check" hx-swap="innerMorph" hx-sync="this:replace" hx-encoding="application/x-www-form-urlencoded" spellcheck="false" autocomplete="off">{{ skeleton }}</textarea>
       <div id="apply-check" class="live-check" data-editor-for="stack-toml"></div>
       <div class="apply-form-foot">
         <label class="apply-upload">or upload <input type="file" name="file" accept=".toml,text/plain,application/toml"></label>
@@ -23,13 +24,44 @@
       </div>
     </form>
   </section>
-  <aside class="apply-aside" aria-label="Plan">
+  <aside class="apply-aside" aria-label="Plan and help">
     <div id="apply-result" class="apply-result" aria-live="polite">
       <section class="card plan-card">
         <div class="card-head"><h2>Plan</h2></div>
         <p class="card-body plan-empty">Nothing checked yet. <strong>Check</strong> the file to see what applying it changes, the pre-flight checks it passes and its diff against the active revision.</p>
       </section>
     </div>
+    <details class="card editor-help" id="snippets" data-snippets-for="stack-toml">
+      <summary class="card-head"><h2>Snippets</h2></summary>
+      <div class="help-scroll">
+        {%- for snippet in help.snippets %}
+        <section class="snippet" aria-labelledby="snippet-{{ snippet.id }}-title">
+          <div class="snippet-head"><h3 id="snippet-{{ snippet.id }}-title">{{ snippet.title }}</h3><button type="button" class="ghost snippet-insert" data-snippet="{{ snippet.id }}"{% if snippet.per_service %} data-per-service{% endif %} hidden>Insert<span class="visually-hidden"> {{ snippet.title }}</span></button></div>
+          <p class="snippet-about">{{ snippet.about }}</p>
+          <pre class="snippet-code" id="snippet-{{ snippet.id }}">{{ snippet.toml }}</pre>
+        </section>
+        {%- endfor %}
+      </div>
+    </details>
+    <details class="card editor-help" id="field-reference">
+      <summary class="card-head"><h2>Field reference</h2></summary>
+      <div class="help-scroll">
+        {%- for table in help.tables %}
+        <section class="ref-table">
+          <h3>{% if let Some(header) = table.header %}<code>{{ header }}</code>{% else %}Top level{% endif %}</h3>
+          {%- if !table.about.0.is_empty() %}
+          <p class="ref-about">{% call prose(table.about) %}{% endcall %}</p>
+          {%- endif %}
+          <dl class="ref-fields">
+            {%- for field in table.fields %}
+            <dt><code class="ref-name">{{ field.name }}</code> <span class="ref-kind">{{ field.kind }}</span>{% if field.required %} <span class="ref-required">required</span>{% endif %}{% if let Some(default) = field.default %} <span class="ref-default">default <code>{{ default }}</code></span>{% endif %}</dt>
+            <dd>{% call prose(field.about) %}{% endcall %}</dd>
+            {%- endfor %}
+          </dl>
+        </section>
+        {%- endfor %}
+      </div>
+    </details>
   </aside>
 </div>
 <div id="apply-diff"></div>

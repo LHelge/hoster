@@ -342,6 +342,8 @@ impl Stacks {
     pub async fn apply_form(shell: Shell) -> Page<ApplyPage> {
         Page(ApplyPage {
             layout: shell.layout(Section::Stacks),
+            help: EditorHelp::get(),
+            skeleton: EditorHelp::SKELETON,
         })
     }
 
@@ -900,6 +902,7 @@ pub struct ErrorPage {
 
 mod apply;
 mod deployments;
+mod editor_help;
 mod environment;
 mod frame;
 mod list;
@@ -908,6 +911,7 @@ mod overview;
 
 use apply::{ApplyFailed, ApplyPage, Attempt, LiveCheck, PreviewView, ReresolveView};
 pub use deployments::DeploymentView;
+use editor_help::EditorHelp;
 pub(super) use list::{Ago, Condition, LastDeploy, TrafficLine};
 pub(super) use overview::StackView;
 

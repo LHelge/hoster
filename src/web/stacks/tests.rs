@@ -1377,7 +1377,7 @@ async fn read_only_pages_need_a_session_but_no_javascript() {
         "{apply}"
     );
     assert!(
-        apply.contains(r#"<aside class="apply-aside" aria-label="Plan">"#),
+        apply.contains(r#"<aside class="apply-aside" aria-label="Plan and help">"#),
         "{apply}"
     );
     assert!(
@@ -1406,13 +1406,52 @@ async fn read_only_pages_need_a_session_but_no_javascript() {
     // The live check posts only the editor's text, a moment after typing stops, into the panel
     // under it.
     assert!(
-        apply.contains(r##"hx-post="/apply/check" hx-trigger="load, input changed delay:500ms" hx-target="#apply-check" hx-swap="innerMorph" hx-sync="this:replace" hx-encoding="application/x-www-form-urlencoded""##),
+        apply.contains(r##"hx-post="/apply/check" hx-trigger="input changed delay:500ms" hx-target="#apply-check" hx-swap="innerMorph" hx-sync="this:replace" hx-encoding="application/x-www-form-urlencoded""##),
         "{apply}"
     );
     assert!(
         apply.contains(
             r#"<div id="apply-check" class="live-check" data-editor-for="stack-toml"></div>"#
         ),
+        "{apply}"
+    );
+
+    // An empty editor starts with the skeleton (escaped), and the aside offers the snippets and
+    // the field reference, closed. Without the editor script the snippets are only to copy.
+    assert!(
+        apply.contains(r#"spellcheck="false" autocomplete="off">#:schema https://docs.hoster.lhelge.se/stack.schema.json"#),
+        "{apply}"
+    );
+    assert!(apply.contains("name = &#34;&#34;"), "{apply}");
+    assert!(
+        apply.contains(
+            r#"<details class="card editor-help" id="snippets" data-snippets-for="stack-toml">"#
+        ),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(r#"<button type="button" class="ghost snippet-insert" data-snippet="route" data-per-service hidden>Insert<span class="visually-hidden"> Route</span></button>"#),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(r#"<pre class="snippet-code" id="snippet-deploy">[deploy]"#),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(r#"<details class="card editor-help" id="field-reference">"#),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(r#"<h3><code>[[services.&#60;service&#62;.routes]]</code></h3>"#),
+        "{apply}"
+    );
+    assert!(
+        apply.contains(r#"<dt><code class="ref-name">image</code> <span class="ref-kind">string</span> <span class="ref-required">required</span></dt>"#),
+        "{apply}"
+    );
+    // Code in a description stays code.
+    assert!(
+        apply.contains("<code>&#34;start-first&#34;</code>"),
         "{apply}"
     );
 

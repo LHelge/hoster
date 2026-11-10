@@ -20,6 +20,7 @@ use askama::Template;
 use axum::response::{IntoResponse, Response};
 use similar::{ChangeTag, TextDiff};
 
+use super::editor_help::EditorHelp;
 use super::{Outcome, Problem, StackView};
 use crate::orchestrator::{ApplyPreview, CheckReport, PinChange, Wave};
 use crate::stack::{Counted, FileSource, Stack};
@@ -30,6 +31,10 @@ use crate::web::pages::{Layout, Page};
 #[template(path = "apply.html")]
 pub struct ApplyPage {
     pub(super) layout: Layout,
+    /// The field reference and snippets beside the editor.
+    pub(super) help: &'static EditorHelp,
+    /// What the editor starts with.
+    pub(super) skeleton: &'static str,
 }
 
 /// The editor's diagnostics panel (ADR-0060), answered by `POST /apply/check` while the admin
