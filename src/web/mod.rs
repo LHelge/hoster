@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -71,7 +72,7 @@ use self::events::EventsPage;
 pub(crate) use self::icons::Icon;
 use self::pages::ShellSource;
 use self::settings::{EffectiveConfig, Notifications, Registries, RegistryControl, Settings};
-use self::stacks::{StackControl, Stacks};
+use self::stacks::{StackControl, StackFile, Stacks};
 use self::system::{LocalHost, System};
 pub(crate) use self::ui::Tone;
 use self::webhook::{OidcVerifier, Webhook};
@@ -340,8 +341,16 @@ impl WebApp {
                 "/stacks/{name}/deployments/{id}/cancel",
                 post(Stacks::cancel),
             )
-            .route("/apply", get(Stacks::apply_form).post(Stacks::apply))
-            .route("/apply/preview", post(Stacks::preview))
+            .route(
+                "/apply",
+                get(Stacks::apply_form)
+                    .post(Stacks::apply)
+                    .layer(DefaultBodyLimit::max(StackFile::MAX_BODY)),
+            )
+            .route(
+                "/apply/preview",
+                post(Stacks::preview).layer(DefaultBodyLimit::max(StackFile::MAX_BODY)),
+            )
             .layer(Extension(self.stacks.clone()))
             .route(
                 "/settings/registries",

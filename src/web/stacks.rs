@@ -511,6 +511,10 @@ impl Stacks {
 pub struct StackFile(String);
 
 impl StackFile {
+    /// The largest apply form accepted, in bytes (8 MiB; ADR-0057 §2). A stack file may hold
+    /// 1 MiB of config file content, which the urlencoded confirm form can triple; axum's
+    /// default of 2 MB would refuse valid files. A larger body is answered with 413.
+    pub const MAX_BODY: usize = 8 * 1024 * 1024;
     const PASTED: &str = "toml";
     const UPLOADED: &str = "file";
 
@@ -543,11 +547,9 @@ impl<S: Send + Sync> FromRequest<S> for StackFile {
     type Rejection = Outcome;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let unreadable = |err: &dyn fmt::Display| {
-            Outcome::error(
-                StatusCode::BAD_REQUEST,
-                format!("Cannot read the form: {err}"),
-            )
+        // The rejection's own status: 413 for a body over `MAX_BODY`, 400 otherwise.
+        let unreadable = |status: StatusCode, err: &dyn fmt::Display| {
+            Outcome::error(status, format!("Cannot read the form: {err}"))
         };
         let multipart = request
             .headers()
@@ -557,20 +559,35 @@ impl<S: Send + Sync> FromRequest<S> for StackFile {
         if !multipart {
             let Form(form) = Form::<PastedFile>::from_request(request, state)
                 .await
-                .map_err(|err| unreadable(&err))?;
+                .map_err(|err| unreadable(err.status(), &err))?;
             return Self::choose(form.toml, None);
         }
         let mut fields = Multipart::from_request(request, state)
             .await
-            .map_err(|err| unreadable(&err))?;
+            .map_err(|err| unreadable(err.status(), &err))?;
         let (mut pasted, mut uploaded) = (None, None);
-        while let Some(field) = fields.next_field().await.map_err(|err| unreadable(&err))? {
+        while let Some(field) = fields
+            .next_field()
+            .await
+            .map_err(|err| unreadable(err.status(), &err))?
+        {
             match field.name() {
                 Some(Self::PASTED) => {
-                    pasted = Some(field.text().await.map_err(|err| unreadable(&err))?);
+                    pasted = Some(
+                        field
+                            .text()
+                            .await
+                            .map_err(|err| unreadable(err.status(), &err))?,
+                    );
                 }
                 Some(Self::UPLOADED) => {
-                    uploaded = Some(field.bytes().await.map_err(|err| unreadable(&err))?.into());
+                    uploaded = Some(
+                        field
+                            .bytes()
+                            .await
+                            .map_err(|err| unreadable(err.status(), &err))?
+                            .into(),
+                    );
                 }
                 _ => {}
             }

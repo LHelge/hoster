@@ -2,7 +2,7 @@
   "$id": "https://docs.hoster.lhelge.se/stack.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "hoster stack file",
-  "description": "A hoster stack file (`<stack>.stack.toml`): one or more services deployed together on one\npodman network. See https://docs.hoster.lhelge.se/wiki/stack-format/.\n\nThe schema checks each field on its own. hoster checks the rules that need more than one value\nwhen the stack is applied: a (host, prefix) used twice within the stack or by another stack;\n`depends_on` cycles, unknown services or a service naming itself; secrets of another stack; a\nname set in both `env` and `secrets`; a mount path used twice; a tag or digest on images other\nthan CI-built `ghcr.io` ones, and `track` only on those; `http` and `tcp` checks only on\nrouted services, against a route's port; a timings-only `health` table only on routed\nservices. It also rejects durations that overflow or whose fraction is not a whole number of\nnanoseconds, such as `\"0.001h\"`.",
+  "description": "A hoster stack file (`<stack>.stack.toml`): one or more services deployed together on one\npodman network. See https://docs.hoster.lhelge.se/wiki/stack-format/.\n\nThe schema checks each field on its own. hoster checks the rules that need more than one value\nwhen the stack is applied: a (host, prefix) used twice within the stack or by another stack;\n`depends_on` cycles, unknown services or a service naming itself; secrets of another stack; a\nname set in both `env` and `secrets`; a mount path used twice; a config file in, above or at a\nvolume, above another file or at a path podman manages, and the 256 KiB per file and 1 MiB per\nstack limits on inline `content`; a tag or digest on images other\nthan CI-built `ghcr.io` ones, and `track` only on those; `http` and `tcp` checks only on\nrouted services, against a route's port; a timings-only `health` table only on routed\nservices. It also rejects durations that overflow or whose fraction is not a whole number of\nnanoseconds, such as `\"0.001h\"`.",
   "type": "object",
   "properties": {
     "deploy": {
@@ -77,6 +77,50 @@
       "additionalProperties": false,
       "required": [
         "repository_id"
+      ]
+    },
+    "File": {
+      "description": "A config file (ADR-0057): exactly one of `content` and `secret`, plus who may read it. The\ncontainer's user cannot change it unless that user is root; with `read_only = true` nobody\ncan.",
+      "type": "object",
+      "properties": {
+        "content": {
+          "description": "The file's text, at most 256 KiB, and 1 MiB for all files of the stack together. A TOML\nmulti-line string (`\"\"\"…\"\"\"`, or `'''…'''` to keep backslashes) holds a whole file.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Permission bits as four octal digits, `\"0000\"` to `\"0777\"`. Default `\"0444\"` for\n`content` and `\"0400\"` for `secret`.",
+          "type": "string",
+          "examples": [
+            "0440"
+          ],
+          "pattern": "^0[0-7]{3}$"
+        },
+        "owner": {
+          "description": "Numeric `\"uid:gid\"` inside the container, each at most 65535. Default `\"0:0\"` for\n`content`, and the user the container runs as for `secret`. Set it for images that start\nas root and switch user themselves (nginx, postgres): podman sees those as root.",
+          "type": "string",
+          "examples": [
+            "0:65534"
+          ],
+          "pattern": "^(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[0-5][0-9]{4}|[0-9]{1,4}):(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[0-5][0-9]{4}|[0-9]{1,4})$"
+        },
+        "secret": {
+          "description": "A secret `<stack>/<name>` of this stack whose value becomes the file's content\n(ADR-0029). Changing the secret redeploys the service.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,30}/[A-Za-z0-9._-]+$"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "content"
+          ]
+        },
+        {
+          "required": [
+            "secret"
+          ]
+        }
       ]
     },
     "Health": {
@@ -262,6 +306,16 @@
           "default": {},
           "propertyNames": {
             "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        },
+        "files": {
+          "description": "Config files: absolute container path → its content, e.g.\n`\"/etc/app/config.yml\" = { content = \"…\" }` (ADR-0057). hoster writes them into each\ncontainer before it starts; they need podman 5.4 or later. A path may not be in or above a\nvolume, above another file, in `/proc`, `/sys` or `/dev`, or a file podman writes itself\n(`/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/etc/passwd`, `/etc/group`,\n`/run/.containerenv`).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/File"
+          },
+          "propertyNames": {
+            "pattern": "^(/([^/.\\x00][^/\\x00]*|\\.[^/.\\x00][^/\\x00]*|\\.\\.[^/\\x00]+))+$"
           }
         },
         "health": {

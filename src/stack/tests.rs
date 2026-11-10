@@ -1395,3 +1395,233 @@ fn counted_pluralises() {
     assert_eq!(Counted(3, "route").to_string(), "3 routes");
     assert_eq!(Counted(0, "warning").to_string(), "0 warnings");
 }
+
+/// `MINIMAL` with `lines` added to `[services.app]`, after its `image`.
+fn app_with(lines: &str) -> String {
+    let image = "image = \"ghcr.io/acme/app\"\n";
+    MINIMAL.replace(image, &format!("{image}{lines}\n"))
+}
+
+#[test]
+fn files_parse_with_their_defaults() {
+    let source = app_with(
+        r#"user = "1000"
+[services.app.files]
+"/etc/app/config.yml" = { content = """
+listen: 8080
+""" }
+"/etc/app/empty" = { content = "" }
+"/run/secrets/creds.json" = { secret = "demo/creds" }
+"/etc/app/shared.key" = { secret = "demo/key", mode = "0440", owner = "0:65534" }
+"#,
+    );
+    let parsed = parse(&source).expect("valid");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let files = &app(&parsed.stack).files;
+    let file = |path: &str| &files[&path.parse::<ContainerPath>().unwrap()];
+    assert_eq!(files.len(), 4);
+
+    let config = file("/etc/app/config.yml");
+    assert_eq!(config.source, FileSource::Inline("listen: 8080\n".into()));
+    assert_eq!(config.resolved_mode().to_string(), "0444");
+    assert_eq!(config.ownership().to_string(), "0:0");
+    assert_eq!(
+        file("/etc/app/empty").source,
+        FileSource::Inline(String::new())
+    );
+
+    let creds = file("/run/secrets/creds.json");
+    assert_eq!(creds.source, FileSource::Secret("demo/creds".into()));
+    assert_eq!(creds.resolved_mode().to_string(), "0400");
+    assert_eq!(creds.ownership().to_string(), "user");
+
+    let key = file("/etc/app/shared.key");
+    assert_eq!(key.mode, Some("0440".parse().unwrap()));
+    assert_eq!(key.ownership().to_string(), "0:65534");
+}
+
+/// Every format and path rule of ADR-0057 §1 and §2, all in one file.
+#[test]
+fn file_errors_snapshot() {
+    let source = r#"version = 1
+name = "demo"
+
+[services.app]
+image = "docker.io/library/nginx:1.27"
+update = "stop-first"
+volumes = { data = "/var/lib/app", cache = "/cache" }
+
+[services.app.files]
+"relative.conf" = { content = "" }
+"/" = { content = "" }
+"/etc/app/" = { content = "" }
+"/etc//app" = { content = "" }
+"/etc/./app" = { content = "" }
+"/etc/../app" = { content = "" }
+"/etc/nul\u0000" = { content = "" }
+"/proc/sys/x" = { content = "" }
+"/sys" = { content = "" }
+"/dev/shm/x" = { content = "" }
+"/etc/hosts" = { content = "" }
+"/etc/hostname" = { content = "" }
+"/etc/resolv.conf" = { content = "" }
+"/run/.containerenv" = { content = "" }
+"/etc/passwd" = { content = "" }
+"/etc/group" = { content = "" }
+"/var/lib/app" = { content = "" }
+"/var/lib/app/config.yml" = { content = "" }
+"/var/lib" = { content = "" }
+"/etc/nginx" = { content = "" }
+"/etc/nginx/nginx.conf" = { content = "" }
+"/etc/a/both" = { content = "", secret = "demo/x" }
+"/etc/a/neither" = { mode = "0644" }
+"/etc/a/other-stack" = { secret = "other/x" }
+"/etc/a/malformed" = { secret = "demo/a b" }
+"/etc/a/short-mode" = { content = "", mode = "644" }
+"/etc/a/sticky" = { content = "", mode = "1755" }
+"/etc/a/not-octal" = { content = "", mode = "0808" }
+"/etc/a/no-gid" = { content = "", owner = "1000" }
+"/etc/a/big-uid" = { content = "", owner = "65536:0" }
+"/etc/a/names" = { content = "", owner = "nginx:nginx" }
+"/etc/a/two-problems" = { mode = "rw", owner = ":" }
+"#;
+    insta::assert_snapshot!(parse(source).unwrap_err().to_string());
+}
+
+#[test]
+fn file_tables_reject_unknown_keys() {
+    let source = app_with("files = { \"/etc/a\" = { content = \"\", template = true } }");
+    let errors = errors(&source);
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(
+        errors[0].contains("unknown field `template`"),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn file_paths_differing_by_a_prefix_only_are_independent() {
+    // `/etc/app.d` is not below `/etc/app`, and `/datastore` is not in the volume at `/data`.
+    let source = app_with(
+        "update = \"stop-first\"\nvolumes = { data = \"/data\" }\n[services.app.files]\n\
+         \"/etc/app\" = { content = \"\" }\n\"/etc/app.d/x\" = { content = \"\" }\n\
+         \"/datastore/x\" = { content = \"\" }\n",
+    );
+    assert_eq!(errors(&source), Vec::<String>::new());
+}
+
+#[test]
+fn inline_content_is_capped_per_file_and_per_stack() {
+    let file = |path: &str, bytes: usize| {
+        format!("\"{path}\" = {{ content = \"{}\" }}\n", "x".repeat(bytes))
+    };
+    let stack = |files: &str| app_with(&format!("[services.app.files]\n{files}"));
+
+    // Exactly 256 KiB fits; one byte more does not.
+    assert_eq!(
+        errors(&stack(&file("/a", ConfigFile::MAX_BYTES))),
+        Vec::<String>::new()
+    );
+    let over = errors(&stack(&file("/a", ConfigFile::MAX_BYTES + 1)));
+    assert_eq!(over.len(), 1, "{}", over.len());
+    assert!(
+        over[0].contains("services.app.files.\"/a\".content")
+            && over[0].contains("262145 bytes; a file holds at most 256 KiB"),
+        "{}",
+        &over[0][..200.min(over[0].len())]
+    );
+
+    // Four full files are exactly 1 MiB; a fifth of one byte is over, and reported once, there.
+    let full: String = (0..4)
+        .map(|i| file(&format!("/f{i}"), ConfigFile::MAX_BYTES))
+        .collect();
+    assert_eq!(errors(&stack(&full)), Vec::<String>::new());
+    let more = format!("{full}{}{}", file("/g", 1), file("/h", 1));
+    let over = errors(&stack(&more));
+    assert_eq!(over.len(), 1, "{}", over.len());
+    assert!(
+        over[0].contains("services.app.files.\"/g\".content")
+            && over[0].contains("over 1024 KiB in total"),
+        "{}",
+        &over[0][..200.min(over[0].len())]
+    );
+
+    // Secret files hold no content in the stack file and count as nothing.
+    let secrets = format!("{full}\"/s\" = {{ secret = \"demo/s\" }}\n");
+    assert_eq!(errors(&stack(&secrets)), Vec::<String>::new());
+}
+
+#[test]
+fn container_paths_know_their_ancestors() {
+    let path: ContainerPath = "/etc/app/conf.d/a.conf".parse().unwrap();
+    assert_eq!(
+        path.ancestors().collect::<Vec<_>>(),
+        ["/etc", "/etc/app", "/etc/app/conf.d"]
+    );
+    let top: ContainerPath = "/a.conf".parse().unwrap();
+    assert_eq!(top.ancestors().count(), 0);
+    assert_eq!(path.to_string(), "/etc/app/conf.d/a.conf");
+    let dir: ContainerPath = "/etc/app".parse().unwrap();
+    assert!(dir.is_ancestor_of(&path));
+    assert!(!path.is_ancestor_of(&dir));
+    assert!(!dir.is_ancestor_of(&dir));
+}
+
+/// The check a deploy repeats on the path the container resolves (ADR-0057 §3), which also
+/// sees the image's volumes, as images declare them.
+#[test]
+fn placement_is_checked_against_any_volume_list() {
+    let path = |p: &str| p.parse::<ContainerPath>().unwrap();
+    let image_volumes = ["/var/lib/postgresql/data/", "/prometheus"];
+    assert!(path("/etc/app.conf").check_placement(image_volumes).is_ok());
+    assert!(
+        path("/prometheus-extra/x")
+            .check_placement(image_volumes)
+            .is_ok()
+    );
+    for inside in ["/prometheus/a.yml", "/var/lib/postgresql/data/pg.conf"] {
+        let reason = path(inside).check_placement(image_volumes).unwrap_err();
+        assert!(reason.contains("is in the volume mounted at"), "{reason}");
+    }
+    let reason = path("/prometheus")
+        .check_placement(image_volumes)
+        .unwrap_err();
+    assert!(reason.contains("is the mount path of a volume"), "{reason}");
+    let reason = path("/var/lib").check_placement(image_volumes).unwrap_err();
+    assert!(
+        reason.contains("parent directory of the volume mounted at `/var/lib/postgresql/data`"),
+        "{reason}"
+    );
+    // A resolved path can land where the declared one did not look reserved.
+    assert!(path("/dev/stdout").check_placement([]).is_err());
+    assert!(path("/anything").check_placement(["/"]).is_err());
+}
+
+#[test]
+fn file_modes_and_owners_round_trip() {
+    for mode in ["0000", "0400", "0444", "0644", "0777"] {
+        assert_eq!(mode.parse::<FileMode>().unwrap().to_string(), mode);
+    }
+    assert_eq!(u32::from("0640".parse::<FileMode>().unwrap()), 0o640);
+    for mode in [
+        "",
+        "644",
+        "00644",
+        "0o644",
+        "1755",
+        "0788",
+        "+644",
+        "rw-r--r--",
+    ] {
+        assert!(mode.parse::<FileMode>().is_err(), "{mode}");
+    }
+    for owner in ["0:0", "1000:1000", "65535:65535", "0:65534"] {
+        assert_eq!(owner.parse::<FileOwner>().unwrap().to_string(), owner);
+    }
+    for owner in [
+        "", "0", "0:", ":0", "0:0:0", "65536:0", "0:65536", "-1:0", "+1:0", "a:b", "1 :0",
+        "000000:0",
+    ] {
+        assert!(owner.parse::<FileOwner>().is_err(), "{owner}");
+    }
+}

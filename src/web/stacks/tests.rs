@@ -1536,6 +1536,37 @@ async fn confirming_applies_and_sends_the_browser_to_the_deployment() {
     assert!(body(response).await.contains("Nothing to redeploy"));
 }
 
+/// A stack file may carry 1 MiB of config files (ADR-0057), which axum's default 2 MB body
+/// limit would refuse once the form encodes it.
+#[tokio::test]
+async fn apply_forms_take_bodies_up_to_8_mib() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    let big = format!("{NOTES}\n# {}\n", "x".repeat(3 * 1024 * 1024));
+    for uri in ["/apply/preview", "/apply"] {
+        let response = app
+            .send(post(uri, &browser, FORM, encoded(&[("toml", &big)])))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let (content_type, form) = multipart("", &big);
+        let response = app.send(post(uri, &browser, &content_type, form)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+    assert_eq!(app.stacks.calls().len(), 4);
+
+    let huge = format!("{NOTES}\n# {}\n", "x".repeat(StackFile::MAX_BODY));
+    for uri in ["/apply/preview", "/apply"] {
+        let response = app
+            .send(post(uri, &browser, FORM, encoded(&[("toml", &huge)])))
+            .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
+        let (content_type, form) = multipart("", &huge);
+        let response = app.send(post(uri, &browser, &content_type, form)).await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
+    }
+    assert_eq!(app.stacks.calls().len(), 4);
+}
+
 #[tokio::test]
 async fn forms_need_the_csrf_token() {
     let app = TestApp::new().await;
