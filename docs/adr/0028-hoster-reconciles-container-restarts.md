@@ -1,6 +1,6 @@
 # ADR-0028: hoster restarts containers itself (reconciliation); podman restart policy is off
 
-- Status: Accepted (resolves OQ-17); a stopped container waits while a `depends_on` dependency is down, and for at most min(`start_period`, 5 min) while it runs without passing its check; the startup pass defers unready containers to the periodic loop, since ADR-0056
+- Status: Accepted (resolves OQ-17); a stopped container waits while a `depends_on` dependency is down, and for at most min(`start_period`, 5 min) while it runs without passing its check; the startup pass defers unready containers to the periodic loop, since ADR-0056; restart records keep the last exit reason, naming an OOM kill, since ADR-0059
 - Date: 2026-11-07
 
 ## Context

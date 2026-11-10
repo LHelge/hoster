@@ -4,7 +4,7 @@ title: OOM detection and limits in the UI
 status: open
 priority: P2
 created: "2026-11-09T17:23:25.599826110Z"
-updated: "2026-11-09T17:23:25.599826110Z"
+updated: "2026-11-10T00:00:49.305121836Z"
 tags:
   - orchestrator
   - web
@@ -15,18 +15,40 @@ parent: "9q5"
 ---
 
 ## Summary
-Make "killed for exceeding its memory limit" a first-class reason, and show configured limits.
+Implement ADR-0059 §6: name OOM kills from podman's sticky `State.OOMKilled` flag in restart events, restart records and deploy aborts. Show each service's limits and runtime options in the UI.
 
 ## Acceptance Criteria
-- [ ] When the reconciler finds an exited container (`src/orchestrator/reconcile.rs`), it inspects `State.OOMKilled` (via the runtime's inspect) and records the reason with the restart in its restart stats. A crash loop caused by OOM is labelled as such in the monitor (`monitor.rs`) and in `UiEvent::Health`.
-- [ ] An OOM exit during a deploy's health check aborts with "OOM-killed (memory limit 512 MiB)" in the deployment's failure reason.
-- [ ] The stack overview shows each service's limits and runtime options, plus the last OOM time if any. The dashboard warnings list services OOM-killed in the last 24 h.
+- [ ] **Flag tracking.** `OOMKilled` stays true across `start`, so hoster keeps the flag it last saw per container. It updates the flag at create (false), before each start it does, and when it first sees a container running (adoption at startup included).
+- [ ] **Exit reason** (one type with `Display`), for an exit hoster did not cause: before a reconciler restart (ADR-0028), or while a deploy probes the container:
+  - exit 137 with the flag true reads "OOM-killed (limit 512MiB)", since an unsent SIGKILL is almost always the OOM killer;
+  - any other exit where the flag turned true since hoster last saw it reads "exited <code> after an OOM kill (limit 512MiB)";
+  - "(no memory limit)" replaces the limit when none is set, and the limit uses `ByteSize`'s `Display`;
+  - an exit with no OOM reads as today (`exit <code>`).
+- [ ] **Restart event** (`ServiceEvents::restarted`, `src/orchestrator/event_log.rs`): the message carries the exit reason, replacing today's ", OOM killed" suffix from the flag alone. `meta` is unchanged. This narrows ADR-0055's "OOM if podman reports it" to these rules.
+- [ ] **Restart record** (`Restarts` / `RestartStats`, `src/orchestrator/reconcile.rs`): keeps the last exit reason (amends ADR-0028). It is shown in the crash-loop detail on the stack overview and in the dashboard warnings. A failed restart (e.g. a controller undelegated after apply: HTTP 500, container left `created`) records the start error as the reason.
+- [ ] **Deploy abort:** a container that exits while `HealthChecking` or `Replacing` probes it aborts the deploy with the exit reason in the deployment's failure reason and `failed` event, e.g. "app exited: OOM-killed (limit 512MiB)" (amends ADR-0038).
+- [ ] **Limits in the UI:** the stack overview's services card (`src/web/stacks/overview/services.rs`) shows each service's `limits` and runtime options (`shm_size`, `tmpfs`, `init`) from the committed revision, sizes in `ByteSize`'s `Display`.
 - [ ] If epic qmw (resource usage meters) has landed, its memory meter shows usage against the limit; otherwise leave a note on qmw.
 
+## Implementation Notes
+- The tracked flag lives in memory with the reconciler's per-container state. It is lost on a hoster restart, and "first seen running" covers that case. Read the flag from the inspect the reconciler already does before a restart (`ContainerInfo.oom_killed`).
+- Exits hoster causes (its own stops during `Replacing`, cleanup, stack stop) are never classified.
+- The reason needs the service's `memory` limit from the revision the container was created from (the committed revision for the reconciler, the target for a deploy).
+- The fake runtime (`src/runtime/fake.rs`) resets `oom_killed` on start (`set_state`), unlike podman. Make it sticky for the container's lifetime (architecture §1.8, OOM), and let a test set the flag without an exit, to model an OOM-killed child.
+
+## Edge Cases
+- An OOM kill of a child in a running container shows only when the container exits (no podman `oom` event; ADR-0059 Consequences).
+- After a 137 OOM exit and a restart, a later exit 1 with the flag still true and unchanged reads "exit 1", not OOM: only a flag that turned true counts.
+- A 137 with the flag true is named even if the flag was already true, since the exit itself is the evidence.
+- In a run hoster did not see start (adopted with the flag already true), an OOM is named only if it exits 137.
+
 ## Testing
-- Reconciler and monitor tests with the fake runtime reporting `OOMKilled`; engine abort-reason test; web rendering tests.
+- Reconciler tests (`reconcile_tests.rs`) with the fake runtime: 137 + flag, exit 0 after a flag change, a sticky flag with a later non-OOM exit, adoption with the flag true, no limit, a failed restart's reason in `RestartStats`.
+- Event-log test for the restart message; engine abort-reason tests for `HealthChecking` and `Replacing`.
+- Web rendering tests: limits on the overview, the reason in the crash-loop detail and the dashboard warnings.
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## References
-- The M13 ADR (task w2w); ADR-0028, ADR-0045
-- `src/orchestrator/reconcile.rs`, `src/orchestrator/monitor.rs`, `src/runtime/mod.rs`, `src/web/stacks/overview.rs`, `src/web/dashboard.rs`
+- ADR-0059 §6 and Consequences; ADR-0028, ADR-0038, ADR-0055
+- `docs/architecture.md` §1.8 (OOM), §2.1 (Reconciler), §5.1 (`HealthChecking`, `Replacing`), §11 (Producers)
+- `src/orchestrator/reconcile.rs`, `src/orchestrator/event_log.rs`, `src/orchestrator/engine.rs`, `src/runtime/mod.rs`, `src/runtime/fake.rs`, `src/web/stacks/overview/services.rs`, `src/web/dashboard.rs`

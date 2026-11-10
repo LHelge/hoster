@@ -1,6 +1,6 @@
 # ADR-0019: Apps get no podman socket and no nested container access
 
-- Status: Accepted
+- Status: Accepted; podman's own init binary is bind-mounted for `init` since ADR-0059
 - Date: 2026-11-07
 
 ## Context
