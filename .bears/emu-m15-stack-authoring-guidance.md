@@ -2,10 +2,10 @@
 id: emu
 title: "M15: Stack authoring guidance"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:20:07.837547939Z"
-updated: "2026-11-10T17:53:10.850974298Z"
+updated: "2026-11-10T20:29:23.941746657Z"
 tags:
   - docs
   - web
@@ -31,12 +31,12 @@ Planned with the owner on 2026-11-10:
 
 - [x] The schema is published (docs site and hoster itself) and covers every field, with descriptions. A test fails when the parser and the schema diverge.
 - [x] `hoster stack check` exits non-zero with the same diagnostics as the UI.
-- [ ] ADR-0060 records the editor decisions.
-- [ ] The apply editor highlights TOML, shows line numbers and has editing keys, and the page still works without JS.
-- [ ] Diagnostics appear while typing, by line, with markers in the gutter, from the same checks as Check (minus network).
-- [ ] The editor offers the field reference, snippets and a starter skeleton.
-- [ ] A stack's active file can be edited from its page, with a warning when the base revision is stale.
-- [ ] The guide exists on the docs site, linked from overview and stack-format, and `aphid build` passes.
+- [x] ADR-0060 records the editor decisions.
+- [x] The apply editor highlights TOML, shows line numbers and has editing keys, and the page still works without JS.
+- [x] Diagnostics appear while typing, by line, with markers in the gutter, from the same checks as Check (minus network).
+- [x] The editor offers the field reference, snippets and a starter skeleton.
+- [x] A stack's active file can be edited from its page, with a warning when the base revision is stale.
+- [x] The guide exists on the docs site, linked from overview and stack-format, and `aphid build` passes.
 
 ## References
 

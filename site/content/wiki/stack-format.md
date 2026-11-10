@@ -24,6 +24,7 @@ app's repository and is applied through the web UI ([ADR-0027](https://github.co
   people to paste compose files and expect compose semantics (`build:`, `depends_on` conditions,
   `ports:`, `privileged:`). hoster's model is different: routes instead of ports, and a deliberately narrow
   security surface ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)). A different format makes that obvious.
+  [[third-party-images|Running third-party images]] translates a compose file by hand.
 
 **Alternatives considered:**
 

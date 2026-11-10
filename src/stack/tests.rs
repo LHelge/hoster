@@ -28,6 +28,57 @@ pub(super) fn files_example() -> &'static str {
     &section[start..start + len]
 }
 
+/// The worked example from `site/content/wiki/third-party-images.md` §3: a compose file
+/// translated by hand, all four images third-party.
+fn third_party_example() -> &'static str {
+    let doc = include_str!("../../site/content/wiki/third-party-images.md");
+    let section = &doc[doc.find("\n# 3. Worked example").expect("§3 exists")..];
+    let start = section.find("```toml\n").expect("§3 has a TOML block") + "```toml\n".len();
+    let len = section[start..].find("```").expect("TOML block is closed");
+    &section[start..start + len]
+}
+
+#[test]
+fn third_party_example_validates_without_warnings() {
+    let parsed = parse(third_party_example()).expect("the guide's example is valid");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let stack = parsed.stack;
+    let name = |n: &str| n.parse::<Name>().unwrap();
+    assert!(
+        stack.services.values().all(|s| !s.image.is_ci_built()),
+        "every image is third-party"
+    );
+    let order: Vec<&str> = stack
+        .dependency_order()
+        .into_iter()
+        .map(AsRef::as_ref)
+        .collect();
+    assert_eq!(order, ["cache", "db", "web", "worker"]);
+    for (service, update) in [
+        ("web", UpdateStrategy::StartFirst),
+        ("worker", UpdateStrategy::StartFirst),
+        ("db", UpdateStrategy::StopFirst),
+        ("cache", UpdateStrategy::StopFirst),
+    ] {
+        assert_eq!(stack.services[&name(service)].update, update, "{service}");
+    }
+    for service in ["db", "cache"] {
+        assert!(
+            matches!(
+                stack.services[&name(service)]
+                    .health
+                    .as_ref()
+                    .map(|h| &h.probe),
+                Some(Probe::Exec { .. })
+            ),
+            "{service}"
+        );
+    }
+    let web = &stack.services[&name("web")];
+    let paths: Vec<String> = web.files.keys().map(ToString::to_string).collect();
+    assert_eq!(paths, ["/etc/tracker/config.yml"]);
+}
+
 #[test]
 fn files_example_validates_with_the_documented_owners_and_modes() {
     let parsed = parse(files_example()).expect("§3.3 is valid");

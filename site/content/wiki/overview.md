@@ -36,6 +36,10 @@ If a step before the swap fails, the new container is removed and the old one ke
 the webhook never arrives, the ghcr poller notices the tracked tag's new digest and starts the
 same deploy. Both triggers are idempotent: a digest that is already running deploys nothing.
 
+Images you didn't build, such as postgres, redis or an app from Docker Hub, run in the same stacks.
+Their tags are resolved to digests when you apply the stack file. [[third-party-images]] covers
+registries, translating a compose file and the usual pitfalls.
+
 # The admin UI
 
 Every page shares one layout: a sidebar with the version, the hostname and the navigation
