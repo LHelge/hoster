@@ -699,6 +699,33 @@ impl NotificationEvents {
         .subject(Self::SUBJECT)
         .meta(reason)
     }
+
+    /// The API key of the mail provider `provider` (its label) was stored by `by`; `replaced`
+    /// when one existed before. A secret event: it names the provider, never the key.
+    pub fn key_set(provider: &str, replaced: bool, by: Option<&Operator>) -> NewEvent {
+        let verb = if replaced { "Replaced" } else { "Set" };
+        Self::key_event(
+            EventKind::SecretSet,
+            format!("{verb} the {provider} API key for notifications"),
+            by,
+        )
+    }
+
+    /// The API key of `provider` was deleted by `by`, with the notification settings.
+    pub fn key_deleted(provider: &str, by: Option<&Operator>) -> NewEvent {
+        Self::key_event(
+            EventKind::SecretDeleted,
+            format!("Deleted the {provider} API key for notifications"),
+            by,
+        )
+    }
+
+    fn key_event(kind: EventKind, message: String, by: Option<&Operator>) -> NewEvent {
+        let by = by.map(|by| format!(" · by {by}")).unwrap_or_default();
+        NewEvent::new(kind, Severity::Info, message)
+            .subject(Self::SUBJECT)
+            .meta(format!("scope notifications{by}"))
+    }
 }
 
 /// What a service or certificate event is about, beyond its stack and the page it links to:

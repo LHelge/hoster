@@ -813,7 +813,7 @@ impl Startup for Supervisor {
                 let notifier = Notifier::new(
                     store.clone(),
                     orchestrator.event_log(),
-                    Arc::new(secrets),
+                    Arc::new(secrets.clone()),
                     instance.clone(),
                     self.config
                         .admin_origin()
@@ -832,6 +832,7 @@ impl Startup for Supervisor {
                     registry,
                     stats,
                     instance,
+                    secrets,
                     self.shutdown.clone(),
                 )?
                 .start(listen, self.teardown.token.child_token())

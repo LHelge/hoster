@@ -443,6 +443,15 @@ impl SecretStore {
             .map(SecretVersion::from))
     }
 
+    /// When the secret `name` was last set, or `None` if it is not set. Never its value.
+    pub async fn changed_at(&self, name: &str) -> Result<Option<Timestamp>> {
+        Ok(self
+            .store
+            .sealed_secret(name)
+            .await?
+            .map(|sealed| sealed.updated_at))
+    }
+
     /// The plaintext and version of the secret `name`, or `None` if it is not set. For the
     /// deploy engine at container create only.
     pub async fn reveal(&self, name: &str) -> Result<Option<(SecretValue, SecretVersion)>> {

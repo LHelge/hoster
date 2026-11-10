@@ -1376,6 +1376,10 @@ async fn ui_preview() {
         ("/apply", "Apply a stack file"),
         ("/certificates", "Certificates"),
         ("/settings/general", "Settings: general"),
+        (
+            "/settings/notifications",
+            "Settings: notifications, not configured",
+        ),
         ("/settings/registries", "Settings: registries"),
         ("/settings/webhook", "Settings: deploy webhook"),
         ("/settings/proxy", "Settings: reverse proxy"),
@@ -1596,6 +1600,54 @@ async fn ui_preview() {
         "Registries: test result",
         &Session::inject(&registries, "test-result", &test),
     );
+    let invalid = session
+        .post(
+            "/settings/notifications",
+            &[
+                ("provider", "resend"),
+                ("api_key", ""),
+                ("from", "hoster@"),
+                ("recipient", ""),
+                ("enabled", "on"),
+            ],
+        )
+        .await;
+    let notifications = session.get("/settings/notifications", StatusCode::OK).await;
+    // The answer replaces the form's card (an `outerHTML` swap).
+    let start = notifications.find("<section id=\"notify-form\"").unwrap();
+    let end = start + notifications[start..].find("</section>").unwrap() + "</section>".len();
+    preview.write(
+        "states/notifications-invalid.html",
+        "Notifications: field errors on save",
+        &format!(
+            "{}{invalid}{}",
+            &notifications[..start],
+            &notifications[end..]
+        ),
+    );
+    session
+        .post(
+            "/settings/notifications",
+            &[
+                ("provider", "resend"),
+                ("api_key", "re_preview_key"),
+                ("from", "hoster@example.com"),
+                ("recipient", "ops@example.com"),
+                ("enabled", "on"),
+            ],
+        )
+        .await;
+    let test = session.post("/settings/notifications/test", &[]).await;
+    let configured = session.get("/settings/notifications", StatusCode::OK).await;
+    preview.write(
+        "states/notifications-test.html",
+        "Notifications: configured, test sent",
+        &Session::inject(
+            &configured,
+            "notify-test-result",
+            &test[..test.find("<div id=\"notify-status\"").unwrap_or(test.len())],
+        ),
+    );
 
     // The error page and the public login page. (Unknown URLs answer a plain-text 404.)
     let html = session.get("/stacks/missing", StatusCode::NOT_FOUND).await;
@@ -1679,6 +1731,7 @@ async fn ui_preview() {
         staging.certificates.clone(),
         staging.registries.clone(),
         staging.instance.clone(),
+        staging.notifications.clone(),
     );
     let browser = staging.sign_in().await;
     let session = Session {

@@ -1,0 +1,38 @@
+{% extends "settings_base.html" %}
+{% block settings %}
+<section class="card settings-card" aria-labelledby="settings-title">
+  <div class="settings-head">
+    <h2 id="settings-title">Notifications</h2>
+    <p class="field-help">Mail about failed deploys, crash loops, failing certificates and their recoveries, sent to one recipient through an HTTP mail API. Saved here, not in <code>hoster.toml</code>: changes apply within a minute, without a restart.</p>
+  </div>
+  {{ status|safe }}
+</section>
+
+{{ form|safe }}
+
+<section class="card settings-card" aria-labelledby="notify-test">
+  <div class="settings-head">
+    <h2 id="notify-test">Send test</h2>
+    <p class="field-help">Sends a fixed test message through the saved configuration, whether or not notifications are switched on, and shows the provider's answer.</p>
+  </div>
+  <form class="field" hx-post="/settings/notifications/test" hx-target="#notify-test-result">
+    <div class="field-label"><span class="field-name">Test message</span><span class="field-help">Save first: the test uses what is stored, not what is in the form.</span></div>
+    <div class="field-control"><button type="submit">Send test</button></div>
+  </form>
+  <div id="notify-test-result" class="card-result" aria-live="polite"></div>
+</section>
+{%- if removable %}
+
+<section class="card settings-card" aria-labelledby="notify-remove">
+  <div class="settings-head">
+    <h2 id="notify-remove">Remove</h2>
+    <p class="field-help">Deletes the notification settings and the API key. No mail is sent afterwards.</p>
+  </div>
+  <form class="field" hx-post="/settings/notifications/remove" hx-target="#notify-remove-result" hx-confirm="Remove the notification settings and the API key?">
+    <div class="field-label"><span class="field-name">Configuration</span><span class="field-help">The last delivery's record is kept.</span></div>
+    <div class="field-control"><button type="submit" class="danger">{{ crate::web::Icon::Remove }}Remove configuration</button></div>
+  </form>
+  <div id="notify-remove-result" class="card-result" aria-live="polite"></div>
+</section>
+{%- endif %}
+{% endblock %}
