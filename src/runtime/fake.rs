@@ -50,6 +50,8 @@ struct State {
     execs: Vec<(String, Vec<String>)>,
     /// The names of the containers started, in order.
     starts: Vec<String>,
+    /// The podman version reported; [`FakeRuntime::DEFAULT_VERSION`] unless set.
+    version: Option<String>,
 }
 
 /// One scripted exec result.
@@ -160,8 +162,16 @@ impl State {
     reason = "test helpers are used as the deploy engine's tests are written"
 )]
 impl FakeRuntime {
+    /// The podman version a new fake reports: the oldest one with every feature.
+    pub const DEFAULT_VERSION: &str = "5.4.2";
+
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes the fake report `version` as its podman version.
+    pub fn set_version(&self, version: &str) {
+        self.lock().version = Some(version.to_owned());
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -570,11 +580,23 @@ impl ContainerRuntime for FakeRuntime {
         result
     }
 
-    /// podman 5.4.2, rootless, on cgroups v2 with systemd.
+    fn version(&self) -> String {
+        let version = self.lock().version.clone();
+        version.unwrap_or_else(|| Self::DEFAULT_VERSION.to_owned())
+    }
+
+    /// podman 5.4.2 unless [`FakeRuntime::set_version`] says otherwise, rootless, on cgroups
+    /// v2 with systemd.
     async fn engine(&self) -> Result<EngineInfo, RuntimeError> {
-        self.lock().enter(Operation::Engine)?;
+        let mut state = self.lock();
+        state.enter(Operation::Engine)?;
         Ok(EngineInfo {
-            version: Some("5.4.2".into()),
+            version: Some(
+                state
+                    .version
+                    .clone()
+                    .unwrap_or_else(|| Self::DEFAULT_VERSION.to_owned()),
+            ),
             rootless: Some(true),
             cgroup_version: Some("2".into()),
             cgroup_driver: Some("systemd".into()),

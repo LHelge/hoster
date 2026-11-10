@@ -136,6 +136,8 @@ pub struct PodmanRuntime {
     docker: Docker,
     /// The socket connected to.
     socket: PathBuf,
+    /// podman's version as it reported it at connect; `unknown` when it did not.
+    version: String,
     /// Pull credentials per registry host (ADR-0025); anonymous unless set.
     credentials: Arc<dyn RegistryCredentials>,
     /// Finished exec sessions still to be removed.
@@ -195,6 +197,7 @@ impl PodmanRuntime {
         Ok(Self {
             docker,
             socket: path,
+            version: podman_version,
             credentials: Arc::new(Anonymous),
             sessions: Arc::default(),
         })
@@ -818,6 +821,10 @@ impl ContainerRuntime for PodmanRuntime {
             .collect();
         containers.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(containers)
+    }
+
+    fn version(&self) -> String {
+        self.version.clone()
     }
 
     /// podman's compat `/info`: its version, whether it runs rootless (a `name=rootless`
