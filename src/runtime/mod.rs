@@ -156,6 +156,10 @@ pub trait ContainerRuntime: Send + Sync + 'static {
     /// What the engine behind the socket says about itself, for the System page.
     fn engine(&self) -> impl Future<Output = Result<EngineInfo, RuntimeError>> + Send;
 
+    /// The engine's version as it reported it when hoster connected, e.g. `5.4.2`; `unknown`
+    /// when it did not say. Parse it as a [`PodmanVersion`] to compare.
+    fn version(&self) -> String;
+
     /// Runs `argv` in the running container `id`, without a shell, as the container's user with
     /// its environment, and without stdin or a TTY (ADR-0056, docs/architecture.md §5.5).
     ///
@@ -175,6 +179,78 @@ pub trait ContainerRuntime: Send + Sync + 'static {
         argv: &[String],
         timeout: Duration,
     ) -> impl Future<Output = Result<ExecOutcome, RuntimeError>> + Send;
+}
+
+/// A podman version, `major.minor.patch`. A suffix (`5.4.0-rc1`, `6.2.0-dev`) is read and
+/// dropped: a pre-release counts as its release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PodmanVersion {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+impl PodmanVersion {
+    /// The first podman whose archive upload hoster's config files were verified on
+    /// (ADR-0057 §9, architecture §1.7).
+    pub const CONFIG_FILES: PodmanVersion = PodmanVersion {
+        major: 5,
+        minor: 4,
+        patch: 0,
+    };
+
+    /// Checks that the engine reporting `running` (see [`ContainerRuntime::version`]) is this
+    /// version or later; `feature` is what needs it. The error names both versions. A version
+    /// that cannot be read is refused too, quoting it: the feature was never verified there.
+    pub fn require(&self, running: &str, feature: &str) -> Result<(), String> {
+        let needs = format!(
+            "{feature} need podman {}.{} or later",
+            self.major, self.minor
+        );
+        match running.parse::<PodmanVersion>() {
+            Ok(running) if running >= *self => Ok(()),
+            Ok(running) => Err(format!("{needs}; this host runs podman {running}")),
+            Err(_) => Err(format!(
+                "{needs}; hoster cannot read this host's podman version `{running}`"
+            )),
+        }
+    }
+}
+
+impl FromStr for PodmanVersion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invalid = || format!("invalid podman version `{s}`: expected e.g. \"5.4.2\"");
+        // `5.4.0-rc1`, `6.2.0-dev`, `5.4.2+ds1`: the numbers end at the first other character.
+        let numbers = s.split(['-', '+', '~']).next().unwrap_or_default();
+        let mut parts = numbers.split('.').map(|part| {
+            let digits = !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+            digits.then(|| part.parse::<u32>().ok()).flatten()
+        });
+        let (Some(Some(major)), Some(Some(minor))) = (parts.next(), parts.next()) else {
+            return Err(invalid());
+        };
+        let patch = match parts.next() {
+            None => 0,
+            Some(Some(patch)) => patch,
+            Some(None) => return Err(invalid()),
+        };
+        if parts.next().is_some() {
+            return Err(invalid());
+        }
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+}
+
+impl fmt::Display for PodmanVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
 }
 
 /// The container engine as it describes itself (podman's compat `/info`). Every part is
@@ -950,5 +1026,51 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("/run/user/1000/podman/podman.sock"));
         assert!(message.contains("hoster doctor"));
+    }
+
+    #[test]
+    fn podman_versions_parse_and_order() {
+        let version = |s: &str| s.parse::<PodmanVersion>().unwrap();
+        assert_eq!(version("6.1.4").to_string(), "6.1.4");
+        assert_eq!(version("5.4").to_string(), "5.4.0");
+        // A pre-release or distribution suffix counts as its release.
+        for suffixed in ["5.4.0-rc1", "5.4.0-dev", "5.4.0+ds1", "5.4.0~rc2"] {
+            assert_eq!(version(suffixed), version("5.4.0"), "{suffixed}");
+        }
+        assert!(version("4.9.3") < version("5.3.9"));
+        assert!(version("5.3.9") < version("5.4.0"));
+        assert!(version("5.4.0") < version("5.4.2"));
+        assert!(version("5.10.0") > version("5.9.9"));
+        assert!(version("6.0.0") > version("5.99.99"));
+        for bad in [
+            "", "unknown", "5", "5.", "5.x", "v5.4.2", "5.4.2.1", "5..2", "-5.4", "5.4.-1",
+        ] {
+            assert!(bad.parse::<PodmanVersion>().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_feature_names_the_running_and_the_required_version() {
+        let files = PodmanVersion::CONFIG_FILES;
+        for supported in ["5.4.0", "5.4.2", "5.7.0", "6.1.4", "5.4.0-rc1"] {
+            assert_eq!(
+                files.require(supported, "config files"),
+                Ok(()),
+                "{supported}"
+            );
+        }
+        assert_eq!(
+            files
+                .require("4.9.3", "config files (`files`)")
+                .unwrap_err(),
+            "config files (`files`) need podman 5.4 or later; this host runs podman 4.9.3"
+        );
+        assert!(files.require("5.3.9", "config files").is_err());
+        // Never verified there, so refused, quoting what podman said.
+        assert_eq!(
+            files.require("unknown", "config files").unwrap_err(),
+            "config files need podman 5.4 or later; hoster cannot read this host's podman \
+             version `unknown`"
+        );
     }
 }

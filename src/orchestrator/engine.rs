@@ -454,6 +454,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         if let Err(err) = run.target.revision.toml.parse::<Stack>() {
             return Event::Invalid(err.to_string());
         }
+        if let Err(reason) = self.check_engine(&run.target.definition) {
+            return Event::Invalid(reason);
+        }
         let others = match self.other_stacks(run.target.stack()).await {
             Ok(others) => others,
             Err(err) => return Event::Invalid(err.to_string()),

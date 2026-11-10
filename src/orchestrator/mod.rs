@@ -78,7 +78,9 @@ use crate::health::{ExecSlots, HealthStats, HealthStatus, MonitorSettings, Netwo
 use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError, TrackedService};
 use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
-use crate::runtime::{ContainerRuntime, NetworkSpec, ObjectKind, RuntimeError, VolumeMount, label};
+use crate::runtime::{
+    ContainerRuntime, NetworkSpec, ObjectKind, PodmanVersion, RuntimeError, VolumeMount, label,
+};
 use crate::secrets::{SecretError, SecretStore, SecretValue};
 use crate::stack::{
     DeployCaller, Diagnostic, Digest, ImageRef, Name, PinnedImage, Service, Stack, StackError,
@@ -195,6 +197,9 @@ pub enum OrchestratorError {
     ForeignDigest { service: String, repository: String },
     #[error("deployment {id} cannot be redeployed: {reason}")]
     NotRedeployable { id: DeploymentId, reason: String },
+    /// The stack uses something this host's podman is too old for (ADR-0057 §9).
+    #[error("{0}")]
+    Unsupported(String),
     #[error("stack {0} has an active deployment")]
     StackBusy(String),
     #[error("stack {0} is being removed")]
@@ -973,6 +978,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             return Err(OrchestratorError::Removing(definition.name.to_string()));
         }
         self.check_routes(&definition).await?;
+        self.check_engine(&definition)
+            .map_err(OrchestratorError::Unsupported)?;
         let images = self.resolve_images(&definition).await?;
         let running = self.store.services(definition.name.as_ref()).await?;
         let secrets = self.secret_versions(&definition).await?;
@@ -1862,6 +1869,16 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .collect::<Vec<_>>();
         others.extend(served);
         Ok(others)
+    }
+
+    /// Whether this host's podman can run `stack`: config files need podman 5.4 (ADR-0057 §9).
+    /// Checked at apply and again in `Validating`, since podman can change under a stored
+    /// revision. A stack without `files` runs on any podman hoster connects to.
+    fn check_engine(&self, stack: &Stack) -> std::result::Result<(), String> {
+        if stack.services.values().all(|s| s.files.is_empty()) {
+            return Ok(());
+        }
+        PodmanVersion::CONFIG_FILES.require(&self.runtime.version(), "config files (`files`)")
     }
 
     /// The current versions of every secret `stack` references; unset ones are left out.

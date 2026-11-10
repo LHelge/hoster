@@ -2481,3 +2481,81 @@ start_period = "20s"
     );
     assert_eq!(removed.unwrap().containers, 2);
 }
+
+/// One inline config file on `api`; `storage` has none.
+const WITH_FILES: &str = r#"
+version = 1
+name = "notes"
+
+[services.api]
+image = "docker.io/library/nginx:1.27"
+files = { "/etc/nginx/conf.d/default.conf" = { content = "server { listen 8080; }" } }
+
+[[services.api.routes]]
+host = "notes.example.com"
+port = 8080
+"#;
+
+/// ADR-0057 §9: a stack with `files` needs podman 5.4, at apply and again when it deploys.
+#[tokio::test]
+async fn config_files_need_podman_5_4() {
+    let h = harness().await;
+    let old = "config files (`files`) need podman 5.4 or later; this host runs podman 4.9.3";
+
+    h.runtime.set_version("4.9.3");
+    for result in [
+        h.orchestrator.preview(WITH_FILES).await.map(|_| ()),
+        h.orchestrator.apply(WITH_FILES).await.map(|_| ()),
+    ] {
+        let err = result.unwrap_err();
+        assert!(matches!(err, OrchestratorError::Unsupported(_)), "{err:?}");
+        assert_eq!(err.to_string(), old);
+    }
+    assert!(h.orchestrator.status().await.unwrap().is_empty());
+    // A stack without `files` is none of its business.
+    h.set_secret("notes/database-url", "postgres://x").await;
+    h.apply(WITH_SECRETS).await;
+    let deployed = h.deploy(&[("api", 1), ("multi", 1), ("worker", 1)]).await;
+    assert_eq!(h.finish(&deployed).await.state, S::Live);
+
+    // A version hoster cannot read is refused as well, quoting it.
+    h.runtime.set_version("unknown");
+    let err = h.orchestrator.apply(WITH_FILES).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "config files (`files`) need podman 5.4 or later; hoster cannot read this host's \
+         podman version `unknown`"
+    );
+}
+
+/// The podman under a stored revision can change (a downgrade, a restored backup): the
+/// deployment is rejected in `Validating`, before anything is pulled or created.
+#[tokio::test]
+async fn a_deployment_with_config_files_is_rejected_on_an_older_podman() {
+    let h = harness().await;
+    h.runtime.set_version("5.4.0");
+    let applied = h.apply(WITH_FILES).await;
+    let live = h.finish(&applied.deployment.clone().unwrap()).await;
+    assert_eq!(live.state, S::Live, "{live:?}");
+
+    h.runtime.set_version("4.9.3");
+    let changed = WITH_FILES.replace("listen 8080;", "listen 8080; gzip on;");
+    // Apply refuses it outright; a rollback or redeploy of the stored revision reaches
+    // `Validating`.
+    assert!(h.orchestrator.apply(&changed).await.is_err());
+    h.runtime.set_version("5.4.0");
+    let second = h.apply(&changed).await;
+    let second = h.finish(&second.deployment.clone().unwrap()).await;
+    assert_eq!(second.state, S::Live, "{second:?}");
+
+    h.runtime.set_version("4.9.3");
+    let created = h.runtime.calls().len();
+    let back = h.orchestrator.rollback("notes", live.id).await.unwrap();
+    let rejected = h.finish(&back).await;
+    assert_eq!(rejected.state, S::Rejected, "{rejected:?}");
+    assert_eq!(
+        rejected.error.as_deref(),
+        Some("config files (`files`) need podman 5.4 or later; this host runs podman 4.9.3")
+    );
+    assert_eq!(h.runtime.calls().len(), created, "nothing reached podman");
+}

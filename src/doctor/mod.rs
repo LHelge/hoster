@@ -23,7 +23,7 @@ use serde::Serialize;
 
 use crate::config::{Config, ConfigError, PortRange};
 use crate::installation::Installation;
-use crate::runtime::PodmanSocket;
+use crate::runtime::{PodmanSocket, PodmanVersion};
 
 /// First systemd release with user-scoped encrypted credentials (`systemd-creds --user`).
 const USER_CREDENTIALS_SYSTEMD: u32 = 256;
@@ -31,8 +31,8 @@ const USER_CREDENTIALS_SYSTEMD: u32 = 256;
 const PUBLIC_PORTS: [u16; 2] = [80, 443];
 /// How long the podman `/_ping` may take.
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
-/// Most bytes read while looking for the `/_ping` status line.
-const PING_MAX_STATUS_LINE: usize = 4096;
+/// Most bytes read of the `/_ping` status line and headers.
+const PING_MAX_HEAD: usize = 8192;
 /// Controllers the user manager must delegate before stacks can get `Memory`, `NanoCpus` and
 /// `PidsLimit` (ADR-0038).
 const DELEGATED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
@@ -248,7 +248,11 @@ impl Doctor {
             return Outcome::fail(format!("no socket at {}", tried.join(" or ")), hint);
         };
         match Ping::send(socket) {
-            Ok(()) => Outcome::Pass(format!("{} answers /_ping", socket.display())),
+            Ok(ping) => Outcome::Pass(format!(
+                "{} answers /_ping ({})",
+                socket.display(),
+                ping.describe()
+            )),
             Err(e) => Outcome::fail(format!("{}: /_ping failed: {e}", socket.display()), hint),
         }
     }
@@ -519,30 +523,59 @@ impl Doctor {
     }
 }
 
-/// A plain HTTP/1.1 `GET /_ping` over the podman Unix socket.
-struct Ping;
+/// A plain HTTP/1.1 `GET /_ping` over the podman Unix socket, and the podman version its
+/// answer carries in the `Libpod-Api-Version` header.
+struct Ping {
+    version: Option<String>,
+}
 
 impl Ping {
-    fn send(socket: &Path) -> io::Result<()> {
+    fn send(socket: &Path) -> io::Result<Self> {
         let mut stream = UnixStream::connect(socket)?;
         stream.set_read_timeout(Some(PING_TIMEOUT))?;
         stream.set_write_timeout(Some(PING_TIMEOUT))?;
         stream.write_all(b"GET /_ping HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n")?;
         let mut response = Vec::new();
-        // Read the status line; the rest of the response does not matter.
+        // Read the status line and the headers; the body does not matter.
         let mut buf = [0u8; 256];
-        while !response.contains(&b'\n') && response.len() < PING_MAX_STATUS_LINE {
+        let ended = |response: &[u8]| response.windows(4).any(|w| w == b"\r\n\r\n");
+        while !ended(&response) && response.len() < PING_MAX_HEAD {
             match stream.read(&mut buf)? {
                 0 => break,
                 n => response.extend_from_slice(&buf[..n]),
             }
         }
         let response = String::from_utf8_lossy(&response);
-        let status = response.lines().next().unwrap_or_default();
+        let mut lines = response.lines();
+        let status = lines.next().unwrap_or_default();
         match status.split_whitespace().nth(1) {
-            Some("200") if status.starts_with("HTTP/1.") => Ok(()),
-            _ if status.is_empty() => Err(io::Error::other("empty response")),
-            _ => Err(io::Error::other(format!("unexpected response {status:?}"))),
+            Some("200") if status.starts_with("HTTP/1.") => {}
+            _ if status.is_empty() => return Err(io::Error::other("empty response")),
+            _ => return Err(io::Error::other(format!("unexpected response {status:?}"))),
+        }
+        let version = lines
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("libpod-api-version"))
+            .map(|(_, value)| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        Ok(Self { version })
+    }
+
+    /// The podman version for the check's detail, noting what a podman older than 5.4 cannot
+    /// do (ADR-0057 §9). An old podman is not a failure: hoster runs on it.
+    fn describe(&self) -> String {
+        let Some(version) = &self.version else {
+            return "podman version unknown".to_owned();
+        };
+        match PodmanVersion::CONFIG_FILES.require(version, "config files (`files`)") {
+            Ok(()) => format!("podman {version}"),
+            Err(_) => format!(
+                "podman {version}; stacks cannot use config files (`files`), which need podman \
+                 {}.{} or later",
+                PodmanVersion::CONFIG_FILES.major,
+                PodmanVersion::CONFIG_FILES.minor
+            ),
         }
     }
 }
@@ -964,6 +997,37 @@ mod tests {
             panic!("500 must fail");
         };
         assert!(detail.contains("500"));
+    }
+
+    /// ADR-0057 §9: doctor reports the podman version, and what an old one cannot do, without
+    /// failing: hoster itself runs on it.
+    #[test]
+    fn podman_socket_check_reports_the_podman_version() {
+        let detail = |response: &'static str| {
+            let fx = Fixture::new();
+            fx.podman(&fx.doctor.sockets[0], response);
+            match fx.doctor.check_podman_socket(None) {
+                Outcome::Pass(detail) => detail,
+                other => panic!("an answered ping passes: {other:?}"),
+            }
+        };
+        let new = detail(
+            "HTTP/1.1 200 OK\r\nApi-Version: 1.44\r\nLibpod-Api-Version: 6.1.4\r\n\
+             Content-Length: 2\r\n\r\nOK",
+        );
+        assert!(new.ends_with("answers /_ping (podman 6.1.4)"), "{new}");
+        // Header names are case-insensitive.
+        let exact = detail("HTTP/1.1 200 OK\r\nlibpod-api-version: 5.4.0\r\n\r\nOK");
+        assert!(exact.ends_with("(podman 5.4.0)"), "{exact}");
+        let old = detail("HTTP/1.1 200 OK\r\nLibpod-API-Version: 4.9.3\r\n\r\nOK");
+        assert!(
+            old.ends_with(
+                "(podman 4.9.3; stacks cannot use config files (`files`), which need podman \
+                 5.4 or later)"
+            ),
+            "{old}"
+        );
+        assert!(detail(OK_PING).ends_with("(podman version unknown)"));
     }
 
     #[test]

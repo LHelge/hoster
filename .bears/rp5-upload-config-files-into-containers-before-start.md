@@ -1,10 +1,10 @@
 ---
 id: rp5
 title: Upload config files into containers before start
-status: open
+status: in_progress
 priority: P2
 created: "2026-11-09T17:22:55.307159730Z"
-updated: "2026-11-10T15:21:06.397107256Z"
+updated: "2026-11-10T15:51:51.483113780Z"
 tags:
   - runtime
   - orchestrator
@@ -13,6 +13,7 @@ depends_on:
   - m9b
   - "2eq"
 parent: xgf
+attempts: 1
 ---
 
 ## Summary
