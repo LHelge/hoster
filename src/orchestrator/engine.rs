@@ -34,7 +34,7 @@ use crate::runtime::{
     ServiceGeneration, VolumeMount, label,
 };
 use crate::secrets::SecretValue;
-use crate::stack::{Name, Stack};
+use crate::stack::{Name, SecretRef, Stack};
 use crate::store::{
     Deployment, DeploymentId, DeploymentState, DigestSet, NewEvent, PortMap, RevisionId,
     ServicePointer, StackRevision, Timestamp,
@@ -504,17 +504,18 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         Event::Validated
     }
 
-    /// Every secret a changed service references must be set (ADR-0029). The message names the
-    /// secret, never a value.
+    /// Every secret a changed service references, for its environment or a config file, must
+    /// be set (ADR-0029, ADR-0057). The message names the secret and its first use, never a
+    /// value.
     async fn check_secrets(&self, run: &Run) -> Result<(), String> {
         for change in &run.plan().changes {
             let service = &run.target.definition.services[&change.service];
-            for (env, secret) in &service.secrets {
+            for SecretRef { secret, usage } in service.secret_refs() {
                 match self.secrets.version(secret).await {
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         return Err(format!(
-                            "service {}: secret `{secret}` (for {env}) is not set",
+                            "service {}: secret `{secret}` (for {usage}) is not set",
                             change.service
                         ));
                     }
@@ -872,7 +873,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             if let Ok(key) = ServiceGeneration::try_from(container) {
                 self.restarted(&key, Instant::now());
             }
-            for (env, secret) in &definition.services[service].secrets {
+            for SecretRef { secret, usage } in definition.services[service].secret_refs() {
                 match self.secrets.reveal(secret).await {
                     Ok(Some((value, _))) => run.secrets.push(value),
                     Ok(None) => {}
@@ -880,7 +881,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                         return Err((
                             service.clone(),
                             format!(
-                                "{service} (unchanged): cannot read secret `{secret}` (for {env}): {err}"
+                                "{service} (unchanged): cannot read secret `{secret}` (for {usage}): {err}"
                             ),
                         ));
                     }
