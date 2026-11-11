@@ -607,6 +607,10 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .chart-other { fill: var(--muted); background: var(--muted); }
 .chart-line { fill: none; stroke-width: 2px; stroke-linejoin: round; stroke-linecap: round; }
 .chart-point { stroke-width: 6px; }
+/* p95 is drawn first and wider, so a p50 dot on the same value leaves it showing as a ring. */
+.chart-point.chart-p95 { stroke-width: 10px; }
+/* Buckets without samples between two runs: joined, but visibly not measured. */
+.chart-gap { stroke-width: 1px; stroke-dasharray: 2 4; opacity: 0.7; }
 .chart-p50 { stroke: var(--p50); background: var(--p50); }
 .chart-p95 { stroke: var(--p95); background: var(--p95); }
 .chart-legend {

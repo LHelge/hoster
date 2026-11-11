@@ -1381,6 +1381,15 @@ impl Fixtures {
             "24h · a single spike",
         );
         html += &lines(Range::Day, lone, "Response time", "24h · a single bucket");
+        // A few requests now and then, as on a quiet host: runs, lone samples and gaps.
+        let mut sporadic = vec![Percentiles::default(); 60];
+        for (minute, p50, p95) in [(29, 1, 20), (30, 1, 1), (31, 3, 3), (34, 5, 5), (51, 1, 1)] {
+            sporadic[minute] = Percentiles {
+                p50: Some(Duration::from_millis(p50)),
+                p95: Some(Duration::from_millis(p95)),
+            };
+        }
+        html += &lines(Range::Hour, sporadic, "Response time", "1h · sporadic load");
         html += "</div>";
 
         html += "<section class=\"card\"><div class=\"card-head\"><h2>Sparklines</h2></div>\
