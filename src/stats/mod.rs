@@ -8,23 +8,38 @@
 //! - **Deployments**: outcome counts and durations per stack, read from SQLite on demand, so
 //!   they survive restarts.
 //! - **Certificates**: the `not_after` of every certificate the proxy serves.
+//! - **Traffic history** ([`TrafficHistory`], ADR-0062): what the recorder ([`TrafficRecorder`])
+//!   flushed to the store each minute, read back per [`Range`] and scope as bars, totals, the
+//!   previous period, the current rate and the peak minute. It survives restarts.
 //!
 //! Restarts and crash loops (ADR-0028) are not kept here: pages read them from the stacks'
-//! status. Everything but the traffic comes from a [`StatsSource`]; [`HostStats`] is the real
-//! one.
+//! status. Everything but the in-memory traffic comes from a [`StatsSource`]; [`HostStats`] is
+//! the real one.
 
+mod history;
 mod latency;
 mod recorder;
 mod traffic;
 
 use std::fmt;
+use std::ops::Range as Span;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 
 use crate::acme::CertMap;
-use crate::store::{DeploymentOutcome, DeploymentState, Store, Timestamp};
+use crate::store::{
+    DeploymentOutcome, DeploymentState, Resolution, Store, Timestamp, TrafficBucket,
+};
+
+#[allow(
+    unused_imports,
+    reason = "the traffic history API (ADR-0062) the dashboard (h6k) and stack pages (5q8) read"
+)]
+pub use self::history::{
+    Bar, PeakMinute, Range, ScopeHistory, TrafficHistory, TrafficTotals, UnknownRange,
+};
 
 #[allow(
     unused_imports,
@@ -52,6 +67,14 @@ pub trait StatsSource: Send + Sync + 'static {
 
     /// The certificates served now.
     fn certificates(&self) -> Vec<CertExpiry>;
+
+    /// The flushed traffic history buckets of `resolution` that start within `span`, of every
+    /// series (ADR-0062).
+    async fn traffic(
+        &self,
+        resolution: Resolution,
+        span: Span<Timestamp>,
+    ) -> anyhow::Result<Vec<TrafficBucket<Histogram>>>;
 }
 
 /// The statistics the admin app shows. A cheap handle: clones share everything.
@@ -94,6 +117,27 @@ impl Stats {
     /// How the deployments of the last [`Self::DEPLOY_HISTORY`] went, per stack, sorted by name.
     pub async fn deployments(&self) -> anyhow::Result<Vec<DeployStats>> {
         Ok(DeployStats::group(self.source.deployments().await?))
+    }
+
+    /// The traffic history over `range` as of now, for every scope at once: one read of the
+    /// range's table, plus one of the rate window's minutes for ranges drawn from hour buckets.
+    #[allow(
+        dead_code,
+        reason = "read by the dashboard (h6k) and the stack pages (5q8), ADR-0062"
+    )]
+    pub async fn history(&self, range: Range) -> anyhow::Result<TrafficHistory> {
+        self.history_at(range, Timestamp::now()).await
+    }
+
+    /// The traffic history over `range` as of `now`; see [`Self::history`].
+    pub async fn history_at(&self, range: Range, now: Timestamp) -> anyhow::Result<TrafficHistory> {
+        let (span, recent) = TrafficHistory::spans(range, now);
+        let rows = self.source.traffic(range.resolution(), span).await?;
+        let recent = match recent {
+            Some(span) => Some(self.source.traffic(Resolution::Minute, span).await?),
+            None => None,
+        };
+        Ok(TrafficHistory::new(range, now, &rows, recent.as_deref()))
     }
 }
 
@@ -212,6 +256,14 @@ impl StatsSource for HostStats {
                 })
             })
             .collect()
+    }
+
+    async fn traffic(
+        &self,
+        resolution: Resolution,
+        span: Span<Timestamp>,
+    ) -> anyhow::Result<Vec<TrafficBucket<Histogram>>> {
+        Ok(self.store.traffic(resolution, span, None).await?)
     }
 }
 

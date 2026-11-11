@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::ops::AddAssign;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ use arc_swap::ArcSwap;
 
 use super::latency::{AtomicHistogram, Histogram, Latency, LatencyWindow};
 use crate::routing::{Owner, RouteEntry};
+use crate::store::TrafficCounts;
 
 /// The class of a response status, as the statistics count it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -424,6 +426,32 @@ impl StatusCounts {
         StatusClass::ALL
             .into_iter()
             .map(|class| (class, self.get(class)))
+    }
+}
+
+impl AddAssign for StatusCounts {
+    fn add_assign(&mut self, other: StatusCounts) {
+        for (sum, count) in self.0.iter_mut().zip(other.0) {
+            *sum = sum.saturating_add(count);
+        }
+    }
+}
+
+/// The status classes of a traffic history bucket.
+impl From<&TrafficCounts> for StatusCounts {
+    fn from(counts: &TrafficCounts) -> Self {
+        let mut statuses = StatusCounts::default();
+        for (class, count) in [
+            (StatusClass::NoResponse, counts.none),
+            (StatusClass::Informational, counts.s1xx),
+            (StatusClass::Success, counts.s2xx),
+            (StatusClass::Redirection, counts.s3xx),
+            (StatusClass::ClientError, counts.s4xx),
+            (StatusClass::ServerError, counts.s5xx),
+        ] {
+            statuses.0[class.index()] = count;
+        }
+        statuses
     }
 }
 

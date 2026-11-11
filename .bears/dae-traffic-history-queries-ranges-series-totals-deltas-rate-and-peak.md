@@ -1,16 +1,17 @@
 ---
 id: dae
 title: "Traffic history queries: ranges, series, totals, deltas, rate and peak"
-status: open
+status: done
 priority: P1
 created: "2026-11-11T09:08:57.917843282Z"
-updated: "2026-11-11T09:08:57.917843282Z"
+updated: "2026-11-11T10:07:44.047896920Z"
 tags:
   - stats
   - observability
 depends_on:
   - vmm
 parent: t97
+attempts: 1
 ---
 
 ## Summary
@@ -19,16 +20,16 @@ The read side of traffic history, behind the `Stats` handle: one query gives a p
 
 ## Acceptance Criteria
 
-- [ ] A `Range` type (1h, 6h, 24h, 7d, 30d) with `FromStr`/`Display` matching the `?range=` values, a default, and its bar plan from ADR-0062: 60 x 1 min, 72 x 5 min, 24 x 1 h, 56 x 3 h, 30 x 1 d. It picks the minute or hour table itself
-- [ ] A history query on `Stats` for a range, returning per scope (all hosted traffic, and each stack):
+- [x] A `Range` type (1h, 6h, 24h, 7d, 30d) with `FromStr`/`Display` matching the `?range=` values, a default, and its bar plan from ADR-0062: 60 x 1 min, 72 x 5 min, 24 x 1 h, 56 x 3 h, 30 x 1 d. It picks the minute or hour table itself
+- [x] A history query on `Stats` for a range, returning per scope (all hosted traffic, and each stack):
   - a series with exactly the plan's number of bars, oldest first, empty bars included: counts per status class and p50/p95 per bar
   - totals over the range: requests, counts per class, 5xx and 4xx shares, p50, p95
   - the same totals for the previous period of equal length, or none when it holds no data
   - the current rate: requests per minute over the last 5 flushed minutes
   - the peak minute of the range and when it was, for ranges drawn from minute buckets
-- [ ] "All hosted traffic" is every stack's routes plus unrouted, without hoster's own routes, as the dashboard counts today; hoster's own routes, unrouted and removed stacks remain available for the note under the dashboard's stacks table
-- [ ] One or two store reads per page render, not one per stack
-- [ ] `StatsSource` (or the test fake of it) can supply history, so web tests and `ui_preview` get fixture series without a recorder
+- [x] "All hosted traffic" is every stack's routes plus unrouted, without hoster's own routes, as the dashboard counts today; hoster's own routes, unrouted and removed stacks remain available for the note under the dashboard's stacks table
+- [x] One or two store reads per page render, not one per stack
+- [x] `StatsSource` (or the test fake of it) can supply history, so web tests and `ui_preview` get fixture series without a recorder
 
 ## Implementation Notes
 
