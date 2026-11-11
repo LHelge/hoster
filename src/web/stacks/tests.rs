@@ -828,7 +828,10 @@ async fn stacks_list_shows_cards_with_services_revision_and_last_deploy() {
         )),
         "{html}"
     );
-    assert!(html.contains("notes.example.com</li>"), "{html}");
+    assert!(
+        html.contains(r#"<a href="https://notes.example.com" target="_blank" rel="noopener noreferrer" title="Open https://notes.example.com in a new tab"><span aria-hidden="true">↗ </span>notes.example.com</a></li>"#),
+        "{html}"
+    );
     assert!(
         html.contains(r#"<a class="add-stack" href="/apply">"#),
         "{html}"
@@ -2641,7 +2644,7 @@ async fn the_overview_shows_kpis_responses_by_status_routes_and_volumes() {
     assert!(!html.contains("slow-route"), "{html}");
     // The routes card, with the certificate's days left and the route's settings.
     assert!(
-        html.contains(r#"<span class="route-url">https://notes.example.com/files</span>"#),
+        html.contains(r#"<a class="route-url" href="https://notes.example.com/files" target="_blank" rel="noopener noreferrer" title="Open https://notes.example.com/files in a new tab">https://notes.example.com/files<span aria-hidden="true"> ↗</span></a>"#),
         "{html}"
     );
     assert!(

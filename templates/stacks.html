@@ -51,7 +51,7 @@
     {%- if !card.routes.is_empty() %}
     <ul class="routes" aria-label="Routes">
       {%- for route in card.routes %}
-      <li><span aria-hidden="true">↗ </span>{{ route }}</li>
+      <li><a href="https://{{ route }}" target="_blank" rel="noopener noreferrer" title="Open https://{{ route }} in a new tab"><span aria-hidden="true">↗ </span>{{ route }}</a></li>
       {%- endfor %}
     </ul>
     {%- endif %}
