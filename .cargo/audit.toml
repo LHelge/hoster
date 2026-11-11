@@ -1,0 +1,15 @@
+# cargo audit's configuration, read by .github/workflows/audit.yml (Bears sng). An advisory is
+# ignored here only with a reason it does not affect hoster and a point at which to look again.
+
+[advisories]
+ignore = [
+    # libsqlite3-sys 0.37 bundles SQLite < 3.54, which can return uninitialised page-cache memory
+    # when it opens a database with a crafted sibling `-wal` file (CVE-2026-119375, local, needs
+    # the victim to open attacker-written files). hoster opens only its own hoster.db in its 0700
+    # data directory, which nobody less trusted than the hoster user can write, and the restore
+    # guide (site/content/wiki/backup.md) deletes stale `-wal`/`-shm` files before a snapshot
+    # goes in place. The fix is libsqlite3-sys >= 0.39, but sqlx-sqlite 0.9.0, the newest,
+    # requires < 0.38. Look again when sqlx releases support for 0.39, and remove this entry
+    # with that bump (Bears t24).
+    "RUSTSEC-2026-0459",
+]

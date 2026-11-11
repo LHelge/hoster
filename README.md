@@ -106,6 +106,10 @@ page: `site/content/blog/YYYY-MM-DD_hoster-X-Y-Z.md` with `slug: hoster-X-Y-Z` a
 to know before updating). The docs site is only deployed by a release tag, so merge the post in its own
 `docs:` PR before running `prepare`; the slug is what links the post to its GitHub release.
 
+A RustSec advisory against a shipped dependency (an issue opened by the daily
+`.github/workflows/audit.yml`) means a patch release once the fix is in, unless
+`.cargo/audit.toml` records why it does not affect hoster.
+
 ```sh
 git log --oneline "$(git describe --tags --abbrev=0)"..main   # what the release contains
 # ... merge the release post (site/content/blog/) through a docs PR ...
