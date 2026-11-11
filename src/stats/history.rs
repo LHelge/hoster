@@ -461,10 +461,6 @@ impl TrafficHistory {
 
     /// The end of the last bar: the end of the newest flushed minute, or of the hour that
     /// holds it for ranges drawn from hour buckets.
-    #[allow(
-        dead_code,
-        reason = "the stack overview's peak minute (5q8) says how long ago it was, ADR-0062"
-    )]
     pub fn end(&self) -> Timestamp {
         self.end
     }

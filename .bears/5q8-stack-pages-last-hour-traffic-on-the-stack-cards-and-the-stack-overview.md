@@ -1,10 +1,10 @@
 ---
 id: "5q8"
 title: "Stack pages: last-hour traffic on the stack cards and the stack overview"
-status: open
+status: done
 priority: P2
 created: "2026-11-11T09:09:29.444561821Z"
-updated: "2026-11-11T09:09:29.444561821Z"
+updated: "2026-11-11T11:02:03.797438043Z"
 tags:
   - web
   - ui
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - h6k
 parent: t97
+attempts: 1
 ---
 
 ## Summary
@@ -20,13 +21,13 @@ The pages without a range picker show the **last hour** from traffic history (ow
 
 ## Acceptance Criteria
 
-- [ ] Stack card: req/min (last 5 min), p95 and 5xx share over the last hour, and a sparkline of requests per minute over the hour, toned by the stack's condition. A stack that routes nothing keeps showing no traffic row
-- [ ] Stack overview tiles: req/min with the sub-line "peak N, M min ago" (the busiest minute of the hour, relative time so no time zone is involved), p50, p95, 5xx rate with `n of m`, each labelled "last hour"
-- [ ] Stack overview "Responses by status · 1h" card: stacked bars, 60 x 1 min, with the legend totals, for this stack's routes
-- [ ] Any per-route traffic the overview shows today reads from the same hour, or is removed if it only repeated "since start" counters; say which in the commit
-- [ ] The window is one constant shared by both pages and named in their labels, so changing it later is one edit
-- [ ] No `style=` attributes; works without JavaScript; no sideways page scroll at 375 px
-- [ ] Not included: a range picker, a slowest-routes panel, egress, uptime % (proposals or not adopted)
+- [x] Stack card: req/min (last 5 min), p95 and 5xx share over the last hour, and a sparkline of requests per minute over the hour, toned by the stack's condition. A stack that routes nothing keeps showing no traffic row
+- [x] Stack overview tiles: req/min with the sub-line "peak N, M min ago" (the busiest minute of the hour, relative time so no time zone is involved), p50, p95, 5xx rate with `n of m`, each labelled "last hour"
+- [x] Stack overview "Responses by status · 1h" card: stacked bars, 60 x 1 min, with the legend totals, for this stack's routes
+- [x] Any per-route traffic the overview shows today reads from the same hour, or is removed if it only repeated "since start" counters; say which in the commit
+- [x] The window is one constant shared by both pages and named in their labels, so changing it later is one edit
+- [x] No `style=` attributes; works without JavaScript; no sideways page scroll at 375 px
+- [x] Not included: a range picker, a slowest-routes panel, egress, uptime % (proposals or not adopted)
 
 ## Implementation Notes
 

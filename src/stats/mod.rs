@@ -40,17 +40,26 @@ pub use self::history::{Range, ScopeHistory, TrafficHistory, TrafficTotals};
     reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
 )]
 pub use self::history::{Bar, PeakMinute, UnknownRange};
+pub use self::latency::Histogram;
 #[allow(
     unused_imports,
     reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
 )]
 pub use self::latency::HistogramDecodeError;
-pub use self::latency::{Histogram, Latency};
+#[allow(
+    unused_imports,
+    reason = "the rolling latency window is removed with the since-start counters (3te, ADR-0062 §8)"
+)]
+pub use self::latency::Latency;
 pub use self::recorder::TrafficRecorder;
 pub use self::traffic::StatusCounts;
+#[allow(
+    unused_imports,
+    reason = "the since-start counters are removed once no page reads them (3te, ADR-0062 §8)"
+)]
+pub use self::traffic::{Counts, RouteTraffic};
 pub use self::traffic::{
-    Counts, RequestOutcome, RouteTraffic, StatusClass, TrackedRequest, Traffic, TrafficDelta,
-    TrafficSnapshot,
+    RequestOutcome, StatusClass, TrackedRequest, Traffic, TrafficDelta, TrafficSnapshot,
 };
 
 /// Where the statistics not kept by [`Traffic`] come from.
@@ -87,6 +96,10 @@ impl fmt::Debug for Stats {
 
 impl Stats {
     /// How far back the latency percentiles look.
+    #[allow(
+        dead_code,
+        reason = "the rolling latency window is removed with the since-start counters (3te, ADR-0062 §8)"
+    )]
     pub const LATENCY_WINDOW: Duration = latency::LatencyWindow::WINDOW;
     /// How far back the deployment statistics look.
     pub const DEPLOY_HISTORY: Duration = Duration::from_secs(30 * 24 * 60 * 60);

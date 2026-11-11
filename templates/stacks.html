@@ -55,15 +55,21 @@
       {%- endfor %}
     </ul>
     {%- endif %}
-    {%- if let Some(traffic) = card.traffic %}
-    <dl class="stack-stats">
-      <div title="Finished requests since hoster started"><dt>requests</dt><dd>{{ traffic.requests }}</dd></div>
-      <div title="{{ traffic.p95_title() }}"><dt>p95</dt><dd class="stat-{{ traffic.p95_tone }}">{{ traffic.p95 }}</dd></div>
-      <div title="Share of 5xx responses since hoster started"><dt>5xx</dt><dd class="stat-{{ traffic.errors_tone }}">{{ traffic.errors }}</dd></div>
-    </dl>
-    {%- else %}
+    {%- match card.traffic %}
+    {%- when CardTraffic::Shown(traffic) %}
+    <div class="stack-stats">
+      <dl>
+        <div title="Requests per minute over the last 5 minutes"><dt>req/min</dt><dd>{{ traffic.per_minute }}</dd></div>
+        <div title="95th percentile time to the response header over the {{ TrafficWindow }}, all the stack's routes together"><dt>p95</dt><dd class="stat-{{ traffic.line.p95_tone }}">{{ traffic.line.p95 }}</dd></div>
+        <div title="Share of 5xx responses over the {{ TrafficWindow }}"><dt>5xx</dt><dd class="stat-{{ traffic.line.errors_tone }}">{{ traffic.line.errors }}</dd></div>
+      </dl>
+      <div class="stack-spark" title="Requests per minute over the {{ TrafficWindow }}"><span class="stack-spark-label">{{ TrafficWindow }}</span>{{ traffic.spark }}<span class="visually-hidden">: {{ traffic.requests() }} {% if traffic.line.requests == 1 %}request{% else %}requests{% endif %}</span></div>
+    </div>
+    {%- when CardTraffic::Unreadable %}
+    <p class="stack-stats muted">the traffic history cannot be read</p>
+    {%- when CardTraffic::NoRoutes %}
     <p class="stack-stats muted">no routes, no traffic</p>
-    {%- endif %}
+    {%- endmatch %}
   </article>
   {%- endfor %}
   <a class="add-stack" href="/apply">

@@ -1,8 +1,9 @@
 //! `GET /stacks/{name}`: a stack's overview tab (ADR-0054, epic 8bf), under the shared
 //! [`StackHeader`].
 //!
-//! The overview opens with the stack's KPI tiles and its slowest routes, from hoster's
-//! in-process statistics (ADR-0045), then shows the services with their containers, the routes
+//! The overview opens with the stack's KPI tiles and its responses by status over the last
+//! hour of traffic history (ADR-0062 §8, the [`TrafficWindow`] the stack cards show too), then
+//! shows the services with their containers, the routes
 //! and named volumes of the active revision, the stack's Recent events (ADR-0055, kept live by
 //! their own stream at `/stacks/{name}/events`, [`StackFeed`]), the form that deploys explicit
 //! digests to the CI-built services, a link to apply a new revision, the refused webhook deploys
@@ -12,7 +13,7 @@
 //! deletes: those of every revision, as [`Orchestrator::volumes`] finds them, with where the
 //! active revision mounts each.
 //!
-//! The tiles, the slowest routes and the routes card are built in `figures.rs`; the services
+//! The tiles, the responses by status and the routes card are built in `figures.rs`; the services
 //! table, which lists the stack's containers too, in `services.rs`.
 //!
 //! [`Orchestrator::volumes`]: crate::orchestrator::Orchestrator::volumes
@@ -28,18 +29,18 @@ use axum::Extension;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 
-use self::figures::{Figures, Readings, RouteRow, SlowRoute};
+use self::figures::{Figures, Readings, RouteRow, StatusChart};
 #[cfg(test)]
 pub(super) use self::services::Role;
 pub(super) use self::services::{LogCandidate, LogPick, StackContainers};
 use self::services::{ServiceRow, ServiceTable};
 use super::frame::{StackHeader, Tab};
-use super::list::StackCard;
+use super::list::{StackCard, TrafficWindow};
 use super::{Outcome, Stacks, UpdatesCard, When};
 use crate::orchestrator::{StackSecret, StackStatus};
 use crate::runtime::VolumeMount;
 use crate::stack::{ConfigFile, ContainerPath, FileSource, Ownership, Stack};
-use crate::stats::{Elapsed, Stats};
+use crate::stats::{Range, Stats};
 use crate::store::WebhookRejection;
 use crate::web::auth::{Auth, Session};
 use crate::web::containers::Containers;
@@ -153,8 +154,8 @@ pub struct StackView {
     files: Vec<FileRow>,
     /// The KPI tiles.
     kpis: Vec<Kpi>,
-    /// The routes the proxy has counted, slowest first.
-    slowest: Vec<SlowRoute>,
+    /// The responses by status over the [`TrafficWindow`].
+    statuses: StatusChart,
     /// The routes of the active revision, for the routes card.
     route_rows: Vec<RouteRow>,
     /// The stack's newest events.
@@ -190,9 +191,14 @@ impl StackView {
         self.now
     }
 
-    /// How far back the latency percentiles look.
-    fn latency_window(&self) -> Elapsed {
-        Elapsed(Stats::LATENCY_WINDOW)
+    /// The range of traffic history the overview shows, for the chart's heading (`1h`).
+    fn window(&self) -> Range {
+        TrafficWindow::RANGE
+    }
+
+    /// The same in words, for the chart's tooltip (`last hour`).
+    fn window_words(&self) -> TrafficWindow {
+        TrafficWindow
     }
 
     /// The volumes the active revision mounts, for the volumes card.
@@ -240,7 +246,7 @@ impl StackView {
         Self {
             now: readings.now,
             kpis: figures.kpis,
-            slowest: figures.slowest,
+            statuses: figures.statuses,
             route_rows: figures.routes,
             events,
             url: Self::url(&status.name),

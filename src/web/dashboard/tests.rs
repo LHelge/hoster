@@ -174,23 +174,23 @@ fn finish(request: &mut crate::stats::TrackedRequest, status: u16, millis: u64) 
     });
 }
 
-const MINUTE: Duration = Duration::from_secs(60);
+pub(in crate::web) const MINUTE: Duration = Duration::from_secs(60);
 
 /// The start of an hour; [`now`] is 30 min 30 s into it.
-fn hour() -> Timestamp {
+pub(in crate::web) fn hour() -> Timestamp {
     Timestamp::from(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_002_800))
 }
 
 /// 30 min 30 s into [`hour`]: the newest flushed minute is the hour's 30th (`hour + 29 min`),
 /// the 24h range ends with the hour, and the rate window is `hour + 25 min` to `hour + 30 min`.
-fn now() -> Timestamp {
+pub(in crate::web) fn now() -> Timestamp {
     hour() + MINUTE * 30 + Duration::from_secs(30)
 }
 
 /// A minute bucket at `start` of the route `host` owned by `stack`'s `service` (`""` for
 /// none, `("", "admin UI")` for hoster's own), with `count` requests of each (status,
 /// latency in ms); a 502 counts as an upstream error.
-fn bucket(
+pub(in crate::web) fn bucket(
     start: Timestamp,
     (host, stack, service): (&str, &str, &str),
     requests: &[(u16, u64, u64)],
@@ -227,7 +227,10 @@ fn bucket(
 }
 
 /// The traffic history over `range` as of [`now`] of the minute buckets `rows`.
-async fn history(range: Range, rows: Vec<TrafficBucket<Histogram>>) -> TrafficHistory {
+pub(in crate::web) async fn history(
+    range: Range,
+    rows: Vec<TrafficBucket<Histogram>>,
+) -> TrafficHistory {
     let fake = FakeStats::default();
     *fake.traffic.lock().unwrap() = rows;
     Stats::new(Traffic::default(), Arc::new(fake))
