@@ -1,10 +1,10 @@
 ---
 id: vqa
 title: "Traffic recorder: flush every minute, roll up, prune, flush on shutdown"
-status: open
+status: done
 priority: P1
 created: "2026-11-11T09:08:57.899829676Z"
-updated: "2026-11-11T09:08:57.899829676Z"
+updated: "2026-11-11T09:56:32.570380421Z"
 tags:
   - stats
   - supervisor
@@ -13,6 +13,7 @@ depends_on:
   - "5ae"
   - vmm
 parent: t97
+attempts: 1
 ---
 
 ## Summary
@@ -21,12 +22,12 @@ The background task that turns the in-memory counters into history (ADR-0062): e
 
 ## Acceptance Criteria
 
-- [ ] A recorder type in `src/stats/` with a `run(cancel)` loop, spawned by the supervisor beside the event-log retention task
-- [ ] Ticks are aligned to wall-clock minutes; each flush writes what was drained under the minute that just ended. A late or skipped tick still writes one bucket, never a duplicate
-- [ ] Retention as constants on the type: minute rows 24 h, hour rows 60 d; swept at startup and then periodically
-- [ ] On graceful shutdown the recorder flushes once more after the proxy has stopped taking requests, so a restart or self-update loses nothing; check the order in `docs/architecture.md` §4 and update it
-- [ ] A failed write is logged at `warn` and the drained minute is retried with the next flush or dropped, as ADR-0062 says; it never blocks the proxy or grows without bound
-- [ ] Nothing is written for a minute without requests
+- [x] A recorder type in `src/stats/` with a `run(cancel)` loop, spawned by the supervisor beside the event-log retention task
+- [x] Ticks are aligned to wall-clock minutes; each flush writes what was drained under the minute that just ended. A late or skipped tick still writes one bucket, never a duplicate
+- [x] Retention as constants on the type: minute rows 24 h, hour rows 60 d; swept at startup and then periodically
+- [x] On graceful shutdown the recorder flushes once more after the proxy has stopped taking requests, so a restart or self-update loses nothing; check the order in `docs/architecture.md` §4 and update it
+- [x] A failed write is logged at `warn` and the drained minute is retried with the next flush or dropped, as ADR-0062 says; it never blocks the proxy or grows without bound
+- [x] Nothing is written for a minute without requests
 
 ## Implementation Notes
 
