@@ -20,7 +20,9 @@ Surface stored update candidates, and let the operator apply them through the ex
 - [ ] An orchestrator method, e.g. `update_preview(stack, selection)`, builds a new revision from the current one. It rewrites the selected services' tags in the TOML text with an edit that preserves formatting and comments (`toml_edit`, added with `cargo add` if not already a dependency) keeping the operator's style (ADR-0061 §9: `repo:tag` gets only the new tag, with the digest stored in the revision; `repo:tag@sha256:…` gets both). It returns the usual `ApplyPreview`. Applying it uses the normal apply path (ADR-0049). Model this on `reresolve_preview` / `reresolve` in `src/orchestrator/mod.rs`.
 - [ ] Stack overview: per service, "postgres 16.4 → 16.6 (patch)", "tag `8` moved", and a major available shown separately. Buttons: "Update" per service and "Update all" (patch + minor + moved, never major unless chosen explicitly). Both lead to the preview.
 - [ ] Version groups per the ADR are offered and applied together.
-- [ ] The stacks list gets a badge; the dashboard warnings say "N updates available"; Settings or System shows the last check time with "Check now".
+- [ ] The stacks list gets a badge; the dashboard warnings say "N updates available".
+- [ ] Settings → Updates (moved here from jcw): edits the `update_settings` interval (`Store::set_update_settings`, `CheckInterval` bounds 1 h–7 d), then calls `UpdateCheckHandle::reschedule`; shows the last pass time (the `updates.last_pass` kv item) and a "Check now" button (`UpdateCheckHandle::check_now`). Hand the handle (`UpdateChecker::handle`, built in `supervisor.rs`) to `WebApp` and drop the `allow(dead_code)`s that mark it.
+- [ ] Read updates with `Store::image_updates`, keeping only rows whose tag and digest match the active revision (a stale row waits for the next pass); a row's `error` is shown as "could not check: …". Pages refresh on `UiEvent::Updates`.
 - [ ] Deployment history shows the update as an apply with the tag change in its diff.
 
 ## Testing

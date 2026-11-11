@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM image_checks WHERE stack = ? AND service = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e583de7b92c70f56d0fb8ca27a4aeacbcdd4513ebbea092ff60740c0ff7b439d"
+}

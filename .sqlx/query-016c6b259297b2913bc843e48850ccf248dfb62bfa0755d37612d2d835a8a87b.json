@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT stack, service, image, tag, digest, checked_at AS \"checked_at: Timestamp\",\n                      error\n               FROM image_checks ORDER BY stack, service",
+  "describe": {
+    "columns": [
+      {
+        "name": "stack",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "service",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "service"
+          }
+        }
+      },
+      {
+        "name": "image",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "image"
+          }
+        }
+      },
+      {
+        "name": "tag",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "tag"
+          }
+        }
+      },
+      {
+        "name": "digest",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "digest"
+          }
+        }
+      },
+      {
+        "name": "checked_at: Timestamp",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "checked_at"
+          }
+        }
+      },
+      {
+        "name": "error",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "error"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "016c6b259297b2913bc843e48850ccf248dfb62bfa0755d37612d2d835a8a87b"
+}

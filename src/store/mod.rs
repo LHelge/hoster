@@ -22,6 +22,7 @@ mod notifications;
 mod secrets;
 mod sessions;
 mod types;
+mod updates;
 mod webhook;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,10 +39,6 @@ use sqlx::sqlite::{
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 use thiserror::Error;
 
-#[allow(
-    unused_imports,
-    reason = "used by the notifier and Settings → Notifications as they land"
-)]
 pub use notifications::{
     DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,
 };
@@ -56,6 +53,14 @@ pub use types::{
     PortRequest, Provenance, RecordedImage, RevisionId, SchemaVersion, SealedSecret, SecretEntry,
     ServicePointer, SessionRecord, Severity, ShortDigest, ShortSha, Stack, StackRevision,
     Timestamp, UnknownEventText, WebhookRejection,
+};
+#[allow(
+    unused_imports,
+    reason = "used by the notifier and Settings → Notifications as they land"
+)]
+pub use updates::{
+    Candidate, CheckInterval, ImageCheck, ServiceUpdates, StoredCandidate, UpdateKind,
+    UpdateSettings,
 };
 
 /// The embedded migrations from `migrations/`. Every one is a reversible `.up.sql` / `.down.sql`
@@ -717,6 +722,10 @@ impl Store {
             .execute(&mut *conn)
             .await?;
         sqlx::query!("DELETE FROM port_allocations WHERE stack = ?", name)
+            .execute(&mut *conn)
+            .await?;
+        // What the update checker found goes too (ADR-0061 §8); its updates cascade.
+        sqlx::query!("DELETE FROM image_checks WHERE stack = ?", name)
             .execute(&mut *conn)
             .await?;
         Ok(true)

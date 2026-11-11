@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT stack, service FROM image_checks",
+  "describe": {
+    "columns": [
+      {
+        "name": "stack",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "service",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "image_checks",
+            "name": "service"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "9ca0f1cf10eb86bbf12d4226c97372c2aa86ee87f2cfa528b0ac407b94f61e65"
+}

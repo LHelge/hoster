@@ -16,9 +16,9 @@ use crate::installation::Version;
 use crate::runtime::ServiceGeneration;
 use crate::stack::Name;
 use crate::store::{
-    Deployment, DeploymentId, DeploymentSource, DeploymentState, Event, EventKind, EventPage,
-    EventQuery, NewEvent, Severity, ShortDigest, ShortSha, StackRevision, Store, StoreError,
-    Timestamp,
+    Candidate, Deployment, DeploymentId, DeploymentSource, DeploymentState, Event, EventKind,
+    EventPage, EventQuery, ImageCheck, NewEvent, Severity, ShortDigest, ShortSha, StackRevision,
+    Store, StoreError, Timestamp, UpdateKind,
 };
 
 /// Records events in the store and announces them on `ui_events`. Cheap to clone; every
@@ -717,6 +717,44 @@ impl NotificationEvents {
         NewEvent::new(kind, Severity::Info, message)
             .subject(Self::SUBJECT)
             .meta(format!("scope notifications{by}"))
+    }
+}
+
+/// The events of the update checker (ADR-0061 §8): it found an update of a third-party
+/// image. Info, linked to the stack's page, never mailed.
+#[derive(Debug, Clone, Copy)]
+pub struct UpdateEvents;
+
+impl UpdateEvents {
+    /// `candidate` was found for `check`'s service.
+    pub fn available(check: &ImageCheck, candidate: &Candidate) -> NewEvent {
+        let repository = format!("{}/{}", check.image.registry(), check.image.repository());
+        let tag = check.image.tag().unwrap_or_default();
+        let (message, meta) = match candidate.kind {
+            UpdateKind::Digest => (
+                format!("{} has a new image for {repository}:{tag}", check.service),
+                format!(
+                    "{} → {}",
+                    ShortDigest(check.digest.as_ref()),
+                    candidate
+                        .digest
+                        .as_ref()
+                        .map(|d| ShortDigest(d.as_ref()).to_string())
+                        .unwrap_or_default()
+                ),
+            ),
+            kind => (
+                format!(
+                    "{} has a {kind} update: {repository}:{}",
+                    check.service, candidate.tag
+                ),
+                format!("{tag} → {}", candidate.tag),
+            ),
+        };
+        NewEvent::new(EventKind::UpdateAvailable, Severity::Info, message)
+            .stack(check.stack.as_str())
+            .subject(format!("/stacks/{}", check.stack))
+            .meta(meta)
     }
 }
 

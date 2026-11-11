@@ -73,9 +73,11 @@ impl From<EventKind> for EventGroup {
     fn from(kind: EventKind) -> Self {
         use EventKind as K;
         match kind {
-            K::DeployStarted | K::DeploySucceeded | K::DeployFailed | K::DeployRolledBack => {
-                Self::Deploys
-            }
+            K::DeployStarted
+            | K::DeploySucceeded
+            | K::DeployFailed
+            | K::DeployRolledBack
+            | K::UpdateAvailable => Self::Deploys,
             K::ContainerRestarted | K::CrashLoopEntered | K::CrashLoopLeft | K::HealthChanged => {
                 Self::Containers
             }

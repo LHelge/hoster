@@ -90,11 +90,14 @@ separate from the digest poller:
 edited in Settings → Updates (ADR-0058 §1), not in `hoster.toml`. The interval is bounded to
 between 1 hour and 7 days. A minimum keeps the checker polite to registries.
 
-**8. Storage.** One `image_updates` table (reversible migration, ADR-0052) with a row per (stack,
-service, kind): current tag and digest, candidate tag and digest, kind (`digest`, `minor`/`patch`,
-`major`), first seen, last checked, last error, and the candidate last acted on. Rows go when the
-service goes or when its running image reaches the candidate. Newly found candidates are recorded
-in the event log (ADR-0055) at info level.
+**8. Storage.** Two tables (reversible migration, ADR-0052). `image_checks` has a row per (stack,
+service): the image, tag and digest last checked, when, and the last error, so a failed check is
+recorded even before anything was found. `image_updates` has a row per (stack, service, kind)
+under it: the candidate tag (and digest, for a moved tag), kind (`digest`, `patch`, `minor`,
+`major`) and first seen. The record of the candidate last acted on (§10) belongs to auto-update.
+Rows go when the service or its stack goes, and a check made for another tag or digest replaces
+the candidates found for the old one. Newly found candidates are recorded in the event log
+(ADR-0055) at info level.
 
 **9. Showing and applying an update.**
 

@@ -235,7 +235,8 @@ impl Class {
             | EventKind::StackApplied
             | EventKind::SecretSet
             | EventKind::SecretDeleted
-            | EventKind::NotificationFailed => Self::Never,
+            | EventKind::NotificationFailed
+            | EventKind::UpdateAvailable => Self::Never,
         }
     }
 }
