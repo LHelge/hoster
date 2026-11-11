@@ -113,6 +113,8 @@ pub enum Call {
     Remove(RemoveStack),
     ReresolvePreview(String),
     Reresolve(String, u32),
+    UpdatePreview(String, Vec<UpdateChoice>),
+    Update(String, Vec<UpdateChoice>, u32),
     /// A stored secret, with the value it was given (only the fake keeps it, to prove the
     /// pages never show it).
     SetSecret(String, String, String),
@@ -176,6 +178,8 @@ pub struct FakeStacks {
     pub log: Mutex<Vec<crate::store::Event>>,
     /// What the live check reports for a file that parses, besides the parser's warnings.
     pub check: Mutex<CheckReport>,
+    /// The updates on offer, by stack.
+    pub updates: Mutex<BTreeMap<String, StackUpdates>>,
 }
 
 impl Default for FakeStacks {
@@ -196,11 +200,32 @@ impl Default for FakeStacks {
             operators: Mutex::new(Vec::new()),
             log: Mutex::new(Vec::new()),
             check: Mutex::new(CheckReport::default()),
+            updates: Mutex::new(BTreeMap::new()),
         }
     }
 }
 
 impl FakeStacks {
+    /// `toml` with the tags the offers `choices` select written in, or the error the real
+    /// orchestrator gives for a choice not on offer.
+    fn updated_file(
+        &self,
+        stack: &str,
+        toml: &str,
+        choices: &[UpdateChoice],
+    ) -> Result<String, OrchestratorError> {
+        let updates = self.updates.lock().unwrap();
+        let offers = updates.get(stack).cloned().unwrap_or_default();
+        let chosen = offers
+            .chosen(choices)
+            .map_err(OrchestratorError::NoUpdate)?;
+        let mut file = toml.to_owned();
+        for offer in chosen.values() {
+            file = file.replace(&format!(":{}\"", offer.from), &format!(":{}\"", offer.to));
+        }
+        Ok(file)
+    }
+
     fn record(&self, call: Call) {
         self.calls.lock().unwrap().push(call);
     }
@@ -559,6 +584,79 @@ impl StackControl for FakeStacks {
                 state: DeploymentState::Validating,
             }),
         }))
+    }
+
+    async fn stack_updates(&self, stack: &str) -> Result<StackUpdates, OrchestratorError> {
+        self.current(stack)
+            .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
+        Ok(self
+            .updates
+            .lock()
+            .unwrap()
+            .get(stack)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn all_updates(&self) -> Result<BTreeMap<String, StackUpdates>, OrchestratorError> {
+        Ok(self.updates.lock().unwrap().clone())
+    }
+
+    /// The active revision with each chosen service's image tag replaced, as the real one
+    /// would write it.
+    async fn update_preview(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+    ) -> Result<UpdatePreview, OrchestratorError> {
+        self.record(Call::UpdatePreview(stack.into(), choices.to_vec()));
+        let status = self
+            .current(stack)
+            .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
+        let file = self.updated_file(stack, &status.revision.toml, choices)?;
+        Ok(UpdatePreview {
+            preview: ApplyPreview {
+                stack: stack.into(),
+                current: Some(status.revision.clone()),
+                warnings: Vec::new(),
+                pins: Vec::new(),
+                changed: self.changed.lock().unwrap().clone(),
+                start_order: Vec::new(),
+            },
+            revision: status.revision,
+            file,
+        })
+    }
+
+    async fn update(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+        expected: u32,
+        by: &Operator,
+    ) -> Result<ApplyOutcome, OrchestratorError> {
+        self.record(Call::Update(stack.into(), choices.to_vec(), expected));
+        self.acted(by);
+        let status = self
+            .current(stack)
+            .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
+        if status.revision.revision != expected {
+            return Err(OrchestratorError::RevisionChanged {
+                stack: stack.into(),
+                expected,
+                active: status.revision.revision,
+            });
+        }
+        let file = self.updated_file(stack, &status.revision.toml, choices)?;
+        Ok(ApplyOutcome {
+            revision: revision(stack, expected + 1, &file),
+            warnings: Vec::new(),
+            changed: self.changed.lock().unwrap().clone(),
+            deployment: Some(DeployOutcome {
+                deployment: DeploymentId::from(9),
+                state: DeploymentState::Validating,
+            }),
+        })
     }
 
     async fn secrets(&self, stack: &str) -> Result<Vec<StackSecret>, OrchestratorError> {

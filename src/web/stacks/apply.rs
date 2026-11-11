@@ -28,7 +28,7 @@ use similar::{ChangeTag, TextDiff};
 
 use super::editor_help::EditorHelp;
 use super::{Outcome, Problem, StackView};
-use crate::orchestrator::{ApplyPreview, CheckReport, PinChange, Wave};
+use crate::orchestrator::{ApplyPreview, CheckReport, PinChange, UpdatePreview, Wave};
 use crate::stack::{Counted, FileSource, Stack};
 use crate::store::StackRevision;
 use crate::web::pages::{Layout, Page};
@@ -663,6 +663,39 @@ impl ReresolveView {
             changed: preview.changed,
             stack: preview.stack,
             revision,
+        }
+    }
+}
+
+/// What applying some updates would do (ADR-0061 §9): the stack file's diff, the pins and
+/// what redeploys, with the confirmation naming the revision and the choices.
+#[derive(Template)]
+#[template(path = "update_preview.html")]
+pub(super) struct UpdateView {
+    stack: String,
+    confirm_url: String,
+    /// The revision the updates are made to.
+    revision: u32,
+    /// The choices, as the form sends them back.
+    choices: String,
+    pins: Vec<PinView>,
+    steps: Vec<Step>,
+    changed: Vec<String>,
+    diff: FileDiff,
+}
+
+impl UpdateView {
+    pub(super) fn new(update: UpdatePreview, choices: String) -> Self {
+        let preview = update.preview;
+        Self {
+            confirm_url: format!("{}/updates", StackView::url(&preview.stack)),
+            pins: preview.pins.iter().map(PinView::from).collect(),
+            steps: Step::services(&preview.changed, None, None),
+            changed: preview.changed,
+            diff: FileDiff::between(&update.revision.toml, &update.file),
+            stack: preview.stack,
+            revision: update.revision.revision,
+            choices,
         }
     }
 }

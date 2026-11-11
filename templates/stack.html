@@ -52,6 +52,11 @@
   {%- endif %}
 </section>
 
+{%- if let Some(updates) = updates %}
+{%- include "stack_updates.html" %}
+{%- endif %}
+<div id="update-result" aria-live="polite"></div>
+
 <section class="card" id="services" aria-labelledby="services-title">
   <header class="card-head">
     <h2 id="services-title">Services <span class="card-count">· {{ stack.services.rows.len() }}{% if stack.services.error.is_none() %} · {{ stack.services.containers }} {% if stack.services.containers == 1 %}container{% else %}containers{% endif %}{% endif %}</span></h2>

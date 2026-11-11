@@ -301,10 +301,6 @@ impl Store {
     }
 
     /// The last check of every checked service, with the updates found, by stack and service.
-    #[allow(
-        dead_code,
-        reason = "read by the stack pages' update badges (Bears j6w)"
-    )]
     pub async fn image_updates(&self) -> Result<Vec<ServiceUpdates>> {
         let mut conn = self.pool.acquire().await?;
         let checks = sqlx::query!(

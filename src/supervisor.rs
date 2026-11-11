@@ -808,6 +808,7 @@ impl Startup for Supervisor {
                     registry.client.clone(),
                     store.clone(),
                 );
+                let updates = checker.handle();
                 tokio::spawn(checker.run(self.teardown.token.child_token()));
 
                 // The instance name (ADR-0058 §2), cached for the sidebar and the notifier.
@@ -841,6 +842,7 @@ impl Startup for Supervisor {
                     instance,
                     secrets,
                     self.shutdown.clone(),
+                    updates,
                 )?
                 .start(listen, self.teardown.token.child_token())
                 .await?;

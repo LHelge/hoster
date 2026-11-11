@@ -90,7 +90,6 @@ enum Wake {
 #[derive(Debug, Clone)]
 pub struct UpdateCheckHandle(mpsc::Sender<Wake>);
 
-#[allow(dead_code, reason = "called from Settings → Updates (Bears j6w)")]
 impl UpdateCheckHandle {
     /// Runs a pass as soon as the checker is idle ("Check now").
     pub fn check_now(&self) {
@@ -100,6 +99,20 @@ impl UpdateCheckHandle {
     /// Recomputes when the next pass is due, after the interval was changed.
     pub fn reschedule(&self) {
         let _ = self.0.try_send(Wake::Reschedule);
+    }
+
+    /// A handle with no checker behind it, and what it was asked, as `check now` or
+    /// `reschedule` (tests of the pages that use it).
+    #[cfg(test)]
+    pub(crate) fn detached() -> (Self, impl FnMut() -> Option<&'static str>) {
+        let (tx, mut rx) = mpsc::channel(4);
+        let next = move || {
+            rx.try_recv().ok().map(|wake| match wake {
+                Wake::CheckNow => "check now",
+                Wake::Reschedule => "reschedule",
+            })
+        };
+        (Self(tx), next)
     }
 }
 
@@ -143,7 +156,6 @@ impl UpdateChecker {
     }
 
     /// A handle that asks this checker for a pass or a new schedule while it runs.
-    #[allow(dead_code, reason = "handed to Settings → Updates (Bears j6w)")]
     pub fn handle(&self) -> UpdateCheckHandle {
         UpdateCheckHandle(self.wake_tx.clone())
     }

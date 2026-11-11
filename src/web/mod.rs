@@ -55,6 +55,7 @@ use crate::config::Config;
 use crate::installation::Installation;
 use crate::instance::Instance;
 use crate::orchestrator::Orchestrator;
+use crate::registry::UpdateCheckHandle;
 use crate::runtime::ContainerRuntime;
 use crate::secrets::SecretStore;
 use crate::stack::StackSchema;
@@ -71,7 +72,9 @@ use self::dashboard::Dashboard;
 use self::events::EventsPage;
 pub(crate) use self::icons::Icon;
 use self::pages::ShellSource;
-use self::settings::{EffectiveConfig, Notifications, Registries, RegistryControl, Settings};
+use self::settings::{
+    EffectiveConfig, Notifications, Registries, RegistryControl, Settings, UpdatesSection,
+};
 use self::stacks::{StackControl, StackFile, Stacks};
 use self::system::{LocalHost, System};
 pub(crate) use self::ui::Tone;
@@ -179,6 +182,7 @@ impl WebApp {
         instance: Instance,
         secrets: SecretStore,
         shutdown: ShutdownRequest,
+        updates: UpdateCheckHandle,
     ) -> anyhow::Result<Self> {
         let installation = Installation::from_env()
             .context("HOME is not set, so the binary layout ~/.local/lib/hoster cannot be found")?;
@@ -214,7 +218,8 @@ impl WebApp {
                 .parse()
                 .context("the admin origin is not a URL")?,
         );
-        Ok(WebApp::new(
+        let updates = UpdatesSection::new(store.clone(), updates);
+        let mut app = WebApp::new(
             auth,
             runtime,
             Arc::new(certificates),
@@ -227,7 +232,9 @@ impl WebApp {
             stats,
             instance,
             notifications,
-        ))
+        );
+        app.settings = app.settings.with_updates(updates);
+        Ok(app)
     }
 
     #[expect(
@@ -320,6 +327,11 @@ impl WebApp {
                 post(Stacks::reresolve_preview),
             )
             .route("/stacks/{name}/reresolve", post(Stacks::reresolve))
+            .route(
+                "/stacks/{name}/updates/preview",
+                post(Stacks::update_preview),
+            )
+            .route("/stacks/{name}/updates", post(Stacks::update))
             .route("/stacks/{name}/deployments", get(Stacks::history))
             .route(
                 "/stacks/{name}/deployments/{id}",
@@ -374,6 +386,11 @@ impl WebApp {
                 "/settings/notifications/remove",
                 post(Notifications::remove),
             )
+            .route(
+                "/settings/updates",
+                get(Settings::updates).post(Settings::save_updates),
+            )
+            .route("/settings/updates/check", post(Settings::check_updates))
             .route("/settings", get(Settings::index))
             .route("/settings/{part}", get(Settings::section))
             .layer(Extension(self.settings.clone()))

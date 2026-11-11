@@ -15,7 +15,7 @@
 //! behind by a removal that did not finish, or made by hand with hoster's labels) are listed
 //! with a link to their log, since no stack page shows them.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
@@ -54,9 +54,11 @@ impl Stacks {
                     tracing::warn!(error = %err, "listing the containers failed");
                     Vec::new()
                 });
+                let updates = stacks.update_counts().await;
                 Page(
                     StackList::new(layout, &list, &stats.traffic(), filter, SystemTime::now())
-                        .with_leftovers(&list, &managed),
+                        .with_leftovers(&list, &managed)
+                        .with_updates(&updates),
                 )
                 .into_response()
             }
@@ -98,6 +100,15 @@ pub struct StackList {
 }
 
 impl StackList {
+    /// Marks each card with the number of updates its stack is offered, majors aside
+    /// (ADR-0061 §9).
+    fn with_updates(mut self, updates: &BTreeMap<String, usize>) -> Self {
+        for card in &mut self.cards {
+            card.updates = updates.get(&card.name).copied().unwrap_or_default();
+        }
+        self
+    }
+
     fn new(
         layout: Layout,
         stacks: &[StackStatus],
@@ -322,6 +333,8 @@ pub(super) struct StackCard {
     routes: Vec<String>,
     /// `None` when the stack routes nothing, so there is no traffic to count.
     traffic: Option<TrafficLine>,
+    /// Updates on offer, majors aside (ADR-0061 §9).
+    updates: usize,
 }
 
 impl StackCard {
@@ -376,6 +389,7 @@ impl StackCard {
                 )
             }),
             routes,
+            updates: 0,
         }
     }
 

@@ -35,7 +35,7 @@ pub(super) use self::services::{LogCandidate, LogPick, StackContainers};
 use self::services::{ServiceRow, ServiceTable};
 use super::frame::{StackHeader, Tab};
 use super::list::StackCard;
-use super::{Outcome, Stacks, When};
+use super::{Outcome, Stacks, UpdatesCard, When};
 use crate::orchestrator::{StackSecret, StackStatus};
 use crate::runtime::VolumeMount;
 use crate::stack::{ConfigFile, ContainerPath, FileSource, Ownership, Stack};
@@ -62,11 +62,19 @@ impl Stacks {
             Err(outcome) => return outcome.page(layout),
         };
         let feed = StackFeed::new(stacks.clone(), &name);
-        let (volumes, secrets, events) = tokio::join!(
+        let (volumes, secrets, events, updates) = tokio::join!(
             stacks.0.volumes(&name),
             stacks.0.secrets(&name),
-            feed.read()
+            feed.read(),
+            stacks.0.stack_updates(&name)
         );
+        // The card is left out when the updates cannot be read; the page still serves.
+        let updates = updates
+            .inspect_err(|err| {
+                tracing::warn!(stack = %name, error = %err, "cannot read the stack's updates");
+            })
+            .ok()
+            .and_then(|updates| UpdatesCard::new(&name, &updates, std::time::SystemTime::now()));
         let volumes = match volumes {
             Ok(volumes) => volumes,
             Err(err) => return Outcome::from(err).page(layout),
@@ -84,6 +92,7 @@ impl Stacks {
             });
         Page(StackPage {
             layout,
+            updates,
             header: stacks.header(&status, Tab::Overview).await,
             stack: StackView::new(
                 &status,
@@ -121,6 +130,8 @@ pub struct StackPage {
     layout: Layout,
     header: StackHeader,
     stack: StackView,
+    /// The Updates card (ADR-0061 §9), when there is something on it.
+    updates: Option<UpdatesCard>,
 }
 
 /// A stack's overview.

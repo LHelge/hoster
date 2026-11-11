@@ -294,16 +294,20 @@ struct Readings {
     certificates: CertGlance,
     /// The newest events, or why they cannot be read.
     events: Result<Vec<LoggedEvent>, String>,
+    /// How many updates (majors aside) each stack is offered (ADR-0061 §9); empty when they
+    /// cannot be read.
+    updates: BTreeMap<String, usize>,
 }
 
 impl Readings {
     async fn gather(stacks: &Stacks, stats: &Stats, certificates: &Certificates) -> Self {
         let query = RecentEvents::query(None);
-        let (status, deployments, glance, events) = tokio::join!(
+        let (status, deployments, glance, events, updates) = tokio::join!(
             stacks.status(),
             stats.deployments(),
             certificates.glance(SystemTime::now()),
             stacks.event_page(&query),
+            stacks.update_counts(),
         );
         Readings {
             stacks: status.map_err(|err| {
@@ -324,6 +328,7 @@ impl Readings {
                 tracing::warn!(error = %err, "cannot read the event log for the dashboard");
                 format!("Cannot show the recent events: {err}.")
             }),
+            updates,
         }
     }
 }
@@ -337,6 +342,7 @@ impl Default for Readings {
             served: Vec::new(),
             certificates: CertGlance::default(),
             events: Ok(Vec::new()),
+            updates: BTreeMap::new(),
         }
     }
 }
@@ -371,6 +377,7 @@ impl Overview {
             served,
             certificates,
             events,
+            updates,
         } = readings;
         let mut problems = Vec::new();
         // `None` when the stacks cannot be read: then which of them exist is not known.
@@ -389,6 +396,7 @@ impl Overview {
             .collect();
         let mut warnings: Vec<Warning> = stacks.iter().flat_map(Warning::of_stack).collect();
         warnings.extend(Warning::of_certificates(stacks, &served, now));
+        warnings.extend(Warning::of_updates(&updates));
         let summary = Condition::ALL
             .into_iter()
             .filter_map(|condition| {
@@ -551,6 +559,23 @@ impl Warning {
         warnings
     }
 
+    /// A warning for every stack offered updates (`updates`, by stack, majors aside).
+    fn of_updates(updates: &BTreeMap<String, usize>) -> Vec<Warning> {
+        updates
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(stack, count)| Warning {
+                kind: WarningKind::UpdatesAvailable,
+                subject: stack.clone(),
+                detail: format!(
+                    "{count} {} available",
+                    if *count == 1 { "update" } else { "updates" }
+                ),
+                href: format!("{}#updates", StackView::url(stack)),
+            })
+            .collect()
+    }
+
     /// A warning for every `served` certificate expiring soon, naming the services of `stacks`
     /// that route its host.
     fn of_certificates(
@@ -609,6 +634,8 @@ enum WarningKind {
     CertExpiring,
     /// A stack's latest deployment failed or was rejected.
     DeployFailed,
+    /// Newer third-party images are on offer (ADR-0061 §9).
+    UpdatesAvailable,
 }
 
 impl fmt::Display for WarningKind {
@@ -618,6 +645,7 @@ impl fmt::Display for WarningKind {
             Self::CrashLooping => "crash looping",
             Self::CertExpiring => "certificate expiring",
             Self::DeployFailed => "deploy failed",
+            Self::UpdatesAvailable => "updates",
         })
     }
 }
@@ -631,6 +659,7 @@ impl From<WarningKind> for Tone {
                 Tone::Fail
             }
             WarningKind::CertExpiring => Tone::Warn,
+            WarningKind::UpdatesAvailable => Tone::Neutral,
         }
     }
 }

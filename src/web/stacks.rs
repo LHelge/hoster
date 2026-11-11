@@ -24,7 +24,7 @@
 //! its logs tab in `logs.rs`. The deployment history, live progress and "redeploy this one" are
 //! in `deployments.rs`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -42,8 +42,8 @@ use super::auth::Session;
 use super::pages::{FlashKind, Layout, Page, Section, Shell};
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, CheckReport, DeployOutcome, Operator, Orchestrator,
-    OrchestratorError, RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus, UiEvent,
-    WebhookDeploy,
+    OrchestratorError, RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus,
+    StackUpdates, UiEvent, UpdateChoice, UpdatePreview, WebhookDeploy,
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
@@ -100,6 +100,28 @@ pub trait StackControl: Send + Sync + 'static {
         request: RemoveStack,
         by: &Operator,
     ) -> Result<RemoveOutcome, OrchestratorError>;
+
+    /// See [`Orchestrator::stack_updates`].
+    async fn stack_updates(&self, stack: &str) -> Result<StackUpdates, OrchestratorError>;
+
+    /// See [`Orchestrator::all_updates`].
+    async fn all_updates(&self) -> Result<BTreeMap<String, StackUpdates>, OrchestratorError>;
+
+    /// See [`Orchestrator::update_preview`].
+    async fn update_preview(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+    ) -> Result<UpdatePreview, OrchestratorError>;
+
+    /// See [`Orchestrator::update`]; done `by` the signed-in operator.
+    async fn update(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+        expected: u32,
+        by: &Operator,
+    ) -> Result<ApplyOutcome, OrchestratorError>;
 
     /// See [`Orchestrator::deployment`].
     async fn deployment(
@@ -217,6 +239,32 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         self.by(by).remove(request).await
     }
 
+    async fn stack_updates(&self, stack: &str) -> Result<StackUpdates, OrchestratorError> {
+        Orchestrator::stack_updates(self, stack).await
+    }
+
+    async fn all_updates(&self) -> Result<BTreeMap<String, StackUpdates>, OrchestratorError> {
+        Orchestrator::all_updates(self).await
+    }
+
+    async fn update_preview(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+    ) -> Result<UpdatePreview, OrchestratorError> {
+        Orchestrator::update_preview(self, stack, choices).await
+    }
+
+    async fn update(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+        expected: u32,
+        by: &Operator,
+    ) -> Result<ApplyOutcome, OrchestratorError> {
+        self.by(by).update(stack, choices, expected).await
+    }
+
     async fn deployment(
         &self,
         stack: &str,
@@ -308,6 +356,21 @@ impl Stacks {
     /// Every stack; see [`Orchestrator::status`].
     pub(super) async fn status(&self) -> Result<Vec<StackStatus>, OrchestratorError> {
         self.0.status().await
+    }
+
+    /// How many updates each stack is offered, majors aside (ADR-0061 §9); empty, and logged,
+    /// when they cannot be read.
+    pub(super) async fn update_counts(&self) -> BTreeMap<String, usize> {
+        match self.0.all_updates().await {
+            Ok(all) => all
+                .into_iter()
+                .map(|(stack, updates)| (stack, updates.applicable().count()))
+                .collect(),
+            Err(err) => {
+                tracing::warn!(error = %err, "cannot read the available updates");
+                BTreeMap::new()
+            }
+        }
     }
 
     /// The [`UiEvent`]s sent from now on; see [`Orchestrator::subscribe`].
@@ -830,10 +893,12 @@ impl From<OrchestratorError> for Outcome {
             | E::NotRedeployable { .. }
             | E::Unsupported(_)
             | E::Undelegated(_)
-            | E::VolumeConfirmation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            | E::VolumeConfirmation { .. }
+            | E::Edit(_) => StatusCode::UNPROCESSABLE_ENTITY,
             E::StackBusy(_)
             | E::Removing(_)
             | E::RevisionChanged { .. }
+            | E::NoUpdate(_)
             | E::NotCancellable { .. } => StatusCode::CONFLICT,
             E::Runtime(_) => StatusCode::BAD_GATEWAY,
             E::Secret(_) | E::Store(_) | E::Ports(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -955,11 +1020,13 @@ mod frame;
 mod list;
 mod logs;
 mod overview;
+mod updates;
 
 use apply::{ApplyFailed, ApplyPage, Attempt, BaseRevision, LiveCheck, PreviewView, ReresolveView};
 pub use deployments::DeploymentView;
 pub(super) use list::{Ago, Condition, LastDeploy, TrafficLine};
 pub(super) use overview::StackView;
+use updates::UpdatesCard;
 
 #[cfg(test)]
 pub(super) mod tests;

@@ -20,6 +20,7 @@
 
 mod effective;
 mod notifications;
+mod updates;
 
 use std::fmt;
 use std::str::FromStr;
@@ -35,6 +36,7 @@ use serde::Deserialize;
 pub use self::effective::EffectiveConfig;
 use self::effective::{ConfigSection, Shown};
 pub use self::notifications::Notifications;
+pub use self::updates::UpdatesSection;
 use super::auth::Session;
 use super::certificates::CertificateControl;
 use super::pages::{Layout, Page, Section, Shell};
@@ -53,6 +55,7 @@ pub enum SettingsPart {
     General,
     Notifications,
     Registries,
+    Updates,
     Webhook,
     Proxy,
     Certificates,
@@ -65,7 +68,14 @@ impl SettingsPart {
             "instance",
             &[SettingsPart::General, SettingsPart::Notifications],
         ),
-        ("deploy", &[SettingsPart::Registries, SettingsPart::Webhook]),
+        (
+            "deploy",
+            &[
+                SettingsPart::Registries,
+                SettingsPart::Updates,
+                SettingsPart::Webhook,
+            ],
+        ),
         (
             "network",
             &[SettingsPart::Proxy, SettingsPart::Certificates],
@@ -81,6 +91,7 @@ impl SettingsPart {
             SettingsPart::General => "general",
             SettingsPart::Notifications => "notifications",
             SettingsPart::Registries => "registries",
+            SettingsPart::Updates => "updates",
             SettingsPart::Webhook => "webhook",
             SettingsPart::Proxy => "proxy",
             SettingsPart::Certificates => "certificates",
@@ -99,6 +110,7 @@ impl fmt::Display for SettingsPart {
             SettingsPart::General => "general",
             SettingsPart::Notifications => "notifications",
             SettingsPart::Registries => "registries",
+            SettingsPart::Updates => "image updates",
             SettingsPart::Webhook => "deploy webhook",
             SettingsPart::Proxy => "reverse proxy",
             SettingsPart::Certificates => "certificates",
@@ -172,9 +184,17 @@ pub struct Settings {
     registries: Arc<dyn RegistryControl>,
     instance: Instance,
     notifications: Notifications,
+    /// Settings → Updates; `None` where no update checker runs (tests of other sections).
+    updates: Option<UpdatesSection>,
 }
 
 impl Settings {
+    /// Adds Settings → Updates, backed by `updates`.
+    pub fn with_updates(mut self, updates: UpdatesSection) -> Self {
+        self.updates = Some(updates);
+        self
+    }
+
     const GENERAL: &str = "/settings/general";
 
     pub fn new(
@@ -190,6 +210,7 @@ impl Settings {
             registries,
             instance,
             notifications,
+            updates: None,
         }
     }
 
@@ -217,6 +238,7 @@ impl Settings {
             SettingsPart::Notifications => {
                 return Self::notifications(Extension(settings), shell).await;
             }
+            SettingsPart::Updates => return Self::updates(Extension(settings), shell).await,
         };
         Page(SettingsPage {
             layout: shell.layout(Section::Settings),

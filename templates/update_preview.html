@@ -1,0 +1,26 @@
+<section class="card plan-card update-preview" aria-labelledby="update-title">
+  <div class="card-head"><h2 id="update-title">Updating {{ stack }}</h2><span class="card-note">against revision {{ revision }}</span></div>
+  <ol class="plan">
+    {%- include "pins.html" %}
+    {%- for step in steps %}
+    {%- include "plan_step.html" %}
+    {%- endfor %}
+  </ol>
+  {%- if !diff.is_empty() %}
+  <div class="diff">
+    {%- for hunk in diff.hunks %}
+    <table class="diff-hunk">
+      {%- for line in hunk %}
+      <tr class="diff-{{ line.kind }}"><td class="diff-no">{% if let Some(n) = line.old %}{{ n }}{% endif %}</td><td class="diff-no">{% if let Some(n) = line.new %}{{ n }}{% endif %}</td><td class="diff-sign">{{ line.sign }}</td><td class="diff-text">{{ line.text }}</td></tr>
+      {%- endfor %}
+    </table>
+    {%- endfor %}
+  </div>
+  {%- endif %}
+  <form class="plan-confirm" hx-post="{{ confirm_url }}" hx-target="#update-result">
+    <input type="hidden" name="revision" value="{{ revision }}">
+    <input type="hidden" name="updates" value="{{ choices }}">
+    <p class="plan-hint">Applies revision {{ revision }} with the new tags as a new revision. Tags are resolved again when you confirm.</p>
+    <button class="primary" type="submit">{{ crate::web::Icon::Apply }}{% if changed.is_empty() %}Apply{% else %}Apply and redeploy {{ changed.len() }} service{% if changed.len() != 1 %}s{% endif %}{% endif %}</button>
+  </form>
+</section>

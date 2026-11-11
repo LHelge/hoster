@@ -63,6 +63,7 @@ mod plan;
 mod reconcile;
 mod routes;
 mod stack_secrets;
+mod updates;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -85,14 +86,16 @@ use crate::runtime::{
 };
 use crate::secrets::{SecretError, SecretStore, SecretValue};
 use crate::stack::{
-    DeployCaller, Diagnostic, Digest, FieldPath, ImageRef, Name, PinnedImage, SecretRef, SecretUse,
-    Service, Stack, StackError,
+    DeployCaller, Diagnostic, Digest, FieldPath, ImageEdits, ImageRef, Name, PinnedImage,
+    SecretRef, SecretUse, Service, Stack, StackError,
 };
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
-    ImageCheck, NewDeployment, NewEvent, Provenance, StackRevision, Store, StoreError,
+    ImageCheck, NewDeployment, NewEvent, Provenance, StackRevision, Store, StoreError, UpdateKind,
     WebhookRejection,
 };
+
+pub use updates::{StackUpdates, UpdateChoice, UpdateOffer};
 
 use certs::CertHosts;
 pub use certs::CertStatus;
@@ -238,6 +241,15 @@ pub enum OrchestratorError {
     },
     #[error("deleting the volumes of stack {stack} needs the stack's name typed as confirmation")]
     VolumeConfirmation { stack: String },
+    #[error(
+        "no {} update of {} is on offer any more: the stack changed since the last check, or the \
+         update was applied",
+        .0.kind,
+        .0.service
+    )]
+    NoUpdate(UpdateChoice),
+    #[error("cannot update the stack file: {0}")]
+    Edit(String),
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
     #[error(transparent)]
@@ -307,6 +319,16 @@ pub struct ApplyPreview {
     pub changed: Vec<String>,
     /// The order the redeploy starts them in (ADR-0056 Decision 2).
     pub start_order: Vec<Wave>,
+}
+
+/// The reply to [`Orchestrator::update_preview`]: what applying some updates would do.
+#[derive(Debug, Clone)]
+pub struct UpdatePreview {
+    pub preview: ApplyPreview,
+    /// The active revision the updates are made to, which the confirmation names.
+    pub revision: StackRevision,
+    /// Its stack file with the updates made.
+    pub file: String,
 }
 
 /// The reply to [`Orchestrator::check_file`]: what the local checks find in a stack file, each
@@ -449,6 +471,18 @@ impl<R: ContainerRuntime> Acting<'_, R> {
     pub async fn reresolve(&self, stack: &str, expected: u32) -> Result<Option<ApplyOutcome>> {
         self.orchestrator
             .reresolve_by(stack, expected, Some(self.operator))
+            .await
+    }
+
+    /// See [`Orchestrator::update`].
+    pub async fn update(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+        expected: u32,
+    ) -> Result<ApplyOutcome> {
+        self.orchestrator
+            .update_by(stack, choices, expected, Some(self.operator))
             .await
     }
 
@@ -1004,6 +1038,165 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     pub async fn reresolve_preview(&self, stack: &str) -> Result<ApplyPreview> {
         let revision = self.active_revision(stack).await?;
         self.preview(&revision.toml).await
+    }
+
+    /// The updates on offer for `stack`'s active revision (ADR-0061 §9): what the update
+    /// checker found, without what is stale.
+    pub async fn stack_updates(&self, stack: &str) -> Result<StackUpdates> {
+        let revision = self.active_revision(stack).await?;
+        let rows = self
+            .store
+            .image_updates()
+            .await?
+            .into_iter()
+            .filter(|row| row.stack == stack)
+            .collect();
+        self.updates_of(&revision, rows).await
+    }
+
+    /// The updates on offer for every stack that has any or whose check failed, by name.
+    pub async fn all_updates(&self) -> Result<BTreeMap<String, StackUpdates>> {
+        let mut rows: BTreeMap<String, Vec<_>> = BTreeMap::new();
+        for row in self.store.image_updates().await? {
+            rows.entry(row.stack.clone()).or_default().push(row);
+        }
+        let mut all = BTreeMap::new();
+        for (stack, rows) in rows {
+            let Some(revision) = self.store.latest_revision(&stack).await? else {
+                continue;
+            };
+            let updates = self.updates_of(&revision, rows).await?;
+            if !updates.offers.is_empty() || !updates.errors.is_empty() {
+                all.insert(stack, updates);
+            }
+        }
+        Ok(all)
+    }
+
+    async fn updates_of(
+        &self,
+        revision: &StackRevision,
+        rows: Vec<crate::store::ServiceUpdates>,
+    ) -> Result<StackUpdates> {
+        let definition: Stack = revision.toml.parse()?;
+        let pins = self.store.revision_images(revision.id).await?;
+        Ok(StackUpdates::new(&definition, &pins, rows))
+    }
+
+    /// The active revision of `stack` and its stack file with the updates `choices` select
+    /// made (ADR-0061 §9): a new version rewrites the image's tag, keeping the file as written
+    /// otherwise, and its digest too when the file pins one; a moved tag rewrites a pinned
+    /// digest and leaves an unpinned tag to be resolved again when the file is applied.
+    async fn updated_file(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+    ) -> Result<(StackRevision, String)> {
+        let revision = self.active_revision(stack).await?;
+        let rows = self
+            .store
+            .image_updates()
+            .await?
+            .into_iter()
+            .filter(|row| row.stack == stack)
+            .collect();
+        let updates = self.updates_of(&revision, rows).await?;
+        let chosen = updates
+            .chosen(choices)
+            .map_err(OrchestratorError::NoUpdate)?;
+        let definition: Stack = revision.toml.parse()?;
+        let mut edits = ImageEdits::default();
+        for (service, offer) in chosen {
+            let name: Name = service
+                .parse()
+                .map_err(|_| OrchestratorError::UnknownService(service.to_owned()))?;
+            let written = &definition
+                .services
+                .get(&name)
+                .ok_or_else(|| OrchestratorError::UnknownService(service.to_owned()))?
+                .image;
+            let resolve_error = |message: String| OrchestratorError::Resolve {
+                service: service.to_owned(),
+                message,
+            };
+            let image = match (offer.kind, written.digest(), &offer.digest) {
+                (UpdateKind::Digest, None, _) => continue,
+                (UpdateKind::Digest, Some(_), Some(digest)) => {
+                    ImageRef::from(written.clone().pin(digest.clone()))
+                }
+                (UpdateKind::Digest, Some(_), None) => continue,
+                (_, pinned, _) => {
+                    let tagged = written.clone().with_tag(&offer.to).map_err(resolve_error)?;
+                    if pinned.is_some() {
+                        // `repo:tag@sha256:…` stays pinned: to the new tag's digest.
+                        let resolved = self
+                            .resolver
+                            .resolve(&tagged)
+                            .await
+                            .map_err(|e| resolve_error(e.to_string()))?;
+                        ImageRef::from(resolved)
+                    } else {
+                        tagged
+                    }
+                }
+            };
+            edits.set(service, image);
+        }
+        let toml = edits
+            .apply(&revision.toml)
+            .map_err(OrchestratorError::Edit)?;
+        Ok((revision, toml))
+    }
+
+    /// What applying the updates `choices` select to `stack` would do (ADR-0061 §9).
+    pub async fn update_preview(
+        &self,
+        stack: &str,
+        choices: &[UpdateChoice],
+    ) -> Result<UpdatePreview> {
+        let (revision, file) = self.updated_file(stack, choices).await?;
+        Ok(UpdatePreview {
+            preview: self.preview(&file).await?,
+            revision,
+            file,
+        })
+    }
+
+    /// Applies the updates `choices` select to `stack`'s revision `expected` as a new revision
+    /// and redeploys what changes, like any apply (ADR-0061 §9, ADR-0049). A stack that moved
+    /// on since `expected`, or an update no longer on offer, is refused.
+    pub async fn update(
+        self: &Arc<Self>,
+        stack: &str,
+        choices: &[UpdateChoice],
+        expected: u32,
+    ) -> Result<ApplyOutcome> {
+        self.update_by(stack, choices, expected, None).await
+    }
+
+    async fn update_by(
+        self: &Arc<Self>,
+        stack: &str,
+        choices: &[UpdateChoice],
+        expected: u32,
+        by: Option<&Operator>,
+    ) -> Result<ApplyOutcome> {
+        let changed = |active: u32| OrchestratorError::RevisionChanged {
+            stack: stack.to_owned(),
+            expected,
+            active,
+        };
+        let (revision, toml) = self.updated_file(stack, choices).await?;
+        if revision.revision != expected {
+            return Err(changed(revision.revision));
+        }
+        // Resolving asks the registries: look again afterwards, as re-resolve does.
+        let prepared = self.prepare(&toml).await?;
+        let latest = self.active_revision(stack).await?;
+        if latest.revision != expected {
+            return Err(changed(latest.revision));
+        }
+        self.store_and_redeploy(&toml, prepared, by).await
     }
 
     /// "Re-resolve tags" (ADR-0025, ADR-0049): resolves the third-party tags of `stack`'s
@@ -2137,5 +2330,7 @@ mod routes_tests;
 mod stack_secrets_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod updates_tests;
 #[cfg(test)]
 mod zero_downtime_tests;
