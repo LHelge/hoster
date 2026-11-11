@@ -18,7 +18,7 @@ becomes a new ADR here.
 | [0005](0005-digest-polling-fallback-and-idempotency.md) | ghcr digest polling fallback; idempotent by digest | Webhook-only, delivery-ID dedupe |
 | [0006](0006-stacks-with-per-stack-network.md) | Stacks of containers, one podman network per stack | Shared network, podman pods |
 | [0007](0007-route-model-and-loopback-only-publishing.md) | Route model; only routed services publish, on 127.0.0.1, allocated ports | 0.0.0.0 + firewall, user-chosen ports |
-| [0008](0008-embedded-pingora-proxy.md) | Embedded Pingora on its own thread, channels + ArcSwap | **Traefik/Caddy sidecar**, nginx reloads |
+| [0008](0008-embedded-pingora-proxy.md) | Embedded Pingora on its own thread, channels + ArcSwap; connection caps per 0065 | **Traefik/Caddy sidecar**, nginx reloads |
 | [0009](0009-host-and-longest-segment-prefix-routing.md) | Host + longest prefix on segment boundaries | Raw string prefix, regex routes |
 | [0010](0010-prefix-preservation-and-forwarded-headers.md) | Preserve prefix by default; strip opt-in; X-Forwarded-Prefix; Host unchanged | Strip by default, Host rewrite |
 | [0011](0011-streaming-bodies-and-per-route-timeouts.md) | Streamed bodies; per-route timeouts | Buffering, global timeouts |
@@ -42,7 +42,7 @@ becomes a new ADR here.
 | [0029](0029-secret-store-and-config-aware-idempotency.md) | Encrypted secret store in SQLite, injected as env; idempotency on digest + config hash (resolves OQ-02; "apply & redeploy" option refined by 0049; secrets as config files per 0057) | see ADR |
 | [0030](0030-named-volumes-and-documented-backups.md) | Named podman volumes kept on stack removal; backups documented with a hoster backup db command (resolves OQ-03; name collisions rejected at apply per 0063) | see ADR |
 | [0031](0031-admin-ui-exposure-identity-sessions.md) | Admin UI on a reserved host via Unix socket; GitHub handle compared; SQLite sessions with CSRF tokens; no break-glass (resolves OQ-05) | see ADR |
-| [0032](0032-proxy-edge-behaviour.md) | Strict edge: no default cert, 421 on Host/SNI mismatch, 404 for unknown hosts on HTTP (resolves OQ-19) | see ADR |
+| [0032](0032-proxy-edge-behaviour.md) | Strict edge: no default cert, 421 on Host/SNI mismatch, 404 for unknown hosts on HTTP (resolves OQ-19; connection caps per 0065) | see ADR |
 | [0033](0033-protocol-support-v1.md) | v1 protocols: h1+h2 downstream, WebSockets, h1 upstream (h2c later) (resolves OQ-22) | see ADR |
 | [0034](0034-hoster-restarts-accept-gap.md) | Accept a short ingress gap on hoster restart; spike systemd socket activation later (resolves OQ-18) | see ADR |
 | [0035](0035-confirmed-implementation-details.md) | Confirmed implementation details from architecture.md (resolves OQ-28) | see ADR |
@@ -75,6 +75,7 @@ becomes a new ADR here.
 | [0062](0062-persisted-traffic-history.md) | Persisted traffic history in the main SQLite database: per route (host, prefix) with stack and service, 1-minute buckets kept 24 h and 1-hour buckets kept 60 d, only buckets with requests, latency as a versioned sparse histogram blob; a recorder flushes once a minute in one transaction (rolled up into hours) and on graceful shutdown; pages read flushed data only; dashboard range picker (1h–30d) with fixed bar plans and previous-period deltas, last hour on the stack pages; req/min over the last 5 minutes, peak minute on the stack overview; in-flight gauge stays live (amends 0045, 0054) | Separate SQLite file, ring file, 1 h buckets for 30 d, one 5-minute table, per-stack or per-service keys, a fixed 24 h window, mean req/min, including the live minute, metrics endpoint with an external TSDB |
 | [0063](0063-reject-cross-stack-podman-name-collisions.md) | Apply rejects a stack whose `<stack>-<service>` or `<stack>-<volume>` podman name equals another stack's (kept volumes of removed stacks included); the deploy-time volume label check stays; naming unchanged (resolves OQ-35; amends 0030) | `_` separator (podman cannot rename volumes), no `-` in stack names, label check only |
 | [0064](0064-accept-no-unit-file-system-sandbox-on-ubuntu.md) | The user unit keeps its directives; on Ubuntu ≥ 23.10 (`apparmor_restrict_unprivileged_userns=1`) its mount-namespace sandbox is skipped and that is accepted: the podman socket lets hoster bind-mount anything the `hoster` user owns, so that user is the boundary; doctor's `unit_sandbox` stays advisory (resolves OQ-36; amends 0023) | Lifting the restriction host-wide in `50-hoster.conf`, a system service with `User=hoster`, an AppArmor `userns` profile |
+| [0065](0065-edge-connection-caps.md) | hoster raises its soft `RLIMIT_NOFILE` to 16384 (unit `LimitNOFILE=16384` too); a `ConnectionFilter` refuses new clients at 4096 open descriptors and beyond 256 connections per IPv4 address / IPv6 /64 (counted by a `ServerApp` wrapper, spiked first); constants first; refusals counted; the missing h2 handshake timeout reported upstream; no rate limiting, minimum transfer rate or per-connection request limit for now (resolves OQ-39; amends 0008, 0032) | Leaving the 1024 default, a total cap only, counting connections in the filter, a minimum transfer rate |
 
 ## Template
 

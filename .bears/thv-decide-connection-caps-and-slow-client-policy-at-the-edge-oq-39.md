@@ -1,10 +1,10 @@
 ---
 id: thv
 title: "Decide: connection caps and slow-client policy at the edge (OQ-39)"
-status: open
+status: done
 priority: P1
 created: "2026-11-11T14:13:10.559548706Z"
-updated: "2026-11-11T14:13:10.559548706Z"
+updated: "2026-11-11T21:55:35.865144955Z"
 tags:
   - decision
   - proxy

@@ -1,6 +1,6 @@
 # ADR-0008: Embed Pingora as the reverse proxy, on its own thread(s), controlled via channels and ArcSwap
 
-- Status: Accepted
+- Status: Accepted; client connections capped in total and per address since ADR-0065
 - Date: 2026-11-07
 
 ## Context

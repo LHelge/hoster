@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-38, OQ-39 and OQ-40 are open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38 and OQ-40 are open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -483,6 +483,10 @@ CDN. The decision amends ADR-0010 and architecture §6.3.
 
 ## OQ-39: Connection caps and slow-client policy at the edge
 
+**Resolved 2026-11-11 → [ADR-0065](adr/0065-edge-connection-caps.md).** B + C + F. The soft descriptor limit is raised to 16384 (by hoster at startup, and in the unit). New clients are refused at 4096 open descriptors (counted from `/proc/self/fd`, since Pingora's `ConnectionFilter` has no close hook) and beyond 256 per IPv4 address / IPv6 /64 (counted in a `ServerApp` wrapper, spiked first). The h2 handshake gap gets reported upstream. D, E and 4 are not done now.
+
+<details><summary>Original discussion</summary>
+
 **Problem.** The survey of the embedded proxy against hostile clients (task `95p`, architecture
 §9.1) found bounds for most cases and set the timeouts whose value was obvious: 60 s for idle
 keep-alive and HTTP/2 connections, and client read and write timeouts that follow the route's.
@@ -535,6 +539,8 @@ only if somebody needs them, and F. They turn the worst case from "everything st
 clients are refused", which is what a cap is for. Leave D for a separate decision. Skip E: with
 connections capped, a slow client costs one slot and no more, and the per-route rate is hard to
 get right. Leave 4 unset.
+
+</details>
 
 ## OQ-40: Dot segments and other non-normal paths at the edge
 

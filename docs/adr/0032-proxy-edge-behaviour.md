@@ -1,6 +1,6 @@
 # ADR-0032: Proxy edge behaviour for unknown hosts, Host/SNI mismatch and errors
 
-- Status: Accepted (resolves OQ-19)
+- Status: Accepted (resolves OQ-19); connections beyond the caps are refused at accept since ADR-0065
 - Date: 2026-11-07
 
 ## Decision
