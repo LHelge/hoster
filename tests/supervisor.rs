@@ -137,7 +137,21 @@ impl Sandbox {
 
     /// `hoster run` with a clean environment pointing at this sandbox.
     fn command(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hoster"));
+        self.configure(Command::new(env!("CARGO_BIN_EXE_hoster")))
+    }
+
+    /// [`Sandbox::command`] for a hoster that may hold at most `files` open file descriptors
+    /// (`RLIMIT_NOFILE`, the unit's `LimitNOFILE=`).
+    fn command_with_fd_limit(&self, files: u32) -> Command {
+        let mut shell = Command::new("/bin/sh");
+        shell
+            .arg("-c")
+            .arg(format!("ulimit -n {files} && exec \"$0\" \"$@\""))
+            .arg(env!("CARGO_BIN_EXE_hoster"));
+        self.configure(shell)
+    }
+
+    fn configure(&self, mut cmd: Command) -> Command {
         cmd.arg("run")
             .arg("--config")
             .arg(self.path("hoster.toml"))
@@ -387,4 +401,72 @@ fn a_second_sigterm_during_the_grace_period_exits_promptly() {
     assert!(status.success(), "exit status {status:?}");
     let took = escalated.elapsed();
     assert!(took < Duration::from_secs(6), "fast shutdown took {took:?}");
+}
+
+/// The first line of the admin app's answer on its Unix socket, or `None` when it does not
+/// answer within `wait`.
+fn admin_status(sandbox: &Sandbox, wait: Duration) -> Option<String> {
+    let mut stream = UnixStream::connect(sandbox.path("state/admin.sock")).ok()?;
+    stream.set_read_timeout(Some(wait)).unwrap();
+    write!(
+        stream,
+        "GET /login HTTP/1.1\r\nHost: hoster.example.com\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    response.lines().next().map(str::to_owned)
+}
+
+/// Clients that hold more connections than hoster has file descriptors (architecture §9.1):
+/// nothing bounds the connections, so the process runs into `EMFILE`. It keeps running, but
+/// accepts nothing more on either listener or on the admin socket until connections close
+/// (OQ-39), and then recovers by itself.
+#[test]
+fn running_out_of_file_descriptors_stops_accepting_until_connections_close() {
+    const BRIEFLY: Duration = Duration::from_secs(2);
+    let sandbox = Sandbox::new("emfile");
+    let mut hoster = Hoster::spawn(sandbox.command_with_fd_limit(128));
+    hoster.wait_for_line("hoster is ready");
+    assert!(admin_status(&sandbox, TIMEOUT).is_some());
+
+    // The kernel completes these handshakes in the listen backlog whether or not hoster
+    // accepts them.
+    let held: Vec<TcpStream> = (0..300)
+        .map(|i| {
+            let addr = if i % 2 == 0 {
+                sandbox.http
+            } else {
+                sandbox.https
+            };
+            TcpStream::connect(addr).expect("the kernel accepts the connection")
+        })
+        .collect();
+    hoster.wait_for_line("Too many open files");
+
+    assert_eq!(admin_status(&sandbox, BRIEFLY), None);
+    let mut starved = TcpStream::connect(sandbox.http).unwrap();
+    starved.set_read_timeout(Some(BRIEFLY)).unwrap();
+    write!(starved, "GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    assert!(
+        starved.read(&mut [0; 16]).is_err(),
+        "no answer at the limit"
+    );
+    assert_eq!(
+        hoster.child.try_wait().unwrap(),
+        None,
+        "hoster keeps running"
+    );
+
+    drop(held);
+    drop(starved);
+    let recovered = Instant::now() + TIMEOUT;
+    while admin_status(&sandbox, BRIEFLY).is_none() {
+        assert!(Instant::now() < recovered, "the admin app answers again");
+    }
+    let response = http_get(sandbox.http, "/");
+    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+
+    hoster.signal(Signal::SIGINT);
+    assert!(hoster.wait().success());
 }

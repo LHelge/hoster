@@ -1,15 +1,16 @@
 ---
 id: "95p"
 title: Survey the proxy's downstream limits against hostile clients
-status: open
+status: done
 priority: P2
 created: "2026-11-10T12:56:33.888508Z"
-updated: "2026-11-10T14:44:46.284802Z"
+updated: "2026-11-11T14:16:12.473109490Z"
 tags:
   - proxy
   - security
   - test
 parent: kyn
+attempts: 1
 ---
 
 ## Problem
@@ -92,3 +93,24 @@ Then:
 - `docs/architecture.md` §1 (Pingora behaviour verified so far), §9
 - `deploy/` (the unit file)
 - Pingora source: `~/.cargo/registry/src/*/pingora-core-0.9.1/src/` (paths in the table above)
+
+## Result (2026-11-11)
+
+Observed against the real proxy (pingora 0.9.1, h2 0.4.20); the table is architecture §9.1.
+
+- **Pinned by tests** (`src/proxy/tests/limits.rs`, `tests/supervisor.rs`): the 60 s handshake,
+  first-request and per-read header waits; header size, field count and target length; the h2
+  bounds (100 streams, rapid reset, CONTINUATION flood, 64 KiB header list, control-frame
+  floods); the behaviour at `EMFILE`.
+- **Set in code** (`DownstreamLimits` in `src/proxy/mod.rs`): 60 s for kept-alive HTTP/1.1
+  connections (was: forever) and idle HTTP/2 connections (was: never); the client read and write
+  timeouts now follow the route's `read` and `write`. The write timeout drops a client that
+  stops reading, which used to hold its upstream's in-flight count until the drain timeout. The
+  read timeout fixes a bug found on the way: Pingora's fixed 60 s client read timeout cut a quiet
+  WebSocket whatever the route's timeouts said.
+- **Corrections to the table above:** a `Keep-Alive: timeout=` from the client is not parsed by
+  Pingora 0.9.1; an idle h2 connection is closed without a GOAWAY; an `h2` connection that never
+  sends the preface is not covered by `h2_idle_timeout`.
+- **Raised as OQ-39, decision task `thv`:** connection caps and `LimitNOFILE` (the unit sets
+  none, so the soft limit is 1024, and at `EMFILE` the admin socket stops accepting too),
+  slow-but-moving headers and bodies, the missing h2 preface timeout, requests per connection.

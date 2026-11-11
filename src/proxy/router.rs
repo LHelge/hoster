@@ -28,6 +28,7 @@ use pingora::proxy::{FailToProxy, ProxyHttp, Session};
 use pingora::upstreams::peer::{HttpPeer, PeerOptions};
 use pingora::{Error, ErrorSource, ErrorType, OkOrErr, OrErr, Result};
 
+use super::DownstreamLimits;
 use super::resolver::Sni;
 use crate::config::Timeouts;
 use crate::logging::ACCESS_TARGET;
@@ -45,17 +46,25 @@ pub struct RoutingProxy {
     routes: Arc<ArcSwap<RouteTable>>,
     /// Upstream timeouts for routes that set none of their own.
     defaults: Timeouts,
+    /// What a client connection is allowed.
+    limits: DownstreamLimits,
     /// The per-route request statistics the web UI shows.
     traffic: Traffic,
 }
 
 impl RoutingProxy {
-    /// A proxy reading `routes`, which the orchestrator replaces as deploys happen, and counting
-    /// requests in `traffic`.
-    pub fn new(routes: Arc<ArcSwap<RouteTable>>, defaults: Timeouts, traffic: Traffic) -> Self {
+    /// A proxy reading `routes`, which the orchestrator replaces as deploys happen, holding
+    /// clients to `limits` and counting requests in `traffic`.
+    pub fn new(
+        routes: Arc<ArcSwap<RouteTable>>,
+        defaults: Timeouts,
+        limits: DownstreamLimits,
+        traffic: Traffic,
+    ) -> Self {
         Self {
             routes,
             defaults,
+            limits,
             traffic,
         }
     }
@@ -111,6 +120,7 @@ impl ProxyHttp for RoutingProxy {
             Err(()) => false,
         };
         if !sni_allows {
+            self.limits.admit(session, self.defaults);
             ctx.stats = Some(self.traffic.unrouted());
             ErrorPage::from(StatusCode::MISDIRECTED_REQUEST)
                 .send(session)
@@ -118,6 +128,11 @@ impl ProxyHttp for RoutingProxy {
             return Ok(true);
         }
         ctx.route = table.lookup(&ctx.host, req.uri.path()).cloned();
+        let timeouts = match &ctx.route {
+            Some(route) => self.defaults.overridden_by(&route.timeouts),
+            None => self.defaults,
+        };
+        self.limits.admit(session, timeouts);
         ctx.stats = Some(match (&ctx.route, table.known_host(&ctx.host)) {
             (Some(route), Some(host)) => self.traffic.route(host, route),
             _ => self.traffic.unrouted(),

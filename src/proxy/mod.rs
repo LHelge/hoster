@@ -34,8 +34,9 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use pingora::apps::HttpServerOptions;
 use pingora::listeners::tls::TlsSettings;
-use pingora::proxy::http_proxy_service_with_name;
+use pingora::proxy::{ProxyServiceBuilder, Session};
 use pingora::server::configuration::ServerConf;
 use pingora::server::{ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch};
 use tokio::sync::{broadcast, watch};
@@ -44,7 +45,7 @@ use self::plain::ChallengeOrRedirect;
 use self::resolver::{CertResolver, SniCapture};
 use self::router::RoutingProxy;
 use crate::acme::{CertMap, ChallengeMap};
-use crate::config::ProxyConfig;
+use crate::config::{ProxyConfig, Timeouts};
 use crate::routing::RouteTable;
 use crate::stats::Traffic;
 
@@ -106,6 +107,50 @@ pub struct ProxyState {
     pub traffic: Traffic,
 }
 
+/// What hoster allows a client connection on either listener, where Pingora's own default is no
+/// bound at all (architecture §9.1). These are fixed, not configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DownstreamLimits {
+    /// How long a kept-alive HTTP/1.1 connection may take over each read of its next request
+    /// header, in whole seconds (Pingora's unit). Pingora applies the same 60 s to a
+    /// connection's first request and then waits forever.
+    pub keepalive: Duration,
+    /// How long an HTTP/2 connection may stay open with no stream on it.
+    pub h2_idle: Duration,
+}
+
+impl Default for DownstreamLimits {
+    fn default() -> Self {
+        Self {
+            keepalive: Duration::from_secs(60),
+            h2_idle: Duration::from_secs(60),
+        }
+    }
+}
+
+impl DownstreamLimits {
+    /// The per-service options: the idle timeout of HTTP/2 connections.
+    fn server_options(self) -> HttpServerOptions {
+        let mut options = HttpServerOptions::default();
+        options.h2_idle_timeout = Some(self.h2_idle);
+        options
+    }
+
+    /// Bounds the rest of `session` and the wait for the connection's next request: the client
+    /// may stall a body read for `timeouts.read` and a response write for `timeouts.write`,
+    /// the same patience the route has with its upstream (ADR-0011), so a stream the route
+    /// allows is never cut from the client's side first.
+    ///
+    /// Pingora has no body read timeout for HTTP/2; there the upstream's read timeout ends a
+    /// request whose body stalls.
+    fn admit(self, session: &mut Session, timeouts: Timeouts) {
+        // Keeps `Connection: close` from the client; 0 would mean "no timeout".
+        session.set_keepalive(Some(self.keepalive.as_secs().max(1)));
+        session.set_read_timeout(Some(timeouts.read));
+        session.set_write_timeout(Some(timeouts.write));
+    }
+}
+
 /// A configured, not yet running Pingora server.
 pub struct Proxy {
     server: Server,
@@ -117,6 +162,16 @@ impl Proxy {
     /// Builds the server and its two services from `config`, reading `state` at the time of
     /// each request or handshake.
     pub fn new(config: &ProxyConfig, state: ProxyState) -> Self {
+        Self::with_limits(config, state, DownstreamLimits::default())
+    }
+
+    /// [`Proxy::new`] with other client limits than the defaults, which are too long to wait
+    /// for in a test.
+    pub(crate) fn with_limits(
+        config: &ProxyConfig,
+        state: ProxyState,
+        limits: DownstreamLimits,
+    ) -> Self {
         let conf = ServerConf {
             daemon: false,
             threads: config.threads.get(),
@@ -132,11 +187,13 @@ impl Proxy {
             traffic,
         } = state;
 
-        let mut https = http_proxy_service_with_name(
+        let mut https = ProxyServiceBuilder::new(
             &server.configuration,
-            RoutingProxy::new(Arc::clone(&routes), config.timeouts, traffic),
-            "hoster https",
-        );
+            RoutingProxy::new(Arc::clone(&routes), config.timeouts, limits, traffic),
+        )
+        .name("hoster https")
+        .server_options(limits.server_options())
+        .build();
         let mut tls = TlsSettings::with_callbacks(Box::new(SniCapture))
             .expect("rustls TlsSettings::with_callbacks cannot fail");
         tls.set_cert_resolver(Arc::new(CertResolver::from(certs)));
@@ -144,11 +201,13 @@ impl Proxy {
         https.add_tls_with_settings(&config.https_listen.to_string(), None, tls);
         server.add_service(https);
 
-        let mut http = http_proxy_service_with_name(
+        let mut http = ProxyServiceBuilder::new(
             &server.configuration,
-            ChallengeOrRedirect::new(routes, challenges),
-            "hoster http",
-        );
+            ChallengeOrRedirect::new(routes, challenges, config.timeouts, limits),
+        )
+        .name("hoster http")
+        .server_options(limits.server_options())
+        .build();
         http.add_tcp(&config.http_listen.to_string());
         server.add_service(http);
 

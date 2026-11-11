@@ -31,7 +31,7 @@ use tokio::sync::{Notify, watch};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
-use super::{Proxy, ProxyError, ProxyState, ProxyThread};
+use super::{DownstreamLimits, Proxy, ProxyError, ProxyState, ProxyThread};
 use crate::acme::{CertMap, ChallengeMap};
 use crate::config::{ProxyConfig, Timeouts};
 use crate::routing::{
@@ -87,8 +87,9 @@ async fn echo(req: Request) -> Json<Value> {
 async fn upload(req: Request) -> String {
     let mut body = req.into_body().into_data_stream();
     let mut total = 0usize;
-    while let Some(chunk) = body.next().await {
-        total += chunk.expect("upload body").len();
+    // A body that ends early (a client the proxy gave up on) just ends the count.
+    while let Some(Ok(chunk)) = body.next().await {
+        total += chunk.len();
     }
     total.to_string()
 }
@@ -185,6 +186,7 @@ fn service(routes: Vec<Route>) -> Service {
 /// - `app.example.com` `/` → web; `/api` (stripped) → web; `/keep` → web
 /// - `api.example.com` `/v1` → web
 /// - `slow.example.com` `/` → web with a 300 ms read timeout
+/// - `stream.example.com` `/` → web with one-hour read and write timeouts
 /// - `down.example.com` `/` → a port nothing listens on
 /// - `reset.example.com` `/` → a listener that drops every connection, counting them
 /// - `flaky.example.com` `/` → a keep-alive listener that answers only the first request on
@@ -292,6 +294,11 @@ impl Harness {
 
     /// The harness with `defaults` as the proxy's timeouts for routes that set none.
     async fn start_with(defaults: Timeouts) -> Self {
+        Self::start_limited(defaults, DownstreamLimits::default()).await
+    }
+
+    /// The harness with `defaults` as the proxy's timeouts and `limits` for its clients.
+    async fn start_limited(defaults: Timeouts, limits: DownstreamLimits) -> Self {
         let state = AppState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let web_port = listener.local_addr().unwrap().port();
@@ -371,6 +378,11 @@ impl Harness {
             read: Some(Duration::from_millis(300)),
             ..RouteTimeouts::default()
         };
+        let long = RouteTimeouts {
+            read: Some(Duration::from_secs(3600)),
+            write: Some(Duration::from_secs(3600)),
+            ..RouteTimeouts::default()
+        };
         let services = BTreeMap::from([
             (
                 name("web"),
@@ -380,6 +392,7 @@ impl Harness {
                     route("app.example.com", "/keep", false, none()),
                     route("api.example.com", "/v1", false, none()),
                     route("slow.example.com", "/", false, short_read),
+                    route("stream.example.com", "/", false, long),
                 ]),
             ),
             (
@@ -435,6 +448,7 @@ impl Harness {
             "app.example.com",
             "api.example.com",
             "slow.example.com",
+            "stream.example.com",
             "down.example.com",
             "reset.example.com",
             "flaky.example.com",
@@ -476,7 +490,7 @@ impl Harness {
                 timeouts: defaults,
             };
             attempts += 1;
-            match Proxy::new(&config, proxy_state.clone()).spawn(rx.clone()) {
+            match Proxy::with_limits(&config, proxy_state.clone(), limits).spawn(rx.clone()) {
                 Ok(running) => break (proxy, http, running),
                 Err(ProxyError::Bind { .. }) if attempts < 5 => continue,
                 Err(e) => panic!("{e}"),
@@ -743,6 +757,292 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
             headers,
             body,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A raw HTTP/2 client
+
+/// One HTTP/2 frame (RFC 9113 §4.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Frame {
+    kind: u8,
+    flags: u8,
+    stream: u32,
+    payload: Vec<u8>,
+}
+
+impl Frame {
+    const DATA: u8 = 0x0;
+    const HEADERS: u8 = 0x1;
+    const PRIORITY: u8 = 0x2;
+    const RST_STREAM: u8 = 0x3;
+    const SETTINGS: u8 = 0x4;
+    const PING: u8 = 0x6;
+    const GOAWAY: u8 = 0x7;
+    const CONTINUATION: u8 = 0x9;
+
+    const END_STREAM: u8 = 0x1;
+    const END_HEADERS: u8 = 0x4;
+
+    /// Error codes (RFC 9113 §7).
+    const REFUSED_STREAM: u32 = 0x7;
+    const CANCEL: u32 = 0x8;
+    const ENHANCE_YOUR_CALM: u32 = 0xb;
+
+    fn new(kind: u8, flags: u8, stream: u32, payload: impl Into<Vec<u8>>) -> Self {
+        Frame {
+            kind,
+            flags,
+            stream,
+            payload: payload.into(),
+        }
+    }
+
+    /// A HEADERS frame carrying `fields` as one complete header block.
+    fn headers(stream: u32, end_stream: bool, fields: &[(&str, &str)]) -> Self {
+        let flags = Self::END_HEADERS | if end_stream { Self::END_STREAM } else { 0 };
+        Frame::new(Self::HEADERS, flags, stream, Self::block(fields))
+    }
+
+    /// A complete bodyless `GET` of `path` on `authority`.
+    fn get(stream: u32, authority: &str, path: &str) -> Self {
+        Frame::headers(
+            stream,
+            true,
+            &[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", authority),
+                (":path", path),
+            ],
+        )
+    }
+
+    fn data(stream: u32, end_stream: bool, payload: &[u8]) -> Self {
+        let flags = if end_stream { Self::END_STREAM } else { 0 };
+        Frame::new(Self::DATA, flags, stream, payload)
+    }
+
+    fn rst_stream(stream: u32, code: u32) -> Self {
+        Frame::new(Self::RST_STREAM, 0, stream, code.to_be_bytes())
+    }
+
+    /// `fields` as an HPACK header block of literals without indexing and without Huffman
+    /// coding (RFC 7541 §6.2.2), so any byte can go into a name or value.
+    fn block(fields: &[(&str, &str)]) -> Vec<u8> {
+        fn string(out: &mut Vec<u8>, s: &str) {
+            // A 7-bit prefix integer (RFC 7541 §5.1), then the bytes.
+            if s.len() < 127 {
+                out.push(s.len() as u8);
+            } else {
+                out.push(127);
+                let mut rest = s.len() - 127;
+                while rest >= 128 {
+                    out.push((rest % 128) as u8 | 0x80);
+                    rest /= 128;
+                }
+                out.push(rest as u8);
+            }
+            out.extend_from_slice(s.as_bytes());
+        }
+        let mut out = Vec::new();
+        for (name, value) in fields {
+            out.push(0);
+            string(&mut out, name);
+            string(&mut out, value);
+        }
+        out
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        let len = (self.payload.len() as u32).to_be_bytes();
+        let mut out = vec![len[1], len[2], len[3], self.kind, self.flags];
+        out.extend_from_slice(&self.stream.to_be_bytes());
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    fn is(&self, kind: u8) -> bool {
+        self.kind == kind
+    }
+
+    fn ends_stream(&self) -> bool {
+        matches!(self.kind, Self::DATA | Self::HEADERS) && self.flags & Self::END_STREAM != 0
+            || self.kind == Self::RST_STREAM
+    }
+
+    /// The error code of an RST_STREAM or GOAWAY frame.
+    fn error_code(&self) -> Option<u32> {
+        let code = match self.kind {
+            Self::RST_STREAM => self.payload.get(..4)?,
+            Self::GOAWAY => self.payload.get(4..8)?,
+            _ => return None,
+        };
+        Some(u32::from_be_bytes(code.try_into().unwrap()))
+    }
+
+    /// The `:status` of a response HEADERS frame, when it is the block's first field (it is,
+    /// in what Pingora and h2 send): a static-table index, or a literal with the indexed name.
+    fn status(&self) -> Option<u16> {
+        if self.kind != Self::HEADERS {
+            return None;
+        }
+        let (&first, rest) = self.payload.split_first()?;
+        match first {
+            0x88 => Some(200),
+            0x89 => Some(204),
+            0x8a => Some(206),
+            0x8b => Some(304),
+            0x8c => Some(400),
+            0x8d => Some(404),
+            0x8e => Some(500),
+            // Literal value, name `:status` (static index 8), in the three literal forms.
+            0x48 | 0x08 | 0x18 => {
+                let (&len, value) = rest.split_first()?;
+                let value = value.get(..usize::from(len & 0x7f))?;
+                if len & 0x80 == 0 {
+                    return std::str::from_utf8(value).ok()?.parse().ok();
+                }
+                // Huffman-coded digits (RFC 7541 appendix B): `0`-`2` are the 5-bit codes
+                // 0-2, `3`-`9` the 6-bit codes 0x19-0x1f.
+                let mut bits = value
+                    .iter()
+                    .flat_map(|b| (0..8).rev().map(move |i| b >> i & 1));
+                let mut take = |n: usize| {
+                    (0..n).try_fold(0u16, |acc, _| Some(acc << 1 | u16::from(bits.next()?)))
+                };
+                let mut status = 0;
+                for _ in 0..3 {
+                    let digit = match take(5)? {
+                        code @ 0..=2 => code,
+                        code => match code << 1 | take(1)? {
+                            code @ 0x19..=0x1f => code - 0x19 + 3,
+                            _ => return None,
+                        },
+                    };
+                    status = status * 10 + digit;
+                }
+                Some(status)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// What [`H2Client::read_until`] saw.
+#[derive(Debug)]
+struct Received {
+    frames: Vec<Frame>,
+    /// The server closed the connection (rather than the wait running out or the wanted
+    /// frame arriving).
+    closed: bool,
+}
+
+impl Received {
+    fn of(&self, kind: u8) -> impl Iterator<Item = &Frame> {
+        self.frames.iter().filter(move |frame| frame.is(kind))
+    }
+
+    /// The GOAWAY's error code and debug data, if one came.
+    fn goaway(&self) -> Option<(u32, String)> {
+        let frame = self.of(Frame::GOAWAY).next()?;
+        let debug = String::from_utf8_lossy(frame.payload.get(8..)?).into_owned();
+        Some((frame.error_code()?, debug))
+    }
+
+    /// The status of the response on `stream`.
+    fn status(&self, stream: u32) -> Option<u16> {
+        self.of(Frame::HEADERS)
+            .find(|frame| frame.stream == stream)
+            .and_then(Frame::status)
+    }
+}
+
+/// An HTTP/2 connection on which every frame is written and read by hand: a client library
+/// would refuse to send most of what the adversarial tests send.
+struct H2Client<S>(S);
+
+impl H2Client<TlsStream<TcpStream>> {
+    /// A connection to `:443` for the SNI name `sni` that has sent the client preface and an
+    /// empty SETTINGS frame.
+    async fn connect(h: &Harness, sni: &str) -> Self {
+        let mut client = H2Client::handshake(h, sni).await;
+        client
+            .0
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .await
+            .unwrap();
+        client
+            .send(&[Frame::new(Frame::SETTINGS, 0, 0, [])])
+            .await
+            .unwrap();
+        client
+    }
+
+    /// A TLS connection that negotiated `h2` and has sent nothing yet.
+    async fn handshake(h: &Harness, sni: &str) -> Self {
+        let connector = h.ca.connector(&[b"h2"]);
+        H2Client(h.handshake(&connector, sni).await.unwrap())
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> H2Client<S> {
+    /// Writes `frames`; an error means the server has closed the connection.
+    async fn send(&mut self, frames: &[Frame]) -> std::io::Result<()> {
+        let bytes: Vec<u8> = frames.iter().flat_map(Frame::bytes).collect();
+        self.0.write_all(&bytes).await?;
+        self.0.flush().await
+    }
+
+    /// Reads frames until `done` accepts one, the server closes, or `wait` has passed.
+    async fn read_until(
+        &mut self,
+        wait: Duration,
+        mut done: impl FnMut(&Frame) -> bool,
+    ) -> Received {
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut frames = Vec::new();
+        loop {
+            let frame = async {
+                let mut head = [0; 9];
+                self.0.read_exact(&mut head).await?;
+                let len = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
+                let mut payload = vec![0; len];
+                self.0.read_exact(&mut payload).await?;
+                let stream = u32::from_be_bytes([head[5], head[6], head[7], head[8]]);
+                std::io::Result::Ok(Frame::new(head[3], head[4], stream & 0x7fff_ffff, payload))
+            };
+            match tokio::time::timeout_at(deadline, frame).await {
+                Err(_) => {
+                    return Received {
+                        frames,
+                        closed: false,
+                    };
+                }
+                Ok(Err(_)) => {
+                    return Received {
+                        frames,
+                        closed: true,
+                    };
+                }
+                Ok(Ok(frame)) => {
+                    let stop = done(&frame);
+                    frames.push(frame);
+                    if stop {
+                        return Received {
+                            frames,
+                            closed: false,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads until the server closes the connection or `wait` has passed.
+    async fn read_to_end(&mut self, wait: Duration) -> Received {
+        self.read_until(wait, |_| false).await
     }
 }
 
@@ -1817,3 +2117,5 @@ async fn every_request_gets_an_access_log_line() {
         "{line}"
     );
 }
+
+mod limits;
