@@ -1,14 +1,15 @@
 ---
 id: v5v
 title: "Spike: count open connections per client address in Pingora 0.9.1 (ServerApp wrapper)"
-status: open
+status: done
 priority: P1
 created: "2026-11-11T21:55:08.893921448Z"
-updated: "2026-11-11T21:55:08.893921448Z"
+updated: "2026-11-11T23:28:03.291141156Z"
 tags:
   - proxy
   - spike
 parent: "6sq"
+attempts: 1
 ---
 
 ## Question
