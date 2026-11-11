@@ -1,10 +1,10 @@
 ---
 id: "59g"
 title: "Decide: ambiguous podman object names across stacks (OQ-35)"
-status: open
+status: done
 priority: P1
 created: "2026-11-07T23:10:21.409833637Z"
-updated: "2026-11-07T23:10:21.409833637Z"
+updated: "2026-11-11T21:44:33.628593942Z"
 tags:
   - decision
 ---

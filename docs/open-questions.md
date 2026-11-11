@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-35, OQ-36 and OQ-38 are open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-36, OQ-38, OQ-39 and OQ-40 are open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -44,7 +44,7 @@ Index:
 | [OQ-32](#oq-32-when-an-applied-but-not-redeployed-revision-takes-effect) | ~~When an applied-but-not-redeployed revision takes effect~~ **Resolved → ADR-0049 (apply always redeploys)** | — |
 | [OQ-33](#oq-33-orchestrator-actor-or-shared-handle) | ~~Orchestrator: actor + Command enum, or shared handle with async methods~~ **Resolved → ADR-0050 (handle)** | — |
 | [OQ-34](#oq-34-poller-bootstrap-advisory-dns-check-health-default-path-port-host-redirects) | ~~Poller bootstrap, advisory DNS check, health default path, `PORT` injection, host redirects~~ **Resolved → ADR-0051** | — |
-| [OQ-35](#oq-35-ambiguous-podman-object-names-across-stacks) | Ambiguous podman object names across stacks (`-` in stack, service and volume names) | M1 (deploys), ADR-0030 volumes |
+| [OQ-35](#oq-35-ambiguous-podman-object-names-across-stacks) | ~~Ambiguous podman object names across stacks~~ **Resolved → ADR-0063 (reject at apply, label check kept)** | — |
 | [OQ-38](#oq-38-client-supplied-forwarding-headers-at-the-edge) | Client-supplied forwarding headers at the edge (`X-Forwarded-For` appended, `Forwarded` and `X-Real-IP` passed through) | — |
 
 ---
@@ -354,6 +354,10 @@ new mechanism. `status` defaults to 308; 307 allowed. No path rewriting beyond p
 
 ## OQ-35: Ambiguous podman object names across stacks
 
+**Resolved 2026-11-11 → [ADR-0063](adr/0063-reject-cross-stack-podman-name-collisions.md).** A + D. Apply rejects a stack whose `<stack>-<service>` or `<stack>-<volume>` equals another stack's, counting the kept volumes of removed stacks. The volume label check (D), already implemented by then, stays. Names are unchanged. B was dropped because podman cannot rename existing volumes.
+
+<details><summary>Original discussion</summary>
+
 **Problem.** Stack, service and volume names may contain `-` (`Name`: `[a-z][a-z0-9-]{0,30}`), and
 architecture §8 / ADR-0030 build podman names by joining them with `-`. Different stacks can
 therefore produce the same name:
@@ -384,6 +388,8 @@ Found while reviewing task 3v6 (`VolumeMount::named`, `ServiceGeneration`).
 **Recommendation.** B, together with D as defence in depth (volumes are labelled at creation in
 any case, ADR-0030). It removes the ambiguity by construction instead of relying on a cross-stack
 check.
+
+</details>
 
 ## OQ-36: No file-system sandbox for the user unit on Ubuntu
 

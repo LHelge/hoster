@@ -1,6 +1,6 @@
 # ADR-0030: Named podman volumes kept on stack removal; backups documented, not built in (v1)
 
-- Status: Accepted (resolves OQ-03)
+- Status: Accepted (resolves OQ-03); cross-stack volume name collisions rejected at apply since ADR-0063
 - Date: 2026-11-07
 
 ## Context
