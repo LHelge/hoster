@@ -1,14 +1,15 @@
 ---
 id: gyy
 title: Raise RLIMIT_NOFILE and refuse new clients beyond the total descriptor cap
-status: open
+status: done
 priority: P1
 created: "2026-11-11T21:55:08.882684187Z"
-updated: "2026-11-11T21:55:08.882684187Z"
+updated: "2026-11-11T22:51:12.473288234Z"
 tags:
   - proxy
   - security
 parent: "6sq"
+attempts: 1
 ---
 
 ## What

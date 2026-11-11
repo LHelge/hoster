@@ -262,9 +262,9 @@ async fn a_routes_own_timeouts_keep_a_quiet_stream_open() {
 /// nothing is dropped after 60 s wherever it stops, and a kept-alive or HTTP/2 connection
 /// after 60 s idle.
 ///
-/// Two cases have no bound, and are asserted so that a change shows up here (OQ-39): a client
-/// that keeps sending a byte now and then, and one that negotiates `h2` and never sends the
-/// connection preface.
+/// Two cases have no bound but the connection cap (ADR-0065), and are asserted so that a change
+/// shows up here: a client that keeps sending a byte now and then, and one that negotiates `h2`
+/// and never sends the connection preface.
 #[tokio::test]
 async fn a_silent_client_is_dropped_after_sixty_seconds() {
     const MINUTE: Duration = Duration::from_secs(60);
@@ -361,6 +361,74 @@ async fn a_silent_client_is_dropped_after_sixty_seconds() {
         dribbled_body,
         no_preface,
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Connection caps
+
+/// Whether `:80` takes a new connection on: it answers a request on it, or closes it at once.
+async fn plain_accepted(h: &Harness) -> Option<TcpStream> {
+    let mut tcp = TcpStream::connect(h.http).await.unwrap();
+    // A refused connection may be closed before the request is written.
+    let _ = tcp.write_all(KEEP_ALIVE_GET).await;
+    let mut buf = [0; 64];
+    match tokio::time::timeout(SLACK, tcp.read(&mut buf)).await {
+        Ok(Ok(0) | Err(_)) => None,
+        Ok(Ok(_)) => Some(tcp),
+        Err(_) => panic!("neither answered nor closed"),
+    }
+}
+
+/// At the descriptor cap (ADR-0065) new clients are refused on both listeners, while the
+/// connections already open, the admin host's among them, keep working; once connections
+/// close, new ones are taken on again.
+#[tokio::test]
+async fn new_clients_are_refused_at_the_descriptor_cap() {
+    const HEADROOM: usize = 40;
+    let admission = Admission::new(usize::MAX);
+    let h =
+        Harness::start_admitting(Timeouts::default(), DownstreamLimits::default(), admission).await;
+    let mut app = h.connect("app.example.com").await;
+    app.write(KEEP_ALIVE_GET).await;
+    assert_eq!(app.reply().await.status, 200);
+    let mut admin = h.connect("hoster.example.com").await;
+    let healthz = b"GET /healthz HTTP/1.1\r\nHost: hoster.example.com\r\n\r\n";
+    admin.write(healthz).await;
+    assert_eq!(admin.reply().await.status, 200);
+
+    let open = h.admission.usage().open.expect("/proc/self/fd is readable");
+    h.admission.set_cap(open + HEADROOM);
+    // The next accept counts afresh.
+    tokio::time::sleep(Admission::REFRESH).await;
+
+    // Each connection costs this process two descriptors, the client's and the proxy's.
+    let mut held = Vec::new();
+    while let Some(tcp) = plain_accepted(&h).await {
+        held.push(tcp);
+        assert!(held.len() <= HEADROOM, "still accepting past the cap");
+    }
+    assert!(held.len() >= HEADROOM / 4, "refused after {}", held.len());
+    assert_eq!(h.admission.refused(), 1);
+    // `:443` refuses before the TLS handshake.
+    assert!(h.handshake(&h.tls, "app.example.com").await.is_err());
+    assert_eq!(h.admission.refused(), 2);
+
+    // What is open keeps working.
+    app.write(KEEP_ALIVE_GET).await;
+    assert_eq!(app.reply().await.status, 200);
+    admin.write(healthz).await;
+    assert_eq!(admin.reply().await.status, 200);
+
+    drop(held);
+    let deadline = Instant::now() + SLACK;
+    while plain_accepted(&h).await.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "still refused after the connections closed"
+        );
+        tokio::time::sleep(Admission::REFRESH).await;
+    }
+    assert_eq!(h.get("app.example.com", "/after").await.status, 200);
 }
 
 // ---------------------------------------------------------------------------------------------

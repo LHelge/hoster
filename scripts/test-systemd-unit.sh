@@ -8,6 +8,7 @@
 # Checks:
 #   - the unit starts and stays active;
 #   - NoNewPrivileges and the seccomp filters apply;
+#   - LimitNOFILE= sets the soft open file limit (ADR-0065);
 #   - the file-system sandbox (a private mount namespace) applies, unless
 #     kernel.apparmor_restrict_unprivileged_userns=1, where systemd skips it (reported; accepted, ADR-0064).
 #
@@ -104,6 +105,10 @@ status_field() {
 echo "ok: NoNewPrivileges in effect"
 [ "$(status_field Seccomp)" = 2 ] || fail "no seccomp filter (SystemCallFilter= and friends)"
 echo "ok: seccomp filters in effect ($(status_field Seccomp_filters) filters)"
+want_files=$(sed -n 's/^LimitNOFILE=//p' "$unit_src")
+soft_files=$(awk '/^Max open files/ { print $4 }' "/proc/$pid/limits")
+[ "$soft_files" = "$want_files" ] || fail "soft open file limit is $soft_files, not LimitNOFILE=$want_files"
+echo "ok: open file limit $soft_files"
 
 restricted=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2> /dev/null || echo 0)
 if [ "$(readlink "/proc/$pid/ns/mnt")" != "$(readlink /proc/self/ns/mnt)" ]; then

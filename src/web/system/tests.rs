@@ -175,6 +175,8 @@ async fn the_page_shows_the_host_facts_and_unknown_for_missing_ones() {
         "<dd>203.0.113.42 · 2001:db8::42 <span class=\"host-note\">· the A/AAAA records of admin.example.com</span></dd>",
         "<dt>data dir</dt>\n    <dd>/home/hoster/.local/state/hoster</dd>",
         "<dt>uptime</dt>\n    <dd>41d 7h</dd>",
+        "<dt>open files</dt>\n    <dd>214 of 16384 <span class=\"host-note\">· new clients refused from 4096</span></dd>",
+        "<dt>refused</dt>\n    <dd>0 client connections since start</dd>",
     ] {
         assert!(html.contains(row), "{row}\n{html}");
     }
@@ -191,7 +193,7 @@ async fn the_page_shows_the_host_facts_and_unknown_for_missing_ones() {
     assert_eq!(
         html.matches(r#"<dd><span class="muted">unknown</span></dd>"#)
             .count(),
-        10,
+        12,
         "{html}"
     );
 }

@@ -20,7 +20,11 @@
 //!   and 421 for a request whose host is not the connection's SNI name (ADR-0032).
 //! - `:80` ([`ProxyConfig::http_listen`]) is [`ChallengeOrRedirect`]: ACME HTTP-01 answers from
 //!   the [`ChallengeMap`], 308 to HTTPS for known hosts and 404 for the rest. It never proxies.
+//!
+//! Both refuse a new client at accept while hoster has too many descriptors open
+//! ([`Admission`], ADR-0065).
 
+mod admission;
 mod plain;
 mod resolver;
 mod router;
@@ -41,6 +45,7 @@ use pingora::server::configuration::ServerConf;
 use pingora::server::{ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch};
 use tokio::sync::{broadcast, watch};
 
+pub use self::admission::{Admission, FileLimit, FileUse};
 use self::plain::ChallengeOrRedirect;
 use self::resolver::{CertResolver, SniCapture};
 use self::router::RoutingProxy;
@@ -105,6 +110,8 @@ pub struct ProxyState {
     pub challenges: ChallengeMap,
     /// The per-route request statistics the `:443` service counts (ADR-0045).
     pub traffic: Traffic,
+    /// Which new client connections both listeners take on (ADR-0065).
+    pub admission: Admission,
 }
 
 /// What hoster allows a client connection on either listener, where Pingora's own default is no
@@ -185,7 +192,9 @@ impl Proxy {
             certs,
             challenges,
             traffic,
+            admission,
         } = state;
+        let admission = Arc::new(admission);
 
         let mut https = ProxyServiceBuilder::new(
             &server.configuration,
@@ -194,6 +203,7 @@ impl Proxy {
         .name("hoster https")
         .server_options(limits.server_options())
         .build();
+        https.set_connection_filter(admission.clone());
         let mut tls = TlsSettings::with_callbacks(Box::new(SniCapture))
             .expect("rustls TlsSettings::with_callbacks cannot fail");
         tls.set_cert_resolver(Arc::new(CertResolver::from(certs)));
@@ -208,6 +218,7 @@ impl Proxy {
         .name("hoster http")
         .server_options(limits.server_options())
         .build();
+        http.set_connection_filter(admission);
         http.add_tcp(&config.http_listen.to_string());
         server.add_service(http);
 
@@ -390,6 +401,7 @@ mod thread_tests {
             certs,
             challenges: ChallengeMap::default(),
             traffic: Traffic::default(),
+            admission: Admission::default(),
         };
         (state, dir)
     }

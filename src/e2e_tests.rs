@@ -206,6 +206,7 @@ impl Hoster {
             certs,
             challenges: ChallengeMap::default(),
             traffic: Default::default(),
+            admission: Default::default(),
         };
         let (shutdown, rx) = watch::channel(None);
         let mut proxy = Proxy::new(&config, state).spawn(rx).unwrap();
