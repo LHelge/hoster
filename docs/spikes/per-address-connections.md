@@ -2,9 +2,10 @@
 
 - Task: Bears `v5v`, for ADR-0065's per-address cap (built in `4vg`)
 - Date: 2026-11-12
-- Prototype and proof: [`src/proxy/tests/address_slots.rs`](../../src/proxy/tests/address_slots.rs)
-  (test-only; `cargo nextest run -E 'test(address_slots)'`). It stays in the tree so a Pingora
-  upgrade that breaks either hook fails CI.
+- Prototype and proof: `src/proxy/tests/address_slots.rs`, test-only, in the spike's commit
+  (`git log -- src/proxy/tests/address_slots.rs`). `4vg` built the design into
+  `src/proxy/admission.rs` and moved the cases to the real proxy in `src/proxy/tests/limits.rs`,
+  so a Pingora upgrade that breaks either hook fails CI there.
 - **Recommendation: build it on the L4 stream's `tracer`**, attached by a pre-TLS callback on
   `:443` and by a thin `ServerApp` wrapper on `:80`. A `ServerApp` wrapper alone, as ADR-0065
   sketched, misses connections that are still in or fail their TLS handshake. This note is

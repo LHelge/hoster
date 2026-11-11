@@ -5,7 +5,10 @@
 //! ([`DownstreamLimits`], the route's timeouts) the tests shorten it; Pingora's fixed 60 s
 //! waits are all observed in one slow test.
 
+use std::net::{IpAddr, Ipv4Addr};
+
 use super::*;
+use crate::proxy::FileLimit;
 
 /// Client limits short enough to wait for.
 const SHORT: DownstreamLimits = DownstreamLimits {
@@ -366,9 +369,21 @@ async fn a_silent_client_is_dropped_after_sixty_seconds() {
 // ---------------------------------------------------------------------------------------------
 // Connection caps
 
-/// Whether `:80` takes a new connection on: it answers a request on it, or closes it at once.
-async fn plain_accepted(h: &Harness) -> Option<TcpStream> {
-    let mut tcp = TcpStream::connect(h.http).await.unwrap();
+const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+/// Another client address: the whole of 127/8 is loopback on Linux.
+const NEIGHBOUR: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+
+/// A TCP connection to `addr` from the client address `from`.
+async fn connect_from(from: IpAddr, addr: SocketAddr) -> TcpStream {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(SocketAddr::new(from, 0)).unwrap();
+    socket.connect(addr).await.unwrap()
+}
+
+/// Whether `:80` takes a new connection from `from` on: it answers a request on it, or closes
+/// it at once.
+async fn plain_accepted_from(h: &Harness, from: IpAddr) -> Option<TcpStream> {
+    let mut tcp = connect_from(from, h.http).await;
     // A refused connection may be closed before the request is written.
     let _ = tcp.write_all(KEEP_ALIVE_GET).await;
     let mut buf = [0; 64];
@@ -376,6 +391,41 @@ async fn plain_accepted(h: &Harness) -> Option<TcpStream> {
         Ok(Ok(0) | Err(_)) => None,
         Ok(Ok(_)) => Some(tcp),
         Err(_) => panic!("neither answered nor closed"),
+    }
+}
+
+async fn plain_accepted(h: &Harness) -> Option<TcpStream> {
+    plain_accepted_from(h, LOCALHOST).await
+}
+
+/// Whether `:443` completes a TLS handshake for a new connection from `from`.
+async fn tls_accepted_from(h: &Harness, from: IpAddr) -> bool {
+    let tcp = connect_from(from, h.proxy).await;
+    let name = ServerName::try_from("app.example.com").unwrap();
+    tokio::time::timeout(SLACK, h.tls.connect(name, tcp))
+        .await
+        .expect("a handshake or a close")
+        .is_ok()
+}
+
+/// Waits until `ip` holds `open` slots under the per-address cap, and fails if it does not
+/// within [`SLACK`]. At zero no address is left in the map.
+async fn slots_settle(h: &Harness, ip: IpAddr, open: usize) {
+    let deadline = Instant::now() + SLACK;
+    while h.admission.open_from_ip(ip) != open {
+        assert!(
+            Instant::now() < deadline,
+            "{} connections counted from {ip}, expected {open}",
+            h.admission.open_from_ip(ip)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    if open == 0 {
+        assert_eq!(
+            h.admission.clients(),
+            0,
+            "an address stayed in the map at zero"
+        );
     }
 }
 
@@ -429,6 +479,211 @@ async fn new_clients_are_refused_at_the_descriptor_cap() {
         tokio::time::sleep(Admission::REFRESH).await;
     }
     assert_eq!(h.get("app.example.com", "/after").await.status, 200);
+}
+
+/// One address may hold [`Admission::PER_ADDRESS`] connections (ADR-0065): the next one is
+/// refused on both listeners, while another address still connects and what is open keeps
+/// working; closing one lets the address in again.
+#[tokio::test]
+async fn the_connection_beyond_the_per_address_cap_is_refused() {
+    let _ = FileLimit::raise();
+    let h = Harness::start_admitting(
+        Timeouts::default(),
+        DownstreamLimits::default(),
+        Admission::new(usize::MAX),
+    )
+    .await;
+    slots_settle(&h, LOCALHOST, 0).await;
+    let mut app = h.connect("app.example.com").await;
+    app.write(KEEP_ALIVE_GET).await;
+    assert_eq!(app.reply().await.status, 200);
+
+    let mut held = Vec::new();
+    for _ in 1..Admission::PER_ADDRESS {
+        held.push(plain_accepted(&h).await.expect("under the cap"));
+    }
+    slots_settle(&h, LOCALHOST, Admission::PER_ADDRESS).await;
+    assert!(
+        plain_accepted(&h).await.is_none(),
+        "the connection beyond the cap"
+    );
+    assert!(
+        !tls_accepted_from(&h, LOCALHOST).await,
+        "refused before TLS too"
+    );
+    assert_eq!(h.admission.refused(), 2);
+
+    // Another address is not affected, nor is what is open.
+    assert!(plain_accepted_from(&h, NEIGHBOUR).await.is_some());
+    assert!(tls_accepted_from(&h, NEIGHBOUR).await);
+    app.write(KEEP_ALIVE_GET).await;
+    assert_eq!(app.reply().await.status, 200);
+
+    held.pop();
+    slots_settle(&h, LOCALHOST, Admission::PER_ADDRESS - 1).await;
+    assert!(
+        plain_accepted(&h).await.is_some(),
+        "a freed slot is taken again"
+    );
+    assert_eq!(h.admission.refused(), 2);
+}
+
+/// A connection holds one slot however many requests it carries: HTTP/1.1 keep-alive on
+/// both listeners, HTTP/2 with many streams at once.
+#[tokio::test]
+async fn a_connection_holds_one_slot_however_it_is_used() {
+    let h = Harness::start().await;
+    slots_settle(&h, LOCALHOST, 0).await;
+    let mut tls = h.connect("app.example.com").await;
+    let mut plain = h.connect_http().await;
+    for _ in 0..3 {
+        tls.write(KEEP_ALIVE_GET).await;
+        assert_eq!(tls.reply().await.status, 200);
+        plain.write(KEEP_ALIVE_GET).await;
+        assert_eq!(plain.reply().await.status, 308);
+        slots_settle(&h, LOCALHOST, 2).await;
+    }
+
+    let mut h2 = H2Client::connect(&h, "app.example.com").await;
+    let streams: Vec<Frame> = (0..50)
+        .map(|i| Frame::get(1 + 2 * i, "app.example.com", "/slow/300"))
+        .collect();
+    h2.send(&streams).await.unwrap();
+    in_flight(&h.web, 50).await;
+    slots_settle(&h, LOCALHOST, 3).await;
+    let mut ended = 0;
+    let received = h2
+        .read_until(SLACK, |frame| {
+            frame.ends_stream() && {
+                ended += 1;
+                ended == 50
+            }
+        })
+        .await;
+    let answered = received
+        .of(Frame::HEADERS)
+        .filter(|f| f.status() == Some(200));
+    assert_eq!(answered.count(), 50, "{received:?}");
+    slots_settle(&h, LOCALHOST, 3).await;
+
+    drop((tls, plain, h2));
+    slots_settle(&h, LOCALHOST, 0).await;
+}
+
+/// A slot is given back however the connection ends: the client leaves mid-header, or while
+/// its response is pending, or its TLS handshake stalls or fails. A handshake holds a slot
+/// while it lasts, since the slot is taken before it.
+#[tokio::test]
+async fn a_slot_is_freed_however_the_connection_ends() {
+    let h = Harness::start().await;
+    slots_settle(&h, LOCALHOST, 0).await;
+    let mut tls = h.connect("app.example.com").await;
+    tls.write(PARTIAL_HEAD).await;
+    let mut plain = h.connect_http().await;
+    plain.write(b"GET /x HTTP/1.1\r\nHost: app").await;
+    let mut pending = h.connect("app.example.com").await;
+    pending
+        .write(b"GET /slow/2000 HTTP/1.1\r\nHost: app.example.com\r\n\r\n")
+        .await;
+    let mut h2 = H2Client::connect(&h, "app.example.com").await;
+    h2.send(&[Frame::get(1, "app.example.com", "/slow/2000")])
+        .await
+        .unwrap();
+    in_flight(&h.web, 2).await;
+    slots_settle(&h, LOCALHOST, 4).await;
+    drop((tls, plain, pending, h2));
+    // The pending ones are noticed once their answer is written.
+    slots_settle(&h, LOCALHOST, 0).await;
+
+    // Half a ClientHello, then nothing.
+    let mut stalled = TcpStream::connect(h.proxy).await.unwrap();
+    stalled
+        .write_all(&[0x16, 0x03, 0x01, 0x02, 0x00, 0x01])
+        .await
+        .unwrap();
+    // Not TLS at all.
+    let mut garbage = TcpStream::connect(h.proxy).await.unwrap();
+    garbage.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+    // A client that does not trust the certificate aborts the handshake.
+    let untrusting = TestCa::new().connector(&[b"http/1.1"]);
+    let tcp = TcpStream::connect(h.proxy).await.unwrap();
+    let name = ServerName::try_from("app.example.com").unwrap();
+    assert!(untrusting.connect(name, tcp).await.is_err());
+    slots_settle(&h, LOCALHOST, 1).await;
+    drop(stalled);
+    slots_settle(&h, LOCALHOST, 0).await;
+    drop(garbage);
+}
+
+/// Stopping the proxy, gracefully or fast, gives back every slot, also of connections that
+/// are idle, mid-request or mid-handshake then.
+#[tokio::test]
+async fn stopping_the_proxy_frees_every_slot() {
+    for signal in [
+        ShutdownSignal::GracefulTerminate,
+        ShutdownSignal::FastShutdown,
+    ] {
+        let name = format!("{signal:?}");
+        let mut h = Harness::start().await;
+        slots_settle(&h, LOCALHOST, 0).await;
+        let mut kept = h.connect("app.example.com").await;
+        kept.write(KEEP_ALIVE_GET).await;
+        assert_eq!(kept.reply().await.status, 200);
+        let mut busy = H2Client::connect(&h, "app.example.com").await;
+        busy.send(&[Frame::get(1, "app.example.com", "/slow/10000")])
+            .await
+            .unwrap();
+        let idle = H2Client::connect(&h, "app.example.com").await;
+        let mut plain = h.connect_http().await;
+        plain.write(b"GET /x HTTP/1.1\r\n").await;
+        let mut stalled = TcpStream::connect(h.proxy).await.unwrap();
+        stalled.write_all(&[0x16, 0x03, 0x01]).await.unwrap();
+        slots_settle(&h, LOCALHOST, 5).await;
+
+        h.shutdown.send_replace(Some(signal));
+        let thread = h.thread.take().unwrap();
+        tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .unwrap()
+            .expect("the proxy thread exits");
+        assert_eq!(h.admission.open_from_ip(LOCALHOST), 0, "{name}");
+        assert_eq!(h.admission.clients(), 0, "{name}");
+        drop((kept, busy, idle, plain, stalled));
+    }
+}
+
+/// The filter checks the count and the slot is taken a moment later, in the connection's own
+/// task, so a burst can get a few connections past the cap before they are counted (the spike
+/// measured at most three). The total cap bounds whatever gets past.
+#[tokio::test]
+async fn a_burst_from_one_address_overshoots_its_cap_by_little() {
+    const BURST: usize = 1000;
+    let _ = FileLimit::raise();
+    let h = Harness::start_admitting(
+        Timeouts::default(),
+        DownstreamLimits::default(),
+        Admission::new(usize::MAX),
+    )
+    .await;
+    slots_settle(&h, LOCALHOST, 0).await;
+    // Raw connections, all completed in the kernel's backlog before the proxy accepts any.
+    let mut held = Vec::with_capacity(BURST);
+    for i in 0..BURST {
+        let addr = if i % 2 == 0 { h.http } else { h.proxy };
+        held.push(TcpStream::connect(addr).await.unwrap());
+    }
+    let deadline = Instant::now() + SLACK;
+    while h.admission.refused() + (h.admission.open_from_ip(LOCALHOST) as u64) < BURST as u64 {
+        assert!(Instant::now() < deadline, "the burst was not all accepted");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let open = h.admission.open_from_ip(LOCALHOST);
+    assert!(
+        (Admission::PER_ADDRESS..=Admission::PER_ADDRESS + 16).contains(&open),
+        "{open} connections counted"
+    );
+    drop(held);
+    slots_settle(&h, LOCALHOST, 0).await;
 }
 
 // ---------------------------------------------------------------------------------------------

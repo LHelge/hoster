@@ -1,10 +1,10 @@
 ---
 id: "4vg"
 title: Refuse connections beyond 256 per IPv4 address / IPv6 /64
-status: open
+status: done
 priority: P1
 created: "2026-11-11T21:55:25.799279871Z"
-updated: "2026-11-11T23:26:30.051584223Z"
+updated: "2026-11-11T23:48:45.644615149Z"
 tags:
   - proxy
   - security
@@ -12,6 +12,7 @@ depends_on:
   - v5v
   - gyy
 parent: "6sq"
+attempts: 1
 ---
 
 ## What

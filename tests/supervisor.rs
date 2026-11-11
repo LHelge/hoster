@@ -474,7 +474,7 @@ fn new_clients_are_refused_at_the_descriptor_cap() {
             TcpStream::connect(addr).expect("the kernel accepts the connection")
         })
         .collect();
-    hoster.wait_for_line("refusing new client connections");
+    hoster.wait_for_line("refusing new client connections: too many open files");
     assert!(!plain_answers(sandbox.http), "a new client is refused");
 
     // Everything else keeps working: the open connection, the admin socket and SQLite, and

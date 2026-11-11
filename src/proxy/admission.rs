@@ -1,5 +1,6 @@
-//! Which client connections the proxy takes on (ADR-0065): hoster's descriptor limit, and the
-//! total cap that refuses new clients before the process runs out of descriptors.
+//! Which client connections the proxy takes on (ADR-0065): hoster's descriptor limit, the
+//! total cap that refuses new clients before the process runs out of descriptors, and the cap
+//! per client address that keeps one client from taking every slot.
 //!
 //! [`FileLimit::raise`] lifts the soft `RLIMIT_NOFILE` to [`FileLimit::WANTED`] at startup (or
 //! to the hard limit, if that is lower), so a self-updated binary gets it without a new unit.
@@ -12,18 +13,37 @@
 //! never falls below the real count by more than the descriptors the rest of the process opened
 //! within one refresh, and a closed connection frees its slot at the next refresh.
 //!
-//! A refused connection is closed at once and counted; while refusing, one warning goes to the
-//! log every [`Admission::LOG_EVERY`]. The System page shows the count ([`FileUse`]).
+//! The per-address cap does count connections: at most [`Admission::PER_ADDRESS`] per IPv4
+//! address or IPv6 /64 ([`Key`]). Each accepted connection takes a [`Slot`], attached to its
+//! L4 stream as Pingora's `tracer`, whose `on_disconnected` runs when Pingora drops the stream
+//! however the connection ended (`docs/spikes/per-address-connections.md`). Pingora never sets
+//! that field on accepted streams. The slot is attached before the TLS handshake on `:443`
+//! (Admission is the listener's `PreTlsProcess`), so a stalled or failed handshake holds and
+//! frees one too, and on `:80`, which has no such callback, by [`Claiming`] around the app. The
+//! filter only checks the count, so a burst from one address can get a few connections past it
+//! before their slots are taken; counting in the filter instead would leak a slot for good
+//! whenever Pingora drops a stream in between.
+//!
+//! A refused connection is closed at once and counted, whichever cap refused it; while
+//! refusing, one warning goes to the log every [`Admission::LOG_EVERY`]. The System page shows
+//! the count ([`FileUse`]).
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use pingora::listeners::ConnectionFilter;
+use pingora::apps::ServerApp;
+use pingora::listeners::{ConnectionFilter, PreTlsProcess};
+use pingora::protocols::l4::stream::Stream as L4Stream;
+use pingora::protocols::{GetSocketDigest, Stream};
+use pingora::server::ShutdownWatch;
+use pingora::upstreams::peer::{Tracer, Tracing};
 use rustix::process::{Resource, Rlimit};
 
 /// hoster's `RLIMIT_NOFILE`. `None` stands for unlimited, as in `getrlimit(2)`.
@@ -130,8 +150,9 @@ pub struct FileUse {
 }
 
 /// The `ConnectionFilter` of the proxy's listeners: refuses a new client connection while the
-/// process has [`Admission::cap`] descriptors open, counting the new connection's own. A cheap
-/// handle: clones share the count.
+/// process has [`Admission::cap`] descriptors open, counting the new connection's own, or its
+/// address has [`Admission::PER_ADDRESS`] connections open. A cheap handle: clones share the
+/// counts.
 #[derive(Clone)]
 pub struct Admission(Arc<Inner>);
 
@@ -141,6 +162,9 @@ struct Inner {
     files: OpenFiles,
     count: Mutex<Count>,
     refused: AtomicU64,
+    /// The open connections per client; a key leaves the map when its count reaches zero, so
+    /// the map holds at most one entry per open connection.
+    addresses: Mutex<HashMap<Key, usize>>,
 }
 
 /// The descriptor count as last measured, and what was let in since.
@@ -186,6 +210,8 @@ impl Admission {
     pub const REFRESH: Duration = Duration::from_millis(100);
     /// How often refusing is logged while it lasts.
     pub const LOG_EVERY: Duration = Duration::from_secs(10);
+    /// The open connections one client address (an IPv4 address, an IPv6 /64) may have.
+    pub const PER_ADDRESS: usize = 256;
 
     /// Refusing new clients at `cap` open descriptors.
     pub fn new(cap: usize) -> Self {
@@ -198,6 +224,7 @@ impl Admission {
             files,
             count: Mutex::default(),
             refused: AtomicU64::new(0),
+            addresses: Mutex::default(),
         }))
     }
 
@@ -227,25 +254,55 @@ impl Admission {
         }
     }
 
-    /// Whether a connection accepted at `now` may stay.
-    fn admit(&self, now: Instant) -> bool {
+    /// `app` taking a slot for each plain connection it is handed (`:80`).
+    pub(super) fn claiming<A>(&self, app: A) -> Claiming<A> {
+        Claiming {
+            app: Arc::new(app),
+            admission: self.clone(),
+        }
+    }
+
+    /// The connections open from `key`'s address.
+    fn open_from(&self, key: Key) -> usize {
+        let addresses = self
+            .0
+            .addresses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        addresses.get(&key).copied().unwrap_or(0)
+    }
+
+    /// Whether a connection from `peer` accepted at `now` may stay.
+    fn admit(&self, now: Instant, peer: Option<IpAddr>) -> bool {
+        let crowded = peer
+            .map(Key::from)
+            .filter(|&key| self.open_from(key) >= Self::PER_ADDRESS);
         let inner = &self.0;
         let mut count = inner.count.lock().unwrap_or_else(PoisonError::into_inner);
-        let stale = count
-            .measured
-            .is_none_or(|at| now.saturating_duration_since(at) >= Self::REFRESH);
-        if stale {
-            count.measure(&inner.files, now);
-        }
-        let Some(open) = count.open else {
-            return true;
+        let refusal = match crowded {
+            Some(key) => Refusal::Address(key),
+            None => {
+                let stale = count
+                    .measured
+                    .is_none_or(|at| now.saturating_duration_since(at) >= Self::REFRESH);
+                if stale {
+                    count.measure(&inner.files, now);
+                }
+                let Some(open) = count.open else {
+                    return true;
+                };
+                let estimate = open.saturating_add(count.accepted);
+                let cap = self.cap();
+                if estimate < cap {
+                    count.accepted += 1;
+                    return true;
+                }
+                Refusal::Total {
+                    open: estimate,
+                    cap,
+                }
+            }
         };
-        let estimate = open.saturating_add(count.accepted);
-        let cap = self.cap();
-        if estimate < cap {
-            count.accepted += 1;
-            return true;
-        }
         let refused = inner.refused.fetch_add(1, Ordering::Relaxed) + 1;
         if count
             .logged
@@ -253,13 +310,174 @@ impl Admission {
         {
             count.logged = Some(now);
             tracing::warn!(
-                open = estimate,
-                cap,
                 refused,
-                "refusing new client connections: too many open files (ADR-0065)"
+                "refusing new client connections: {refusal} (ADR-0065)"
             );
         }
         false
+    }
+
+    /// Takes a slot for `stream`'s peer, unless it holds one already or has no address.
+    fn claim(&self, stream: &mut L4Stream) {
+        if stream.tracer.is_some() {
+            return;
+        }
+        let peer = stream
+            .get_socket_digest()
+            .and_then(|digest| digest.peer_addr().and_then(|addr| addr.as_inet()).copied());
+        if let Some(peer) = peer {
+            stream.tracer = Some(Tracer(Box::new(self.take(Key::from(peer.ip())))));
+        }
+    }
+
+    /// [`Admission::claim`] for a stream as Pingora hands it to an app: a plain connection is
+    /// the L4 stream itself, boxed.
+    fn claim_plain(&self, stream: Stream) -> Stream {
+        if !stream.as_any().is::<L4Stream>() {
+            return stream;
+        }
+        let Ok(mut l4) = stream.into_any().downcast::<L4Stream>() else {
+            unreachable!("the stream was checked to be an L4 stream");
+        };
+        self.claim(&mut l4);
+        l4
+    }
+
+    /// Counts one more connection from `key`.
+    fn take(&self, key: Key) -> Slot {
+        let mut addresses = self
+            .0
+            .addresses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *addresses.entry(key).or_default() += 1;
+        Slot {
+            admission: Some(self.clone()),
+            key,
+        }
+    }
+
+    fn release(&self, key: Key) {
+        let mut addresses = self
+            .0
+            .addresses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(open) = addresses.get_mut(&key) {
+            *open -= 1;
+            if *open == 0 {
+                addresses.remove(&key);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Admission {
+    /// The connections open from `ip`'s address (its /64 for IPv6).
+    pub(crate) fn open_from_ip(&self, ip: IpAddr) -> usize {
+        self.open_from(Key::from(ip))
+    }
+
+    /// The addresses with connections open.
+    pub(crate) fn clients(&self) -> usize {
+        self.0.addresses.lock().unwrap().len()
+    }
+}
+
+/// Why a connection was refused, as the log says it.
+enum Refusal {
+    Total { open: usize, cap: usize },
+    Address(Key),
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::Total { open, cap } => {
+                write!(f, "too many open files ({open}, cap {cap})")
+            }
+            Refusal::Address(key) => {
+                write!(f, "{} connections open from {key}", Admission::PER_ADDRESS)
+            }
+        }
+    }
+}
+
+/// What the per-address cap counts by: an IPv4 address, or the /64 of an IPv6 one. An
+/// IPv4-mapped IPv6 address is the IPv4 address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Key(IpAddr);
+
+impl From<IpAddr> for Key {
+    fn from(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(v4) => Key(v4.into()),
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => Key(v4.into()),
+                None => Key(Ipv6Addr::from(u128::from(v6) & !u128::from(u64::MAX)).into()),
+            },
+        }
+    }
+}
+
+impl fmt::Display for Key {
+    /// `203.0.113.9`, `2001:db8:1:2::/64`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            IpAddr::V4(v4) => v4.fmt(f),
+            IpAddr::V6(v6) => write!(f, "{v6}/64"),
+        }
+    }
+}
+
+/// One connection's place under the per-address cap, held as its L4 stream's `tracer` and
+/// given back when Pingora drops the stream.
+#[derive(Debug)]
+struct Slot {
+    /// `None` in a clone, which must not give the slot back a second time.
+    admission: Option<Admission>,
+    key: Key,
+}
+
+impl Tracing for Slot {
+    fn on_connected(&self) {}
+
+    fn on_disconnected(&self) {
+        if let Some(admission) = &self.admission {
+            admission.release(self.key);
+        }
+    }
+
+    fn boxed_clone(&self) -> Box<dyn Tracing> {
+        Box::new(Slot {
+            admission: None,
+            key: self.key,
+        })
+    }
+}
+
+/// An app that takes a slot for each plain connection before handling it, for the listener
+/// without TLS, where no pre-TLS callback runs. Built by [`Admission::claiming`].
+pub(super) struct Claiming<A> {
+    app: Arc<A>,
+    admission: Admission,
+}
+
+#[async_trait]
+impl<A: ServerApp + Send + Sync + 'static> ServerApp for Claiming<A> {
+    async fn process_new(
+        self: &Arc<Self>,
+        stream: Stream,
+        shutdown: &ShutdownWatch,
+    ) -> Option<Stream> {
+        // A kept-alive connection comes back here with its slot already taken.
+        let stream = self.admission.claim_plain(stream);
+        self.app.process_new(stream, shutdown).await
+    }
+
+    async fn cleanup(&self) {
+        self.app.cleanup().await;
     }
 }
 
@@ -286,8 +504,17 @@ impl Count {
 
 #[async_trait]
 impl ConnectionFilter for Admission {
-    async fn should_accept(&self, _addr: Option<&std::net::SocketAddr>) -> bool {
-        self.admit(Instant::now())
+    async fn should_accept(&self, addr: Option<&SocketAddr>) -> bool {
+        self.admit(Instant::now(), addr.map(SocketAddr::ip))
+    }
+}
+
+#[async_trait]
+impl PreTlsProcess for Admission {
+    /// Takes the connection's slot before its TLS handshake (`:443`).
+    async fn process(&self, stream: &mut L4Stream) -> pingora::Result<()> {
+        self.claim(stream);
+        Ok(())
     }
 }
 
@@ -380,11 +607,11 @@ mod tests {
         let (admission, _) = fixed(7);
         let now = Instant::now();
         // 7 open, cap 10: three more, counted between refreshes.
-        assert!(admission.admit(now));
-        assert!(admission.admit(now));
-        assert!(admission.admit(now));
-        assert!(!admission.admit(now));
-        assert!(!admission.admit(now + Admission::REFRESH / 2));
+        assert!(admission.admit(now, None));
+        assert!(admission.admit(now, None));
+        assert!(admission.admit(now, None));
+        assert!(!admission.admit(now, None));
+        assert!(!admission.admit(now + Admission::REFRESH / 2, None));
         assert_eq!(admission.refused(), 2);
     }
 
@@ -392,10 +619,13 @@ mod tests {
     fn closed_connections_free_their_slot_at_the_next_refresh() {
         let (admission, answer) = fixed(10);
         let now = Instant::now();
-        assert!(!admission.admit(now));
+        assert!(!admission.admit(now, None));
         *answer.lock().unwrap() = Ok(5);
-        assert!(!admission.admit(now + Admission::REFRESH / 2), "not yet");
-        assert!(admission.admit(now + Admission::REFRESH));
+        assert!(
+            !admission.admit(now + Admission::REFRESH / 2, None),
+            "not yet"
+        );
+        assert!(admission.admit(now + Admission::REFRESH, None));
         assert_eq!(admission.refused(), 2);
     }
 
@@ -409,11 +639,67 @@ mod tests {
             rustix::io::Errno::NFILE.raw_os_error()
         )));
         let now = Instant::now();
-        assert!(!admission.admit(now));
+        assert!(!admission.admit(now, None));
 
         *answer.lock().unwrap() = Err(io::ErrorKind::NotFound.into());
-        assert!(admission.admit(now + Admission::REFRESH));
-        assert!(admission.admit(now + Admission::REFRESH));
+        assert!(admission.admit(now + Admission::REFRESH, None));
+        assert!(admission.admit(now + Admission::REFRESH, None));
+    }
+
+    #[test]
+    fn keys_are_ipv4_addresses_and_ipv6_slash_64s() {
+        let key = |ip: &str| Key::from(ip.parse::<IpAddr>().unwrap());
+        assert_eq!(key("192.0.2.1"), key("::ffff:192.0.2.1"));
+        assert_ne!(key("192.0.2.1"), key("192.0.2.2"));
+        assert_eq!(key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff::9"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+        assert_eq!(key("2001:db8:1:2:3::4").to_string(), "2001:db8:1:2::/64");
+        assert_eq!(key("::ffff:192.0.2.1").to_string(), "192.0.2.1");
+    }
+
+    #[test]
+    fn an_address_is_refused_at_its_cap_and_one_slot_back_lets_it_in() {
+        let (admission, _) = fixed(0);
+        admission.set_cap(usize::MAX);
+        let now = Instant::now();
+        let ip = |ip: &str| Some(ip.parse::<IpAddr>().unwrap());
+        // Two addresses of one /64 share the budget.
+        let mut slots: Vec<Slot> = (0..Admission::PER_ADDRESS)
+            .map(|i| {
+                let peer = if i % 2 == 0 {
+                    "2001:db8::1"
+                } else {
+                    "2001:db8::2"
+                };
+                assert!(admission.admit(now, ip(peer)));
+                admission.take(Key::from(ip(peer).unwrap()))
+            })
+            .collect();
+        assert!(!admission.admit(now, ip("2001:db8::3")));
+        assert!(admission.admit(now, ip("2001:db8:0:1::1")), "another /64");
+        assert!(admission.admit(now, ip("192.0.2.1")));
+        assert!(admission.admit(now, None));
+        assert_eq!(admission.refused(), 1);
+
+        slots.pop().unwrap().on_disconnected();
+        assert!(admission.admit(now, ip("2001:db8::3")));
+        // A clone gives nothing back.
+        Tracer(Box::new(slots.pop().unwrap()))
+            .clone()
+            .0
+            .on_disconnected();
+        assert_eq!(
+            admission.open_from(Key::from(ip("2001:db8::1").unwrap())),
+            255
+        );
+        for slot in &slots {
+            slot.on_disconnected();
+        }
+        assert_eq!(
+            admission.open_from(Key::from(ip("2001:db8::1").unwrap())),
+            1
+        );
+        assert_eq!(admission.0.addresses.lock().unwrap().len(), 1);
     }
 
     #[test]
