@@ -11,8 +11,9 @@
 //! the upstream [`PeerOptions`].
 //!
 //! Every request, answered or failed, ends in the `logging` hook, which writes one
-//! [`AccessRecord`] line to the access log (target [`ACCESS_TARGET`]) and counts the request in
-//! the [`Traffic`] statistics of the web UI (ADR-0045).
+//! [`AccessRecord`] line to the access log (target [`ACCESS_TARGET`], or [`UNROUTED_TARGET`]
+//! at `debug` for a request that matched no route) and counts the request in the [`Traffic`]
+//! statistics of the web UI (ADR-0045).
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -31,7 +32,7 @@ use pingora::{Error, ErrorSource, ErrorType, OkOrErr, OrErr, Result};
 use super::DownstreamLimits;
 use super::resolver::Sni;
 use crate::config::Timeouts;
-use crate::logging::ACCESS_TARGET;
+use crate::logging::{ACCESS_TARGET, UNROUTED_TARGET};
 use crate::routing::{InflightGuard, Owner, RouteEntry, RouteTable, Target};
 use crate::stack::RouteTimeouts;
 use crate::stats::{RequestOutcome, TrackedRequest, Traffic};
@@ -256,9 +257,9 @@ impl ProxyHttp for RoutingProxy {
         }
     }
 
-    /// One access log line per request, whether it was proxied, answered by hoster or failed,
-    /// and the request counted in its route's statistics (requests that failed before routing
-    /// count as unrouted).
+    /// One access log line per request, whether it was proxied, answered by hoster or failed
+    /// (at `debug` when it matched no route), and the request counted in its route's
+    /// statistics (requests that failed before routing count as unrouted).
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
         let record = AccessRecord::new(session, &ctx.host, ctx.route.as_ref(), ctx.started, e)
             .header_after(ctx.header_after);
@@ -293,6 +294,8 @@ pub(super) struct AccessRecord<'a> {
     client: Option<IpAddr>,
     /// The fatal error that ended the request, if one did.
     error: Option<&'a Error>,
+    /// hoster answered the request on purpose without a route.
+    answered: bool,
 }
 
 impl<'a> AccessRecord<'a> {
@@ -317,6 +320,7 @@ impl<'a> AccessRecord<'a> {
             bytes: session.body_bytes_sent(),
             client: Forwarding::client_ip(session),
             error,
+            answered: false,
         }
     }
 
@@ -328,7 +332,17 @@ impl<'a> AccessRecord<'a> {
         }
     }
 
-    /// Writes the line to the [`ACCESS_TARGET`] target at `info`.
+    /// The record of a request hoster answered although it matched no route (an ACME
+    /// challenge), which is logged like one that did.
+    pub(super) fn answered(self) -> Self {
+        Self {
+            answered: true,
+            ..self
+        }
+    }
+
+    /// Writes the line: at `info` to [`ACCESS_TARGET`] for a request that matched a route, at
+    /// `debug` to [`UNROUTED_TARGET`] for the rest, which is what scanners send.
     pub(super) fn emit(&self) {
         let route = self.route.map(|route| route.prefix_str.as_str());
         let (stack, service) = match self.route.map(|route| &route.owner) {
@@ -351,23 +365,33 @@ impl<'a> AccessRecord<'a> {
         };
         let client = self.client.map(tracing::field::display);
         let error = self.error.map(tracing::field::display);
-        tracing::info!(
-            target: ACCESS_TARGET,
-            host = self.host,
-            method = self.method,
-            path = self.path,
-            route,
-            stack,
-            service,
-            generation,
-            upstream,
-            status = self.status,
-            duration_ms = self.duration.as_secs_f64() * 1000.0,
-            bytes = self.bytes,
-            client,
-            error,
-            "request"
-        );
+        // The target and the level of an event are fixed where it is written.
+        macro_rules! line {
+            ($level:ident, $target:expr) => {
+                tracing::$level!(
+                    target: $target,
+                    host = self.host,
+                    method = self.method,
+                    path = self.path,
+                    route,
+                    stack,
+                    service,
+                    generation,
+                    upstream,
+                    status = self.status,
+                    duration_ms = self.duration.as_secs_f64() * 1000.0,
+                    bytes = self.bytes,
+                    client,
+                    error,
+                    "request"
+                )
+            };
+        }
+        if self.route.is_some() || self.answered {
+            line!(info, ACCESS_TARGET);
+        } else {
+            line!(debug, UNROUTED_TARGET);
+        }
     }
 }
 
@@ -907,9 +931,10 @@ mod tests {
                 bytes: 24,
                 client: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
                 error: Some(&error),
+                answered: false,
             }
             .emit();
-            AccessRecord {
+            let bare = AccessRecord {
                 host: "",
                 method: "GET",
                 path: "/",
@@ -920,8 +945,11 @@ mod tests {
                 bytes: 0,
                 client: None,
                 error: None,
-            }
-            .emit();
+                answered: false,
+            };
+            // Without a route the line is a `debug` one, which `info` does not show.
+            bare.emit();
+            bare.answered().emit();
         });
         let lines = buffer.json();
         assert_eq!(lines.len(), 2, "{lines:?}");
@@ -974,6 +1002,7 @@ mod tests {
             bytes: 512,
             client: None,
             error: None,
+            answered: false,
         };
         // Without an upstream response header (hoster's own answer) the whole request counts.
         assert_eq!(

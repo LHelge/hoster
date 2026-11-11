@@ -2298,7 +2298,7 @@ async fn access_line(path: &str) -> Value {
 }
 
 #[tokio::test]
-async fn every_request_gets_an_access_log_line() {
+async fn every_request_that_matched_a_route_gets_an_access_log_line() {
     crate::logging::capture::global();
     let h = Harness::start().await;
 
@@ -2321,33 +2321,6 @@ async fn every_request_gets_an_access_log_line() {
     assert!(line["duration_ms"].as_f64().unwrap() >= 0.0, "{line}");
     assert!(line.get("error").is_none(), "{line}");
     assert!(!line.to_string().contains("secret"), "{line}");
-
-    let reply = h.get("noroute.example.com", "/access/unknown").await;
-    assert_eq!(reply.status, 404);
-    let line = access_line("/access/unknown").await;
-    assert_eq!(line["host"], "noroute.example.com");
-    assert_eq!(line["status"], 404);
-    assert!(line.get("route").is_none(), "{line}");
-    assert!(line.get("upstream").is_none(), "{line}");
-
-    let head =
-        "GET /access/misdirected HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n";
-    let reply = h.request_with_sni("app.example.com", head).await;
-    assert_eq!(reply.status, 421);
-    let line = access_line("/access/misdirected").await;
-    assert_eq!(line["host"], "api.example.com");
-    assert_eq!(line["status"], 421);
-    assert!(line.get("route").is_none(), "{line}");
-
-    // The `:80` service logs its redirects too.
-    let reply = h.get_http("app.example.com", "/access/plain?token=1").await;
-    assert_eq!(reply.status, 308);
-    let line = access_line("/access/plain").await;
-    assert_eq!(line["host"], "app.example.com");
-    assert_eq!(line["status"], 308);
-    assert_eq!(line["client"], "127.0.0.1");
-    assert!(line.get("route").is_none(), "{line}");
-    assert!(!line.to_string().contains("token"), "{line}");
 
     let reply = h.get("gap.example.com", "/access/gap").await;
     assert_eq!(reply.status, 503);
@@ -2382,3 +2355,65 @@ async fn every_request_gets_an_access_log_line() {
 
 mod limits;
 mod smuggling;
+
+/// What scanners send matches no route, and is not in the log at `info`: an unknown host, a
+/// host that is not the SNI name, and everything on `:80` but an answered ACME challenge.
+#[tokio::test]
+async fn requests_that_matched_no_route_are_not_logged_at_info() {
+    let log = crate::logging::capture::global();
+    let h = Harness::start().await;
+
+    let reply = h.get("noroute.example.com", "/quiet/unknown-host").await;
+    assert_eq!(reply.status, 404);
+    let head =
+        "GET /quiet/misdirected HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n";
+    let reply = h.request_with_sni("app.example.com", head).await;
+    assert_eq!(reply.status, 421);
+    // They are still counted, and counting happens after the line would have been written.
+    let drained = Drained::until(&h.traffic, |drained| {
+        drained
+            .routes
+            .get("")
+            .is_some_and(|unrouted| unrouted.statuses.total() == 2)
+    })
+    .await;
+    assert_eq!(drained.route("").statuses.total(), 2, "{drained:?}");
+
+    // On `:80`, one connection: its requests are logged in order, so the challenge's line
+    // comes after whatever the probes before it wrote.
+    h.challenges.insert("quiet-token", "quiet-token.thumbprint");
+    let mut plain = h.connect_http().await;
+    for (host, target, status) in [
+        ("app.example.com", "/quiet/redirect", 308),
+        ("203.0.113.9", "/quiet/probe", 404),
+        (
+            "app.example.com",
+            "/.well-known/acme-challenge/unknown",
+            404,
+        ),
+        (
+            "app.example.com",
+            "/.well-known/acme-challenge/quiet-token",
+            200,
+        ),
+    ] {
+        plain
+            .write(format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes())
+            .await;
+        assert_eq!(plain.reply().await.status, status, "{target}");
+    }
+    let line = access_line("/.well-known/acme-challenge/quiet-token").await;
+    assert_eq!(line["target"], "hoster::access");
+    assert_eq!(line["level"], "INFO");
+    assert_eq!(line["status"], 200);
+
+    let noise: Vec<Value> = log
+        .json()
+        .into_iter()
+        .filter(|line| {
+            let path = line["path"].as_str().unwrap_or_default();
+            path.starts_with("/quiet/") || path.ends_with("/unknown")
+        })
+        .collect();
+    assert_eq!(noise, Vec::<Value>::new());
+}

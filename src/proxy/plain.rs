@@ -49,18 +49,29 @@ impl ChallengeOrRedirect {
     }
 }
 
+/// Per-request state of the `:80` service.
+pub struct PlainCtx {
+    /// When the request header had been read, for the access log's duration.
+    started: Instant,
+    /// The request was an ACME challenge that got its answer.
+    challenge: bool,
+}
+
 #[async_trait]
 impl ProxyHttp for ChallengeOrRedirect {
-    /// When the request header had been read, for the access log's duration.
-    type CTX = Instant;
+    type CTX = PlainCtx;
 
     fn new_ctx(&self) -> Self::CTX {
-        Instant::now()
+        PlainCtx {
+            started: Instant::now(),
+            challenge: false,
+        }
     }
 
-    async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         self.limits.admit(session, self.timeouts);
         let answer = PlainAnswer::new(session.req_header(), &self.routes.load(), &self.challenges);
+        ctx.challenge = matches!(answer, PlainAnswer::Challenge(_));
         answer.send(session).await;
         Ok(true)
     }
@@ -73,11 +84,18 @@ impl ProxyHttp for ChallengeOrRedirect {
         Error::e_explain(ErrorType::InternalError, "the :80 service never proxies")
     }
 
-    /// One access log line per request, like the `:443` service's (without a route: `:80`
-    /// never proxies).
-    async fn logging(&self, session: &mut Session, e: Option<&Error>, started: &mut Self::CTX) {
+    /// One access log line per request, like the `:443` service's. `:80` never proxies, so
+    /// no request has a route and the line is a `debug` one, which keeps redirects and
+    /// probes out of the log. An answered ACME challenge is the exception: it is logged at
+    /// `info`, as part of a certificate being issued.
+    async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
         let host = Forwarding::request_host(session.req_header()).unwrap_or_default();
-        AccessRecord::new(session, host, None, *started, e).emit();
+        let record = AccessRecord::new(session, host, None, ctx.started, e);
+        if ctx.challenge {
+            record.answered().emit();
+        } else {
+            record.emit();
+        }
     }
 }
 

@@ -408,13 +408,27 @@ The fake releases are wired in with `HOSTER_INSTALL_RELEASES_URL`, which replace
 | JSON log lines | `[log] format = "json"` in `hoster.toml` (or `HOSTER_LOG__FORMAT=json`), then `journalctl --user -u hoster -o cat \| jq` |
 | Only the access log | `journalctl --user -u hoster -o cat \| grep hoster::access` |
 | No access log | `Environment=RUST_LOG=info,hoster::access=off` in the drop-in |
+| Log scanner traffic too | `Environment=RUST_LOG=info,hoster::access::unrouted=debug,hoster::proxy::client=debug` in the drop-in |
 | Check for an update | `hoster update --check`: the running and the latest version, and the release notes |
 | Update | `hoster update` (`--version vX.Y.Z` for a specific release or a pre-release, `--yes` to skip the confirmation): installs the release, snapshots the database and restarts the service |
 | Roll back | `hoster rollback` (`--yes` to skip the confirmation): returns to the previous installed version, undoing the database migrations it does not know; their data is lost |
 
-**Log lines.** The proxy writes one line per request under the `hoster::access` target: host,
-method, path (without the query), matched route, stack, service, generation, upstream, status,
-duration in ms, response body bytes, client IP and, for a failed request, the error. Every
+**Log lines.** The proxy writes one line per request that matched a route under the
+`hoster::access` target: host, method, path (without the query), matched route, stack, service,
+generation, upstream, status, duration in ms, response body bytes, client IP and, for a failed
+request, the error.
+
+A server on a public address is probed all day, so what a client can cause without reaching an
+app is logged at `debug` only and does not show by default. There are two targets for it.
+`hoster::access::unrouted` has the access lines of requests that matched no route: an unknown
+host or prefix (404), a host that is not the TLS connection's name (421), and everything on
+port 80 except an answered ACME challenge. `hoster::proxy::client` has the connections a client
+broke before there was a request: a failed TLS handshake (every port scan, and every client
+that asks for a name hoster has no certificate for), a failed HTTP/2 handshake, a request
+header that never finished. The dashboard still counts the unrouted requests. Real proxy errors
+(an upstream that cannot be reached, running out of file descriptors) stay at `error`.
+
+Every
 deployment state change is logged under `hoster::deploy` (at `warn` when it failed, was
 rejected or went live with warnings), in addition to its deployment page. Deploy work runs in
 spans carrying `stack`, `deployment_id`, `generation` and `service`; JSON lines list them under

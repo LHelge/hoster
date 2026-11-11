@@ -166,6 +166,11 @@ impl Sandbox {
             .env("HOSTER_PROXY__THREADS", "1")
             .env("HOSTER_PROXY__GRACE_PERIOD", "1s")
             .env("HOSTER_PROXY__GRACEFUL_SHUTDOWN_TIMEOUT", "1s")
+            // Nothing listens here: the ACME task must not reach a real CA from a test.
+            .env(
+                "HOSTER_ACME__DIRECTORY_URL",
+                "https://127.0.0.1:1/directory",
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -466,6 +471,224 @@ fn running_out_of_file_descriptors_stops_accepting_until_connections_close() {
     }
     let response = http_get(sandbox.http, "/");
     assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+
+    hoster.signal(Signal::SIGINT);
+    assert!(hoster.wait().success());
+}
+
+/// What a scanner does to a public hoster, against the real binary: on `:80` and on `:443`,
+/// with and without a TLS session.
+struct Scanner<'a> {
+    sandbox: &'a Sandbox,
+    /// A client that trusts the certificate seeded for the admin host.
+    roots: rustls::RootCertStore,
+}
+
+impl<'a> Scanner<'a> {
+    const ADMIN_HOST: &'static str = "hoster.example.com";
+
+    /// Seeds `sandbox` with a certificate for the admin host, which hoster loads at startup,
+    /// so some of the scanner's TLS handshakes succeed.
+    fn new(sandbox: &'a Sandbox) -> Self {
+        let key = rcgen::generate_simple_self_signed(vec![Self::ADMIN_HOST.to_owned()]).unwrap();
+        let dir = sandbox.path("state/certs").join(Self::ADMIN_HOST);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fullchain.pem"), key.cert.pem()).unwrap();
+        std::fs::write(dir.join("privkey.pem"), key.signing_key.serialize_pem()).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(key.cert.der().clone()).unwrap();
+        Scanner { sandbox, roots }
+    }
+
+    /// Writes `bytes` to `addr` and waits for the answer or the end of the connection.
+    fn plain(&self, addr: SocketAddr, bytes: &[u8]) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let _ = stream.write_all(bytes);
+        let _ = stream.read(&mut [0; 1024]);
+    }
+
+    /// A TLS handshake on `:443` for `sni` (none: no SNI extension) offering `alpn`, then
+    /// `bytes`. Returns what came back, empty when the handshake failed.
+    fn tls(&self, sni: Option<&str>, alpn: &str, bytes: &[u8]) -> String {
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let mut config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(self.roots.clone())
+            .with_no_client_auth();
+        config.enable_sni = sni.is_some();
+        config.alpn_protocols = vec![alpn.as_bytes().to_vec()];
+        let name = sni.unwrap_or("unnamed.invalid").to_owned();
+        let name = rustls::pki_types::ServerName::try_from(name).unwrap();
+        let mut conn = rustls::ClientConnection::new(std::sync::Arc::new(config), name).unwrap();
+        let mut tcp = TcpStream::connect(self.sandbox.https).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let mut stream = rustls::Stream::new(&mut conn, &mut tcp);
+        let mut answer = Vec::new();
+        if stream.write_all(bytes).is_ok() {
+            let _ = stream.read_to_end(&mut answer);
+        }
+        String::from_utf8_lossy(&answer).into_owned()
+    }
+
+    /// One of everything that reaches no app.
+    fn scan(&self) {
+        let (http, https) = (self.sandbox.http, self.sandbox.https);
+        let admin = Some(Self::ADMIN_HOST);
+        // `:80`: an address as the host, a known host, a request that never finishes.
+        self.plain(http, b"GET / HTTP/1.1\r\nHost: 203.0.113.9\r\n\r\n");
+        self.plain(
+            http,
+            b"GET /.env HTTP/1.1\r\nHost: hoster.example.com\r\n\r\n",
+        );
+        self.plain(http, b"GET / HTTP/1.1\r\nHost: 203.0.");
+        // `:443` without a TLS session: a port scan, plain HTTP, no SNI, a name without a
+        // certificate.
+        drop(TcpStream::connect(https).unwrap());
+        self.plain(https, b"GET / HTTP/1.1\r\nHost: 203.0.113.9\r\n\r\n");
+        assert_eq!(self.tls(None, "http/1.1", b"GET / HTTP/1.1\r\n\r\n"), "");
+        assert_eq!(
+            self.tls(
+                Some("scanner.example.net"),
+                "http/1.1",
+                b"GET / HTTP/1.1\r\n\r\n"
+            ),
+            ""
+        );
+        // `:443` with one: another host (421), half a request, HTTP/1.1 on an `h2` connection.
+        let misdirected = self.tls(
+            admin,
+            "http/1.1",
+            b"GET / HTTP/1.1\r\nHost: 203.0.113.9\r\n\r\n",
+        );
+        assert!(misdirected.starts_with("HTTP/1.1 421"), "{misdirected}");
+        self.tls(admin, "http/1.1", b"GET / HTTP/1.1\r\nHost: hoster.exa");
+        self.tls(
+            admin,
+            "h2",
+            b"GET / HTTP/1.1\r\nHost: hoster.example.com\r\n\r\n",
+        );
+    }
+
+    /// A request for the admin app, whose access line marks a point in the log.
+    fn request(&self, path: &str) {
+        let head =
+            format!("GET {path} HTTP/1.1\r\nHost: hoster.example.com\r\nConnection: close\r\n\r\n");
+        let answer = self.tls(Some(Self::ADMIN_HOST), "http/1.1", head.as_bytes());
+        assert!(answer.starts_with("HTTP/1.1 "), "{answer}");
+    }
+}
+
+impl Hoster {
+    /// The stderr lines up to the first one containing `needle`.
+    fn lines_until(&self, needle: &str) -> Vec<String> {
+        let deadline = Instant::now() + TIMEOUT;
+        let mut lines = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.contains(needle) => return lines,
+                Ok(line) => lines.push(line),
+                Err(_) => panic!("hoster never logged {needle:?}"),
+            }
+        }
+    }
+}
+
+/// With the default `RUST_LOG=info`, nothing a scanner does writes a line: not the requests
+/// hoster answers itself, and not Pingora's `error` for each connection the client broke.
+/// A request for a routed host still gets its access line.
+#[test]
+fn scanner_traffic_writes_no_log_line_by_default() {
+    let sandbox = Sandbox::new("scanner");
+    let scanner = Scanner::new(&sandbox);
+    let hoster = Hoster::spawn(sandbox.command());
+    hoster.wait_for_line("hoster is ready");
+
+    scanner.scan();
+    // hoster logs a broken connection when it notices, which can be after the client is done.
+    std::thread::sleep(Duration::from_millis(300));
+    scanner.request("/login?end-of-scan");
+
+    let during = hoster.lines_until("path=\"/login\"");
+    let from_the_proxy: Vec<&String> = during
+        .iter()
+        .filter(|line| {
+            line.contains("pingora")
+                || line.contains("hoster::access")
+                || line.contains("hoster::proxy")
+        })
+        .collect();
+    assert_eq!(from_the_proxy, Vec::<&String>::new());
+
+    hoster.signal(Signal::SIGINT);
+    assert!(hoster.wait().success());
+}
+
+/// The same scan with the two `debug` targets on shows what was held back, each line under
+/// its target. This is also what notices a Pingora upgrade that words its errors differently
+/// (`ClientNoise` in `src/logging.rs` recognises them by their start).
+#[test]
+fn scanner_traffic_is_logged_at_debug_under_its_own_targets() {
+    let sandbox = Sandbox::new("scanner-debug");
+    let scanner = Scanner::new(&sandbox);
+    let mut cmd = sandbox.command();
+    cmd.env(
+        "RUST_LOG",
+        "info,hoster::access::unrouted=debug,hoster::proxy::client=debug",
+    );
+    let hoster = Hoster::spawn(cmd);
+    hoster.wait_for_line("hoster is ready");
+
+    scanner.scan();
+    std::thread::sleep(Duration::from_millis(300));
+    scanner.request("/login?end-of-scan");
+
+    let during = hoster.lines_until("path=\"/login\"");
+    let count = |target: &str, needle: &str| {
+        let target = format!("DEBUG {target}: ");
+        during
+            .iter()
+            .filter(|line| line.contains(&target) && line.contains(needle))
+            .count()
+    };
+    // Two answered on `:80` and the 421.
+    assert_eq!(
+        count("hoster::access::unrouted", "request"),
+        3,
+        "{during:#?}"
+    );
+    assert_eq!(
+        count("hoster::access::unrouted", "status=421"),
+        1,
+        "{during:#?}"
+    );
+    // Four failed TLS handshakes, one failed HTTP/2 handshake, two requests cut short.
+    assert_eq!(
+        count("hoster::proxy::client", "Downstream handshake error"),
+        4,
+        "{during:#?}"
+    );
+    assert_eq!(
+        count("hoster::proxy::client", "H2 handshake error"),
+        1,
+        "{during:#?}"
+    );
+    assert_eq!(
+        count("hoster::proxy::client", "Fail to proxy: Downstream"),
+        2,
+        "{during:#?}"
+    );
+    assert!(
+        !during
+            .iter()
+            .any(|line| line.contains("ERROR") && line.contains("pingora")),
+        "{during:#?}"
+    );
 
     hoster.signal(Signal::SIGINT);
     assert!(hoster.wait().success());

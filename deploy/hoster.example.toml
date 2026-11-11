@@ -21,6 +21,9 @@
 # Logging verbosity is set with RUST_LOG (default "info"), e.g. RUST_LOG=hoster=debug. The proxy
 # access log (target hoster::access) and deployment events (hoster::deploy) can be tuned on their
 # own, e.g. RUST_LOG=info,hoster::access=off turns the access log off.
+# Requests that matched no route and connections a client broke (scanners, mostly) are logged
+# at debug only: RUST_LOG=info,hoster::access::unrouted=debug,hoster::proxy::client=debug shows
+# them.
 #
 # Durations are humantime strings: "500ms", "30s", "5m", "1h 30m".
 # Values shown are the defaults unless marked "required".

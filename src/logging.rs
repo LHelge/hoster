@@ -13,6 +13,21 @@
 //! the [`ACCESS_TARGET`] target, and the store one line per deployment transition under
 //! [`DEPLOY_TARGET`], so either can be filtered on its own
 //! (`RUST_LOG=info,hoster::access=off`).
+//!
+//! # What anyone on the internet can make hoster log
+//!
+//! A proxy on a public address is probed all day, and a line per probe hides the lines that
+//! matter. So what a client can cause without reaching an app is logged at `debug`, under two
+//! targets of its own, and is silent by default:
+//!
+//! - [`UNROUTED_TARGET`]: the access line of a request that matched no route (an unknown host
+//!   or prefix, a host that is not the SNI name) and of everything on `:80` but an answered
+//!   ACME challenge;
+//! - [`CLIENT_TARGET`]: Pingora's `error` lines for a connection the client broke before a
+//!   request existed (a failed TLS or HTTP/2 handshake, a request header that never
+//!   finished), re-logged by [`ClientNoise`].
+//!
+//! `RUST_LOG=info,hoster::access::unrouted=debug,hoster::proxy::client=debug` brings both back.
 
 use std::fmt;
 use std::io::IsTerminal;
@@ -21,12 +36,17 @@ use std::str::FromStr;
 use serde::Deserialize;
 use tracing::Span;
 use tracing::field::Empty;
+use tracing_log::{AsLog, LogTracer};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// The target of the proxy's per-request access log lines.
 pub const ACCESS_TARGET: &str = "hoster::access";
+/// The target of the access log lines of requests that matched no route, logged at `debug`.
+/// A child of [`ACCESS_TARGET`], so turning that off turns these off too.
+pub const UNROUTED_TARGET: &str = "hoster::access::unrouted";
+/// The target of Pingora's lines about connections a client broke, re-logged at `debug`.
+pub const CLIENT_TARGET: &str = "hoster::proxy::client";
 /// The target of the deployment event log lines.
 pub const DEPLOY_TARGET: &str = "hoster::deploy";
 
@@ -83,11 +103,18 @@ impl From<LogFormat> for Logging {
 
 impl Logging {
     /// Installs this subscriber for the whole process, writing to stderr, and forwards records
-    /// of the `log` crate (Pingora logs through it) to it. A second call (or a subscriber
-    /// installed elsewhere first) leaves the existing one in place.
+    /// of the `log` crate (Pingora logs through it) to it through [`ClientNoise`]. A second
+    /// call (or a subscriber installed elsewhere first) leaves the existing one in place.
     pub fn init(self) {
         let ansi = self.format == LogFormat::Text && std::io::stderr().is_terminal();
-        let _ = self.subscriber(std::io::stderr, ansi).try_init();
+        let subscriber = self.subscriber(std::io::stderr, ansi);
+        // No `log` record above the most verbose level the filter lets through is built.
+        let max_level = subscriber.max_level_hint();
+        if tracing::subscriber::set_global_default(subscriber).is_ok()
+            && log::set_boxed_logger(Box::new(ClientNoise::default())).is_ok()
+        {
+            log::set_max_level(max_level.map_or(log::LevelFilter::Trace, |level| level.as_log()));
+        }
     }
 
     /// The subscriber writing to `writer`; `ansi` colours text output.
@@ -110,6 +137,67 @@ impl Logging {
             ),
         }
     }
+}
+
+/// The process's `log` logger: every record goes on to `tracing`, except Pingora's `error`
+/// lines about a connection the client broke, which are logged again at `debug` under
+/// [`CLIENT_TARGET`].
+///
+/// Pingora logs those at `error` whoever caused them. On `:443` that is every port scan and
+/// every client without a name hoster has a certificate for (there is no default certificate,
+/// ADR-0032). They are recognised by where Pingora logs them and how the message starts,
+/// since Pingora offers nothing better; `tests/supervisor.rs` fails when an upgrade changes
+/// the wording. Pingora's other errors (a failed `accept`, an upstream that cannot be
+/// reached, a panic) are not touched.
+#[derive(Default)]
+struct ClientNoise(LogTracer);
+
+impl ClientNoise {
+    /// Where Pingora 0.9 logs a client's failure, and how each such message starts.
+    const SOURCES: [(&str, &[&str]); 3] = [
+        // A TLS handshake that failed or timed out.
+        (
+            "pingora_core::services::listening",
+            &["Downstream handshake"],
+        ),
+        // An `h2` connection without a valid preface.
+        ("pingora_core::apps", &["H2 handshake error"]),
+        // A request that ended before its header did, or whose client went away later.
+        ("pingora_proxy", &["Fail to proxy: Downstream"]),
+    ];
+
+    /// The message of `record` if a client caused it.
+    fn message(record: &log::Record<'_>) -> Option<String> {
+        if record.level() != log::Level::Error {
+            return None;
+        }
+        let (_, starts) = Self::SOURCES
+            .iter()
+            .find(|(target, _)| *target == record.target())?;
+        let message = record.args().to_string();
+        let message = message.trim_start();
+        starts
+            .iter()
+            .any(|start| message.starts_with(start))
+            .then(|| message.to_owned())
+    }
+}
+
+impl log::Log for ClientNoise {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        match Self::message(record) {
+            Some(message) => {
+                tracing::debug!(target: CLIENT_TARGET, source = record.target(), "{message}");
+            }
+            None => self.0.log(record),
+        }
+    }
+
+    fn flush(&self) {}
 }
 
 /// The spans deploy code runs in, so its log lines carry the deployment they belong to.
@@ -244,6 +332,68 @@ mod tests {
 
     use super::capture::subscriber;
     use super::*;
+
+    #[test]
+    fn only_pingoras_client_errors_are_noise() {
+        let message = |level, target: &str, args: std::fmt::Arguments<'_>| {
+            let record = log::Record::builder()
+                .level(level)
+                .target(target)
+                .args(args)
+                .build();
+            ClientNoise::message(&record)
+        };
+        let error = log::Level::Error;
+        let listening = "pingora_core::services::listening";
+        for (target, args) in [
+            (
+                listening,
+                format_args!("Downstream handshake error from 203.0.113.9:1234: eof"),
+            ),
+            (listening, format_args!("Downstream handshake timeout")),
+            (
+                "pingora_core::apps",
+                format_args!("H2 handshake error  HandshakeError"),
+            ),
+            (
+                "pingora_proxy",
+                format_args!("Fail to proxy: Downstream ConnectionClosed context: x"),
+            ),
+        ] {
+            assert!(message(error, target, args).is_some(), "{target}");
+        }
+        for (level, target, args) in [
+            // A real problem from the same place.
+            (
+                error,
+                listening,
+                format_args!("Accept() failed too many open files"),
+            ),
+            (
+                error,
+                "pingora_proxy",
+                format_args!("Fail to proxy: Upstream ConnectRefused, status: 502"),
+            ),
+            (
+                error,
+                "pingora_proxy",
+                format_args!("Fail to proxy: Internal InternalError"),
+            ),
+            // The same words from somewhere else, or at another level.
+            (
+                error,
+                "hoster::proxy",
+                format_args!("Downstream handshake timeout"),
+            ),
+            (
+                log::Level::Warn,
+                listening,
+                format_args!("Downstream handshake timeout"),
+            ),
+        ] {
+            assert_eq!(message(level, target, args), None, "{target}");
+        }
+    }
 
     #[test]
     fn formats_parse_and_print() {

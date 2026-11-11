@@ -30,6 +30,7 @@ humantime = "2.4.0"
 humantime-serde = "1.1.1"
 icondata = { version = "0.7.0", default-features = false, features = ["lucide"] }
 instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "rcgen", "time", "x509-parser"] }
+log = "0.4.35"
 nix = { version = "0.31.3", features = ["hostname"] }
 oauth2 = { version = "5.0.0", default-features = false }
 pingora = { version = "0.9", default-features = false, features = ["proxy", "rustls"] }
@@ -55,6 +56,7 @@ tokio-util = "0.7.20"
 toml = "1.2.1"
 toml_edit = "0.25.19"
 tracing = "0.1.44"
+tracing-log = "0.2.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 x509-parser = "0.18.1"
 
