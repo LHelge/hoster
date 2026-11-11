@@ -1,7 +1,11 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+
 use super::*;
+use crate::store::TrafficSeries;
 
 /// A [`StatsSource`] serving whatever the test puts in it.
 #[derive(Debug, Default)]
@@ -10,6 +14,8 @@ pub(crate) struct FakeStats {
     /// Reading the deployments fails.
     pub broken: AtomicBool,
     pub certificates: Mutex<Vec<CertExpiry>>,
+    /// Traffic history as minute buckets; hour reads roll them up.
+    pub traffic: Mutex<Vec<TrafficBucket<Histogram>>>,
 }
 
 #[async_trait]
@@ -23,6 +29,34 @@ impl StatsSource for FakeStats {
 
     fn certificates(&self) -> Vec<CertExpiry> {
         self.certificates.lock().unwrap().clone()
+    }
+
+    async fn traffic(
+        &self,
+        resolution: Resolution,
+        span: Span<Timestamp>,
+    ) -> anyhow::Result<Vec<TrafficBucket<Histogram>>> {
+        if self.broken.load(Ordering::Relaxed) {
+            anyhow::bail!("database is locked");
+        }
+        let mut buckets: BTreeMap<(Timestamp, TrafficSeries), TrafficBucket<Histogram>> =
+            BTreeMap::new();
+        for bucket in self.traffic.lock().unwrap().iter() {
+            let start = resolution.bucket(bucket.start);
+            if !span.contains(&start) {
+                continue;
+            }
+            match buckets.entry((start, bucket.series.clone())) {
+                Entry::Occupied(mut sum) => *sum.get_mut() += bucket.clone(),
+                Entry::Vacant(slot) => {
+                    slot.insert(TrafficBucket {
+                        start,
+                        ..bucket.clone()
+                    });
+                }
+            }
+        }
+        Ok(buckets.into_values().collect())
     }
 }
 
