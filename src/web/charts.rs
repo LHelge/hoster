@@ -493,8 +493,9 @@ impl From<&Histogram> for Percentiles {
 }
 
 /// A line chart of the p95 (yellow) and p50 (teal) response times over a [`Timeline`], one
-/// point per bucket at the middle of its bar. A bucket without samples breaks the lines
-/// instead of drawing them down to zero.
+/// point per bucket at the middle of its bar. Buckets without samples break the solid
+/// lines instead of drawing them down to zero; a dashed line joins the samples on either side,
+/// and a sample with none beside it is a dot (the p95 dot wider, so an equal p50 leaves a ring).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineChart {
     timeline: Timeline,
@@ -589,6 +590,21 @@ impl LineChart {
                     open = true;
                 }
                 None => open = false,
+            }
+        }
+        // Where buckets without samples separate two runs, a dashed line joins them, so a
+        // series of scattered samples reads as one series and still shows where nothing was
+        // measured.
+        for (before, after) in runs.iter().zip(runs.iter().skip(1)) {
+            if let (Some((x1, y1)), Some((x2, y2))) = (before.last(), after.first()) {
+                write!(
+                    f,
+                    r#"<polyline class="chart-line chart-gap {class}" points="{},{} {},{}" vector-effect="non-scaling-stroke"></polyline>"#,
+                    Num(*x1),
+                    Num(*y1),
+                    Num(*x2),
+                    Num(*y2)
+                )?;
             }
         }
         for mut run in runs {
