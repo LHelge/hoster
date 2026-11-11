@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO image_checks (stack, service, image, tag, digest, checked_at, error)\n             VALUES (?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT (stack, service) DO UPDATE SET\n                 image = excluded.image, tag = excluded.tag, digest = excluded.digest,\n                 checked_at = excluded.checked_at, error = excluded.error",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "fdfd0aaccb83dc742e446410323be114cc5a0ef3294cc6a3fdbf06ab9f91c128"
+}

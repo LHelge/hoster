@@ -1,5 +1,6 @@
 //! Generic OCI registry client (token discovery, manifest `HEAD` for digests, paginated tag
-//! lists) and the edge-triggered digest poller (ADR-0005, ADR-0043, ADR-0061).
+//! lists), the edge-triggered digest poller and the update checker of third-party images
+//! (ADR-0005, ADR-0043, ADR-0061).
 //!
 //! Also home to the registry credentials (ADR-0025): one credential per registry host, kept in
 //! the secret store and shared by podman pulls (`X-Registry-Auth`) and the registry client's
@@ -12,6 +13,7 @@
 mod client;
 mod credentials;
 mod poller;
+mod updates;
 
 #[allow(
     unused_imports,
@@ -23,3 +25,8 @@ pub use credentials::{
     RegistryHost, StoredCredentials,
 };
 pub use poller::{Poller, TrackedService};
+#[allow(
+    unused_imports,
+    reason = "the handle is used by Settings → Updates (Bears j6w)"
+)]
+pub use updates::{UpdateCheckHandle, UpdateChecker};

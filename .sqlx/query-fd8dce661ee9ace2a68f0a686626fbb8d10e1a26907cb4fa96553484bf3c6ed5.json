@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM image_updates WHERE stack = ? AND service = ? AND kind = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "fd8dce661ee9ace2a68f0a686626fbb8d10e1a26907cb4fa96553484bf3c6ed5"
+}

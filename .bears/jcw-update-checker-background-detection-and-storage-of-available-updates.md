@@ -1,10 +1,10 @@
 ---
 id: jcw
 title: "Update checker: background detection and storage of available updates"
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:22:55.324406067Z"
-updated: "2026-11-09T17:22:55.324406067Z"
+updated: "2026-11-11T06:47:05.223490938Z"
 tags:
   - registry
   - store
@@ -13,13 +13,14 @@ depends_on:
   - ggf
   - tsg
 parent: "6z3"
+attempts: 1
 ---
 
 ## Summary
 A background task that finds available updates for every checkable third-party service, per ADR-0061, and stores them. It only detects; it never deploys (that's the auto-update task).
 
 ## Acceptance Criteria
-- [ ] An `UpdateChecker` (in `src/registry/`, next to the poller, sharing its client and backoff style) runs at the interval from a typed single-row `update_settings` table (ADR-0061 §7, ADR-0058 §1: default 6 h, bounded 1 h–7 d, ±10 % jitter, last pass persisted so a restart doesn't trigger a full pass), edited in Settings → Updates. It also offers a "Check now" entry point for the UI.
+- [ ] An `UpdateChecker` (in `src/registry/`, next to the poller, sharing its client and backoff style) runs at the interval from a typed single-row `update_settings` table (ADR-0061 §7, ADR-0058 §1: default 6 h, bounded 1 h–7 d, ±10 % jitter, last pass persisted so a restart doesn't trigger a full pass), edited in Settings → Updates. It also offers a "Check now" entry point for the UI (`UpdateCheckHandle`); the Settings → Updates page itself moved to j6w.
 - [ ] For each service of each active revision whose image is checkable:
   - a moved-tag check (HEAD digest vs. the revision's pinned digest);
   - for parseable tags, the newest same-line candidate across patch / minor / major. Store the highest of each kind, so the UI can show "patch available, major available".

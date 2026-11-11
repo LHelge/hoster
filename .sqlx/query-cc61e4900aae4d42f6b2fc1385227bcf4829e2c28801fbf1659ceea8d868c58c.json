@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO image_updates (stack, service, kind, tag, digest, first_seen_at)\n                 VALUES (?, ?, ?, ?, ?, ?)\n                 ON CONFLICT (stack, service, kind) DO UPDATE SET\n                     tag = excluded.tag, digest = excluded.digest,\n                     first_seen_at = excluded.first_seen_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "cc61e4900aae4d42f6b2fc1385227bcf4829e2c28801fbf1659ceea8d868c58c"
+}

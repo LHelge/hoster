@@ -632,11 +632,13 @@ pub enum EventKind {
     HosterRolledBack,
     /// A notification mail could not be delivered (ADR-0058 §9); never itself mailed.
     NotificationFailed,
+    /// The update checker found an update of a third-party image (ADR-0061 §8); never mailed.
+    UpdateAvailable,
 }
 
 impl EventKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::DeployStarted,
         Self::DeploySucceeded,
         Self::DeployFailed,
@@ -657,6 +659,7 @@ impl EventKind {
         Self::HosterUpdated,
         Self::HosterRolledBack,
         Self::NotificationFailed,
+        Self::UpdateAvailable,
     ];
 
     /// The text stored in the `kind` column. It must match the `#[sqlx(rename_all)]` encoding,
@@ -684,6 +687,7 @@ impl EventKind {
             Self::HosterUpdated => "hoster_updated",
             Self::HosterRolledBack => "hoster_rolled_back",
             Self::NotificationFailed => "notification_failed",
+            Self::UpdateAvailable => "update_available",
         }
     }
 }

@@ -29,7 +29,7 @@ use crate::notify::Notifier;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
 use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
-use crate::registry::{Poller, RegistryClient, StoredCredentials};
+use crate::registry::{Poller, RegistryClient, StoredCredentials, UpdateChecker};
 use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
@@ -802,6 +802,13 @@ impl Startup for Supervisor {
                     &self.config.poller,
                 );
                 tokio::spawn(poller.run(self.teardown.token.child_token()));
+                // The update checker: finds updates of third-party images (ADR-0061).
+                let checker = UpdateChecker::new(
+                    Box::new(Arc::clone(&orchestrator)),
+                    registry.client.clone(),
+                    store.clone(),
+                );
+                tokio::spawn(checker.run(self.teardown.token.child_token()));
 
                 // The instance name (ADR-0058 §2), cached for the sidebar and the notifier.
                 let instance = Instance::load(store.clone()).await?;

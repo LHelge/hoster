@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM image_updates\n             WHERE (stack, service) IN (\n                 SELECT stack, service FROM image_checks\n                 WHERE stack = ? AND service = ? AND (image, tag, digest) IS NOT (?, ?, ?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "75d59fc6b73d4b743dd02c654ae2c5898fce5749dca5c8115bd28f37364658c2"
+}

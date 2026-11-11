@@ -146,6 +146,16 @@ impl RegistryError {
         }
     }
 
+    /// Whether the registry as a whole failed, rather than one image: a rate limit, a network
+    /// error or a server error. The update checker stops asking that registry for the pass.
+    pub fn is_registry_wide(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } | Self::Http { .. } => true,
+            Self::Status { status, .. } => status.is_server_error(),
+            _ => false,
+        }
+    }
+
     /// The kind of failure in a few words, for the UI's "test" result (`401 Unauthorized`,
     /// `429 Too Many Requests`, `network error`, …). Never contains a credential.
     pub fn class(&self) -> String {

@@ -90,7 +90,8 @@ use crate::stack::{
 };
 use crate::store::{
     Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
-    NewDeployment, NewEvent, Provenance, StackRevision, Store, StoreError, WebhookRejection,
+    ImageCheck, NewDeployment, NewEvent, Provenance, StackRevision, Store, StoreError,
+    WebhookRejection,
 };
 
 use certs::CertHosts;
@@ -98,7 +99,7 @@ pub use certs::CertStatus;
 use engine::{Run, Target};
 use event_log::OperatorEvents;
 pub use event_log::{
-    EventLog, EventTopic, HosterEvents, NotificationEvents, Operator, RegistryEvents,
+    EventLog, EventTopic, HosterEvents, NotificationEvents, Operator, RegistryEvents, UpdateEvents,
 };
 #[cfg_attr(
     not(test),
@@ -365,6 +366,9 @@ pub enum UiEvent {
     },
     /// An event was recorded in the event log (ADR-0055); pages showing the feed append it.
     Event(crate::store::Event),
+    /// The update checker recorded new results for `stack`'s services (ADR-0061); pages
+    /// showing its updates re-read them from the store.
+    Updates { stack: String },
 }
 
 /// How many `ui_events` a slow receiver may fall behind before it lags.
@@ -905,6 +909,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self.events.clone()
     }
 
+    /// Tells the open UI pages that the update checker recorded new results for `stack`
+    /// (ADR-0061).
+    pub fn announce_updates(&self, stack: &str) {
+        self.emit(UiEvent::Updates {
+            stack: stack.to_owned(),
+        });
+    }
+
     /// Sends `event` to the open UI pages, if there are any.
     fn emit(&self, event: UiEvent) {
         // No receiver is not an error: no UI page is open.
@@ -1194,6 +1206,43 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
         }
         Ok(tracked)
+    }
+
+    /// Every service whose active revision names a third-party image with a tag (ADR-0061
+    /// §1), with the digest the revision pins for it: what the update checker checks. CI-built
+    /// and digest-only images are left out, and so is a service the revision pins no digest
+    /// for.
+    pub async fn checkable(&self) -> Result<Vec<ImageCheck>> {
+        let mut checkable = Vec::new();
+        for stack in self.store.stacks().await? {
+            let Some(revision) = self.store.latest_revision(&stack.name).await? else {
+                continue;
+            };
+            let definition: Stack = revision.toml.parse()?;
+            let pins = self.store.revision_images(revision.id).await?;
+            for (name, service) in &definition.services {
+                if service.image.is_ci_built() || service.image.tag().is_none() {
+                    continue;
+                }
+                let Some(digest) = pins.get(name.as_ref()) else {
+                    continue;
+                };
+                let digest =
+                    digest
+                        .parse::<Digest>()
+                        .map_err(|message| OrchestratorError::Digest {
+                            service: name.to_string(),
+                            message,
+                        })?;
+                checkable.push(ImageCheck {
+                    stack: stack.name.clone(),
+                    service: name.to_string(),
+                    image: service.image.clone(),
+                    digest,
+                });
+            }
+        }
+        Ok(checkable)
     }
 
     /// A deploy from the webhook (ADR-0042, ADR-0047): the caller must match the stack's
