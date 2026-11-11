@@ -27,5 +27,5 @@ Give the generic OCI registry client the two operations update detection needs, 
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## References
-- The M14 ADR (task 7ah); ADR-0025
+- ADR-0061; ADR-0025
 - `src/registry/client.rs`, `src/registry/client_tests.rs`, `src/stack/image.rs`

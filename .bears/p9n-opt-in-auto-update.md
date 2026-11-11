@@ -28,5 +28,5 @@ Apply candidates that match a service's `auto_update` policy automatically: one 
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## References
-- The M14 ADR (task 7ah); ADR-0040, ADR-0041, ADR-0043, ADR-0049, ADR-0052
+- ADR-0061; ADR-0040, ADR-0041, ADR-0043, ADR-0049, ADR-0052
 - `src/orchestrator/mod.rs`, `src/registry/`, `src/store/types.rs` (`DeploymentSource`)

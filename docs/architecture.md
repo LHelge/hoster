@@ -292,6 +292,7 @@ flowchart LR
             ORC[Orchestrator<br/>Arc, async methods]
             DEP[Deploy tasks<br/>one per stack]
             POLL[Digest poller]
+            UPD[Update checker]
             ACME[ACME task]
             HC[Health checker]
             REC[Reconciler]
@@ -326,6 +327,8 @@ flowchart LR
     API -->|method call| ORC
     POLL -->|method call| ORC
     POLL --> GHCR
+    UPD -->|method call| ORC
+    UPD --> REG[(Docker Hub, ghcr,<br/>other registries)]
     ORC --> DEP
     DEP --> HC
     DEP --> PC
@@ -355,8 +358,9 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 | **State store** | orchestrator runtime | SQLite via sqlx (ADR-0022): `SqlitePool`, WAL mode, embedded migrations, compile-time checked queries. Persists stacks, deployments, digests, generations, port allocations, deploy history, sessions. |
 | **Health checker** | orchestrator runtime | Probes new containers before the swap with the service's check: HTTP or TCP on their `127.0.0.1` port, or an exec inside the container (ADR-0038, ADR-0056, §5.5). Afterwards, periodic probes feed status only. |
 | **ACME task** | orchestrator runtime, single task | Account lifecycle, issuance, renewal. Writes `CertMap` and `ChallengeMap`. Persists account and certs to disk. |
-| **Registry client** | orchestrator runtime | Generic OCI distribution client (ADR-0025): token discovery from `WWW-Authenticate`, `HEAD` manifest → digest. Per-registry-host credentials. Used by the poller and for resolving third-party tags at stack apply. |
+| **Registry client** | orchestrator runtime | Generic OCI distribution client (ADR-0025): token discovery from `WWW-Authenticate`, `HEAD` manifest → digest, and paginated tag lists. Per-registry-host credentials. Used by the poller, the update checker and for resolving third-party tags at stack apply. |
 | **Digest poller** | orchestrator runtime | Periodically resolves tracked ghcr tags to digests. Calls `orchestrator.deploy` only when a tag's observed digest changes (ADR-0043). |
+| **Update checker** | orchestrator runtime | Checks third-party images for updates (ADR-0061), every 6 h by default with jitter (Settings → Updates, "Check now"). Sees moved tags by `HEAD` and newer versions in the same line from the tag list, backing off per registry on 429. Stores candidates in `image_updates` for the UI. For services with `auto_update`, applies a stack's allowed candidates as one new revision and one `AutoUpdate` deployment through the orchestrator, skipping stacks with an active or queued deployment; each candidate is acted on once. |
 | **Notifier** | orchestrator runtime | Mails the operator about problems and recoveries (ADR-0058). Reads the event log (§11) past a persisted cursor, woken by `ui_events` and a one-minute timer; selects, de-duplicates and rate-limits; delivers through a mail `Provider` (Resend) with a short retry, and records `NotificationFailed` when it gives up. Idle until notifications are configured in Settings. Beyond ADR-0058 §7–§8 it keeps the open problems true to what the producers still know: a cancelled deploy (`DeployFailed`, warning) is not mailed; a successful deploy, or a rollback that went live, forgets the stack's crash-loop and health problems, since their generations are gone; `HosterStarted` forgets all of those, which the reconciler and health monitor write again if they persist; `StackRemoved` forgets every problem of the stack, its hosts' included. Open problems with no repeat event are reminded of from the timer, a day after their last mail (deploy problems never). The hourly cap and its held-back count live in memory. |
 | **Admin web UI + webhook (Axum)** | orchestrator runtime | One Axum app (ADR-0021).<br/>• **UI:** Askama-rendered pages with vendored HTMX 4 (embedded in the binary). GitHub OAuth login, restricted to `HOSTER_ADMIN_GITHUB`. SQLite sessions and CSRF tokens (ADR-0031).<br/>• **Webhook:** `/hooks/deploy`, authenticated with a GitHub Actions OIDC token (signature via a cached JWKS, `iss`, `aud`, expiry, single-use `jti`) and authorized by the stack's `[deploy]` rule (ADR-0047).<br/>• **Wiring:** calls `Orchestrator` methods directly and renders their typed results. Live views (deploy progress, logs) stream through SSE or HTMX polling. |
 | **GitHub OAuth client** | orchestrator runtime | Authorization-code + PKCE flow against github.com. Compares the login handle case-insensitively with `HOSTER_ADMIN_GITHUB` (ADR-0031). |
@@ -371,7 +375,7 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 ```
 process hoster
 ├── main thread ── #[tokio::main] orchestrator runtime (multi-thread, N workers)
-│                  supervisor, orchestrator, deploy tasks, ACME, poller, API, reconciler, notifier
+│                  supervisor, orchestrator, deploy tasks, ACME, poller, update checker, API, reconciler, notifier
 └── "pingora" std::thread ── pingora_core::server::Server::run(RunArgs{ custom watcher })
                  ├── Pingora "Server" runtime (1 thread): main loop, awaits our ShutdownSignalWatch
                  ├── ":80" service runtime  (ServerConf.threads or per-service override)
@@ -415,7 +419,7 @@ reach zero to know the drain is done (§5.3). No message from the proxy is neede
 ### 3.3 Channels
 
 Requests into the orchestrator are **method calls** on `Arc<Orchestrator>` (ADR-0050): the web
-UI, webhook, poller and reconciler call `apply`, `deploy`, `remove`, `rollback` and `status` and
+UI, webhook, poller, update checker and reconciler call `apply`, `deploy`, `remove`, `rollback` and `status` and
 receive typed results; deploy tasks call `transition(deployment_id, event)`. Channels are used only
 where a boundary needs them:
 
@@ -642,6 +646,8 @@ swap and the inflight drain without changing the states or transitions.
 - **One deploy per stack.** While a stack has an active deployment, new commands for it are
   queued (ADR-0040). The queue keeps only the newest target, and when the active deploy
   ends the orchestrator re-runs the idempotency check against it. Different stacks deploy in parallel.
+- **Auto-updates don't queue.** The update checker skips a stack that has an active or queued
+  deployment and tries again on its next pass, so it never takes the pending slot (ADR-0061).
 
 ### 5.3 Draining
 

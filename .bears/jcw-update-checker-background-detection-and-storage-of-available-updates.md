@@ -16,10 +16,10 @@ parent: "6z3"
 ---
 
 ## Summary
-A background task that finds available updates for every checkable third-party service, per the M14 ADR, and stores them. It only detects; it never deploys (that's the auto-update task).
+A background task that finds available updates for every checkable third-party service, per ADR-0061, and stores them. It only detects; it never deploys (that's the auto-update task).
 
 ## Acceptance Criteria
-- [ ] An `UpdateChecker` (in `src/registry/`, next to the poller, sharing its client and backoff style) runs every `updates.interval` (a new `hoster.toml` section in `src/config.rs`, default 6h, with jitter, plus a `HOSTER_UPDATES_INTERVAL` override per ADR-0024 conventions). It also offers a "check now" entry point for the UI.
+- [ ] An `UpdateChecker` (in `src/registry/`, next to the poller, sharing its client and backoff style) runs at the interval from a typed single-row `update_settings` table (ADR-0061 §7, ADR-0058 §1: default 6 h, bounded 1 h–7 d, ±10 % jitter, last pass persisted so a restart doesn't trigger a full pass), edited in Settings → Updates. It also offers a "Check now" entry point for the UI.
 - [ ] For each service of each active revision whose image is checkable:
   - a moved-tag check (HEAD digest vs. the revision's pinned digest);
   - for parseable tags, the newest same-line candidate across patch / minor / major. Store the highest of each kind, so the UI can show "patch available, major available".
@@ -34,6 +34,6 @@ A background task that finds available updates for every checkable third-party s
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## References
-- The M14 ADR (task 7ah); ADR-0022, ADR-0024, ADR-0025, ADR-0043, ADR-0052 (reversible migrations)
+- ADR-0061; ADR-0022, ADR-0025, ADR-0058, ADR-0043, ADR-0052 (reversible migrations)
 - `docs/architecture.md` §2, §3
 - `src/registry/poller.rs`, `src/registry/client.rs`, `src/config.rs`, `src/store/`, `migrations/`

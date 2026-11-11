@@ -1,15 +1,16 @@
 ---
 id: "7ah"
 title: "ADR: update detection and opt-in auto-update for third-party images"
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:21:18.094672133Z"
-updated: "2026-11-09T17:21:18.094672133Z"
+updated: "2026-11-11T06:08:28.792576396Z"
 tags:
   - decision
   - docs
   - adr
 parent: "6z3"
+attempts: 1
 ---
 
 ## Summary
