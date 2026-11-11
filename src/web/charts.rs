@@ -493,9 +493,9 @@ impl From<&Histogram> for Percentiles {
 }
 
 /// A line chart of the p95 (yellow) and p50 (teal) response times over a [`Timeline`], one
-/// point per bucket at the middle of its bar. Buckets without samples break the solid
-/// lines instead of drawing them down to zero; a dashed line joins the samples on either side,
-/// and a sample with none beside it is a dot (the p95 dot wider, so an equal p50 leaves a ring).
+/// point per bucket at the middle of its bar. A bucket without samples is drawn at zero, so
+/// the lines run the whole timeline and quiet stretches lie on the axis; its tooltip says "no
+/// samples". A series without any samples draws no line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineChart {
     timeline: Timeline,
@@ -576,54 +576,23 @@ impl LineChart {
         scale: &Scale,
         pick: impl Fn(&Percentiles) -> Option<Duration>,
     ) -> fmt::Result {
+        if self.points.iter().all(|point| pick(point).is_none()) {
+            return Ok(());
+        }
         let slot = self.timeline.slot();
-        let mut runs: Vec<Vec<(f64, f64)>> = Vec::new();
-        let mut open = false;
+        write!(f, r#"<polyline class="chart-line {class}" points=""#)?;
         for (i, point) in self.points.iter().enumerate() {
-            match pick(point) {
-                Some(d) => {
-                    let xy = (slot * (i as f64 + 0.5), scale.y(d.as_secs_f64()));
-                    match runs.last_mut() {
-                        Some(run) if open => run.push(xy),
-                        _ => runs.push(vec![xy]),
-                    }
-                    open = true;
-                }
-                None => open = false,
-            }
+            // A bucket without samples sits on the axis.
+            let value = pick(point).unwrap_or_default().as_secs_f64();
+            let sep = if i == 0 { "" } else { " " };
+            write!(
+                f,
+                "{sep}{},{}",
+                Num(slot * (i as f64 + 0.5)),
+                Num(scale.y(value))
+            )?;
         }
-        // Where buckets without samples separate two runs, a dashed line joins them, so a
-        // series of scattered samples reads as one series and still shows where nothing was
-        // measured.
-        for (before, after) in runs.iter().zip(runs.iter().skip(1)) {
-            if let (Some((x1, y1)), Some((x2, y2))) = (before.last(), after.first()) {
-                write!(
-                    f,
-                    r#"<polyline class="chart-line chart-gap {class}" points="{},{} {},{}" vector-effect="non-scaling-stroke"></polyline>"#,
-                    Num(*x1),
-                    Num(*y1),
-                    Num(*x2),
-                    Num(*y2)
-                )?;
-            }
-        }
-        for mut run in runs {
-            // A lone point is a zero-length line, which the round caps draw as a dot, made
-            // wider than the line by `chart-point` so it can be seen.
-            let point = if run.len() == 1 {
-                run.push(run[0]);
-                " chart-point"
-            } else {
-                ""
-            };
-            write!(f, r#"<polyline class="chart-line{point} {class}" points=""#)?;
-            for (n, (x, y)) in run.into_iter().enumerate() {
-                let sep = if n == 0 { "" } else { " " };
-                write!(f, "{sep}{},{}", Num(x), Num(y))?;
-            }
-            f.write_str(r#"" vector-effect="non-scaling-stroke"></polyline>"#)?;
-        }
-        Ok(())
+        f.write_str(r#"" vector-effect="non-scaling-stroke"></polyline>"#)
     }
 }
 
