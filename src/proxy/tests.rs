@@ -192,6 +192,7 @@ fn service(routes: Vec<Route>) -> Service {
 /// - `flaky.example.com` `/` → a keep-alive listener that answers only the first request on
 ///   each connection and closes on the second, counting requests
 /// - `gap.example.com` `/` → a service in its stop-first gap
+/// - `raw.example.com` `/`; `/api` (stripped) → the [`Recorder`], which keeps every byte it gets
 /// - `admin.example.com` → the app on a Unix socket (reserved host)
 /// - `hoster.example.com` → hoster's real admin app on its own 0600 Unix socket (reserved host)
 ///
@@ -217,6 +218,8 @@ struct Harness {
     state: AppState,
     resets: Arc<AtomicUsize>,
     flaky_requests: Arc<AtomicUsize>,
+    /// What the upstream behind `raw.example.com` received.
+    recorder: Recorder,
     shutdown: watch::Sender<Option<ShutdownSignal>>,
     thread: Option<std::thread::JoinHandle<()>>,
     /// hoster's admin app behind `hoster.example.com`, and the server running it.
@@ -367,6 +370,11 @@ impl Harness {
             }
         });
 
+        let recorder = Recorder::default();
+        let recorder_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let recorder_port = recorder_listener.local_addr().unwrap().port();
+        tokio::spawn(recorder.clone().serve(recorder_listener));
+
         let down_port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -411,6 +419,13 @@ impl Harness {
                 name("gapped"),
                 service(vec![route("gap.example.com", "/", false, none())]),
             ),
+            (
+                name("raw"),
+                service(vec![
+                    route("raw.example.com", "/", false, none()),
+                    route("raw.example.com", "/api", true, none()),
+                ]),
+            ),
         ]);
         let stack = Stack {
             name: name("site"),
@@ -426,6 +441,7 @@ impl Harness {
             .with_live(name("down"), [(8080, upstream(down_port, "down"))])
             .with_live(name("reset"), [(8080, upstream(reset_port, "reset"))])
             .with_live(name("flaky"), [(8080, upstream(flaky_port, "flaky"))])
+            .with_live(name("raw"), [(8080, upstream(recorder_port, "raw"))])
             .with_gap(name("gapped"), Duration::from_secs(7))]
         .into_iter()
         .collect();
@@ -453,6 +469,7 @@ impl Harness {
             "reset.example.com",
             "flaky.example.com",
             "gap.example.com",
+            "raw.example.com",
             "admin.example.com",
             "hoster.example.com",
             "noroute.example.com",
@@ -513,6 +530,7 @@ impl Harness {
             state,
             resets,
             flaky_requests,
+            recorder,
             shutdown,
             thread: Some(thread),
             admin,
@@ -761,6 +779,249 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// A recording upstream
+
+/// One request as the [`Recorder`] received it, framed strictly by RFC 9112 §6.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Seen {
+    /// The raw request line and header section, up to and including the empty line.
+    head: Vec<u8>,
+    /// The decoded body.
+    body: Vec<u8>,
+}
+
+impl Seen {
+    fn line(&self) -> String {
+        let end = self.head.windows(2).position(|w| w == b"\r\n");
+        String::from_utf8_lossy(&self.head[..end.unwrap_or(0)]).into_owned()
+    }
+
+    /// The values of the header `name`, as the bytes between the colon and the line end.
+    fn header(&self, name: &str) -> Vec<String> {
+        String::from_utf8_lossy(&self.head)
+            .split("\r\n")
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim().to_owned())
+            .collect()
+    }
+
+    /// What in the head a less strict server could frame differently than this recorder did
+    /// (the disagreement request smuggling needs). Empty for a head hoster may forward.
+    fn ambiguities(&self) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        let text = String::from_utf8_lossy(&self.head);
+        let lines: Vec<&str> = text.trim_end_matches("\r\n").split("\r\n").collect();
+        if lines.iter().any(|line| line.contains(['\r', '\n', '\0'])) {
+            found.push("a bare CR, LF or NUL");
+        }
+        let fields: Vec<(&str, &str)> = lines[1..]
+            .iter()
+            .map(|line| line.split_once(':').unwrap_or((line, "")))
+            .collect();
+        if lines[1..].iter().any(|line| line.starts_with([' ', '\t'])) {
+            found.push("a folded header line");
+        }
+        if fields.iter().any(|(name, _)| {
+            name.is_empty() || name.contains(|c: char| c.is_ascii_whitespace() || c.is_control())
+        }) {
+            found.push("whitespace in a header name");
+        }
+        let values = |name: &str| -> Vec<&str> {
+            fields
+                .iter()
+                .filter(|(n, _)| n.trim().eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.trim_matches([' ', '\t']))
+                .collect()
+        };
+        let lengths = values("content-length");
+        let encodings = values("transfer-encoding");
+        if !lengths.is_empty() && !encodings.is_empty() {
+            found.push("Content-Length with Transfer-Encoding");
+        }
+        if lengths.len() > 1 {
+            found.push("more than one Content-Length");
+        }
+        if lengths
+            .iter()
+            .any(|v| v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()))
+        {
+            found.push("a Content-Length that is not a number");
+        }
+        if encodings.len() > 1 || encodings.iter().any(|v| *v != "chunked") {
+            found.push("a Transfer-Encoding other than one `chunked`");
+        }
+        if values("host").len() > 1 {
+            found.push("more than one Host");
+        }
+        if !lines[0].ends_with(" HTTP/1.1") || lines[0].split(' ').count() != 3 {
+            found.push("a request line that is not `method target HTTP/1.1`");
+        }
+        found
+    }
+
+    /// The first request at the start of `buf` and how many bytes it takes, `Ok(None)` while
+    /// it is incomplete, `Err` when `buf` does not start with a request.
+    fn parse(buf: &[u8]) -> Result<Option<(Seen, usize)>, ()> {
+        let Some(head_len) = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|at| at + 4)
+        else {
+            return Ok(None);
+        };
+        let head = &buf[..head_len];
+        let seen = Seen {
+            head: head.to_vec(),
+            body: Vec::new(),
+        };
+        if seen.line().split(' ').count() != 3 {
+            return Err(());
+        }
+        let rest = &buf[head_len..];
+        let encodings = seen
+            .header("transfer-encoding")
+            .join(",")
+            .to_ascii_lowercase();
+        let lengths = seen.header("content-length");
+        let framed = if !encodings.is_empty() {
+            // The final coding must be chunked (RFC 9112 §6.3 rule 4).
+            if encodings.rsplit(',').next().map(str::trim) != Some("chunked") {
+                return Err(());
+            }
+            Self::dechunk(rest)?
+        } else if let Some(first) = lengths.first() {
+            if lengths.iter().any(|v| v != first) || !first.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(());
+            }
+            let len: usize = first.parse().map_err(|_| ())?;
+            (rest.len() >= len).then(|| (rest[..len].to_vec(), len))
+        } else {
+            Some((Vec::new(), 0))
+        };
+        Ok(framed.map(|(body, taken)| {
+            let head = head.to_vec();
+            (Seen { head, body }, head_len + taken)
+        }))
+    }
+
+    /// A chunked body at the start of `buf`, decoded, and its encoded length.
+    fn dechunk(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, ()> {
+        let line_end = |from: usize| {
+            buf[from..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .map(|at| from + at)
+        };
+        let (mut at, mut body) = (0, Vec::new());
+        loop {
+            let Some(end) = line_end(at) else {
+                return Ok(None);
+            };
+            let size = std::str::from_utf8(&buf[at..end]).map_err(|_| ())?;
+            let size = size.split(';').next().unwrap_or_default();
+            if size.is_empty() || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(());
+            }
+            let size = usize::from_str_radix(size, 16).map_err(|_| ())?;
+            at = end + 2;
+            if size == 0 {
+                // Trailer fields up to the empty line.
+                loop {
+                    let Some(end) = line_end(at) else {
+                        return Ok(None);
+                    };
+                    let empty = end == at;
+                    at = end + 2;
+                    if empty {
+                        return Ok(Some((body, at)));
+                    }
+                }
+            }
+            let Some(data) = buf.get(at..at + size + 2) else {
+                return Ok(None);
+            };
+            if &data[size..] != b"\r\n" {
+                return Err(());
+            }
+            body.extend_from_slice(&data[..size]);
+            at += size + 2;
+        }
+    }
+}
+
+/// A raw TCP upstream that keeps what it receives, as a strict HTTP/1.1 server frames it, and
+/// answers each request `200` with the request line as the body. An HTTP library would
+/// normalise or refuse what the adversarial tests need to see.
+#[derive(Debug, Clone, Default)]
+struct Recorder {
+    requests: Arc<std::sync::Mutex<Vec<Seen>>>,
+    /// Connections that ended in something other than a whole request: bytes that are not a
+    /// request, or a request the proxy gave up on halfway.
+    broken: Arc<AtomicUsize>,
+}
+
+impl Recorder {
+    async fn serve(self, listener: TcpListener) {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(self.clone().connection(stream));
+        }
+    }
+
+    async fn connection(self, mut stream: TcpStream) {
+        let mut buf = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            match Seen::parse(&buf) {
+                Ok(Some((seen, taken))) => {
+                    let line = seen.line();
+                    self.requests.lock().unwrap().push(seen);
+                    buf.drain(..taken);
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{line}\n",
+                        line.len() + 1
+                    );
+                    if stream.write_all(reply.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => match stream.read(&mut chunk).await {
+                    Ok(n) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+                    _ if buf.is_empty() => return,
+                    _ => break,
+                },
+                Err(()) => break,
+            }
+        }
+        self.broken.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The whole requests received since the last call.
+    fn take(&self) -> Vec<Seen> {
+        std::mem::take(&mut self.requests.lock().unwrap())
+    }
+
+    /// How many connections have ended without a whole request so far.
+    fn broken(&self) -> usize {
+        self.broken.load(Ordering::SeqCst)
+    }
+
+    /// Waits until one more connection than `before` has ended without a whole request: the
+    /// proxy closes an upstream connection it gave up on a moment after answering the client.
+    async fn broken_after(&self, before: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.broken() <= before {
+            assert!(
+                Instant::now() < deadline,
+                "no upstream connection was cut short"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // A raw HTTP/2 client
 
 /// One HTTP/2 frame (RFC 9113 §4.1).
@@ -786,6 +1047,7 @@ impl Frame {
     const END_HEADERS: u8 = 0x4;
 
     /// Error codes (RFC 9113 §7).
+    const PROTOCOL_ERROR: u32 = 0x1;
     const REFUSED_STREAM: u32 = 0x7;
     const CANCEL: u32 = 0x8;
     const ENHANCE_YOUR_CALM: u32 = 0xb;
@@ -2119,3 +2381,4 @@ async fn every_request_gets_an_access_log_line() {
 }
 
 mod limits;
+mod smuggling;

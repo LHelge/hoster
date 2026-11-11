@@ -427,6 +427,38 @@ impl Forwarding<'_> {
         (!host.is_empty()).then_some(host)
     }
 
+    /// Leaves `req` at most one `Content-Length`, as a plain decimal number.
+    ///
+    /// Pingora accepts a repeated field and a list (`5, 5`) when every value is the same
+    /// number, and forwards them as they came. An upstream that reads such a field differently
+    /// would disagree with the proxy about where the body ends, which is what request
+    /// smuggling needs (RFC 9112 §6.3), so the upstream only ever sees the one number. Values
+    /// that are not all the same number are refused with 400; Pingora already refuses them.
+    fn single_content_length(req: &mut RequestHeader) -> Result<()> {
+        let mut values = req
+            .headers
+            .get_all(header::CONTENT_LENGTH)
+            .iter()
+            .flat_map(|value| value.as_bytes().split(|b| *b == b','))
+            .map(|value| {
+                std::str::from_utf8(value.trim_ascii())
+                    .ok()
+                    .filter(|digits| {
+                        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                    })
+                    .and_then(|digits| digits.parse::<u64>().ok())
+            });
+        let Some(first) = values.next() else {
+            return Ok(());
+        };
+        let length = first
+            .filter(|length| values.all(|value| value == Some(*length)))
+            .or_err(ErrorType::InvalidHTTPHeader, "ambiguous Content-Length")
+            .map_err(|e| e.into_down())?;
+        req.insert_header(header::CONTENT_LENGTH, length)?;
+        Ok(())
+    }
+
     /// Rewrites `req` for `route`: strips the prefix if the route asks for it, sets the
     /// forwarding headers and overwrites any the client sent. `Host` is left alone.
     ///
@@ -455,6 +487,8 @@ impl Forwarding<'_> {
                 .into_down());
             }
         }
+
+        Self::single_content_length(req)?;
 
         req.remove_header(X_FORWARDED_PREFIX);
         if let Some(prefix) = route.forwarded_prefix() {
@@ -619,6 +653,50 @@ mod tests {
 
     fn header<'a>(req: &'a RequestHeader, name: &str) -> Option<&'a str> {
         req.headers.get(name).map(|v| v.to_str().unwrap())
+    }
+
+    #[test]
+    fn content_length_goes_upstream_as_one_number() {
+        let lengths = |req: &RequestHeader| -> Vec<String> {
+            let values = req.headers.get_all("content-length").iter();
+            values.map(|v| v.to_str().unwrap().to_owned()).collect()
+        };
+        for sent in [
+            &["5"][..],
+            &["5", "5"],
+            &["5, 5"],
+            &["5,5", " 5 "],
+            &["005"],
+        ] {
+            let headers: Vec<_> = sent.iter().map(|v| ("content-length", *v)).collect();
+            let mut req = request("/", &headers);
+            forwarding("a.example.com")
+                .apply(&route("/", false), &mut req)
+                .unwrap();
+            assert_eq!(lengths(&req), ["5"], "{sent:?}");
+        }
+        for sent in [
+            &["5", "6"][..],
+            &["5, 6"],
+            &["+5"],
+            &["0x5"],
+            &["5 5"],
+            &[""],
+            &["5,"],
+        ] {
+            let headers: Vec<_> = sent.iter().map(|v| ("content-length", *v)).collect();
+            let mut req = request("/", &headers);
+            let err = forwarding("a.example.com")
+                .apply(&route("/", false), &mut req)
+                .unwrap_err();
+            assert_eq!(err.esource(), &ErrorSource::Downstream, "{sent:?}");
+            assert_eq!(ErrorPage::for_error(&err).unwrap().status, 400, "{sent:?}");
+        }
+        let mut req = request("/", &[]);
+        forwarding("a.example.com")
+            .apply(&route("/", false), &mut req)
+            .unwrap();
+        assert!(lengths(&req).is_empty());
     }
 
     #[test]
