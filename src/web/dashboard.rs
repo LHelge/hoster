@@ -1,28 +1,40 @@
-//! The dashboard at `/` (spec §5.4, ADR-0021, ADR-0045, ADR-0054), from data hoster has:
+//! The dashboard at `/` (spec §5.4, ADR-0021, ADR-0045, ADR-0054), from data hoster has.
 //!
-//! - **KPI tiles**: requests since hoster started, their 5xx rate, p50 and p95 over the latency
-//!   window (all the stacks' routes and unrouted requests together, without hoster's own admin
-//!   UI), stacks running out of all (with how many are degraded or deploying) and certificates
-//!   valid out of all (with how many are failing or expiring). Each tile takes the tone of the
-//!   worst state it counts.
+//! Its traffic figures come from the persisted traffic history (ADR-0062) over the [`Range`]
+//! the header's picker sets (`?range=1h` … `?range=30d`, 24h by default and for an unknown
+//! value). They cover every stack's routes and the unrouted requests, without hoster's own
+//! routes (the admin UI, whose live pages would otherwise weigh on a quiet host's figures), and
+//! end with the newest flushed minute, so they lag by up to a minute:
+//!
+//! - **KPI tiles**: the requests over the range (with the requests in flight now, the one live
+//!   figure), their 5xx rate (`n of m`), and their p50 and p95 latency. The requests, p50 and
+//!   p95 tiles say how they changed against the period of equal length just before the range,
+//!   when that period has data; the change keeps a neutral tone. Then stacks running out of all
+//!   (with how many are degraded or deploying) and certificates valid out of all (with how many
+//!   are failing or expiring). The 5xx, p95, stacks and certificates tiles take the tone of the
+//!   worst state they count.
 //! - **Warnings**, v1's only alerting surface, as an alert list shown only while there are any.
-//! - **Stacks**: one row per stack with its [`Condition`] pill, healthy services out of all, p50
-//!   and p95 over all its routes, its 4xx and 5xx shares since start, the restarts of its running
-//!   services (ADR-0028), its deployments of the last [`Stats::DEPLOY_HISTORY`] and its running
-//!   or latest deployment. Service detail (digests, per-host certificates) is on the stack page.
-//!   Under the table, a note counts the requests no stack row shows (unrouted ones, hoster's own
-//!   routes and the routes of removed stacks, with their upstream errors) and the deployments of
-//!   removed stacks.
+//! - **Charts**: responses by status as stacked bars and the p50/p95 response time as lines,
+//!   one bar or point per bucket of the range's bar plan ([`crate::web::charts`]).
+//! - **Stacks**: one row per stack with its [`Condition`] pill, healthy services out of all, its
+//!   requests per minute over the last [`ScopeHistory::RATE_WINDOW`], p50, p95 and its 4xx and
+//!   5xx shares over the range, a sparkline of its requests over the range in the tone of its
+//!   condition, the restarts of its running services (ADR-0028), its deployments of the last
+//!   [`Stats::DEPLOY_HISTORY`] and its running or latest deployment. Service detail (digests,
+//!   per-host certificates) is on the stack page. Under the table, a note counts the requests
+//!   over the range no stack row shows (unrouted ones, hoster's own routes and the routes of
+//!   removed stacks, with their upstream errors) and the deployments of removed stacks.
 //! - **Certificates**: the hosts soonest to expire with a days-left meter (out of 90) and their
 //!   status, every host needing attention among them, and how many more are valid.
 //! - **Recent events**: the newest events of the event log (ADR-0055), as [`RecentEvents`].
 //!
 //! The page renders server-side and works without JavaScript. Everything under the header is
 //! one partial, [`Overview`]: the page holds it in a live region that follows `GET /events` over
-//! SSE. The stream sends the partial again whenever the orchestrator reports a change on
-//! `ui_events` (a health change, a certificate issued or failed, a deployment moving) or the
-//! receiver lagged, and at least every [`OverviewEvents::REFRESH`] for what no event reports
-//! (traffic, restart counts, a removed stack, certificates nearing expiry with time). A burst of
+//! SSE, with the range in the stream's URL so the partials it sends stay on it. The stream sends
+//! the partial again whenever the orchestrator reports a change on `ui_events` (a health
+//! change, a certificate issued or failed, a deployment moving) or the receiver lagged, and at
+//! least every [`OverviewEvents::REFRESH`] for what no event reports (each minute's traffic
+//! flush, restart counts, a removed stack, certificates nearing expiry with time). A burst of
 //! nothing but newly recorded events ([`UiEvent::Event`]) sends only the Recent events card, with
 //! them added to the one the stream sent last, as an `<hx-partial>` that replaces just that card
 //! ([`RecentEvents::partial`]); the overview's other parts do not change with it. It ends
@@ -34,6 +46,7 @@
 //! (by the health monitor or the reconciler, ADR-0028), a served certificate that expires within
 //! [`CertState::WARN_WITHIN`], and a stack whose latest deployment failed or was rejected.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fmt;
@@ -42,31 +55,37 @@ use std::time::{Duration, SystemTime};
 
 use askama::Template;
 use axum::Extension;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream::{self, Stream, StreamExt};
+use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use super::auth::{Auth, Session};
 use super::certificates::{CertGlance, Certificates};
+use super::charts::{LineChart, Percentiles, Sparkline, StackedBars, Timeline};
 use super::events::RecentEvents;
 use super::icons::Icon;
 use super::pages::{Layout, Page, Section, Shell};
 use super::stacks::{Condition, DeploymentView, LastDeploy, StackView, Stacks, TrafficLine};
-use super::ui::{CertState, Count, Kpi, Pill, Tone};
+use super::ui::{CertState, Count, Kpi, PerMinute, Pill, Tone};
 use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus, UiEvent};
-use crate::routing::Owner;
 use crate::stack::Stack;
-use crate::stats::{CertExpiry, Counts, DeployStats, Elapsed, Stats, StatusClass, TrafficSnapshot};
-use crate::store::{Event as LoggedEvent, EventKind};
+use crate::stats::{
+    CertExpiry, DeployStats, Elapsed, Range, ScopeHistory, Stats, StatusClass, TrafficHistory,
+    TrafficSnapshot, TrafficTotals,
+};
+use crate::store::{Event as LoggedEvent, EventKind, Timestamp};
 
 /// The dashboard: the live overview.
 #[derive(Template)]
 #[template(path = "dashboard.html")]
 pub struct Dashboard {
     layout: Layout,
+    /// The range the traffic figures cover.
+    range: Range,
     overview: Overview,
 }
 
@@ -74,25 +93,30 @@ impl Dashboard {
     /// The URL of the overview's live stream.
     pub const EVENTS: &str = "/events";
 
-    /// The `GET /` handler.
+    /// The `GET /[?range=…]` handler.
     pub async fn show(
         shell: Shell,
+        Query(query): Query<RangeQuery>,
         Extension(stats): Extension<Stats>,
         Extension(stacks): Extension<Stacks>,
         Extension(certificates): Extension<Certificates>,
     ) -> Page<Dashboard> {
-        let readings = Readings::gather(&stacks, &stats, &certificates).await;
+        let range = Range::from(query);
+        let readings = Readings::gather(&stacks, &stats, &certificates, range).await;
         Page(Dashboard {
             layout: shell.layout(Section::Dashboard),
+            range,
             overview: Overview::new(readings, SystemTime::now()),
         })
     }
 
-    /// `GET /events`: the overview partial as `text/event-stream`, sent at once and again on
-    /// every change the orchestrator reports, until the session ends.
+    /// `GET /events[?range=…]`: the overview partial over the range as `text/event-stream`,
+    /// sent at once and again on every change the orchestrator reports, until the session
+    /// ends.
     pub async fn events(
         State(auth): State<Arc<Auth>>,
         Extension(session): Extension<Session>,
+        Query(query): Query<RangeQuery>,
         Extension(stats): Extension<Stats>,
         Extension(stacks): Extension<Stacks>,
         Extension(certificates): Extension<Certificates>,
@@ -111,14 +135,23 @@ impl Dashboard {
             stacks,
             stats,
             certificates,
+            range: Range::from(query),
         };
         Sse::new(live.stream(events, signed_out))
             .keep_alive(KeepAlive::new().interval(OverviewEvents::KEEP_ALIVE))
             .into_response()
     }
 
-    pub fn events_url(&self) -> &'static str {
-        Self::EVENTS
+    /// The stream's URL, on the page's range.
+    pub fn events_url(&self) -> String {
+        format!("{}?range={}", Self::EVENTS, self.range)
+    }
+
+    /// The range picker: a link per range, shortest first, the page's own marked.
+    fn ranges(&self) -> impl Iterator<Item = (Range, String, bool)> + '_ {
+        Range::ALL
+            .into_iter()
+            .map(|range| (range, format!("/?range={range}"), range == self.range))
     }
 
     /// The page with no stacks and no statistics, for the layout tests.
@@ -126,8 +159,26 @@ impl Dashboard {
     pub(super) fn empty(layout: Layout) -> Self {
         Dashboard {
             layout,
-            overview: Overview::default(),
+            range: Range::default(),
+            overview: Overview::new(Readings::default(), SystemTime::now()),
         }
+    }
+}
+
+/// The query of `GET /` and `GET /events`: the traffic range.
+#[derive(Debug, Default, Deserialize)]
+pub struct RangeQuery {
+    range: Option<String>,
+}
+
+/// The range asked for; [`Range::default`] without one or for one that is none of
+/// [`Range::ALL`].
+impl From<RangeQuery> for Range {
+    fn from(query: RangeQuery) -> Self {
+        query
+            .range
+            .and_then(|range| range.parse().ok())
+            .unwrap_or_default()
     }
 }
 
@@ -136,6 +187,8 @@ struct OverviewEvents {
     stacks: Stacks,
     stats: Stats,
     certificates: Certificates,
+    /// The range of the page that opened the stream.
+    range: Range,
 }
 
 impl OverviewEvents {
@@ -259,7 +312,8 @@ impl OverviewEvents {
 
     /// The whole overview, read now, and its Recent events card for the next events.
     async fn render(&self) -> (Event, RecentEvents) {
-        let readings = Readings::gather(&self.stacks, &self.stats, &self.certificates).await;
+        let readings =
+            Readings::gather(&self.stacks, &self.stats, &self.certificates, self.range).await;
         let overview = Overview::new(readings, SystemTime::now());
         let html = overview.render().unwrap_or_else(|err| {
             tracing::error!(error = %err, "rendering the dashboard overview failed");
@@ -285,7 +339,13 @@ enum Change {
 struct Readings {
     /// Every stack, or why they cannot be read.
     stacks: Result<Vec<StackStatus>, String>,
-    traffic: TrafficSnapshot,
+    /// The range the traffic figures cover.
+    range: Range,
+    /// The traffic history over [`Self::range`], or why it cannot be read.
+    history: Result<TrafficHistory, String>,
+    /// The requests in flight now to every stack's routes and unrouted, without hoster's own:
+    /// the one live traffic figure (ADR-0062 §8).
+    inflight: u64,
     /// The deployments of the last [`Stats::DEPLOY_HISTORY`] per stack, or why they cannot be
     /// read.
     deployments: Result<Vec<DeployStats>, String>,
@@ -300,10 +360,16 @@ struct Readings {
 }
 
 impl Readings {
-    async fn gather(stacks: &Stacks, stats: &Stats, certificates: &Certificates) -> Self {
+    async fn gather(
+        stacks: &Stacks,
+        stats: &Stats,
+        certificates: &Certificates,
+        range: Range,
+    ) -> Self {
         let query = RecentEvents::query(None);
-        let (status, deployments, glance, events, updates) = tokio::join!(
+        let (status, history, deployments, glance, events, updates) = tokio::join!(
             stacks.status(),
+            stats.history(range),
             stats.deployments(),
             certificates.glance(SystemTime::now()),
             stacks.event_page(&query),
@@ -314,7 +380,15 @@ impl Readings {
                 tracing::warn!(error = %err, "cannot read the stacks for the dashboard");
                 format!("Cannot show the stacks: {err}.")
             }),
-            traffic: stats.traffic(),
+            range,
+            history: history.map_err(|err| {
+                tracing::warn!(
+                    error = format!("{err:#}"),
+                    "cannot read the traffic history"
+                );
+                format!("Cannot show the traffic history: {err:#}.")
+            }),
+            inflight: Self::inflight(&stats.traffic()),
             deployments: deployments.map_err(|err| {
                 tracing::warn!(
                     error = format!("{err:#}"),
@@ -331,13 +405,29 @@ impl Readings {
             updates,
         }
     }
+
+    /// The requests in flight in `traffic` to every stack's routes and unrouted, without
+    /// hoster's own routes.
+    fn inflight(traffic: &TrafficSnapshot) -> u64 {
+        traffic
+            .routes
+            .iter()
+            .filter(|r| !r.is_reserved())
+            .map(|r| r.counts.inflight)
+            .chain([traffic.unrouted.inflight])
+            .sum()
+    }
 }
 
+/// Nothing at all, over the default range, as of now.
 impl Default for Readings {
     fn default() -> Self {
+        let range = Range::default();
         Readings {
             stacks: Ok(Vec::new()),
-            traffic: TrafficSnapshot::default(),
+            range,
+            history: Ok(TrafficHistory::empty(range, Timestamp::now())),
+            inflight: 0,
             deployments: Ok(Vec::new()),
             served: Vec::new(),
             certificates: CertGlance::default(),
@@ -347,13 +437,19 @@ impl Default for Readings {
     }
 }
 
-/// Everything under the dashboard's header: the tiles, the warnings, the stacks, the
-/// certificates and the recent events. The live region's content.
-#[derive(Debug, Default, Template)]
+/// Everything under the dashboard's header: the tiles, the warnings, the charts, the stacks,
+/// the certificates and the recent events. The live region's content.
+#[derive(Debug, Template)]
 #[template(path = "dashboard_overview.html")]
 pub struct Overview {
+    /// The range the traffic figures cover.
+    range: Range,
     kpis: Vec<Kpi>,
     warnings: Vec<Warning>,
+    /// Responses by status over the range, for all hosted traffic.
+    statuses: StackedBars,
+    /// The p50 and p95 response times over the range, for all hosted traffic.
+    latency: LineChart,
     stacks: Vec<StackRow>,
     /// The stacks cannot be read, so the empty table does not mean there are none.
     unreadable: bool,
@@ -368,11 +464,16 @@ pub struct Overview {
 }
 
 impl Overview {
+    /// What the charts and the tiles say they cover.
+    const ALL: &str = "all stacks";
+
     /// The overview of `readings` as of `now`.
     fn new(readings: Readings, now: SystemTime) -> Self {
         let Readings {
             stacks,
-            traffic,
+            range,
+            history,
+            inflight,
             deployments,
             served,
             certificates,
@@ -383,15 +484,20 @@ impl Overview {
         // `None` when the stacks cannot be read: then which of them exist is not known.
         let known = stacks.map_err(|problem| problems.push(problem)).ok();
         let stacks = known.as_deref().unwrap_or_default();
+        // A history that cannot be read draws as one without any: empty bars, `-` figures.
+        let history = history.unwrap_or_else(|problem| {
+            problems.push(problem);
+            TrafficHistory::empty(range, Timestamp::from(now))
+        });
         let deployments = deployments.map_err(|problem| problems.push(problem)).ok();
         let recent = RecentEvents::new(events.map_err(|problem| problems.push(problem)).ok(), now);
         let rows: Vec<StackRow> = stacks
             .iter()
             .map(|status| {
-                let history = deployments
+                let history_of = deployments
                     .as_ref()
                     .map(|all| all.iter().find(|d| d.stack == status.name));
-                StackRow::new(status, &traffic, history, now)
+                StackRow::new(status, &history, history_of, now)
             })
             .collect();
         let mut warnings: Vec<Warning> = stacks.iter().flat_map(Warning::of_stack).collect();
@@ -405,10 +511,28 @@ impl Overview {
             })
             .collect::<Vec<_>>()
             .join(" · ");
+        let all = history.all();
+        let timeline = Timeline::from(range);
         Overview {
-            kpis: Self::kpis(&traffic, known.is_some().then_some(&rows), &certificates),
+            range,
+            kpis: Self::kpis(
+                range,
+                all,
+                inflight,
+                known.is_some().then_some(&rows),
+                &certificates,
+            ),
             warnings,
-            other: OtherTraffic::all(&traffic, deployments.as_deref(), known.as_deref()),
+            statuses: StackedBars::new(timeline, all.bars.iter().map(|b| b.traffic.statuses))
+                .of(Self::ALL),
+            latency: LineChart::new(
+                timeline,
+                all.bars
+                    .iter()
+                    .map(|b| Percentiles::from(&b.traffic.latency)),
+            )
+            .of(Self::ALL),
+            other: OtherTraffic::all(&history, deployments.as_deref(), known.as_deref()),
             unreadable: known.is_none(),
             stacks: rows,
             summary,
@@ -419,52 +543,72 @@ impl Overview {
     }
 
     /// The tiles; `rows` is `None` when the stacks cannot be read. The traffic tiles are about
-    /// what hoster hosts: they leave out hoster's own routes (the admin UI, whose live pages
-    /// would otherwise weigh on a quiet host's figures), which the note under the stacks
-    /// table counts.
+    /// what hoster hosts over `range` (`all`): they leave out hoster's own routes, which the
+    /// note under the stacks table counts. `inflight` is live.
     fn kpis(
-        traffic: &TrafficSnapshot,
+        range: Range,
+        all: &ScopeHistory,
+        inflight: u64,
         rows: Option<&Vec<StackRow>>,
         certificates: &CertGlance,
     ) -> Vec<Kpi> {
-        let all = TrafficLine::of(
-            traffic
-                .routes
-                .iter()
-                .filter(|r| !r.is_reserved())
-                .map(|r| &r.counts)
-                .chain([&traffic.unrouted]),
+        let totals = &all.totals;
+        let previous = all.previous.as_ref();
+        let line = TrafficLine::from(totals);
+        let covers = format!(
+            "over the last {range}, to every stack's routes and unrouted, not hoster's own \
+             admin UI; the change is against the {range} before it"
         );
-        let window = Elapsed(Stats::LATENCY_WINDOW);
-        let requests_sub = match all.inflight {
-            0 => "since hoster started".to_owned(),
-            n => format!("{} in flight · since start", Count(n)),
-        };
-        let errors_sub = if all.requests == 0 {
-            "no requests yet".to_owned()
+        let requests_sub = [
+            Some(
+                Delta::requests(totals.requests(), previous.map(TrafficTotals::requests))
+                    .map_or_else(|| Delta::NONE.to_owned(), |d| d.to_string()),
+            ),
+            (inflight > 0).then(|| format!("{} in flight", Count(inflight))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+        let errors_sub = if totals.requests() == 0 {
+            "no requests".to_owned()
         } else {
             format!(
-                "{} of {} since start",
-                Count(all.server_errors),
-                Count(all.requests)
+                "{} of {}",
+                Count(totals.server_errors()),
+                Count(totals.requests())
             )
         };
-        let latency_title = format!(
-            "Time to the response header, over the requests to every stack's routes and \
-             unrouted that finished in the last {window}"
-        );
+        let latency_sub = |now: Option<Duration>, before: Option<Duration>| match now {
+            None => "no requests".to_owned(),
+            Some(_) => Delta::latency(now, before)
+                .map_or_else(|| Delta::NONE.to_owned(), |d| d.to_string()),
+        };
+        let p50 = latency_sub(totals.p50(), previous.and_then(TrafficTotals::p50));
+        let p95 = latency_sub(totals.p95(), previous.and_then(TrafficTotals::p95));
         vec![
-            Kpi::new("requests", Count(all.requests), requests_sub).title(
-                "Finished requests since hoster started, to every stack's routes and \
-                     unrouted; not hoster's own admin UI",
-            ),
-            Kpi::new("5xx rate", &all.errors, errors_sub)
-                .tone(all.errors_tone)
-                .title("Share of 5xx responses since hoster started"),
-            Kpi::new("p50 latency", &all.p50, format!("last {window}")).title(&latency_title),
-            Kpi::new("p95 latency", &all.p95, format!("last {window}"))
-                .tone(all.p95_tone)
-                .title(&latency_title),
+            Kpi::new(
+                format!("requests · {range}"),
+                Count(totals.requests()),
+                requests_sub,
+            )
+            .title(format!(
+                "Finished requests {covers}. In flight: requests under way now"
+            )),
+            Kpi::new("5xx rate", &line.errors, errors_sub)
+                .tone(line.errors_tone)
+                .title(format!(
+                    "Share of 5xx responses among the finished requests over the last {range}"
+                )),
+            Kpi::new("p50 latency", &line.p50, p50).title(format!(
+                "Median time to the response header of the finished requests {covers}"
+            )),
+            Kpi::new("p95 latency", &line.p95, p95)
+                .tone(line.p95_tone)
+                .title(format!(
+                    "95th percentile time to the response header of the finished requests \
+                     {covers}"
+                )),
             StackRow::kpi(rows),
             certificates.kpi(),
         ]
@@ -487,6 +631,55 @@ impl Overview {
         match self.alert_tone() {
             Tone::Fail => Icon::Failed,
             _ => Icon::Warning,
+        }
+    }
+}
+
+/// How a tile's figure changed against the period of equal length just before the range
+/// (ADR-0062 §8), as its sub-line writes it: `▲ 6.2 % vs prev`, `▼ 2.0 ms vs prev`. A change is
+/// not good or bad by itself, so it has no tone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Delta {
+    /// A count, by this many percent of what it was.
+    Count { direction: Ordering, percent: f64 },
+    /// A latency, by this much.
+    Latency { direction: Ordering, by: Duration },
+}
+
+impl Delta {
+    /// The sub-line where there is nothing to compare with.
+    const NONE: &str = "no previous data";
+
+    /// The change of a count from `before`; `None` when the period before had nothing.
+    fn requests(now: u64, before: Option<u64>) -> Option<Self> {
+        let before = before.filter(|before| *before > 0)?;
+        Some(Delta::Count {
+            direction: now.cmp(&before),
+            percent: now.abs_diff(before) as f64 * 100.0 / before as f64,
+        })
+    }
+
+    /// The change of a latency from `before`; `None` without both.
+    fn latency(now: Option<Duration>, before: Option<Duration>) -> Option<Self> {
+        let (now, before) = (now?, before?);
+        Some(Delta::Latency {
+            direction: now.cmp(&before),
+            by: now.abs_diff(before),
+        })
+    }
+}
+
+impl fmt::Display for Delta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (Delta::Count { direction, .. } | Delta::Latency { direction, .. }) = *self;
+        let arrow = match direction {
+            Ordering::Greater => "▲",
+            Ordering::Less => "▼",
+            Ordering::Equal => return f.write_str("unchanged vs prev"),
+        };
+        match *self {
+            Delta::Count { percent, .. } => write!(f, "{arrow} {percent:.1} % vs prev"),
+            Delta::Latency { by, .. } => write!(f, "{arrow} {} vs prev", Elapsed(by)),
         }
     }
 }
@@ -678,8 +871,8 @@ struct StackRow {
     services: usize,
     /// Each service in words, for the tooltip of the healthy count.
     health_detail: String,
-    /// `None` when the stack routes nothing and no route of it was counted.
-    traffic: Option<TrafficLine>,
+    /// `None` when the stack routes nothing and saw no traffic in the history read.
+    traffic: Option<RowTraffic>,
     /// Its active revision does not parse, so which hosts it routes is not known.
     revision_unreadable: bool,
     /// The restarts of its running services' current generation.
@@ -700,7 +893,7 @@ struct StackRow {
 impl StackRow {
     fn new(
         status: &StackStatus,
-        traffic: &TrafficSnapshot,
+        history: &TrafficHistory,
         deployments: Option<Option<&DeployStats>>,
         now: SystemTime,
     ) -> Self {
@@ -710,12 +903,8 @@ impl StackRow {
             .iter()
             .flat_map(BTreeMap::values)
             .any(|hosts| !hosts.is_empty());
-        let counted: Vec<&Counts> = traffic
-            .routes
-            .iter()
-            .filter(|r| r.stack() == Some(status.name.as_str()))
-            .map(|r| &r.counts)
-            .collect();
+        let seen = history.stacks().any(|(name, _)| name == status.name);
+        let condition = Condition::from(status);
         let running: Vec<&ServiceStatus> = status
             .services
             .iter()
@@ -725,7 +914,7 @@ impl StackRow {
             history_url: format!("{url}/deployments"),
             url,
             name: status.name.clone(),
-            condition: Condition::from(status),
+            condition,
             flag: status.flag.clone(),
             healthy: running.iter().filter(|s| !Self::failing(s)).count(),
             services: status.services.len(),
@@ -735,7 +924,8 @@ impl StackRow {
                 .map(|s| format!("{}: {}", s.name, Self::health_word(s)))
                 .collect::<Vec<_>>()
                 .join(", "),
-            traffic: (routed || !counted.is_empty()).then(|| TrafficLine::of(counted)),
+            traffic: (routed || seen)
+                .then(|| RowTraffic::new(history.stack(&status.name), condition)),
             revision_unreadable: hosts.is_none(),
             restarts: running.iter().map(|s| u64::from(s.restarts.restarts)).sum(),
             crash_looping: running.iter().filter(|s| s.is_crash_looping()).count(),
@@ -859,6 +1049,35 @@ impl StackRow {
     }
 }
 
+/// A stack's traffic in its row of the stacks table.
+#[derive(Debug)]
+struct RowTraffic {
+    /// Requests per minute over the last [`ScopeHistory::RATE_WINDOW`].
+    per_minute: PerMinute,
+    /// The figures over the range.
+    line: TrafficLine,
+    /// Its requests over the range, in the tone of the stack's condition.
+    spark: Sparkline,
+}
+
+impl RowTraffic {
+    fn new(scope: &ScopeHistory, condition: Condition) -> Self {
+        RowTraffic {
+            per_minute: PerMinute(scope.per_minute()),
+            line: TrafficLine::from(&scope.totals),
+            spark: Sparkline::new(
+                scope.bars.iter().map(|b| b.traffic.requests()),
+                Tone::from(condition),
+            ),
+        }
+    }
+
+    /// The requests over the range, for the sparkline's cell in words.
+    fn requests(&self) -> Count {
+        Count(self.line.requests)
+    }
+}
+
 /// A stack's finished deployments of the last [`Stats::DEPLOY_HISTORY`].
 #[derive(Debug, Default)]
 struct DeploysCell {
@@ -896,9 +1115,9 @@ impl From<Option<&DeployStats>> for DeploysCell {
     }
 }
 
-/// What no stack row shows: unrouted requests, those to hoster's own routes (the admin UI),
-/// and the requests and deployments of a stack hoster no longer has (or of every stack, while
-/// the stacks cannot be read).
+/// What no stack row shows over the range: unrouted requests, those to hoster's own routes
+/// (the admin UI), and the requests and deployments of a stack hoster no longer has (or of every
+/// stack, while the stacks cannot be read).
 #[derive(Debug)]
 struct OtherTraffic {
     /// `unrouted`, `hoster (admin UI)`, `blog (removed)`, or `blog` while the stacks cannot be
@@ -914,11 +1133,11 @@ struct OtherTraffic {
 }
 
 impl OtherTraffic {
-    /// The unrouted requests always, then every other owner that saw requests or, for a
-    /// stack, deployments. `stacks` is `None` when they cannot be read, and `deployments` when
-    /// those cannot.
+    /// The unrouted requests always, then every other owner that saw requests over the range
+    /// or, for a stack, deployments. `stacks` is `None` when they cannot be read, and
+    /// `deployments` when those cannot.
     fn all(
-        traffic: &TrafficSnapshot,
+        history: &TrafficHistory,
         deployments: Option<&[DeployStats]>,
         stacks: Option<&[StackStatus]>,
     ) -> Vec<Self> {
@@ -928,51 +1147,54 @@ impl OtherTraffic {
             Some(_) => Some(format!("{stack} (removed)")),
             None => Some(stack.to_owned()),
         };
-        let mut owners: BTreeMap<String, (Vec<&Counts>, Option<&DeployStats>)> = BTreeMap::new();
-        for route in &traffic.routes {
-            let label = match &route.owner {
-                Some(Owner::Route(owner)) => match stack_label(owner.stack.as_ref()) {
-                    Some(label) => label,
-                    None => continue,
-                },
-                Some(Owner::Reserved(purpose)) => format!("hoster ({purpose})"),
-                None => "unowned".to_owned(),
-            };
-            owners.entry(label).or_default().0.push(&route.counts);
+        let mut owners: BTreeMap<String, (Option<&TrafficTotals>, Option<&DeployStats>)> =
+            BTreeMap::new();
+        for (purpose, scope) in history.reserved() {
+            owners.entry(format!("hoster ({purpose})")).or_default().0 = Some(&scope.totals);
+        }
+        for (stack, scope) in history.stacks() {
+            if let Some(label) = stack_label(stack) {
+                owners.entry(label).or_default().0 = Some(&scope.totals);
+            }
         }
         for stats in deployments.unwrap_or_default() {
             if let Some(label) = stack_label(&stats.stack) {
                 owners.entry(label).or_default().1 = Some(stats);
             }
         }
+        let range = history.range();
         std::iter::once(Self::new(
+            range,
             "unrouted".to_owned(),
-            vec![&traffic.unrouted],
+            Some(&history.unrouted().totals),
             None,
         ))
         .chain(
             owners
                 .into_iter()
-                .map(|(label, (counts, deploys))| Self::new(label, counts, deploys))
+                .map(|(label, (totals, deploys))| Self::new(range, label, totals, deploys))
                 .filter(|other| other.traffic.requests > 0 || other.deploys.is_some()),
         )
         .collect()
     }
 
-    fn new(label: String, counts: Vec<&Counts>, deploys: Option<&DeployStats>) -> Self {
+    fn new(
+        range: Range,
+        label: String,
+        totals: Option<&TrafficTotals>,
+        deploys: Option<&DeployStats>,
+    ) -> Self {
+        let totals = totals.copied().unwrap_or_default();
         let statuses = StatusClass::ALL
             .into_iter()
-            .map(|class| {
-                let count: u64 = counts.iter().map(|c| c.statuses.get(class)).sum();
-                format!("{class} {}", Count(count))
-            })
+            .map(|class| format!("{class} {}", Count(totals.statuses.get(class))))
             .collect::<Vec<_>>()
             .join(" · ");
         OtherTraffic {
             label,
-            upstream_errors: counts.iter().map(|c| c.upstream_errors).sum(),
-            statuses: format!("Responses since hoster started: {statuses}"),
-            traffic: TrafficLine::of(counts),
+            upstream_errors: totals.upstream_errors,
+            statuses: format!("Responses over the last {range}: {statuses}"),
+            traffic: TrafficLine::from(&totals),
             deploys: deploys.map(|d| DeploysCell::from(Some(d))),
         }
     }

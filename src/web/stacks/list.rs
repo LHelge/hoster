@@ -31,7 +31,7 @@ use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::runtime::{ContainerInfo, label};
 use crate::stack::Stack;
-use crate::stats::{Counts, Elapsed, Latency, Stats, StatusClass, TrafficSnapshot};
+use crate::stats::{Counts, Elapsed, Latency, Stats, StatusClass, TrafficSnapshot, TrafficTotals};
 use crate::store::{Deployment, DeploymentSource, DeploymentState, Timestamp};
 use crate::web::containers::Containers;
 use crate::web::pages::{Layout, Page, Section, Shell};
@@ -593,15 +593,17 @@ impl ServiceChip {
 /// dashboard's stacks table show them too, with the figures the card leaves out.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::web) struct TrafficLine {
-    /// Finished requests since hoster started.
+    /// Finished requests: since hoster started (the stack cards), or over a range of the
+    /// traffic history (the dashboard).
     pub(in crate::web) requests: u64,
     /// Of those, the 5xx responses.
     pub(in crate::web) server_errors: u64,
-    /// Requests in flight now.
+    /// Requests in flight now; 0 for figures from the history, which has no live gauge.
     pub(in crate::web) inflight: u64,
-    /// How many routes were counted.
+    /// How many routes were counted; 0 for figures from the history.
     pub(in crate::web) routes: usize,
-    /// The p95 of all the routes' requests over the latency window, `-` without samples.
+    /// The p95 of the same requests (those of the latency window for the in-memory counters),
+    /// `-` without samples.
     pub(in crate::web) p95: String,
     pub(in crate::web) p95_tone: Tone,
     /// The p50 of the same requests, `-` without samples.
@@ -632,13 +634,33 @@ impl TrafficLine {
             .map(|c| c.statuses.get(StatusClass::ClientError))
             .sum();
         let latency: Latency = routes.iter().map(|c| &c.latency).sum();
-        let p95 = latency.p95;
+        TrafficLine {
+            inflight: routes.iter().map(|c| c.inflight).sum(),
+            routes: routes.len(),
+            ..Self::new(
+                requests,
+                client_errors,
+                server_errors,
+                latency.p50,
+                latency.p95,
+            )
+        }
+    }
+
+    /// The figures of `requests` with these 4xx and 5xx counts and percentiles.
+    fn new(
+        requests: u64,
+        client_errors: u64,
+        server_errors: u64,
+        p50: Option<Duration>,
+        p95: Option<Duration>,
+    ) -> Self {
         TrafficLine {
             requests,
             server_errors,
-            inflight: routes.iter().map(|c| c.inflight).sum(),
-            routes: routes.len(),
-            p50: Elapsed::cell(latency.p50),
+            inflight: 0,
+            routes: 0,
+            p50: Elapsed::cell(p50),
             p95: Elapsed::cell(p95),
             p95_tone: if p95.is_some_and(|p| p >= Self::SLOW) {
                 Tone::Warn
@@ -662,6 +684,19 @@ impl TrafficLine {
         format!(
             "p95 of the requests to the stack's routes over the last {}",
             Elapsed(Stats::LATENCY_WINDOW)
+        )
+    }
+}
+
+/// The figures of a span of the traffic history (ADR-0062): no in-flight gauge, no route count.
+impl From<&TrafficTotals> for TrafficLine {
+    fn from(totals: &TrafficTotals) -> Self {
+        Self::new(
+            totals.requests(),
+            totals.client_errors(),
+            totals.server_errors(),
+            totals.p50(),
+            totals.p95(),
         )
     }
 }

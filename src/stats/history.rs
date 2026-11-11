@@ -132,10 +132,6 @@ pub struct TrafficTotals {
     pub latency: Histogram,
 }
 
-#[allow(
-    dead_code,
-    reason = "read by the dashboard (h6k) and the stack pages (5q8), ADR-0062"
-)]
 impl TrafficTotals {
     /// Every finished request.
     pub fn requests(&self) -> u64 {
@@ -152,16 +148,6 @@ impl TrafficTotals {
         self.statuses.get(StatusClass::ServerError)
     }
 
-    /// The share of 4xx responses, from 0 to 1; `None` without requests.
-    pub fn client_error_share(&self) -> Option<f64> {
-        self.share(self.client_errors())
-    }
-
-    /// The share of 5xx responses, from 0 to 1; `None` without requests.
-    pub fn server_error_share(&self) -> Option<f64> {
-        self.share(self.server_errors())
-    }
-
     /// The median latency, to within 25 %; `None` without requests.
     pub fn p50(&self) -> Option<Duration> {
         self.latency.p50()
@@ -170,11 +156,6 @@ impl TrafficTotals {
     /// The 95th percentile latency, to within 25 %; `None` without requests.
     pub fn p95(&self) -> Option<Duration> {
         self.latency.p95()
-    }
-
-    fn share(&self, part: u64) -> Option<f64> {
-        let requests = self.requests();
-        (requests > 0).then(|| part as f64 / requests as f64)
     }
 }
 
@@ -223,10 +204,6 @@ pub struct ScopeHistory {
     pub peak: Option<PeakMinute>,
 }
 
-#[allow(
-    dead_code,
-    reason = "read by the dashboard (h6k) and the stack pages (5q8), ADR-0062"
-)]
 impl ScopeHistory {
     /// How far back the current rate looks (ADR-0062 §8).
     pub const RATE_WINDOW: Duration = Duration::from_secs(5 * 60);
@@ -393,10 +370,6 @@ pub struct TrafficHistory {
     empty: ScopeHistory,
 }
 
-#[allow(
-    dead_code,
-    reason = "read by the dashboard (h6k) and the stack pages (5q8), ADR-0062"
-)]
 impl TrafficHistory {
     /// The history over `range` as of `now`, from `rows` (the buckets of the range's table
     /// from the start of the previous period to the end of the range) and `recent` (the minute
@@ -459,6 +432,12 @@ impl TrafficHistory {
         }
     }
 
+    /// The history over `range` as of `now` with no rows at all: empty bars and no figures,
+    /// for a page that could not read the history (or a test that needs none).
+    pub fn empty(range: Range, now: Timestamp) -> Self {
+        Self::new(range, now, &[], None)
+    }
+
     /// The spans [`Self::new`] reads, as of `now`: the range's table from the start of the
     /// previous period to the end of the range, and the rate window's minutes when that table
     /// is not the minute one.
@@ -482,6 +461,10 @@ impl TrafficHistory {
 
     /// The end of the last bar: the end of the newest flushed minute, or of the hour that
     /// holds it for ranges drawn from hour buckets.
+    #[allow(
+        dead_code,
+        reason = "the stack overview's peak minute (5q8) says how long ago it was, ADR-0062"
+    )]
     pub fn end(&self) -> Timestamp {
         self.end
     }

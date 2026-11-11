@@ -98,13 +98,16 @@ async fn dashboard_shows_the_statistics() {
 
     use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
     use crate::stack::RouteTimeouts;
-    use crate::stats::{CertExpiry, RequestOutcome};
-    use crate::store::{DeploymentOutcome, DeploymentState};
+    use crate::stats::{CertExpiry, Histogram, RequestOutcome};
+    use crate::store::{
+        DeploymentOutcome, DeploymentState, Resolution, Timestamp, TrafficBucket, TrafficCounts,
+        TrafficSeries,
+    };
 
     let app = TestApp::new().await;
     let browser = app.sign_in().await;
     let html = body(app.get("/", Some(&browser.cookie)).await).await;
-    assert!(html.contains("no requests yet"), "{html}");
+    assert!(html.contains("no requests"), "{html}");
 
     *app.stacks.stacks.lock().unwrap() = vec![crate::web::stacks::tests::notes_status()];
     let route = RouteEntry {
@@ -120,15 +123,34 @@ async fn dashboard_shows_the_statistics() {
         },
         timeouts: RouteTimeouts::default(),
     };
-    for status in [200, 200, 502] {
-        app.traffic
-            .route("notes.example.com", &route)
-            .finish(RequestOutcome {
-                status: Some(status),
-                latency: Duration::from_millis(20),
-                upstream_error: status == 502,
-            });
+    // Three requests in the history, two minutes ago; one finished just now, not flushed yet.
+    let mut latency = Histogram::default();
+    for _ in 0..3 {
+        latency.record(Duration::from_millis(20));
     }
+    app.stats.traffic.lock().unwrap().push(TrafficBucket {
+        start: Resolution::Minute.bucket(Timestamp::now()) - Duration::from_secs(120),
+        series: TrafficSeries {
+            host: "notes.example.com".into(),
+            prefix: "/".into(),
+            stack: "notes".into(),
+            service: "api".into(),
+        },
+        counts: TrafficCounts {
+            s2xx: 2,
+            s5xx: 1,
+            upstream_errors: 1,
+            ..TrafficCounts::default()
+        },
+        latency,
+    });
+    app.traffic
+        .route("notes.example.com", &route)
+        .finish(RequestOutcome {
+            status: Some(200),
+            latency: Duration::from_millis(20),
+            upstream_error: false,
+        });
     let _in_flight = app.traffic.route("notes.example.com", &route);
     app.stats.deployments.lock().unwrap().extend([
         DeploymentOutcome {
@@ -154,11 +176,11 @@ async fn dashboard_shows_the_statistics() {
     let html = body(app.get("/", Some(&browser.cookie)).await).await;
     let compact: String = html.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        compact.contains(r#"<dt class="kpi-label">requests</dt><dd class="kpi-value">3</dd><dd class="kpi-sub">1 in flight · since start</dd>"#),
+        compact.contains(r#"<dt class="kpi-label">requests · 24h</dt><dd class="kpi-value">3</dd><dd class="kpi-sub">no previous data · 1 in flight</dd>"#),
         "{compact}"
     );
     assert!(
-        compact.contains(r#"<dt class="kpi-label">5xx rate</dt><dd class="kpi-value">33.3 %</dd><dd class="kpi-sub">1 of 3 since start</dd>"#),
+        compact.contains(r#"<dt class="kpi-label">5xx rate</dt><dd class="kpi-value">33.3 %</dd><dd class="kpi-sub">1 of 3</dd>"#),
         "{compact}"
     );
     assert!(
@@ -176,7 +198,9 @@ async fn dashboard_shows_the_statistics() {
         )),
         "{compact}"
     );
-    assert!(compact.contains("last 5 min"), "{compact}");
+    // 3 requests in the last 5 minutes.
+    assert!(compact.contains(r#"<td class="num">0.6</td>"#), "{compact}");
+    assert!(!compact.contains("since"), "{compact}");
     assert!(!compact.contains("Cannot show"), "{compact}");
 }
 

@@ -10,12 +10,14 @@ use http_body_util::BodyExt as _;
 use super::*;
 use crate::health::HealthStats;
 use crate::orchestrator::RestartStats;
-use crate::routing::{RouteEntry, RouteOwner, Target};
+use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
 use crate::stack::RouteTimeouts;
-use crate::stats::{RequestOutcome, Traffic};
+use crate::stats::tests::FakeStats;
+use crate::stats::{Histogram, RequestOutcome, Traffic};
 use crate::store::{
     ContentHash, Deployment, DeploymentId, DeploymentOutcome, DeploymentSource, DeploymentState,
-    DigestSet, EventId, EventKind, RevisionId, Severity, StackRevision, Timestamp,
+    DigestSet, EventId, EventKind, RevisionId, Severity, StackRevision, TrafficBucket,
+    TrafficCounts, TrafficSeries,
 };
 use crate::web::auth::tests::TestApp;
 use crate::web::stacks::tests::body;
@@ -170,6 +172,81 @@ fn finish(request: &mut crate::stats::TrackedRequest, status: u16, millis: u64) 
         latency: Duration::from_millis(millis),
         upstream_error: false,
     });
+}
+
+const MINUTE: Duration = Duration::from_secs(60);
+
+/// The start of an hour; [`now`] is 30 min 30 s into it.
+fn hour() -> Timestamp {
+    Timestamp::from(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_002_800))
+}
+
+/// 30 min 30 s into [`hour`]: the newest flushed minute is the hour's 30th (`hour + 29 min`),
+/// the 24h range ends with the hour, and the rate window is `hour + 25 min` to `hour + 30 min`.
+fn now() -> Timestamp {
+    hour() + MINUTE * 30 + Duration::from_secs(30)
+}
+
+/// A minute bucket at `start` of the route `host` owned by `stack`'s `service` (`""` for
+/// none, `("", "admin UI")` for hoster's own), with `count` requests of each (status,
+/// latency in ms); a 502 counts as an upstream error.
+fn bucket(
+    start: Timestamp,
+    (host, stack, service): (&str, &str, &str),
+    requests: &[(u16, u64, u64)],
+) -> TrafficBucket<Histogram> {
+    let mut counts = TrafficCounts::default();
+    let mut latency = Histogram::default();
+    for &(status, count, millis) in requests {
+        let class = match status {
+            100..=199 => &mut counts.s1xx,
+            200..=299 => &mut counts.s2xx,
+            300..=399 => &mut counts.s3xx,
+            400..=499 => &mut counts.s4xx,
+            _ => &mut counts.s5xx,
+        };
+        *class += count;
+        if status == 502 {
+            counts.upstream_errors += count;
+        }
+        for _ in 0..count {
+            latency.record(Duration::from_millis(millis));
+        }
+    }
+    TrafficBucket {
+        start,
+        series: TrafficSeries {
+            host: host.into(),
+            prefix: if host.is_empty() { "" } else { "/" }.into(),
+            stack: stack.into(),
+            service: service.into(),
+        },
+        counts,
+        latency,
+    }
+}
+
+/// The traffic history over `range` as of [`now`] of the minute buckets `rows`.
+async fn history(range: Range, rows: Vec<TrafficBucket<Histogram>>) -> TrafficHistory {
+    let fake = FakeStats::default();
+    *fake.traffic.lock().unwrap() = rows;
+    Stats::new(Traffic::default(), Arc::new(fake))
+        .history_at(range, now())
+        .await
+        .unwrap()
+}
+
+/// The overview of `stacks` and `history`, and nothing else.
+fn overview_of(stacks: Vec<StackStatus>, history: TrafficHistory) -> Overview {
+    Overview::new(
+        Readings {
+            stacks: Ok(stacks),
+            range: history.range(),
+            history: Ok(history),
+            ..Readings::default()
+        },
+        SystemTime::now(),
+    )
 }
 
 /// The `<tr>` of `stack` in the stacks table.
@@ -420,33 +497,49 @@ fn a_stack_whose_revision_cannot_be_read_still_shows() {
     );
     assert!(
         row.contains(
-            r#"<td class="num muted" colspan="4">the active revision cannot be read</td>"#
+            r#"<td class="num muted" colspan="6">the active revision cannot be read</td>"#
         ),
         "{row}"
     );
-    assert!(!row.contains("no routes"), "{row}");
+    assert!(!row.contains("The stack routes nothing"), "{row}");
     assert!(row.contains(">0/0</span>"), "{row}");
 }
 
-#[test]
-fn the_stacks_table_aggregates_each_stacks_routes_and_deployments() {
+#[tokio::test]
+async fn the_stacks_table_aggregates_each_stacks_routes_and_deployments() {
     let now = SystemTime::now();
-    let traffic = Traffic::default();
-    let root = entry(routed("blog", "web"), "/");
-    let api = entry(routed("blog", "web"), "/api");
-    for _ in 0..90 {
-        finish(&mut traffic.route("blog.example.com", &root), 200, 4);
-    }
-    for status in [404, 404, 503, 500, 200, 200, 200, 200, 200, 200] {
-        finish(&mut traffic.route("blog.example.com", &api), status, 1_500);
-    }
-    let removed = entry(routed("gone", "web"), "/");
-    finish(&mut traffic.route("gone.example.com", &removed), 200, 2);
-    let admin = entry(Owner::Reserved("admin UI"), "/");
-    for _ in 0..3 {
-        finish(&mut traffic.route("admin.example.com", &admin), 200, 2);
-    }
-    finish(&mut traffic.unrouted(), 404, 1);
+    let blog_web = ("blog.example.com", "blog", "web");
+    let blog_api = ("api.blog.example.com", "blog", "web");
+    let rows = vec![
+        // In the rate window: 90 fast requests to one route, 10 slow ones to another.
+        bucket(hour() + MINUTE * 27, blog_web, &[(200, 90, 4)]),
+        bucket(
+            hour() + MINUTE * 28,
+            blog_api,
+            &[
+                (404, 2, 1_500),
+                (503, 1, 1_500),
+                (500, 1, 1_500),
+                (200, 6, 1_500),
+            ],
+        ),
+        // Earlier in the range, outside the rate window: 20 more.
+        bucket(hour() - MINUTE * 100, blog_web, &[(200, 20, 4)]),
+        bucket(
+            hour() + MINUTE,
+            ("gone.example.com", "gone", "web"),
+            &[(200, 1, 2)],
+        ),
+        bucket(
+            hour() + MINUTE,
+            ("admin.example.com", "", "admin UI"),
+            &[(200, 3, 2)],
+        ),
+        bucket(hour() + MINUTE, ("", "", ""), &[(404, 1, 1)]),
+        // The period before the range: half as many requests, all faster.
+        bucket(hour() - 25 * MINUTE * 60, blog_web, &[(200, 61, 1)]),
+    ];
+    let history = history(Range::Day, rows).await;
     let outcome = |state, count, mean, max| DeploymentOutcome {
         stack: "blog".into(),
         state,
@@ -465,7 +558,9 @@ fn the_stacks_table_aggregates_each_stacks_routes_and_deployments() {
     let overview = Overview::new(
         Readings {
             stacks: Ok(vec![blog()]),
-            traffic: traffic.snapshot(),
+            range: Range::Day,
+            history: Ok(history),
+            inflight: 2,
             deployments: Ok(deployments),
             ..Readings::default()
         },
@@ -473,14 +568,19 @@ fn the_stacks_table_aggregates_each_stacks_routes_and_deployments() {
     );
     let html = compact(&overview.render().unwrap());
     let row = row(&html, "blog");
-    // 100 requests over both routes: p50 is the fast route's, p95 the slow one's.
+    // 100 requests in the last 5 minutes; 120 over both routes in the range: p50 is the fast
+    // route's, p95 the slow one's.
     assert!(
-        row.contains(r#"<td class="num">4.1 ms</td> <td class="num stat-warn">1.6 s</td>"#),
+        row.contains(r#"<td class="num">20</td> <td class="num">4.1 ms</td> <td class="num stat-warn">1.6 s</td>"#),
         "{row}"
     );
     assert!(
-        row.contains(r#"<td class="num">2.0 %</td> <td class="num stat-fail">2.0 %</td>"#),
+        row.contains(r#"<td class="num">1.7 %</td> <td class="num stat-fail">1.7 %</td>"#),
         "4xx and 5xx shares: {row}"
+    );
+    assert!(
+        row.contains(r#"<td class="dash-spark"><span class="visually-hidden">120 requests</span><svg class="spark spark-warn""#),
+        "the sparkline is in the tone of the stack's condition (degraded): {row}"
     );
     assert!(
         row.contains(r#"7 live · <span class="stat-fail">2 failed</span> · 3 skipped</span><span class="dash-sub">mean 12.0 s · max 40.0 s</span>"#),
@@ -490,35 +590,44 @@ fn the_stacks_table_aggregates_each_stacks_routes_and_deployments() {
         row.contains("Finished deployments of the last 30 d: 7 went live"),
         "{row}"
     );
-    // What no stack row counts.
+    // What no stack row counts, over the range.
     assert!(
-        html.contains(r#"Outside the stacks: <span class="mono">unrouted</span> <span title="Responses since hoster started: none 0 · 1xx 0 · 2xx 0 · 3xx 0 · 4xx 1 · 5xx 0">1 request (4xx 100.0 %, 5xx 0 %"#),
+        html.contains(r#"Outside the stacks: <span class="mono">unrouted</span> <span title="Responses over the last 24h: none 0 · 1xx 0 · 2xx 0 · 3xx 0 · 4xx 1 · 5xx 0">1 request (4xx 100.0 %, 5xx 0 %"#),
         "{html}"
     );
     assert!(
-        html.contains(r#"<span class="mono">gone (removed)</span> <span title="Responses since hoster started: none 0 · 1xx 0 · 2xx 1 · 3xx 0 · 4xx 0 · 5xx 0">1 request"#),
+        html.contains(r#"<span class="mono">gone (removed)</span> <span title="Responses over the last 24h: none 0 · 1xx 0 · 2xx 1 · 3xx 0 · 4xx 0 · 5xx 0">1 request"#),
         "{html}"
     );
     assert!(
-        html.contains(r#"<span class="mono">hoster (admin UI)</span> <span title="Responses since hoster started: none 0 · 1xx 0 · 2xx 3 · 3xx 0 · 4xx 0 · 5xx 0">3 requests"#),
+        html.contains(r#"<span class="mono">hoster (admin UI)</span> <span title="Responses over the last 24h: none 0 · 1xx 0 · 2xx 3 · 3xx 0 · 4xx 0 · 5xx 0">3 requests"#),
         "{html}"
     );
 
-    // The tiles count everything but hoster's own admin UI: 102 requests, two 5xx.
+    // The tiles count everything but hoster's own admin UI: 122 requests, two 5xx; the period
+    // before had 61.
     let tiles: Vec<String> = overview.kpis.iter().map(ToString::to_string).collect();
     assert!(
-        tiles[0].contains(r#"<dd class="kpi-value">102</dd>"#),
+        tiles[0].contains(r#"<dt class="kpi-label">requests · 24h</dt><dd class="kpi-value">122</dd><dd class="kpi-sub">▲ 100.0 % vs prev · 2 in flight</dd>"#),
         "{tiles:?}"
     );
     assert!(
-        tiles[1].contains(
-            r#"<dd class="kpi-value">2.0 %</dd><dd class="kpi-sub">2 of 102 since start</dd>"#
-        ),
+        tiles[1].contains(r#"<dd class="kpi-value">1.6 %</dd><dd class="kpi-sub">2 of 122</dd>"#),
         "{tiles:?}"
     );
     assert!(tiles[1].contains("kpi-fail"), "{tiles:?}");
     assert!(
-        tiles[2].contains("p50 latency") && tiles[2].contains("last 5 min"),
+        tiles[2].contains(
+            r#"<dd class="kpi-value">4.1 ms</dd><dd class="kpi-sub">▲ 3.1 ms vs prev</dd>"#
+        ),
+        "{tiles:?}"
+    );
+    assert!(
+        tiles[3].contains("kpi-warn") && tiles[3].contains("vs prev"),
+        "{tiles:?}"
+    );
+    assert!(
+        tiles[0].contains("over the last 24h") && !tiles.concat().contains("since"),
         "{tiles:?}"
     );
     // blog's worker crash loops: degraded.
@@ -527,6 +636,7 @@ fn the_stacks_table_aggregates_each_stacks_routes_and_deployments() {
             && tiles[4].contains(r#"<dd class="kpi-value">0 / 1</dd><dd class="kpi-sub">1 degraded · 0 deploying</dd>"#),
         "{tiles:?}"
     );
+    assert!(!html.contains("since hoster started"), "{html}");
 }
 
 #[test]
@@ -562,15 +672,21 @@ fn an_empty_overview_says_so() {
     assert!(html.contains(r#"<dd class="kpi-value">0 / 0</dd>"#));
 }
 
-#[test]
-fn a_failing_orchestrator_is_named_above_the_overview() {
-    let traffic = Traffic::default();
-    let root = entry(routed("blog", "web"), "/");
-    finish(&mut traffic.route("blog.example.com", &root), 200, 4);
+#[tokio::test]
+async fn a_failing_orchestrator_is_named_above_the_overview() {
+    let history = history(
+        Range::Day,
+        vec![bucket(
+            hour(),
+            ("blog.example.com", "blog", "web"),
+            &[(200, 1, 4)],
+        )],
+    )
+    .await;
     let overview = Overview::new(
         Readings {
             stacks: Err("Cannot show the stacks: the store is locked.".into()),
-            traffic: traffic.snapshot(),
+            history: Ok(history),
             ..Readings::default()
         },
         SystemTime::now(),
@@ -602,17 +718,17 @@ fn a_failing_orchestrator_is_named_above_the_overview() {
     );
 }
 
-#[test]
-fn removed_stacks_keep_their_upstream_errors_and_deployments() {
-    let traffic = Traffic::default();
-    let removed = entry(routed("gone", "web"), "/");
-    let mut request = traffic.route("gone.example.com", &removed);
-    request.finish(RequestOutcome {
-        status: Some(502),
-        latency: Duration::from_millis(3),
-        upstream_error: true,
-    });
-    finish(&mut traffic.route("gone.example.com", &removed), 200, 2);
+#[tokio::test]
+async fn removed_stacks_keep_their_upstream_errors_and_deployments() {
+    let history = history(
+        Range::Day,
+        vec![bucket(
+            hour(),
+            ("gone.example.com", "gone", "web"),
+            &[(502, 1, 3), (200, 1, 2)],
+        )],
+    )
+    .await;
     let outcome = |stack: &str, state, count| DeploymentOutcome {
         stack: stack.into(),
         state,
@@ -636,7 +752,7 @@ fn removed_stacks_keep_their_upstream_errors_and_deployments() {
     let overview = Overview::new(
         Readings {
             stacks: Ok(vec![blog()]),
-            traffic: traffic.snapshot(),
+            history: Ok(history),
             deployments: Ok(deployments),
             ..Readings::default()
         },
@@ -644,7 +760,7 @@ fn removed_stacks_keep_their_upstream_errors_and_deployments() {
     );
     let html = compact(&overview.render().unwrap());
     assert!(
-        html.contains(r#"<span class="mono">gone (removed)</span> <span title="Responses since hoster started: none 0 · 1xx 0 · 2xx 1 · 3xx 0 · 4xx 0 · 5xx 1">2 requests"#),
+        html.contains(r#"<span class="mono">gone (removed)</span> <span title="Responses over the last 24h: none 0 · 1xx 0 · 2xx 1 · 3xx 0 · 4xx 0 · 5xx 1">2 requests"#),
         "{html}"
     );
     assert!(
@@ -800,7 +916,7 @@ async fn the_dashboard_shows_the_overview_in_a_live_region() {
     let html = body(app.get("/", Some(&browser.cookie)).await).await;
     assert!(
         html.contains(
-            r#"<div id="overview" class="dashboard" hx-sse:connect="/events" hx-swap="innerHTML" hx-sse:close="end">"#
+            r#"<div id="overview" class="dashboard" hx-sse:connect="/events?range=24h" hx-swap="innerHTML" hx-sse:close="end">"#
         ),
         "{html}"
     );
@@ -985,4 +1101,249 @@ async fn the_stream_needs_a_session() {
     let app = TestApp::new().await;
     let response = app.get("/events", None).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn every_range_renders_with_its_link_marked_and_the_stream_on_it() {
+    let app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    *app.stacks.stacks.lock().unwrap() = vec![blog()];
+    for (query, range) in [
+        ("", "24h"),
+        ("?range=1h", "1h"),
+        ("?range=6h", "6h"),
+        ("?range=24h", "24h"),
+        ("?range=7d", "7d"),
+        ("?range=30d", "30d"),
+        // An unknown range falls back to the default.
+        ("?range=1y", "24h"),
+    ] {
+        let html = compact(&body(app.get(&format!("/{query}"), Some(&browser.cookie)).await).await);
+        let picker = &html[html.find(r#"<div class="range-picker""#).expect(&html)..];
+        let picker = &picker[..picker.find("</div>").unwrap()];
+        for other in ["1h", "6h", "24h", "7d", "30d"] {
+            let link = if other == range {
+                format!(r#"<a href="/?range={other}" aria-current="page">{other}</a>"#)
+            } else {
+                format!(r#"<a href="/?range={other}">{other}</a>"#)
+            };
+            assert!(picker.contains(&link), "{query}: {picker}");
+        }
+        assert_eq!(picker.matches("aria-current").count(), 1, "{picker}");
+        assert!(
+            html.contains(&format!(r#"hx-sse:connect="/events?range={range}""#)),
+            "{query}: {html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r#"Responses by status <span class="card-count">· {range} · all stacks</span>"#
+            )) && html.contains(&format!(
+                r#"Response time <span class="card-count">· {range}</span>"#
+            )),
+            "{query}: {html}"
+        );
+        assert!(
+            html.contains(&format!(r#"<dt class="kpi-label">requests · {range}</dt>"#)),
+            "{query}: {html}"
+        );
+        assert_eq!(
+            html.matches(r#"class="chart-plot""#).count(),
+            2,
+            "{query}: {html}"
+        );
+        assert!(!html.contains("style="), "{html}");
+    }
+
+    // The stream sends the overview on the range of its URL.
+    let response = app.get("/events?range=7d", Some(&browser.cookie)).await;
+    let mut stream = response.into_body();
+    let mut text = String::new();
+    read_until(&mut stream, &mut text, "\n\n").await;
+    assert!(text.contains("requests · 7d"), "{text}");
+    assert!(
+        text.contains("Response time <span class=\"card-count\">· 7d"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn deltas_compare_with_the_period_before_and_are_left_out_without_one() {
+    let blog_web = ("blog.example.com", "blog", "web");
+    // Only the range has data: no delta on any tile.
+    let only_now = overview_of(
+        vec![blog()],
+        history(
+            Range::Hour,
+            vec![bucket(hour(), blog_web, &[(200, 40, 20)])],
+        )
+        .await,
+    );
+    let tiles: Vec<String> = only_now.kpis.iter().map(ToString::to_string).collect();
+    assert!(
+        tiles[0]
+            .contains(r#"<dd class="kpi-value">40</dd><dd class="kpi-sub">no previous data</dd>"#),
+        "{tiles:?}"
+    );
+    for tile in &tiles[2..4] {
+        assert!(
+            tile.contains(r#"<dd class="kpi-sub">no previous data</dd>"#),
+            "{tiles:?}"
+        );
+    }
+    assert!(!tiles.concat().contains("vs prev"), "{tiles:?}");
+
+    // The hour before had more, slower requests: everything went down.
+    let both = overview_of(
+        vec![blog()],
+        history(
+            Range::Hour,
+            vec![
+                bucket(hour(), blog_web, &[(200, 40, 20)]),
+                bucket(hour() - MINUTE * 40, blog_web, &[(200, 50, 80)]),
+            ],
+        )
+        .await,
+    );
+    let tiles: Vec<String> = both.kpis.iter().map(ToString::to_string).collect();
+    assert!(
+        tiles[0].contains(r#"<dd class="kpi-sub">▼ 20.0 % vs prev</dd>"#),
+        "{tiles:?}"
+    );
+    assert!(
+        tiles[2].contains("▼ ") && tiles[2].contains(" ms vs prev"),
+        "{tiles:?}"
+    );
+    assert!(
+        tiles[3].contains("▼ ") && tiles[3].contains(" ms vs prev"),
+        "{tiles:?}"
+    );
+    // A change has no tone of its own.
+    assert!(
+        tiles[0].contains("kpi-neutral") && tiles[2].contains("kpi-neutral"),
+        "{tiles:?}"
+    );
+
+    // The same figures: unchanged.
+    let same = overview_of(
+        vec![blog()],
+        history(
+            Range::Hour,
+            vec![
+                bucket(hour(), blog_web, &[(200, 40, 20)]),
+                bucket(hour() - MINUTE * 40, blog_web, &[(200, 40, 20)]),
+            ],
+        )
+        .await,
+    );
+    let tiles: Vec<String> = same.kpis.iter().map(ToString::to_string).collect();
+    assert!(
+        tiles[0].contains(r#"<dd class="kpi-sub">unchanged vs prev</dd>"#)
+            && tiles[2].contains(r#"<dd class="kpi-sub">unchanged vs prev</dd>"#),
+        "{tiles:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_admin_uis_own_requests_are_not_counted() {
+    // Live: one request in flight to blog, two to the admin UI.
+    let traffic = Traffic::default();
+    let _blog = traffic.route("blog.example.com", &entry(routed("blog", "web"), "/"));
+    let admin = entry(Owner::Reserved("admin UI"), "/");
+    let _admin = [
+        traffic.route("admin.example.com", &admin),
+        traffic.route("admin.example.com", &admin),
+    ];
+    let mut done = traffic.route("blog.example.com", &entry(routed("blog", "web"), "/"));
+    finish(&mut done, 200, 3);
+    drop(done);
+    // In the history, only the admin UI saw requests.
+    let history = history(
+        Range::Day,
+        vec![bucket(
+            hour(),
+            ("admin.example.com", "", "admin UI"),
+            &[(200, 30, 2), (500, 3, 2)],
+        )],
+    )
+    .await;
+    let overview = Overview::new(
+        Readings {
+            stacks: Ok(vec![blog()]),
+            history: Ok(history),
+            inflight: Readings::inflight(&traffic.snapshot()),
+            ..Readings::default()
+        },
+        SystemTime::now(),
+    );
+    let tiles: Vec<String> = overview.kpis.iter().map(ToString::to_string).collect();
+    assert!(
+        tiles[0].contains(
+            r#"<dd class="kpi-value">0</dd><dd class="kpi-sub">no previous data · 1 in flight</dd>"#
+        ),
+        "{tiles:?}"
+    );
+    assert!(
+        tiles[1].contains(r#"<dd class="kpi-value">-</dd><dd class="kpi-sub">no requests</dd>"#)
+            && !tiles[1].contains("kpi-fail"),
+        "{tiles:?}"
+    );
+    assert!(
+        tiles[2].contains(r#"<dd class="kpi-value">-</dd><dd class="kpi-sub">no requests</dd>"#),
+        "{tiles:?}"
+    );
+    let html = compact(&overview.render().unwrap());
+    // The charts show nothing for the admin UI's requests: an empty plot.
+    assert!(html.contains("2xx 0"), "{html}");
+    // The note counts them.
+    assert!(
+        html.contains(r#"<span class="mono">hoster (admin UI)</span> <span title="Responses over the last 24h: none 0 · 1xx 0 · 2xx 30 · 3xx 0 · 4xx 0 · 5xx 3">33 requests"#),
+        "{html}"
+    );
+    // blog routes hosts but saw nothing: zero rate, `-` figures, a flat sparkline.
+    let row = row(&html, "blog");
+    assert!(
+        row.contains(r#"<td class="num">0</td> <td class="num">-</td> <td class="num stat-neutral">-</td> <td class="num">-</td> <td class="num stat-neutral">-</td>"#),
+        "{row}"
+    );
+    assert!(row.contains("0 requests</span><svg class=\"spark"), "{row}");
+}
+
+#[tokio::test]
+async fn a_stack_without_routes_shows_dashes_and_an_unreadable_history_is_named() {
+    const WORKER: &str = r#"version = 1
+name = "jobs"
+
+[services.worker]
+image = "ghcr.io/acme/jobs"
+"#;
+    let mut jobs = blog();
+    jobs.name = "jobs".into();
+    jobs.revision.toml = WORKER.into();
+    jobs.services.truncate(1);
+    let overview = Overview::new(
+        Readings {
+            stacks: Ok(vec![jobs]),
+            history: Err("Cannot show the traffic history: database is locked.".into()),
+            ..Readings::default()
+        },
+        SystemTime::now(),
+    );
+    let html = compact(&overview.render().unwrap());
+    assert!(
+        html.contains(r#"<p class="flash flash-error">Cannot show the traffic history: database is locked.</p>"#),
+        "{html}"
+    );
+    let row = row(&html, "jobs");
+    assert_eq!(
+        row.matches(r#"<td class="num muted" title="The stack routes nothing">-</td>"#)
+            .count(),
+        6,
+        "{row}"
+    );
+    assert!(!row.contains("spark"), "{row}");
+    // The charts still draw, empty, over the range.
+    assert!(
+        html.contains("Responses by status <span class=\"card-count\">· 24h"),
+        "{html}"
+    );
 }

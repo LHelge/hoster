@@ -21,6 +21,22 @@
   </div>
 </section>
 {%- endif %}
+<div class="dash-charts">
+<section class="card dash-chart-statuses" aria-labelledby="statuses-title">
+  <header class="card-head">
+    <h2 id="statuses-title" title="Every stack's routes and unrouted requests, not hoster's own admin UI">Responses by status <span class="card-count">· {{ range }} · all stacks</span></h2>
+    {{ statuses.legend() }}
+  </header>
+  <div class="card-body">{{ statuses }}</div>
+</section>
+<section class="card dash-chart-latency" aria-labelledby="latency-title">
+  <header class="card-head">
+    <h2 id="latency-title" title="Time to the response header; every stack's routes and unrouted requests, not hoster's own admin UI">Response time <span class="card-count">· {{ range }}</span></h2>
+    {{ latency.legend() }}
+  </header>
+  <div class="card-body">{{ latency }}</div>
+</section>
+</div>
 <section class="card" aria-labelledby="stacks-title">
   <header class="card-head">
     <h2 id="stacks-title">Stacks{% if !summary.is_empty() %} <span class="card-count">· {{ summary }}</span>{% endif %}</h2>
@@ -33,7 +49,7 @@
   {%- else %}
   <div class="table-scroll"><table class="list dash-stacks">
     <thead>
-      <tr><th scope="col">Stack</th><th scope="col">Status</th><th scope="col" class="num" title="Running services that pass their health check, out of all">Healthy</th><th scope="col" class="num">p50</th><th scope="col" class="num">p95</th><th scope="col" class="num" title="Share of 4xx responses since hoster started">4xx</th><th scope="col" class="num" title="Share of 5xx responses since hoster started">5xx</th><th scope="col" class="num">Restarts</th><th scope="col">Deploys · 30 d</th><th scope="col">Last deployment</th></tr>
+      <tr><th scope="col">Stack</th><th scope="col">Status</th><th scope="col" class="num" title="Running services that pass their health check, out of all">Healthy</th><th scope="col" class="num" title="Requests per minute over the last 5 minutes">req/min</th><th scope="col" class="num" title="Median time to the response header over the last {{ range }}">p50</th><th scope="col" class="num" title="95th percentile time to the response header over the last {{ range }}">p95</th><th scope="col" class="num" title="Share of 4xx responses over the last {{ range }}">4xx</th><th scope="col" class="num" title="Share of 5xx responses over the last {{ range }}">5xx</th><th scope="col" title="Requests over the last {{ range }}">Last {{ range }}</th><th scope="col" class="num">Restarts</th><th scope="col">Deploys · 30 d</th><th scope="col">Last deployment</th></tr>
     </thead>
     <tbody>
       {%- for stack in stacks %}
@@ -43,14 +59,18 @@
         <td>{{ stack.condition.pill() }}</td>
         <td class="num"><span class="stat-{{ stack.healthy_tone() }}" title="{{ stack.health_detail }}">{{ stack.healthy }}/{{ stack.services }}</span></td>
         {%- if let Some(traffic) = stack.traffic %}
-        <td class="num">{{ traffic.p50 }}</td>
-        <td class="num stat-{{ traffic.p95_tone }}">{{ traffic.p95 }}</td>
-        <td class="num">{{ traffic.client_errors }}</td>
-        <td class="num stat-{{ traffic.errors_tone }}">{{ traffic.errors }}</td>
+        <td class="num">{{ traffic.per_minute }}</td>
+        <td class="num">{{ traffic.line.p50 }}</td>
+        <td class="num stat-{{ traffic.line.p95_tone }}">{{ traffic.line.p95 }}</td>
+        <td class="num">{{ traffic.line.client_errors }}</td>
+        <td class="num stat-{{ traffic.line.errors_tone }}">{{ traffic.line.errors }}</td>
+        <td class="dash-spark"><span class="visually-hidden">{{ traffic.requests() }} requests</span>{{ traffic.spark }}</td>
         {%- else if stack.revision_unreadable %}
-        <td class="num muted" colspan="4">the active revision cannot be read</td>
+        <td class="num muted" colspan="6">the active revision cannot be read</td>
         {%- else %}
-        <td class="num muted" colspan="4">no routes</td>
+        {%- for _ in 0..6 %}
+        <td class="num muted" title="The stack routes nothing">-</td>
+        {%- endfor %}
         {%- endif %}
         <td class="num dash-restarts"><span class="stat-{{ stack.restarts_tone() }}" title="{{ stack.restarts_detail }}">{{ stack.restarts }}</span>{% if stack.crash_looping > 0 %}<span class="dash-sub stat-fail">{{ stack.crash_looping }} crash looping</span>{% endif %}</td>
         <td class="dash-deploys">
@@ -72,7 +92,7 @@
   <p class="card-foot dash-other">Outside the stacks:
     {%- for other in other %}{% if !loop.first %};{% endif %} <span class="mono">{{ other.label }}</span>
       {%- if other.traffic.requests > 0 || other.deploys.is_none() %} <span{% if other.traffic.requests > 0 %} title="{{ other.statuses }}"{% endif %}>{{ other.requests() }} {% if other.traffic.requests == 1 %}request{% else %}requests{% endif %}
-      {%- if other.traffic.requests > 0 %} (4xx {{ other.traffic.client_errors }}, 5xx {{ other.traffic.errors }}, p50 {{ other.traffic.p50 }}, p95 {{ other.traffic.p95 }}{% if other.traffic.inflight > 0 %}, {{ other.traffic.inflight }} in flight{% endif %}{% if other.upstream_errors > 0 %}, <span class="stat-fail">{{ other.upstream_errors() }} upstream {% if other.upstream_errors == 1 %}error{% else %}errors{% endif %}</span>{% endif %}){% endif %}</span>
+      {%- if other.traffic.requests > 0 %} (4xx {{ other.traffic.client_errors }}, 5xx {{ other.traffic.errors }}, p50 {{ other.traffic.p50 }}, p95 {{ other.traffic.p95 }}{% if other.upstream_errors > 0 %}, <span class="stat-fail">{{ other.upstream_errors() }} upstream {% if other.upstream_errors == 1 %}error{% else %}errors{% endif %}</span>{% endif %}){% endif %}</span>
       {%- endif %}
       {%- if let Some(deploys) = other.deploys %}{% if other.traffic.requests > 0 %},{% endif %} <span title="{{ deploys.title() }}">deploys · 30 d: {{ deploys.live }} live
       {%- if deploys.failed > 0 %} · <span class="stat-fail">{{ deploys.failed }} failed</span>{% endif %}
