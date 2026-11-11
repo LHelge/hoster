@@ -1,15 +1,16 @@
 ---
 id: sq4
 title: Send Strict-Transport-Security on the admin host
-status: open
+status: done
 priority: P3
 created: "2026-11-10T14:45:11.157392Z"
-updated: "2026-11-10T14:45:11.157392Z"
+updated: "2026-11-11T15:09:22.931318007Z"
 tags:
   - proxy
   - web
   - security
 parent: kyn
+attempts: 1
 ---
 
 ## Problem
@@ -40,3 +41,12 @@ and the OAuth flow, and it is only ever served over TLS with a certificate hoste
 - `src/web/mod.rs` (where the security headers are set), `src/proxy/plain.rs` (the 308)
 - `docs/adr/0031-admin-ui-exposure-identity-sessions.md`, `docs/adr/0032-proxy-edge-behaviour.md`
 - `site/content/wiki/stack-format.md`
+
+## Result (2026-11-11)
+
+`SecurityHeaders` in `src/web/mod.rs` adds `Strict-Transport-Security: max-age=31536000` (no
+`includeSubDomains`, no `preload`) to every response of the admin app, asserted in
+`every_response_carries_the_security_headers`. The proxy's own error pages for the admin host
+do not carry it. Browsers ignore the header on the plain-HTTP dev listener (`web.dev_listen`),
+so it is sent there too rather than making the header set depend on the listener. The
+stack-format guide (§2.3) says that apps set their own HSTS.

@@ -2,10 +2,10 @@
 id: kyn
 title: "Edge hardening: downstream limits and adversarial HTTP tests"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-10T12:55:41.446324Z"
-updated: "2026-11-10T12:55:41.446324Z"
+updated: "2026-11-11T15:09:22.935977852Z"
 tags:
   - proxy
   - security

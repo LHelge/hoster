@@ -119,6 +119,13 @@ impl SecurityHeaders {
                        img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; \
                        form-action 'self'; frame-ancestors 'none'";
 
+    /// One year, for the admin host alone: its parent domain is not hoster's to speak for
+    /// (no `includeSubDomains`), and nobody asked to be on a preload list. The admin host is
+    /// only ever served over TLS (ADR-0031), so after one visit a browser no longer makes the
+    /// plain-HTTP request that `:80` would redirect, which is the hop that can be intercepted.
+    /// Browsers ignore the header on the plain-HTTP dev listener.
+    const HSTS: &str = "max-age=31536000";
+
     async fn apply(mut response: Response) -> Response {
         Self::insert(response.headers_mut());
         response
@@ -133,6 +140,7 @@ impl SecurityHeaders {
             // no referrer to other sites.
             (header::REFERRER_POLICY, "same-origin"),
             (header::X_FRAME_OPTIONS, "DENY"),
+            (header::STRICT_TRANSPORT_SECURITY, Self::HSTS),
             (
                 header::HeaderName::from_static("cross-origin-opener-policy"),
                 "same-origin",

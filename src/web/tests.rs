@@ -73,6 +73,11 @@ async fn every_response_carries_the_security_headers() {
         assert_eq!(header(&response, "x-content-type-options"), "nosniff");
         assert_eq!(header(&response, "referrer-policy"), "same-origin");
         assert_eq!(header(&response, "x-frame-options"), "DENY");
+        // The admin host only: no `includeSubDomains`, no `preload`.
+        assert_eq!(
+            header(&response, "strict-transport-security"),
+            "max-age=31536000"
+        );
     }
 }
 
