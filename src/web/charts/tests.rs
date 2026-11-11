@@ -243,12 +243,8 @@ fn a_line_chart_draws_exact_svg_and_breaks_where_a_bucket_has_no_samples() {
             r#"<g class="chart-bar"><title>-3m to -2m: p50 30 ms, p95 150 ms</title><rect class="chart-hit" x="150" y="0" width="150" height="180"></rect></g>"#,
             r#"<g class="chart-bar"><title>-2m to -1m: no samples</title><rect class="chart-hit" x="300" y="0" width="150" height="180"></rect></g>"#,
             r#"<g class="chart-bar"><title>-1m to now: p50 20 ms, p95 90 ms</title><rect class="chart-hit" x="450" y="0" width="150" height="180"></rect></g>"#,
-            r#"<polyline class="chart-line chart-gap chart-p95" points="225,90 525,126" vector-effect="non-scaling-stroke"></polyline>"#,
-            r#"<polyline class="chart-line chart-p95" points="75,0 225,90" vector-effect="non-scaling-stroke"></polyline>"#,
-            r#"<polyline class="chart-line chart-point chart-p95" points="525,126 525,126" vector-effect="non-scaling-stroke"></polyline>"#,
-            r#"<polyline class="chart-line chart-gap chart-p50" points="225,162 525,168" vector-effect="non-scaling-stroke"></polyline>"#,
-            r#"<polyline class="chart-line chart-p50" points="75,156 225,162" vector-effect="non-scaling-stroke"></polyline>"#,
-            r#"<polyline class="chart-line chart-point chart-p50" points="525,168 525,168" vector-effect="non-scaling-stroke"></polyline>"#,
+            r#"<polyline class="chart-line chart-p95" points="75,0 225,90 375,180 525,126" vector-effect="non-scaling-stroke"></polyline>"#,
+            r#"<polyline class="chart-line chart-p50" points="75,156 225,162 375,180 525,168" vector-effect="non-scaling-stroke"></polyline>"#,
         )
     );
     assert!(svg.ends_with(r#"<div class="chart-x" aria-hidden="true"><span>-4m</span><span>-3m</span><span>-2m</span><span>-1m</span><span>now</span></div></div>"#));
