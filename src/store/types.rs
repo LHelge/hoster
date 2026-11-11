@@ -23,6 +23,15 @@ impl Timestamp {
     pub fn as_millis(self) -> i64 {
         self.0
     }
+
+    /// The start of the `unit`-long period since the epoch that holds this time: the time
+    /// itself when it is a multiple of `unit`. A zero `unit` leaves the time as it is.
+    pub fn floor(self, unit: Duration) -> Timestamp {
+        match i64::try_from(unit.as_millis()).unwrap_or(i64::MAX) {
+            0 => self,
+            unit => Timestamp(self.0.saturating_sub(self.0.rem_euclid(unit))),
+        }
+    }
 }
 
 impl std::ops::Add<Duration> for Timestamp {

@@ -1,0 +1,170 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT start AS \"start: Timestamp\", host, prefix, stack, service, none,\n                              s1xx, s2xx, s3xx, s4xx, s5xx, upstream_errors, latency\n                       FROM traffic_minutes WHERE start = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "start: Timestamp",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "start"
+          }
+        }
+      },
+      {
+        "name": "host",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "name": "prefix",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "prefix"
+          }
+        }
+      },
+      {
+        "name": "stack",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "stack"
+          }
+        }
+      },
+      {
+        "name": "service",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "service"
+          }
+        }
+      },
+      {
+        "name": "none",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "none"
+          }
+        }
+      },
+      {
+        "name": "s1xx",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "s1xx"
+          }
+        }
+      },
+      {
+        "name": "s2xx",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "s2xx"
+          }
+        }
+      },
+      {
+        "name": "s3xx",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "s3xx"
+          }
+        }
+      },
+      {
+        "name": "s4xx",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "s4xx"
+          }
+        }
+      },
+      {
+        "name": "s5xx",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "s5xx"
+          }
+        }
+      },
+      {
+        "name": "upstream_errors",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "upstream_errors"
+          }
+        }
+      },
+      {
+        "name": "latency",
+        "ordinal": 12,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "traffic_minutes",
+            "name": "latency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "05390b1ebc7a14ca3785b99cd238a28d48767c924693d1edb162fc38755bacaf"
+}

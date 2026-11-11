@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM traffic_hours WHERE start < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f723d238267382de3e0915d53a8d204299190cf27c2c9f12890af7672e70c80f"
+}

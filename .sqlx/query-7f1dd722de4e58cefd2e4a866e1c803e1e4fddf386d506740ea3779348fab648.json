@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO traffic_minutes (start, host, prefix, stack, service, none, s1xx,\n                         s2xx, s3xx, s4xx, s5xx, upstream_errors, latency)\n                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n                     ON CONFLICT (start, host, prefix, stack, service) DO UPDATE SET\n                         none = excluded.none, s1xx = excluded.s1xx, s2xx = excluded.s2xx,\n                         s3xx = excluded.s3xx, s4xx = excluded.s4xx, s5xx = excluded.s5xx,\n                         upstream_errors = excluded.upstream_errors, latency = excluded.latency",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 13
+    },
+    "nullable": []
+  },
+  "hash": "7f1dd722de4e58cefd2e4a866e1c803e1e4fddf386d506740ea3779348fab648"
+}
