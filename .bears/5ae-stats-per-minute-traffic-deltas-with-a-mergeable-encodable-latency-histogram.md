@@ -1,16 +1,17 @@
 ---
 id: "5ae"
 title: "Stats: per-minute traffic deltas with a mergeable, encodable latency histogram"
-status: open
+status: done
 priority: P1
 created: "2026-11-11T09:08:20.531155347Z"
-updated: "2026-11-11T09:08:20.531155347Z"
+updated: "2026-11-11T09:33:26.862332517Z"
 tags:
   - stats
   - observability
 depends_on:
   - mje
 parent: t97
+attempts: 1
 ---
 
 ## Summary
@@ -19,11 +20,11 @@ Give the in-memory `Traffic` counters what the recorder needs: a way to take, pe
 
 ## Acceptance Criteria
 
-- [ ] Each route's counters keep a cumulative latency histogram beside the status counters, recorded lock-free on the proxy's hot path (no new locks; at most a couple of atomic adds more per request)
-- [ ] `Traffic` has a drain operation returning one delta per route (and one for unrouted) with requests since the previous drain: host, prefix, owner, counts per `StatusClass`, upstream errors, latency histogram. Routes without requests since the last drain return nothing
-- [ ] The histogram is a public type of `stats` with `Sum`/`AddAssign`, p50/p95 (as `Latency` has today), and a compact versioned byte encoding via `From`/`TryFrom` (sparse: most of the 108 buckets are empty). Decoding unknown versions or malformed bytes is an error, not a panic
-- [ ] A route that changed owner starts a new series, as its counters do today
-- [ ] Counters of routes that are gone are dropped once drained and idle, so the registry no longer grows until restart
+- [x] Each route's counters keep a cumulative latency histogram beside the status counters, recorded lock-free on the proxy's hot path (no new locks; at most a couple of atomic adds more per request)
+- [x] `Traffic` has a drain operation returning one delta per route (and one for unrouted) with requests since the previous drain: host, prefix, owner, counts per `StatusClass`, upstream errors, latency histogram. Routes without requests since the last drain return nothing
+- [x] The histogram is a public type of `stats` with `Sum`/`AddAssign`, p50/p95 (as `Latency` has today), and a compact versioned byte encoding via `From`/`TryFrom` (sparse: most of the 108 buckets are empty). Decoding unknown versions or malformed bytes is an error, not a panic
+- [x] A route that changed owner starts a new series, as its counters do today
+- [x] Counters of routes that are gone are dropped once drained and idle, so the registry no longer grows until restart
 
 ## Implementation Notes
 
