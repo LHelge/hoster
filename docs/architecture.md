@@ -101,6 +101,12 @@ Checked live against a public image:
 3. Without a token the registry answers `401` with
    `WWW-Authenticate: Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:…:pull"`,
    so the token step can also be discovered generically.
+4. `GET /v2/<owner>/<name>/tags/list?n=1000` with the same pull token returns
+   `{"name": …, "tags": […]}` and, when more remain, `Link: </v2/…/tags/list?…&last=…>;
+   rel="next"` with a relative target. Checked live on 2026-11-11 for the update checker
+   (ADR-0061) on ghcr (`immich-app/immich-server`: 33,317 tags, most of them per-commit and
+   per-PR CI tags) and Docker Hub (`library/postgres`: 1,433 tags). A full list of the larger
+   one took a few seconds; the client gives up past 100,000 tags or 1,000 pages.
 
 For multi-arch images the digest is the **index** digest. hoster records and compares the
 requested reference digest, stored in a container label, rather than podman's image ID, which is

@@ -1,5 +1,5 @@
-//! Generic OCI registry client (token discovery, manifest `HEAD` for digests) and the
-//! edge-triggered digest poller (ADR-0005, ADR-0043).
+//! Generic OCI registry client (token discovery, manifest `HEAD` for digests, paginated tag
+//! lists) and the edge-triggered digest poller (ADR-0005, ADR-0043, ADR-0061).
 //!
 //! Also home to the registry credentials (ADR-0025): one credential per registry host, kept in
 //! the secret store and shared by podman pulls (`X-Registry-Auth`) and the registry client's
