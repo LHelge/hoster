@@ -1,10 +1,10 @@
 ---
 id: wfw
 title: "Decide: file-system sandbox for the unit on Ubuntu (OQ-36)"
-status: open
+status: done
 priority: P1
 created: "2026-11-08T11:58:18.020088500Z"
-updated: "2026-11-08T11:58:18.020088500Z"
+updated: "2026-11-11T21:49:53.991697332Z"
 tags:
   - decision
 ---

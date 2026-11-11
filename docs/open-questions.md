@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-36, OQ-38, OQ-39 and OQ-40 are open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38, OQ-39 and OQ-40 are open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -393,6 +393,10 @@ check.
 
 ## OQ-36: No file-system sandbox for the user unit on Ubuntu
 
+**Resolved 2026-11-11 → [ADR-0064](adr/0064-accept-no-unit-file-system-sandbox-on-ubuntu.md).** A, accept the gap. The podman socket lets hoster bind-mount anything the `hoster` user owns, so no unit sandbox contains a compromised hoster. The `hoster` user is the boundary. The sandbox would only guard against wrong-path bugs, which doesn't justify relaxing a host-wide default (B) or moving to a system service (D).
+
+<details><summary>Original discussion</summary>
+
 **Problem.** On Ubuntu ≥ 23.10, `kernel.apparmor_restrict_unprivileged_userns = 1` gives the user
 manager a user namespace without capabilities. The unit therefore cannot set up a mount
 namespace. `ProtectSystem=strict`, `ProtectHome=read-only`, `ReadWritePaths=`, `PrivateTmp=`,
@@ -430,6 +434,8 @@ Found on the first real install (Ubuntu 26.04, v0.1.0). The `unit_sandbox` check
 **Recommendation.** D. It gives the strongest sandbox on every distribution, it drops the
 low-ports-for-everyone sysctl, and it doesn't weaken host defaults. Until then, A, which is the
 current state. B is a reasonable stopgap if the owner wants the sandbox on Ubuntu now.
+
+</details>
 
 ## OQ-37: Notifications: channel, provider, configuration and which events
 
