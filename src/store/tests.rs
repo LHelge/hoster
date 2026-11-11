@@ -1697,6 +1697,29 @@ mod traffic {
     }
 
     #[tokio::test]
+    async fn traffic_history_survives_reopening_the_store() {
+        let (dir, store) = open().await;
+        let notes = bucket(minute(3), series("notes", "web"), 5, 1, &[3, 4, 90]);
+        store.record_traffic([notes.clone()]).await.unwrap();
+        store.close().await;
+
+        // A restart: the history is still there, and the next flush adds to it.
+        let store = Store::open(&dir.path().join("state")).await.unwrap();
+        assert_eq!(
+            read(&store, Resolution::Minute, everything(), None).await,
+            std::slice::from_ref(&notes)
+        );
+        store
+            .record_traffic([bucket(minute(4), series("notes", "web"), 1, 0, &[2])])
+            .await
+            .unwrap();
+        let hours = read(&store, Resolution::Hour, everything(), None).await;
+        assert_eq!(hours.len(), 1);
+        assert_eq!(hours[0].counts.s2xx, 6);
+        assert_eq!(hours[0].latency.samples(), 4);
+    }
+
+    #[tokio::test]
     async fn writing_a_bucket_again_adds_to_it() {
         let (_dir, store) = open().await;
         let first = bucket(minute(1), series("notes", "web"), 5, 1, &[3, 4]);

@@ -41,7 +41,7 @@ use crate::stack::{
     DEFAULT_DRAIN_TIMEOUT, DEFAULT_STOP_TIMEOUT, Limits, Name, Route, RouteTimeouts, Service,
     Stack, UpdateStrategy,
 };
-use crate::stats::{StatusClass, Traffic};
+use crate::stats::{Histogram, StatusClass, StatusCounts, Traffic};
 use crate::web::{Listen, TestApp, WebServer};
 
 const CHUNK: usize = 64 * 1024;
@@ -1005,38 +1005,66 @@ async fn requests_are_counted_in_the_route_statistics() {
     assert_eq!(h.get("api.example.com", "/other").await.status, 404);
 
     // The `logging` hook runs after the response went out.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let snapshot = loop {
-        let snapshot = h.traffic.snapshot();
-        let finished: u64 = snapshot
-            .routes
-            .iter()
-            .map(|r| r.counts.statuses.total())
-            .sum::<u64>()
-            + snapshot.unrouted.statuses.total();
-        if finished >= 5 || Instant::now() > deadline {
-            break snapshot;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    let route = |host: &str, prefix: &str| {
-        snapshot
-            .routes
-            .iter()
-            .find(|r| r.host == host && r.prefix == prefix)
-            .unwrap_or_else(|| panic!("{host}{prefix} in {snapshot:?}"))
-            .counts
-    };
-    let root = route("app.example.com", "/");
+    let drained = Drained::until(&h.traffic, |d| {
+        d.routes.values().map(|r| r.statuses.total()).sum::<u64>() >= 5
+    })
+    .await;
+    let root = drained.route("app.example.com/");
     assert_eq!(root.statuses.get(StatusClass::Success), 2);
-    assert_eq!(root.latency.samples, 2);
-    assert!(root.latency.p95.is_some());
-    assert_eq!(root.inflight, 0);
-    assert_eq!(route("app.example.com", "/api").statuses.total(), 1);
-    let down = route("down.example.com", "/");
+    assert_eq!(root.latency.samples(), 2);
+    assert!(root.latency.p95().is_some());
+    assert_eq!(h.traffic.in_flight().hosted(), 0);
+    assert_eq!(drained.route("app.example.com/api").statuses.total(), 1);
+    let down = drained.route("down.example.com/");
     assert_eq!(down.statuses.get(StatusClass::ServerError), 1);
     assert_eq!(down.upstream_errors, 1);
-    assert_eq!(snapshot.unrouted.statuses.get(StatusClass::ClientError), 1);
+    assert_eq!(
+        drained.route("").statuses.get(StatusClass::ClientError),
+        1,
+        "unrouted"
+    );
+}
+
+/// What the traffic counters drained, added up per `host` + `prefix` (`""` for unrouted).
+#[derive(Debug, Default)]
+struct Drained {
+    routes: BTreeMap<String, DrainedRoute>,
+}
+
+#[derive(Debug, Default)]
+struct DrainedRoute {
+    statuses: StatusCounts,
+    upstream_errors: u64,
+    latency: Histogram,
+}
+
+impl Drained {
+    /// Drains `traffic` until `done` holds of everything drained, for up to five seconds.
+    async fn until(traffic: &Traffic, done: impl Fn(&Drained) -> bool) -> Drained {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut drained = Drained::default();
+        loop {
+            for delta in traffic.drain() {
+                let route = drained
+                    .routes
+                    .entry(format!("{}{}", delta.host, delta.prefix))
+                    .or_default();
+                route.statuses += delta.statuses;
+                route.upstream_errors += delta.upstream_errors;
+                route.latency += delta.latency;
+            }
+            if done(&drained) || Instant::now() > deadline {
+                return drained;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn route(&self, route: &str) -> &DrainedRoute {
+        self.routes
+            .get(route)
+            .unwrap_or_else(|| panic!("{route} in {self:?}"))
+    }
 }
 
 #[tokio::test]
@@ -1410,19 +1438,15 @@ async fn server_sent_events_are_not_buffered() {
     assert_eq!(h.web.inflight(), 0);
 
     // Its latency in the statistics is the time to the response header, not its lifetime.
-    let latency = loop {
-        let snapshot = h.traffic.snapshot();
-        let api = snapshot
-            .routes
-            .iter()
-            .find(|r| r.host == "app.example.com" && r.prefix == "/api");
-        match api.map(|r| r.counts.latency) {
-            Some(latency) if latency.samples == 1 => break latency,
-            _ if Instant::now() > deadline => panic!("stream not counted: {snapshot:?}"),
-            _ => tokio::time::sleep(Duration::from_millis(10)).await,
-        }
-    };
-    assert!(latency.p95.unwrap() < OPEN / 2, "{latency:?}");
+    let drained = Drained::until(&h.traffic, |d| {
+        d.routes
+            .get("app.example.com/api")
+            .is_some_and(|r| r.latency.samples() == 1)
+    })
+    .await;
+    let latency = drained.route("app.example.com/api").latency;
+    assert_eq!(latency.samples(), 1, "stream not counted: {drained:?}");
+    assert!(latency.p95().unwrap() < OPEN / 2, "{latency:?}");
 }
 
 // ---------------------------------------------------------------------------------------------

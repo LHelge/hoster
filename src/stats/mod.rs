@@ -1,20 +1,26 @@
-//! In-process statistics for the web UI (ADR-0045). There is no metrics endpoint: the only
+//! Statistics for the web UI (ADR-0045, ADR-0062). There is no metrics endpoint: the only
 //! reader is the authenticated admin app, through the [`Stats`] handle.
 //!
-//! - **Traffic** ([`Traffic`]): per-route request counts by status class, upstream errors, the
-//!   in-flight gauge and p50/p95 latency (time to the response header) over a rolling window
-//!   of a few minutes. The proxy updates the atomic counters from its `logging` hook; they
-//!   reset when hoster restarts.
-//! - **Deployments**: outcome counts and durations per stack, read from SQLite on demand, so
-//!   they survive restarts.
+//! Traffic comes in two parts:
+//!
+//! - **Live counters** ([`Traffic`]): per-route request counts by status class, upstream errors
+//!   and a latency histogram, updated lock-free by the proxy's `logging` hook. The traffic
+//!   recorder ([`TrafficRecorder`]) drains what they counted into the store once a minute, and
+//!   on graceful shutdown. The pages read only one live figure from them: the requests in flight
+//!   now ([`InFlight`]).
+//! - **Traffic history** ([`TrafficHistory`]): what the recorder flushed, 1-minute buckets for
+//!   24 h and 1-hour buckets for 60 days, read back per [`Range`] and scope as bars, totals, the
+//!   previous period, the current rate and the peak minute. It survives restarts, and lags by up
+//!   to a minute, since the minute in progress is never read.
+//!
+//! Besides traffic:
+//!
+//! - **Deployments**: outcome counts and durations per stack, read from SQLite on demand.
 //! - **Certificates**: the `not_after` of every certificate the proxy serves.
-//! - **Traffic history** ([`TrafficHistory`], ADR-0062): what the recorder ([`TrafficRecorder`])
-//!   flushed to the store each minute, read back per [`Range`] and scope as bars, totals, the
-//!   previous period, the current rate and the peak minute. It survives restarts.
 //!
 //! Restarts and crash loops (ADR-0028) are not kept here: pages read them from the stacks'
-//! status. Everything but the in-memory traffic comes from a [`StatsSource`]; [`HostStats`] is
-//! the real one.
+//! status. Everything but the live counters comes from a [`StatsSource`]; [`HostStats`] is the
+//! real one.
 
 mod history;
 mod latency;
@@ -34,35 +40,13 @@ use crate::store::{
 };
 
 pub use self::history::{Range, ScopeHistory, TrafficHistory, TrafficTotals};
-
-#[allow(
-    unused_imports,
-    reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
-)]
-pub use self::history::{Bar, PeakMinute, UnknownRange};
 pub use self::latency::Histogram;
-#[allow(
-    unused_imports,
-    reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
-)]
-pub use self::latency::HistogramDecodeError;
-#[allow(
-    unused_imports,
-    reason = "the rolling latency window is removed with the since-start counters (3te, ADR-0062 §8)"
-)]
-pub use self::latency::Latency;
 pub use self::recorder::TrafficRecorder;
-pub use self::traffic::StatusCounts;
-#[allow(
-    unused_imports,
-    reason = "the since-start counters are removed once no page reads them (3te, ADR-0062 §8)"
-)]
-pub use self::traffic::{Counts, RouteTraffic};
 pub use self::traffic::{
-    RequestOutcome, StatusClass, TrackedRequest, Traffic, TrafficDelta, TrafficSnapshot,
+    InFlight, RequestOutcome, StatusClass, StatusCounts, TrackedRequest, Traffic, TrafficDelta,
 };
 
-/// Where the statistics not kept by [`Traffic`] come from.
+/// Where the statistics not kept in memory come from.
 #[async_trait]
 pub trait StatsSource: Send + Sync + 'static {
     /// Deployment outcomes per stack and terminal state, over the last
@@ -95,12 +79,6 @@ impl fmt::Debug for Stats {
 }
 
 impl Stats {
-    /// How far back the latency percentiles look.
-    #[allow(
-        dead_code,
-        reason = "the rolling latency window is removed with the since-start counters (3te, ADR-0062 §8)"
-    )]
-    pub const LATENCY_WINDOW: Duration = latency::LatencyWindow::WINDOW;
     /// How far back the deployment statistics look.
     pub const DEPLOY_HISTORY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
@@ -116,10 +94,9 @@ impl Stats {
         certificates
     }
 
-    /// The request statistics alone, as of now: no store queries, for pages that show only
-    /// traffic (the stacks list).
-    pub fn traffic(&self) -> TrafficSnapshot {
-        self.traffic.snapshot()
+    /// The requests in flight now: the one traffic figure read live, not from the history.
+    pub fn in_flight(&self) -> InFlight {
+        self.traffic.in_flight()
     }
 
     /// How the deployments of the last [`Self::DEPLOY_HISTORY`] went, per stack, sorted by name.

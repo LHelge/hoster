@@ -1,26 +1,28 @@
-//! Per-route request statistics, kept in memory and updated by the proxy (ADR-0045).
+//! Per-route request counters, kept in memory and updated by the proxy (ADR-0045, ADR-0062).
 //!
 //! Each (host, prefix) route gets its counters on its first request; they are atomics, so the
 //! proxy's threads update them without locking. The registry of routes is an `ArcSwap`ped map
 //! that is copied only when a route is seen for the first time, so finding a route's counters
 //! is two hash lookups.
 //!
-//! The counters are cumulative and never reset. [`Traffic::drain`] takes what each route counted
+//! Nothing reads the counters but two things: the traffic recorder, which drains them into the
+//! traffic history once a minute, and the in-flight gauge ([`Traffic::in_flight`]), the one
+//! live traffic figure the pages show. The counters are cumulative and never reset. [`Traffic::drain`] takes what each route counted
 //! since the previous drain (for the traffic history, ADR-0062) by diffing them against the
 //! values it saw last, which it keeps to itself, so the proxy's hot path never waits on it.
 //! Routes that were idle across a drain leave the registry; their next request starts them
 //! over, so the registry holds only routes in use.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::ops::AddAssign;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 
-use super::latency::{AtomicHistogram, Histogram, Latency, LatencyWindow};
+use super::latency::{AtomicHistogram, Histogram};
 use crate::routing::{Owner, RouteEntry};
 use crate::store::TrafficCounts;
 
@@ -92,8 +94,8 @@ pub struct RequestOutcome {
     pub upstream_error: bool,
 }
 
-/// The request statistics of every route the proxy served since hoster started. A cheap handle:
-/// clones share the counters.
+/// The request counters of every route the proxy serves. A cheap handle: clones share the
+/// counters.
 #[derive(Debug, Clone)]
 pub struct Traffic(Arc<Registry>);
 
@@ -101,8 +103,6 @@ type Routes = HashMap<String, HashMap<String, Vec<Arc<RouteCounters>>>>;
 
 #[derive(Debug)]
 struct Registry {
-    /// Latency windows count time from here.
-    base: Instant,
     /// Host (normalized) → prefix → counters, the current owner's last. Counters of earlier
     /// owners stay until a drain has taken their last requests.
     routes: ArcSwap<Routes>,
@@ -143,22 +143,18 @@ struct Totals {
 #[derive(Debug)]
 struct RouteCounters {
     owner: Option<Owner>,
-    base: Instant,
     statuses: [AtomicU64; StatusClass::ALL.len()],
     upstream_errors: AtomicU64,
     inflight: AtomicU64,
-    latency: LatencyWindow,
     /// Every latency since the counters started, for [`Traffic::drain`].
     histogram: AtomicHistogram,
 }
 
 impl Default for Traffic {
     fn default() -> Self {
-        let base = Instant::now();
         Traffic(Arc::new(Registry {
-            base,
             routes: ArcSwap::default(),
-            unrouted: Arc::new(RouteCounters::new(None, base)),
+            unrouted: Arc::new(RouteCounters::new(None)),
             drained: Mutex::default(),
         }))
     }
@@ -189,7 +185,7 @@ impl Traffic {
         if let Some(counters) = current(&self.0.routes.load()) {
             return counters;
         }
-        let fresh = Arc::new(RouteCounters::new(Some(route.owner.clone()), self.0.base));
+        let fresh = Arc::new(RouteCounters::new(Some(route.owner.clone())));
         let mut found = None;
         self.0.routes.rcu(|routes| {
             if let Some(counters) = current(routes) {
@@ -296,44 +292,37 @@ impl Traffic {
         });
     }
 
-    /// The statistics of every route in the registry (its current owner's counters), sorted by
-    /// host and prefix, and of the requests that matched none.
-    pub fn snapshot(&self) -> TrafficSnapshot {
-        let at = self.0.base.elapsed();
-        let mut routes: Vec<RouteTraffic> = self
+    /// The requests in flight now, by the stack their route belongs to. Every set of counters
+    /// in the registry counts, an earlier owner's too, while it still has requests open.
+    pub fn in_flight(&self) -> InFlight {
+        let mut stacks = BTreeMap::new();
+        for counters in self
             .0
             .routes
             .load()
-            .iter()
-            .flat_map(|(host, prefixes)| {
-                prefixes.iter().filter_map(move |(prefix, series)| {
-                    let counters = series.last()?;
-                    Some(RouteTraffic {
-                        host: host.clone(),
-                        prefix: prefix.clone(),
-                        owner: counters.owner.clone(),
-                        counts: counters.read(at),
-                    })
-                })
-            })
-            .collect();
-        routes.sort_by(|a, b| (&a.host, &a.prefix).cmp(&(&b.host, &b.prefix)));
-        TrafficSnapshot {
-            routes,
-            unrouted: self.0.unrouted.read(at),
+            .values()
+            .flat_map(HashMap::values)
+            .flatten()
+        {
+            let open = counters.inflight.load(Ordering::Relaxed);
+            if let (Some(Owner::Route(owner)), 1..) = (&counters.owner, open) {
+                *stacks.entry(owner.stack.to_string()).or_default() += open;
+            }
+        }
+        InFlight {
+            stacks,
+            unrouted: self.0.unrouted.inflight.load(Ordering::Relaxed),
         }
     }
 }
 
 impl RouteCounters {
-    fn new(owner: Option<Owner>, base: Instant) -> Self {
+    fn new(owner: Option<Owner>) -> Self {
         Self {
             owner,
-            base,
             statuses: Default::default(),
             upstream_errors: AtomicU64::new(0),
             inflight: AtomicU64::new(0),
-            latency: LatencyWindow::default(),
             histogram: AtomicHistogram::default(),
         }
     }
@@ -344,7 +333,6 @@ impl RouteCounters {
         if outcome.upstream_error {
             self.upstream_errors.fetch_add(1, Ordering::Relaxed);
         }
-        self.latency.record(self.base.elapsed(), outcome.latency);
         self.histogram.record(outcome.latency);
     }
 
@@ -362,15 +350,6 @@ impl RouteCounters {
                 .each_ref()
                 .map(|count| count.load(Ordering::Relaxed)),
         )
-    }
-
-    fn read(&self, at: Duration) -> Counts {
-        Counts {
-            statuses: self.statuses(),
-            upstream_errors: self.upstream_errors.load(Ordering::Relaxed),
-            inflight: self.inflight.load(Ordering::Relaxed),
-            latency: self.latency.summary(at),
-        }
     }
 }
 
@@ -501,14 +480,6 @@ pub struct TrafficDelta {
     pub latency: Histogram,
 }
 
-impl TrafficDelta {
-    /// Whether these are requests that matched no route.
-    #[allow(dead_code, reason = "read by the traffic recorder (ADR-0062)")]
-    pub fn is_unrouted(&self) -> bool {
-        self.owner.is_none()
-    }
-}
-
 /// The counts of unrouted requests; routes fill in their host, prefix and owner.
 impl From<Totals> for TrafficDelta {
     fn from(totals: Totals) -> Self {
@@ -523,53 +494,26 @@ impl From<Totals> for TrafficDelta {
     }
 }
 
-/// What a set of counters held when read.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Counts {
-    /// Finished requests since the counters started (hoster started, or the route came back
-    /// after leaving the registry idle).
-    pub statuses: StatusCounts,
-    /// Requests that failed because of their upstream, since the counters started.
-    pub upstream_errors: u64,
-    /// Requests in flight now.
-    pub inflight: u64,
-    /// The latency of the requests of the last few minutes.
-    pub latency: Latency,
-}
-
-/// The statistics of one route.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RouteTraffic {
-    pub host: String,
-    /// The route's prefix, e.g. `/` or `/api`.
-    pub prefix: String,
-    /// Who the route belonged to when it was counted.
-    pub owner: Option<Owner>,
-    pub counts: Counts,
-}
-
-impl RouteTraffic {
-    /// The stack the route belonged to, unless it is hoster's own.
-    pub fn stack(&self) -> Option<&str> {
-        match &self.owner {
-            Some(Owner::Route(owner)) => Some(owner.stack.as_ref()),
-            Some(Owner::Reserved(_)) | None => None,
-        }
-    }
-
-    /// Whether the route is hoster's own (the admin UI), not a hosted service's.
-    pub fn is_reserved(&self) -> bool {
-        matches!(self.owner, Some(Owner::Reserved(_)))
-    }
-}
-
-/// The request statistics at one moment.
+/// The requests in flight at one moment: the one live traffic figure (ADR-0062 §8).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TrafficSnapshot {
-    /// Sorted by host and prefix.
-    pub routes: Vec<RouteTraffic>,
+pub struct InFlight {
+    /// To each stack's routes, by stack name; stacks with none open are left out.
+    stacks: BTreeMap<String, u64>,
     /// Requests that matched no route.
-    pub unrouted: Counts,
+    unrouted: u64,
+}
+
+impl InFlight {
+    /// The requests in flight to `stack`'s routes.
+    pub fn stack(&self, stack: &str) -> u64 {
+        self.stacks.get(stack).copied().unwrap_or_default()
+    }
+
+    /// The requests in flight to every stack's routes and unrouted, without hoster's own: what
+    /// the dashboard's totals cover.
+    pub fn hosted(&self) -> u64 {
+        self.stacks.values().sum::<u64>() + self.unrouted
+    }
 }
 
 #[cfg(test)]
@@ -615,54 +559,12 @@ mod tests {
     }
 
     #[test]
-    fn requests_are_counted_per_route_by_status_class() {
-        let traffic = Traffic::default();
-        let root = entry("/", "web");
-        let api = entry("/api", "api");
-        for status in [200, 201, 404, 502] {
-            traffic
-                .route("app.example.com", &root)
-                .finish(outcome(Some(status), 5));
-        }
-        traffic
-            .route("app.example.com", &api)
-            .finish(RequestOutcome {
-                upstream_error: true,
-                ..outcome(Some(502), 1)
-            });
-        traffic.unrouted().finish(outcome(Some(404), 0));
-
-        let snapshot = traffic.snapshot();
-        let [root, api] = snapshot.routes.as_slice() else {
-            panic!("{snapshot:?}");
-        };
-        assert_eq!(
-            (api.host.as_str(), api.prefix.as_str()),
-            ("app.example.com", "/api")
-        );
-        assert_eq!(root.prefix, "/");
-        assert_eq!(
-            root.owner.as_ref().unwrap().to_string(),
-            "service `web` of stack `site`"
-        );
-        let counts = root.counts.statuses;
-        assert_eq!(counts.get(StatusClass::Success), 2);
-        assert_eq!(counts.get(StatusClass::ClientError), 1);
-        assert_eq!(counts.get(StatusClass::ServerError), 1);
-        assert_eq!(counts.total(), 4);
-        assert_eq!(root.counts.upstream_errors, 0);
-        assert_eq!(root.counts.latency.samples, 4);
-        assert_eq!(api.counts.upstream_errors, 1);
-        assert_eq!(snapshot.unrouted.statuses.get(StatusClass::ClientError), 1);
-    }
-
-    #[test]
     fn in_flight_requests_are_gauged_until_dropped() {
         let traffic = Traffic::default();
         let root = entry("/", "web");
         let mut first = traffic.route("app.example.com", &root);
         let second = traffic.route("app.example.com", &root);
-        let gauge = |traffic: &Traffic| traffic.snapshot().routes[0].counts.inflight;
+        let gauge = |traffic: &Traffic| traffic.in_flight().stack("site");
         assert_eq!(gauge(&traffic), 2);
         first.finish(outcome(Some(200), 1));
         first.finish(outcome(Some(200), 1));
@@ -674,34 +576,50 @@ mod tests {
         drop(first);
         // Dropped without finishing: a cancelled request is not counted.
         drop(second);
-        let routes = traffic.snapshot().routes;
-        assert_eq!(routes[0].counts.inflight, 0);
-        assert_eq!(routes[0].counts.statuses.total(), 1);
+        assert_eq!(gauge(&traffic), 0);
+        assert_eq!(
+            drained(&traffic),
+            [(
+                "app.example.com/ service `web` of stack `site`".to_owned(),
+                1,
+                0
+            )]
+        );
     }
 
     #[test]
-    fn a_route_that_changes_hands_starts_over() {
+    fn the_in_flight_gauge_counts_stacks_and_unrouted_but_not_hoster_itself() {
         let traffic = Traffic::default();
-        traffic
-            .route("app.example.com", &entry("/", "web"))
-            .finish(outcome(Some(200), 1));
-        traffic
-            .route("app.example.com", &entry("/", "web"))
-            .finish(outcome(Some(200), 1));
-        traffic
-            .route("app.example.com", &entry("/", "blog"))
-            .finish(outcome(Some(200), 1));
-        let routes = traffic.snapshot().routes;
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].counts.statuses.total(), 1);
-        assert!(
-            routes[0]
-                .owner
-                .as_ref()
-                .unwrap()
-                .to_string()
-                .contains("blog")
-        );
+        let admin = RouteEntry {
+            owner: Owner::Reserved("admin UI"),
+            ..entry("/", "web")
+        };
+        let _site = traffic.route("app.example.com", &entry("/", "web"));
+        let _api = traffic.route("app.example.com", &entry("/api", "api"));
+        let _admin = traffic.route("admin.example.com", &admin);
+        let _unrouted = traffic.unrouted();
+        // The route changed hands with a request still open on the earlier owner's counters.
+        let _moved = traffic.route("app.example.com", &entry("/api", "blog"));
+        let in_flight = traffic.in_flight();
+        assert_eq!(in_flight.stack("site"), 3);
+        assert_eq!(in_flight.stack("other"), 0);
+        assert_eq!(in_flight.hosted(), 4, "{in_flight:?}");
+        assert_eq!(Traffic::default().in_flight(), InFlight::default());
+    }
+
+    /// The (host, prefix) of every route in the registry, sorted.
+    fn registered(traffic: &Traffic) -> Vec<String> {
+        let mut routes: Vec<String> = traffic
+            .0
+            .routes
+            .load()
+            .iter()
+            .flat_map(|(host, prefixes)| {
+                prefixes.keys().map(move |prefix| format!("{host}{prefix}"))
+            })
+            .collect();
+        routes.sort();
+        routes
     }
 
     fn drained(traffic: &Traffic) -> Vec<(String, u64, u64)> {
@@ -749,11 +667,11 @@ mod tests {
         assert_eq!(root_delta.statuses.get(StatusClass::Success), 3);
         assert_eq!(root_delta.latency.samples(), 3);
         assert!(root_delta.latency.p50().unwrap() > Duration::from_millis(5));
-        assert!(!root_delta.is_unrouted());
+        assert!(root_delta.owner.is_some());
         assert_eq!(api_delta.prefix, "/api");
         assert_eq!(api_delta.statuses.get(StatusClass::ServerError), 1);
         assert_eq!(api_delta.upstream_errors, 1);
-        assert!(unrouted.is_unrouted());
+        assert!(unrouted.owner.is_none());
         assert_eq!((unrouted.host.as_str(), unrouted.prefix.as_str()), ("", ""));
         assert_eq!(unrouted.statuses.get(StatusClass::ClientError), 1);
 
@@ -768,8 +686,6 @@ mod tests {
         assert_eq!(root_delta.statuses.get(StatusClass::ClientError), 1);
         assert!(root_delta.latency.p95().unwrap() > Duration::from_millis(900));
         assert_eq!(traffic.drain(), [], "nothing since");
-        // The since-start counts are untouched by draining.
-        assert_eq!(traffic.snapshot().unrouted.statuses.total(), 1);
     }
 
     #[test]
@@ -839,7 +755,7 @@ mod tests {
         );
         // Both idle now: out of the registry, then no longer followed.
         assert_eq!(traffic.drain(), []);
-        assert!(traffic.snapshot().routes.is_empty());
+        assert!(registered(&traffic).is_empty());
         assert_eq!(traffic.drain(), []);
         assert!(traffic.0.drained.lock().unwrap().routes.is_empty());
     }
@@ -854,13 +770,15 @@ mod tests {
             .finish(outcome(Some(200), 1));
         let open = traffic.route("app.example.com", &busy);
         assert_eq!(drained(&traffic).len(), 1);
-        assert_eq!(traffic.snapshot().routes.len(), 2);
+        assert_eq!(registered(&traffic).len(), 2);
 
         // Idle across this drain: out of the registry, followed until nothing holds it.
         assert_eq!(traffic.drain(), []);
-        let routes = traffic.snapshot().routes;
-        assert_eq!(routes.len(), 1, "an in-flight request keeps its route");
-        assert_eq!(routes[0].prefix, "/busy");
+        assert_eq!(
+            registered(&traffic),
+            ["app.example.com/busy"],
+            "an in-flight request keeps its route"
+        );
         assert_eq!(traffic.0.drained.lock().unwrap().routes.len(), 2);
         assert_eq!(traffic.drain(), []);
         assert_eq!(traffic.0.drained.lock().unwrap().routes.len(), 1);
@@ -887,7 +805,7 @@ mod tests {
         // The proxy found the counters just before they left the registry.
         let counters = traffic.counters("app.example.com", &root);
         assert_eq!(traffic.drain(), []);
-        assert!(traffic.snapshot().routes.is_empty());
+        assert!(registered(&traffic).is_empty());
         assert_eq!(traffic.drain(), []);
         counters.record(outcome(Some(200), 1));
         assert_eq!(drained(&traffic).len(), 1);
@@ -915,9 +833,11 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        let routes = traffic.snapshot().routes;
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].counts.statuses.get(StatusClass::Success), 2000);
-        assert_eq!(routes[0].counts.inflight, 0);
+        let deltas = traffic.drain();
+        let [root] = deltas.as_slice() else {
+            panic!("{deltas:?}");
+        };
+        assert_eq!(root.statuses.get(StatusClass::Success), 2000);
+        assert_eq!(traffic.in_flight().stack("site"), 0);
     }
 }

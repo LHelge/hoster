@@ -48,15 +48,26 @@ colours follow your system's light or dark mode.
 
 | Page | What you see and do |
 |---|---|
-| **Dashboard** | Request, error-rate, latency, stack and certificate figures; warnings; every stack with its status, healthy services, latency, error shares, restarts and last deploy; the certificates closest to expiry; the recent events, which update live. |
+| **Dashboard** | Traffic over the range you pick (1h, 6h, 24h, 7d or 30d; 24h by default): requests, 5xx rate and p50/p95 latency, each with its change against the period before, and charts of the responses by status and of p50/p95 over time. Stack and certificate figures; warnings; every stack with its status, healthy services, requests per minute, latency, error shares and a sparkline over the range, restarts and last deploy; the certificates closest to expiry; the recent events. The page updates live. |
 | **Events** | Everything hoster has recorded in the last 30 days, newest first: deploys and their outcome, container restarts, crash loops and health changes, certificates issued, renewed or failing, and operator and system actions (stacks applied or removed, secrets set or deleted by name, hoster started, updated or rolled back). Filter by kind, severity and stack, including stacks you have removed. Reached from the dashboard's and each stack's Recent events card. |
-| **Stacks** | Every stack as a card with its services, routes and traffic, filterable by status. **New stack** applies a stack file, with a plan and pre-flight checks before you confirm. |
-| **Stack** | One stack under four tabs that share a header with **Redeploy** and **Re-resolve tags**. **Overview**: traffic figures, the slowest routes, the services with their containers, generations, uptime and ports, routes, volumes, deploying explicit digests, applying a new revision of the stack file (with a diff), refused webhook attempts, the stack's recent events, and removing the stack at the bottom. **Logs**: tail and follow the logs of each service's containers. **Environment**: the environment variables and the secrets, whose values are write-only. **Deployments**: the history, with each step and failure reasons; "Redeploy this one" or "Roll back to this one" is the rollback. |
+| **Stacks** | Every stack as a card with its services, routes and last hour of traffic (requests per minute, p95, 5xx share and a sparkline), filterable by status. **New stack** applies a stack file, with a plan and pre-flight checks before you confirm. |
+| **Stack** | One stack under four tabs that share a header with **Redeploy** and **Re-resolve tags**. **Overview**: the last hour of traffic (requests per minute and the busiest minute, p50, p95, 5xx rate, the requests in flight now, and the responses by status), the services with their containers, generations, uptime and ports, routes, volumes, deploying explicit digests, applying a new revision of the stack file (with a diff), refused webhook attempts, the stack's recent events, and removing the stack at the bottom. **Logs**: tail and follow the logs of each service's containers. **Environment**: the environment variables and the secrets, whose values are write-only. **Deployments**: the history, with each step and failure reasons; "Redeploy this one" or "Roll back to this one" is the rollback. |
 | **Certificates** | Hosts, issuer, expiry, the last ACME error and the DNS check, per host or for all at once; retry the failing ones. |
 | **Settings** | General, notifications, registries (credentials for private images), deploy webhook, reverse proxy and certificates. The instance name, [[notifications|mail notifications]] and registries are edited here; the rest shows the effective `hoster.toml`. |
 | **System** | The running and previous versions, the host; check for updates, read the release notes and update. |
 
 There is no separate containers page: a container and its logs are on its stack's pages.
+
+## Traffic history
+
+hoster keeps a history of the traffic to each route: one record per minute for the last 24 hours
+and one per hour for the last 60 days, so every range on the dashboard can be compared with the
+period before it. It is written to hoster's database once a minute, so the figures survive
+restarts and updates, and are up to a minute behind; a crash loses at most the last minute.
+Requests per minute is the rate over the last 5 minutes, and only the requests in flight are
+live. Routes without requests take no space. The history is part of the database, so
+`hoster backup db` copies it with everything else ([[backup]]), and rolling hoster back past the
+release that added it removes it.
 
 Login is GitHub OAuth, and only the GitHub account named in the configuration gets in. Apps never
 get access to podman, and a container is only reachable from outside through a declared route.

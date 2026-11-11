@@ -1,22 +1,15 @@
 //! Request latency: a log-linear [`Histogram`] that merges and encodes for storage (ADR-0062),
-//! and a rolling window of the recent past, both recorded lock-free from the proxy's threads.
+//! and an [`AtomicHistogram`] the proxy's threads record into lock-free.
 //!
 //! A histogram has four buckets per power of two of microseconds, so a percentile is reported
-//! to within 25 %. Its bucket layout is a persisted format: traffic history stores histograms
-//! as the versioned bytes of [`Histogram`]'s `From`/`TryFrom` conversions.
+//! to within 25 %. Histograms merge (`AddAssign`, `Sum`) into the histogram of all their
+//! samples, so the latencies of several routes or buckets add up to the percentiles of all
+//! their requests together: a stack's, a bar's or the whole proxy's. Its bucket layout is a
+//! persisted format: traffic history stores histograms as the versioned bytes of
+//! [`Histogram`]'s `From`/`TryFrom` conversions.
 //!
-//! The window is a ring of [`LatencyWindow::SLOTS`] time slots of [`LatencyWindow::SLOT`] each,
-//! each slot an [`AtomicHistogram`]; the first sample of a new slot period clears the slot it
-//! reuses. Reading sums the slots of the last [`LatencyWindow::WINDOW`].
-//!
-//! A [`Latency`] keeps the summed histogram beside its percentiles, so the latencies of several
-//! routes add up (`Sum`) to the percentiles of all their requests together: a stack's, or the
-//! whole proxy's.
-//!
-//! Recording and clearing a window slot race benignly: a sample added while another thread
-//! clears its slot may be lost. That is fine for a dashboard and keeps the hot path to two
-//! atomic adds. An [`AtomicHistogram`] that is never cleared (the cumulative one of a route)
-//! loses nothing.
+//! A route's [`AtomicHistogram`] is cumulative and never cleared, so it loses nothing; the
+//! traffic recorder takes the samples since its previous drain with [`Histogram::since`].
 
 use std::array;
 use std::iter::Sum;
@@ -33,32 +26,6 @@ const SUB: usize = 4;
 /// Buckets per histogram: exact below 4 µs, then four per octave up to 2^28 µs (about 4.5 min).
 /// Anything longer lands in the last one. Part of the persisted format, as [`SUB`] is.
 const BUCKETS: usize = SUB + 26 * SUB;
-
-/// Latency samples of the recent past.
-#[derive(Debug)]
-pub(super) struct LatencyWindow {
-    slots: [Slot; LatencyWindow::SLOTS],
-}
-
-#[derive(Debug, Default)]
-struct Slot {
-    /// The slot period (time since the base divided by [`LatencyWindow::SLOT`]) plus one that
-    /// the buckets count; 0 for a slot never used.
-    period: AtomicU64,
-    histogram: AtomicHistogram,
-}
-
-/// p50 and p95 of a set of requests.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Latency {
-    /// How many requests the percentiles are taken over.
-    pub samples: u64,
-    /// `None` without samples.
-    pub p50: Option<Duration>,
-    pub p95: Option<Duration>,
-    /// The samples behind the percentiles, for adding latencies up.
-    histogram: Histogram,
-}
 
 /// Request latencies, counted per log-linear bucket. Histograms merge (`AddAssign`, `Sum`) into
 /// the histogram of all their samples, and convert to and from a compact versioned encoding
@@ -284,30 +251,6 @@ pub enum HistogramDecodeError {
     BadCount(u8),
 }
 
-/// The percentiles of a histogram.
-impl From<Histogram> for Latency {
-    fn from(histogram: Histogram) -> Self {
-        Latency {
-            samples: histogram.samples(),
-            p50: histogram.p50(),
-            p95: histogram.p95(),
-            histogram,
-        }
-    }
-}
-
-/// The latency of all the requests together: their histograms summed, the percentiles taken
-/// again.
-impl<'a> Sum<&'a Latency> for Latency {
-    fn sum<I: Iterator<Item = &'a Latency>>(latencies: I) -> Self {
-        Latency::from(
-            latencies
-                .map(|latency| &latency.histogram)
-                .sum::<Histogram>(),
-        )
-    }
-}
-
 /// A [`Histogram`] the proxy's threads record into without locking: one atomic add a sample.
 #[derive(Debug)]
 pub(super) struct AtomicHistogram([AtomicU64; BUCKETS]);
@@ -327,73 +270,6 @@ impl AtomicHistogram {
     /// The counts now.
     pub(super) fn load(&self) -> Histogram {
         Histogram(self.0.each_ref().map(|count| count.load(Ordering::Relaxed)))
-    }
-
-    fn clear(&self) {
-        for count in &self.0 {
-            count.store(0, Ordering::Relaxed);
-        }
-    }
-}
-
-impl Default for LatencyWindow {
-    fn default() -> Self {
-        Self {
-            slots: array::from_fn(|_| Slot::default()),
-        }
-    }
-}
-
-impl LatencyWindow {
-    /// The length of one slot.
-    pub(super) const SLOT: Duration = Duration::from_secs(30);
-    /// How many slots the ring holds.
-    pub(super) const SLOTS: usize = 10;
-    /// How far back the percentiles look: up to this long (the current slot is partial).
-    pub(super) const WINDOW: Duration =
-        Duration::from_secs(Self::SLOT.as_secs() * Self::SLOTS as u64);
-
-    /// Records a request that took `latency`, finished `at` after the base instant.
-    pub(super) fn record(&self, at: Duration, latency: Duration) {
-        let period = Self::period(at);
-        let slot = &self.slots[(period % Self::SLOTS as u64) as usize];
-        let tag = period + 1;
-        let seen = slot.period.load(Ordering::Acquire);
-        if seen != tag {
-            if seen > tag {
-                // A sample from a period the slot has already moved past.
-                return;
-            }
-            if slot
-                .period
-                .compare_exchange(seen, tag, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                slot.histogram.clear();
-            } else if slot.period.load(Ordering::Acquire) != tag {
-                return;
-            }
-        }
-        slot.histogram.record(latency);
-    }
-
-    /// The percentiles of the samples of the window that ends `at` after the base instant.
-    pub(super) fn summary(&self, at: Duration) -> Latency {
-        let current = Self::period(at) + 1;
-        let counts: Histogram = self
-            .slots
-            .iter()
-            .filter(|slot| {
-                let tag = slot.period.load(Ordering::Acquire);
-                tag != 0 && tag <= current && tag + Self::SLOTS as u64 > current
-            })
-            .map(|slot| slot.histogram.load())
-            .sum();
-        Latency::from(counts)
-    }
-
-    fn period(at: Duration) -> u64 {
-        at.as_secs() / Self::SLOT.as_secs()
     }
 }
 
@@ -616,108 +492,15 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_window_has_no_percentiles() {
-        let window = LatencyWindow::default();
-        assert_eq!(window.summary(Duration::ZERO), Latency::default());
-    }
-
-    #[test]
-    fn percentiles_of_a_uniform_spread() {
-        let window = LatencyWindow::default();
-        for ms in 1..=100 {
-            window.record(Duration::from_secs(1), ms * MS);
-        }
-        let summary = window.summary(Duration::from_secs(2));
-        assert_eq!(summary.samples, 100);
-        let p50 = summary.p50.unwrap();
-        let p95 = summary.p95.unwrap();
-        assert!(p50 > 50 * MS && p50 <= 50 * MS * 5 / 4, "{p50:?}");
-        assert!(p95 > 95 * MS && p95 <= 95 * MS * 5 / 4, "{p95:?}");
-    }
-
-    #[test]
     fn p95_sees_a_slow_tail_that_p50_does_not() {
-        let window = LatencyWindow::default();
+        let mut histogram = Histogram::default();
         for _ in 0..90 {
-            window.record(Duration::ZERO, 2 * MS);
+            histogram.record(2 * MS);
         }
         for _ in 0..10 {
-            window.record(Duration::ZERO, 800 * MS);
+            histogram.record(800 * MS);
         }
-        let summary = window.summary(Duration::ZERO);
-        assert!(summary.p50.unwrap() < 3 * MS, "{summary:?}");
-        assert!(summary.p95.unwrap() >= 800 * MS, "{summary:?}");
-    }
-
-    #[test]
-    fn latencies_add_up_to_the_percentiles_of_all_their_samples() {
-        let fast = LatencyWindow::default();
-        let slow = LatencyWindow::default();
-        for _ in 0..90 {
-            fast.record(Duration::ZERO, 2 * MS);
-        }
-        for _ in 0..10 {
-            slow.record(Duration::ZERO, 800 * MS);
-        }
-        let parts = [fast.summary(Duration::ZERO), slow.summary(Duration::ZERO)];
-        let all: Latency = parts.iter().sum();
-        assert_eq!(all.samples, 100);
-        // Neither route alone has these: fast's p95 is 2 ms, slow's p50 800 ms.
-        assert!(all.p50.unwrap() < 3 * MS, "{all:?}");
-        assert!(all.p95.unwrap() >= 800 * MS, "{all:?}");
-        assert_eq!(
-            std::iter::empty::<&Latency>().sum::<Latency>(),
-            Latency::default()
-        );
-    }
-
-    #[test]
-    fn samples_spread_over_the_window_count_until_they_age_out() {
-        let window = LatencyWindow::default();
-        let slot = LatencyWindow::SLOT;
-        for i in 0..LatencyWindow::SLOTS as u32 {
-            window.record(slot * i, 10 * MS);
-        }
-        let end = slot * (LatencyWindow::SLOTS as u32 - 1);
-        assert_eq!(window.summary(end).samples, 10);
-        // One slot later the oldest has aged out; the window is never longer than WINDOW.
-        assert_eq!(window.summary(end + slot).samples, 9);
-        assert_eq!(window.summary(end + LatencyWindow::WINDOW).samples, 0);
-    }
-
-    #[test]
-    fn a_reused_slot_forgets_its_old_samples() {
-        let window = LatencyWindow::default();
-        window.record(Duration::ZERO, 900 * MS);
-        // Same slot of the ring, one whole window later.
-        let later = LatencyWindow::WINDOW + Duration::from_secs(1);
-        window.record(later, MS);
-        let summary = window.summary(later);
-        assert_eq!(summary.samples, 1);
-        assert!(summary.p95.unwrap() <= 2 * MS, "{summary:?}");
-        // A late sample of the old period is dropped instead of reviving it.
-        window.record(Duration::ZERO, 900 * MS);
-        assert_eq!(window.summary(later).samples, 1);
-    }
-
-    #[test]
-    fn concurrent_recording_counts_every_sample_within_a_slot() {
-        let window = std::sync::Arc::new(LatencyWindow::default());
-        // The slot is taken over first: a sample racing its clearing may be lost by design.
-        window.record(Duration::from_secs(5), 3 * MS);
-        let threads: Vec<_> = (0..4)
-            .map(|_| {
-                let window = std::sync::Arc::clone(&window);
-                std::thread::spawn(move || {
-                    for _ in 0..1000 {
-                        window.record(Duration::from_secs(5), 3 * MS);
-                    }
-                })
-            })
-            .collect();
-        for thread in threads {
-            thread.join().unwrap();
-        }
-        assert_eq!(window.summary(Duration::from_secs(5)).samples, 4001);
+        assert!(histogram.p50().unwrap() < 3 * MS, "{histogram:?}");
+        assert!(histogram.p95().unwrap() >= 800 * MS, "{histogram:?}");
     }
 }

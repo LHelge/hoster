@@ -184,14 +184,20 @@ after the browser's colour scheme (ADR-0054).
 
 | Page | What you see and do |
 |---|---|
-| **Dashboard** | Request, error-rate, latency, stack and certificate figures; warnings; every stack with its status, healthy services, latency, error shares, restarts and last deploy; the certificates closest to expiry; the recent events of the event log (deploys, restarts and crash loops, certificates, operator actions, kept 30 days, ADR-0055), linking to the **Events** page with every event, filterable by kind, severity and stack. Live updates through HTMX. |
-| **Stacks** | Every stack as a card, filterable by status. **New stack** applies a stack file after showing its plan and pre-flight checks. |
-| **Stack** | Separate tabs under one header with Redeploy and Re-resolve tags (ADR-0054). *Overview*: traffic figures, services with their containers, generations, uptime and ports, routes, volumes, deploying explicit digests, applying a new revision of the stack file (with diff), the `[deploy]` rule's recently rejected webhook attempts with their token claims, the stack's recent events (live), and the danger zone to remove the stack (volumes kept unless explicitly deleted). *Logs*: tail and follow logs per container. *Environment*: env vars and write-only secrets. *Deployments*: history with state transitions and failure reasons; "Redeploy this one" ("Roll back to this one" for an older revision) acts as rollback (ADR-0041). |
+| **Dashboard** | A range picker (1h, 6h, 24h, 7d, 30d; default 24h) for the traffic figures: requests, 5xx rate and p50/p95 latency tiles with the change against the period before, responses by status as stacked bars and p50/p95 lines, all over every stack's routes and unrouted requests; stack and certificate tiles; warnings; every stack with its status, healthy services, req/min over the last 5 minutes, p50/p95, 4xx and 5xx shares and a sparkline over the range, restarts and last deploy; the certificates closest to expiry; the recent events of the event log (deploys, restarts and crash loops, certificates, operator actions, kept 30 days, ADR-0055), linking to the **Events** page with every event, filterable by kind, severity and stack. Live updates through HTMX. |
+| **Stacks** | Every stack as a card with its req/min over the last 5 minutes, its p95 and 5xx share over the last hour and a sparkline of that hour, filterable by status. **New stack** applies a stack file after showing its plan and pre-flight checks. |
+| **Stack** | Separate tabs under one header with Redeploy and Re-resolve tags (ADR-0054). *Overview*: req/min (with the hour's peak minute), p50, p95 and 5xx rate over the last hour, the requests in flight, responses by status over that hour, services with their containers, generations, uptime and ports, routes, volumes, deploying explicit digests, applying a new revision of the stack file (with diff), the `[deploy]` rule's recently rejected webhook attempts with their token claims, the stack's recent events (live), and the danger zone to remove the stack (volumes kept unless explicitly deleted). *Logs*: tail and follow logs per container. *Environment*: env vars and write-only secrets. *Deployments*: history with state transitions and failure reasons; "Redeploy this one" ("Roll back to this one" for an older revision) acts as rollback (ADR-0041). |
 | **Certificates** | Hosts, issuer, expiry, last ACME error, DNS check; check all DNS and retry all failing at once. |
 | **Settings** | Sections for general, notifications, registries, deploy webhook, reverse proxy and certificates. The instance name, the notification settings and registry credentials are edited here and kept in SQLite (ADR-0058); the others show the effective configuration, whose source stays `hoster.toml` (ADR-0027). |
 | **System** | Running version, target and schema; installed current and previous versions; host facts. "Check for updates" asks GitHub for the latest stable release only when clicked and shows its notes; **Update** installs it and restarts hoster. Rollback is `hoster rollback` over SSH (ADR-0052). |
 
 `/containers` redirects to `/stacks`: containers and their logs live on their stack's pages.
+
+Traffic figures come from the traffic history (ADR-0062): per route, 1-minute buckets kept 24
+hours and 1-hour buckets kept 60 days, written to hoster's SQLite database once a minute. So they
+survive restarts and self-updates, lag by up to a minute, and a crash loses at most the last
+minute; only the requests in flight are live. The history is part of the database that
+`hoster backup db` copies.
 
 There is no break-glass login: if GitHub login is unavailable, use SSH until it is back
 (ADR-0031). Running apps and the webhook are unaffected.
