@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT service, tag, digest FROM auto_update_attempts WHERE stack = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "service",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "auto_update_attempts",
+            "name": "service"
+          }
+        }
+      },
+      {
+        "name": "tag",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "auto_update_attempts",
+            "name": "tag"
+          }
+        }
+      },
+      {
+        "name": "digest",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "auto_update_attempts",
+            "name": "digest"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "848e89d72427465ffce65092b222b1d478f8e6f1ba7fa92d3519109fd1deff91"
+}

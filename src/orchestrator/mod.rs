@@ -86,13 +86,13 @@ use crate::runtime::{
 };
 use crate::secrets::{SecretError, SecretStore, SecretValue};
 use crate::stack::{
-    DeployCaller, Diagnostic, Digest, FieldPath, ImageEdits, ImageRef, Name, PinnedImage,
-    SecretRef, SecretUse, Service, Stack, StackError,
+    AutoUpdate, DeployCaller, Diagnostic, Digest, FieldPath, ImageEdits, ImageRef, Name,
+    PinnedImage, SecretRef, SecretUse, Service, Stack, StackError,
 };
 use crate::store::{
-    Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
-    ImageCheck, NewDeployment, NewEvent, Provenance, StackRevision, Store, StoreError, UpdateKind,
-    WebhookRejection,
+    Attempt, Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState,
+    DigestSet, ImageCheck, NewDeployment, NewEvent, Provenance, StackRevision, Store, StoreError,
+    UpdateKind, WebhookRejection,
 };
 
 pub use updates::{StackUpdates, UpdateChoice, UpdateOffer};
@@ -1020,7 +1020,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// [`apply`](Self::apply), recorded in the event log as done by `by`.
     async fn apply_by(self: &Arc<Self>, toml: &str, by: Option<&Operator>) -> Result<ApplyOutcome> {
         let prepared = self.prepare(toml).await?;
-        self.store_and_redeploy(toml, prepared, by).await
+        self.store_and_redeploy(toml, prepared, by, DeploymentSource::Apply)
+            .await
     }
 
     /// The operator actions (apply, re-resolve, remove, secrets), recorded in the event log as
@@ -1148,6 +1149,99 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         Ok((revision, toml))
     }
 
+    /// Applies, for every stack, the updates its services' `auto_update` policies allow
+    /// (ADR-0061 §10): one new revision and one `AutoUpdate` deployment per stack, never a
+    /// major. A group moves only under the strictest policy of its members. Each target is tried
+    /// once: one tried before (and failed, rolled back or edited away since) waits for a newer
+    /// one. A stack that is deploying, has a deployment queued or is being removed is left for
+    /// the next pass. A stack that fails is logged and the others go on. Returns the applies.
+    pub async fn auto_update(self: &Arc<Self>) -> Result<Vec<ApplyOutcome>> {
+        let mut applied = Vec::new();
+        for (stack, updates) in self.all_updates().await? {
+            if self.is_occupied(&stack) {
+                tracing::debug!(stack, "auto-update skipped: the stack is busy");
+                continue;
+            }
+            match self.auto_update_stack(&stack, &updates).await {
+                Ok(Some(outcome)) => applied.push(outcome),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(stack, error = %err, "auto-update failed");
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    async fn auto_update_stack(
+        self: &Arc<Self>,
+        stack: &str,
+        updates: &StackUpdates,
+    ) -> Result<Option<ApplyOutcome>> {
+        let revision = self.active_revision(stack).await?;
+        let definition: Stack = revision.toml.parse()?;
+        let policy = |service: &str| {
+            service
+                .parse::<Name>()
+                .ok()
+                .and_then(|name| definition.services.get(&name))
+                .map_or(AutoUpdate::Off, |s| s.auto_update)
+        };
+        let tried = self.store.auto_update_attempts(stack).await?;
+        let choices: Vec<UpdateChoice> = updates
+            .offers
+            .iter()
+            .filter(|offer| {
+                let strictest = offer
+                    .services
+                    .iter()
+                    .map(|s| policy(s))
+                    .min()
+                    .unwrap_or(AutoUpdate::Off);
+                strictest.allows(offer.kind)
+            })
+            .filter(|offer| {
+                let target = Attempt {
+                    tag: offer.to.clone(),
+                    digest: offer.digest.clone(),
+                };
+                !offer.services.iter().any(|s| tried.get(s) == Some(&target))
+            })
+            .map(UpdateOffer::choice)
+            .collect();
+        if choices.is_empty() {
+            return Ok(None);
+        }
+        let chosen = updates
+            .chosen(&choices)
+            .map_err(OrchestratorError::NoUpdate)?;
+        let attempts = chosen
+            .iter()
+            .map(|(service, offer)| {
+                let attempt = Attempt {
+                    tag: offer.to.clone(),
+                    digest: offer.digest.clone(),
+                };
+                ((*service).to_owned(), attempt)
+            })
+            .collect();
+        // Recorded first: a target that fails in any way is not tried again.
+        self.store
+            .record_auto_update_attempts(stack, &attempts)
+            .await?;
+        tracing::info!(stack, updates = ?choices, "auto-updating");
+        let outcome = self
+            .update_as(
+                stack,
+                &choices,
+                revision.revision,
+                None,
+                DeploymentSource::AutoUpdate,
+            )
+            .await?;
+        Ok(Some(outcome))
+    }
+
     /// What applying the updates `choices` select to `stack` would do (ADR-0061 §9).
     pub async fn update_preview(
         &self,
@@ -1181,6 +1275,19 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         expected: u32,
         by: Option<&Operator>,
     ) -> Result<ApplyOutcome> {
+        self.update_as(stack, choices, expected, by, DeploymentSource::Apply)
+            .await
+    }
+
+    /// [`update_by`](Self::update_by), deployed as from `source`.
+    async fn update_as(
+        self: &Arc<Self>,
+        stack: &str,
+        choices: &[UpdateChoice],
+        expected: u32,
+        by: Option<&Operator>,
+        source: DeploymentSource,
+    ) -> Result<ApplyOutcome> {
         let changed = |active: u32| OrchestratorError::RevisionChanged {
             stack: stack.to_owned(),
             expected,
@@ -1196,7 +1303,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         if latest.revision != expected {
             return Err(changed(latest.revision));
         }
-        self.store_and_redeploy(&toml, prepared, by).await
+        self.store_and_redeploy(&toml, prepared, by, source).await
     }
 
     /// "Re-resolve tags" (ADR-0025, ADR-0049): resolves the third-party tags of `stack`'s
@@ -1239,7 +1346,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         if prepared.images == self.store.revision_images(revision.id).await? {
             return Ok(None);
         }
-        self.store_and_redeploy(&revision.toml, prepared, by)
+        self.store_and_redeploy(&revision.toml, prepared, by, DeploymentSource::Apply)
             .await
             .map(Some)
     }
@@ -1260,6 +1367,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         toml: &str,
         prepared: Prepared,
         by: Option<&Operator>,
+        source: DeploymentSource,
     ) -> Result<ApplyOutcome> {
         let Prepared {
             definition,
@@ -1284,7 +1392,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             None
         } else {
             let target = Target::new(definition, revision.clone(), images, DigestSet::new());
-            Some(self.submit(target, DeploymentSource::Apply, None).await?)
+            Some(self.submit(target, source, None).await?)
         };
         Ok(ApplyOutcome {
             revision,
@@ -1988,6 +2096,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         self.watchlist
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether `stack` has a deployment running or queued, or is being removed.
+    fn is_occupied(&self, stack: &str) -> bool {
+        self.lock()
+            .slots
+            .get(stack)
+            .is_some_and(|s| s.active.is_some() || s.pending.is_some() || s.removing)
     }
 
     fn is_busy(&self, stack: &str) -> bool {

@@ -255,6 +255,8 @@ pub enum DeploymentSource {
     Manual,
     /// "Redeploy this one" on an earlier deployment (ADR-0041).
     Rollback,
+    /// The update checker applied a service's `auto_update` policy (ADR-0061 §10).
+    AutoUpdate,
 }
 
 impl fmt::Display for DeploymentSource {
@@ -273,6 +275,7 @@ impl AsRef<str> for DeploymentSource {
             Self::Apply => "apply",
             Self::Manual => "manual",
             Self::Rollback => "rollback",
+            Self::AutoUpdate => "auto_update",
         }
     }
 }

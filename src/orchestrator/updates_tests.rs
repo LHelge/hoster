@@ -188,3 +188,131 @@ async fn a_moved_tag_rewrites_a_pinned_digest_and_resolves_an_unpinned_tag_again
     assert_eq!(pins["server"], digest(0xcc));
     assert_eq!(pins["ml"], digest(0xcc));
 }
+
+/// `photos()` with `auto_update` set: the immich group on `server`/`ml`, db on `db`.
+fn with_policies(server: &str, ml: &str, db: &str) -> String {
+    let set = |file: String, image: &str, policy: &str| {
+        if policy.is_empty() {
+            return file;
+        }
+        let line = file
+            .lines()
+            .find(|l| l.contains(image))
+            .expect("the service's image line")
+            .to_owned();
+        file.replace(&line, &format!("{line}\nauto_update = \"{policy}\""))
+    };
+    let file = set(photos(), "immich-server", server);
+    let file = set(file, "immich-machine-learning", ml);
+    set(file, "postgres", db)
+}
+
+#[tokio::test]
+async fn auto_update_applies_what_the_policies_allow_in_one_deployment() {
+    let h = harness().await;
+    let applied = h.apply(&with_policies("patch", "patch", "minor")).await;
+    h.finish(applied.deployment.as_ref().unwrap()).await;
+    let found = [
+        (UpdateKind::Patch, "v2.3.4"),
+        (UpdateKind::Minor, "v2.4.0"),
+        (UpdateKind::Major, "v3.0.0"),
+    ];
+    h.found("server", &found).await;
+    h.found("ml", &found).await;
+    h.found(
+        "db",
+        &[(UpdateKind::Minor, "16.6"), (UpdateKind::Major, "17.0")],
+    )
+    .await;
+
+    h.resolver.digest.store(0xdd, Ordering::SeqCst);
+    let outcomes = h.orchestrator.auto_update().await.unwrap();
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.revision.revision, 2);
+    // The group's patch (its minor is beyond `patch`), db's minor; no major.
+    let toml = &outcome.revision.toml;
+    assert!(toml.contains("immich-server:v2.3.4\""), "{toml}");
+    assert!(toml.contains("immich-machine-learning:v2.3.4\""), "{toml}");
+    assert!(
+        toml.contains(&format!("postgres:16.6@{}", digest(0xdd))),
+        "{toml}"
+    );
+    let deployment = h.finish(outcome.deployment.as_ref().unwrap()).await;
+    assert_eq!(deployment.state, S::Live, "{deployment:?}");
+    assert_eq!(deployment.source, DeploymentSource::AutoUpdate);
+
+    // The applied rows are stale now: a second run has nothing to do.
+    assert!(h.orchestrator.auto_update().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_group_waits_for_its_strictest_member_and_majors_never_go() {
+    let h = harness().await;
+    let applied = h.apply(&with_policies("minor", "", "minor")).await;
+    h.finish(applied.deployment.as_ref().unwrap()).await;
+    h.found("server", &[(UpdateKind::Patch, "v2.3.4")]).await;
+    h.found("ml", &[(UpdateKind::Patch, "v2.3.4")]).await;
+    h.found("db", &[(UpdateKind::Major, "17.0")]).await;
+    // ml is `off`, so the group stays; db has only a major.
+    assert!(h.orchestrator.auto_update().await.unwrap().is_empty());
+    assert_eq!(h.store.revisions("photos").await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_target_is_tried_once_and_an_edit_back_holds() {
+    let h = harness().await;
+    let file = with_policies("patch", "patch", "");
+    let applied = h.apply(&file).await;
+    h.finish(applied.deployment.as_ref().unwrap()).await;
+    h.found("server", &[(UpdateKind::Patch, "v2.3.4")]).await;
+    h.found("ml", &[(UpdateKind::Patch, "v2.3.4")]).await;
+    h.resolver.digest.store(0xdd, Ordering::SeqCst);
+    let outcome = h.orchestrator.auto_update().await.unwrap().remove(0);
+    h.finish(outcome.deployment.as_ref().unwrap()).await;
+
+    // The operator goes back to v2.3.1 by hand; the checker finds v2.3.4 again.
+    let back = h.apply(&file).await;
+    assert_eq!(back.revision.revision, 3);
+    if let Some(deployment) = &back.deployment {
+        h.finish(deployment).await;
+    }
+    h.found("server", &[(UpdateKind::Patch, "v2.3.4")]).await;
+    h.found("ml", &[(UpdateKind::Patch, "v2.3.4")]).await;
+    assert!(h.orchestrator.auto_update().await.unwrap().is_empty());
+    // It stays offered by hand.
+    assert_eq!(
+        h.orchestrator
+            .stack_updates("photos")
+            .await
+            .unwrap()
+            .offers
+            .len(),
+        1
+    );
+
+    // A newer target is tried.
+    h.found("server", &[(UpdateKind::Patch, "v2.3.5")]).await;
+    h.found("ml", &[(UpdateKind::Patch, "v2.3.5")]).await;
+    let outcome = h.orchestrator.auto_update().await.unwrap().remove(0);
+    assert!(outcome.revision.toml.contains("immich-server:v2.3.5\""));
+}
+
+#[tokio::test]
+async fn a_busy_stack_is_left_for_the_next_pass() {
+    // Health checks take long, so the first deployment is still running.
+    let h = super::tests::harness_with(Duration::from_secs(30)).await;
+    let applied = h.apply(&with_policies("patch", "patch", "")).await;
+    assert!(applied.deployment.is_some());
+    h.found("server", &[(UpdateKind::Patch, "v2.3.4")]).await;
+    h.found("ml", &[(UpdateKind::Patch, "v2.3.4")]).await;
+    assert!(h.orchestrator.auto_update().await.unwrap().is_empty());
+    // Nothing was tried, so the next pass still can.
+    assert!(
+        h.store
+            .auto_update_attempts("photos")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO auto_update_attempts (stack, service, tag, digest, attempted_at)\n                 VALUES (?, ?, ?, ?, ?)\n                 ON CONFLICT (stack, service) DO UPDATE SET\n                     tag = excluded.tag, digest = excluded.digest,\n                     attempted_at = excluded.attempted_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "eabcc821226fbb8aea509582bacec830b4a4ebdaa3e4cd1ff99ef1ce2d515d9f"
+}

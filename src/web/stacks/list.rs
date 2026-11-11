@@ -490,6 +490,7 @@ impl fmt::Display for Source {
             DeploymentSource::Apply => "apply",
             DeploymentSource::Manual => "manual",
             DeploymentSource::Rollback => "rollback",
+            DeploymentSource::AutoUpdate => "auto-update",
         })
     }
 }

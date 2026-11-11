@@ -13,7 +13,8 @@
 //! major in the same line. Each tag is resolved and each repository listed at most once per
 //! pass. A rate limit, a network error or a 5xx stops the pass from asking that registry again;
 //! a `Retry-After` beyond the pass keeps the next passes away until it has passed. The
-//! services it could not check keep their earlier candidates, with the error recorded.
+//! services it could not check keep their earlier candidates, with the error recorded. After
+//! the pass, the targets apply what the services' `auto_update` policies allow.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -39,6 +40,8 @@ pub trait UpdateTargets: Send + Sync {
     async fn record(&self, event: NewEvent);
     /// Tells the open pages that `stack`'s updates were checked.
     fn announce(&self, stack: &str);
+    /// Applies what the services' `auto_update` policies allow (ADR-0061 §10).
+    async fn auto_update(&self) -> anyhow::Result<()>;
 }
 
 #[async_trait]
@@ -53,6 +56,18 @@ impl<R: ContainerRuntime + 'static> UpdateTargets for Arc<Orchestrator<R>> {
 
     fn announce(&self, stack: &str) {
         self.announce_updates(stack);
+    }
+
+    async fn auto_update(&self) -> anyhow::Result<()> {
+        for outcome in Orchestrator::auto_update(self).await? {
+            tracing::info!(
+                stack = outcome.revision.stack,
+                revision = outcome.revision.revision,
+                deployment = ?outcome.deployment.map(|d| d.deployment),
+                "auto-update applied"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -273,7 +288,8 @@ impl UpdateChecker {
         self.store
             .kv_set(LAST_PASS_KEY, &Timestamp::now().as_millis().to_string())
             .await?;
-        Ok(())
+        // What the pass found, applied where a policy asks for it (ADR-0061 §10).
+        self.targets.auto_update().await
     }
 
     /// The updates of `check`'s service, or why they could not be found.

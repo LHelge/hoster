@@ -59,7 +59,7 @@ pub use types::{
     reason = "used by the notifier and Settings → Notifications as they land"
 )]
 pub use updates::{
-    Candidate, CheckInterval, ImageCheck, ServiceUpdates, StoredCandidate, UpdateKind,
+    Attempt, Candidate, CheckInterval, ImageCheck, ServiceUpdates, StoredCandidate, UpdateKind,
     UpdateSettings,
 };
 
@@ -726,6 +726,9 @@ impl Store {
             .await?;
         // What the update checker found goes too (ADR-0061 §8); its updates cascade.
         sqlx::query!("DELETE FROM image_checks WHERE stack = ?", name)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query!("DELETE FROM auto_update_attempts WHERE stack = ?", name)
             .execute(&mut *conn)
             .await?;
         Ok(true)

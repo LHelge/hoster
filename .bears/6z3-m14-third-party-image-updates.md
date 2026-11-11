@@ -2,10 +2,10 @@
 id: "6z3"
 title: "M14: Third-party image updates"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:20:07.827541609Z"
-updated: "2026-11-09T17:20:07.827541609Z"
+updated: "2026-11-11T07:27:07.458285652Z"
 tags:
   - registry
   - orchestrator
