@@ -158,7 +158,7 @@ async fn a_fresh_install_has_empty_bars_and_no_figures() {
             assert!(scope.bars.iter().all(|bar| bar.traffic.requests() == 0));
             assert_eq!(scope.totals, TrafficTotals::default());
             assert_eq!((scope.totals.p50(), scope.totals.p95()), (None, None));
-            assert_eq!(scope.totals.server_error_share(), None);
+            assert_eq!(scope.totals.server_errors(), 0);
             assert_eq!(scope.previous, None);
             assert_eq!((scope.recent, scope.per_minute()), (0, 0.0));
             assert_eq!(scope.peak, None);
@@ -407,8 +407,6 @@ async fn percentiles_merge_across_routes_and_minutes() {
         let p95 = totals.p95().unwrap();
         assert!(p95 >= Duration::from_secs(2), "{range}: {p95:?}");
         assert_eq!((totals.client_errors(), totals.server_errors()), (1, 5));
-        assert_eq!(totals.server_error_share(), Some(0.05));
-        assert_eq!(totals.client_error_share(), Some(0.01));
         assert_eq!(totals.upstream_errors, 3);
     }
     // In the 1h range the two minutes are bars of their own.

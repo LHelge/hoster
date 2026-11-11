@@ -33,14 +33,13 @@ use crate::store::{
     DeploymentOutcome, DeploymentState, Resolution, Store, Timestamp, TrafficBucket,
 };
 
+pub use self::history::{Range, ScopeHistory, TrafficHistory, TrafficTotals};
+
 #[allow(
     unused_imports,
-    reason = "the traffic history API (ADR-0062) the dashboard (h6k) and stack pages (5q8) read"
+    reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
 )]
-pub use self::history::{
-    Bar, PeakMinute, Range, ScopeHistory, TrafficHistory, TrafficTotals, UnknownRange,
-};
-
+pub use self::history::{Bar, PeakMinute, UnknownRange};
 #[allow(
     unused_imports,
     reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
@@ -117,10 +116,6 @@ impl Stats {
 
     /// The traffic history over `range` as of now, for every scope at once: one read of the
     /// range's table, plus one of the rate window's minutes for ranges drawn from hour buckets.
-    #[allow(
-        dead_code,
-        reason = "read by the dashboard (h6k) and the stack pages (5q8), ADR-0062"
-    )]
     pub async fn history(&self, range: Range) -> anyhow::Result<TrafficHistory> {
         self.history_at(range, Timestamp::now()).await
     }

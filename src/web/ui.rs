@@ -366,6 +366,25 @@ impl fmt::Display for Count {
     }
 }
 
+/// A request rate per minute as the UI writes it (ADR-0062 §8): one decimal below ten (`0.4`,
+/// `2.6`), a whole [`Count`] from there (`412`, `1,240`), `0` for none.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerMinute(pub f64);
+
+impl fmt::Display for PerMinute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rate = self.0;
+        if !rate.is_finite() || rate <= 0.0 {
+            f.write_str("0")
+        } else if rate < 9.95 {
+            write!(f, "{rate:.1}")
+        } else {
+            // A rate is far below 2^53 requests a minute, so the cast loses nothing.
+            Count(rate.round() as u64).fmt(f)
+        }
+    }
+}
+
 /// How long something (a container, hoster, the host) has been up, in its two largest units:
 /// `45s`, `12m`, `2h 04m`, `12d 6h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,6 +436,18 @@ mod tests {
         assert_eq!(up(12 * 60 + 5), "12m");
         assert_eq!(up(2 * 3_600 + 4 * 60), "2h 04m");
         assert_eq!(up(12 * 86_400 + 6 * 3_600 + 59), "12d 6h");
+    }
+
+    #[test]
+    fn rates_keep_a_decimal_below_ten_only() {
+        let rate = |r| PerMinute(r).to_string();
+        assert_eq!(rate(0.0), "0");
+        assert_eq!(rate(f64::NAN), "0");
+        assert_eq!(rate(0.2), "0.2");
+        assert_eq!(rate(9.4), "9.4");
+        assert_eq!(rate(9.96), "10");
+        assert_eq!(rate(411.6), "412");
+        assert_eq!(rate(1_240.0), "1,240");
     }
 
     #[test]

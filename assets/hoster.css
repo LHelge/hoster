@@ -1429,8 +1429,39 @@ table.events .event-kind { margin: 0 4px 0 0; }
   dl.kv dd { margin-bottom: 8px; }
 }
 
-/* Dashboard (src/web/dashboard.rs): tiles, the warnings alert, the stacks table, certificates. */
+/* Dashboard (src/web/dashboard.rs): the range picker, tiles, the warnings alert, the charts,
+   the stacks table, certificates. */
 .live-note { display: inline-flex; align-items: center; gap: 7px; color: var(--text-2); font: 12px/1.4 var(--mono); }
+/* The range picker: one link per range in a segmented group, the current one raised. */
+.range-picker {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font: 12px/1.4 var(--mono);
+}
+.range-picker a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  padding: 5px 11px;
+  border-radius: 6px;
+  color: var(--text-2);
+}
+.range-picker a:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.range-picker a[aria-current="page"] { background: var(--hover); box-shadow: inset 0 -2px 0 var(--accent); color: var(--text); font-weight: 600; }
+/* The two charts side by side, the status bars wider, each on its own line when narrow. */
+.dash-charts { display: flex; flex-wrap: wrap; gap: 0 16px; }
+.dash-charts > .card { min-width: 0; }
+.dash-chart-statuses { flex: 3 1 520px; }
+.dash-chart-latency { flex: 2 1 380px; }
+td.dash-spark { width: 96px; }
+@media (max-width: 760px) {
+  .range-picker a { min-height: 44px; }
+}
 .dash-kpis { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
 .alert h2.alert-title { margin: 0; font-size: 14px; }
 .alert.alert-warn { border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); background: color-mix(in srgb, var(--warn) 10%, var(--surface)); }
@@ -1440,7 +1471,7 @@ ul.warnings li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px
 ul.warnings li a { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
 .warning-detail { min-width: 0; color: var(--text-2); font: 12px/1.55 var(--mono); overflow-wrap: anywhere; }
 .card-link { color: var(--link); font: 12px/1.4 var(--mono); white-space: nowrap; }
-table.dash-stacks { min-width: 1060px; }
+table.dash-stacks { min-width: 1240px; }
 table.dash-stacks td, table.dash-stacks th[scope="row"] { vertical-align: middle; }
 table.dash-stacks th, table.dash-stacks td { padding-inline: 10px; }
 table.dash-stacks th:first-child, table.dash-stacks td:first-child { padding-left: 18px; }

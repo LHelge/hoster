@@ -51,11 +51,12 @@ use crate::runtime::{
     PortBinding, RuntimeError, ServiceGeneration,
 };
 use crate::stack::{ByteSize, RouteTimeouts};
-use crate::stats::{CertExpiry, Range, RequestOutcome, StatusClass, StatusCounts};
+use crate::stats::{CertExpiry, Histogram, Range, RequestOutcome, StatusClass, StatusCounts};
 use crate::store::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentOutcome, DeploymentSource,
-    DeploymentState, DigestSet, Event, EventId, EventKind, Provenance, RevisionId, Severity,
-    StackRevision, Timestamp, WebhookRejection,
+    DeploymentState, DigestSet, Event, EventId, EventKind, Provenance, Resolution, RevisionId,
+    Severity, StackRevision, Timestamp, TrafficBucket, TrafficCounts, TrafficSeries,
+    WebhookRejection,
 };
 use crate::supervisor::ShutdownRequest;
 use crate::update::fake::{FakeReleases, Host, script};
@@ -1117,9 +1118,131 @@ impl Fixtures {
     }
 }
 
+/// Traffic history (ADR-0062) for the dashboard's range picker: 60 days of hour buckets, and
+/// minute buckets for the last 12 hours (all the minute ranges and their previous periods
+/// read), each route with its own daily wave. shop has a 5xx spike 10 hours ago, blog's 502s
+/// follow its crash-looping worker, forum (removed) went quiet 3 days ago, and hoster's own
+/// admin UI and unrouted requests feed the note under the stacks table.
+impl Fixtures {
+    /// A number from 0 to 1 that looks random but is the same on every run.
+    fn noise(seed: u64) -> f64 {
+        (seed.wrapping_mul(2_654_435_761) % 1_000) as f64 / 1_000.0
+    }
+
+    /// The bucket of `series` at `start` with `requests` requests, `latency` ms typical.
+    fn bucket(
+        start: Timestamp,
+        (host, stack, service): (&str, &str, &str),
+        requests: u64,
+        latency: f64,
+        errors: (u64, u64),
+    ) -> TrafficBucket<Histogram> {
+        let (client, server) = errors;
+        let redirects = requests / 30;
+        let ok = requests.saturating_sub(redirects + client + server);
+        let mut histogram = Histogram::default();
+        // A sample of the requests is enough for the percentiles; most are fast, a few slow.
+        let samples = requests.min(120);
+        for j in 0..samples {
+            let tail = (j as f64 / samples as f64).powi(6);
+            histogram.record(Duration::from_secs_f64(
+                latency * (0.6 + 5.0 * tail) / 1_000.0,
+            ));
+        }
+        TrafficBucket {
+            start,
+            series: TrafficSeries {
+                host: host.into(),
+                prefix: if host.is_empty() { "" } else { "/" }.into(),
+                stack: stack.into(),
+                service: service.into(),
+            },
+            counts: TrafficCounts {
+                s2xx: ok,
+                s3xx: redirects,
+                s4xx: client,
+                s5xx: server,
+                upstream_errors: if stack == "blog" || stack == "forum" {
+                    server
+                } else {
+                    0
+                },
+                ..TrafficCounts::default()
+            },
+            latency: histogram,
+        }
+    }
+
+    fn history(app: &TestApp) {
+        let now = Timestamp::now();
+        let minute = Duration::from_secs(60);
+        let newest = Resolution::Minute.bucket(now);
+        let minutes_from = Resolution::Hour.bucket(now) - 12 * HOUR;
+        let oldest = minutes_from - 60 * DAY;
+        // (series, requests a minute at the daily peak, typical latency in ms, 4xx and 5xx
+        // per mille)
+        let routes = [
+            (("notes.example.com", "notes", "api"), 40.0, 14.0, 12, 1),
+            (("blog.example.com", "blog", "web"), 24.0, 38.0, 4, 6),
+            (("www.blog.example.com", "blog", "web"), 5.0, 30.0, 2, 0),
+            (("shop.example.com", "shop", "storefront"), 60.0, 85.0, 9, 2),
+            (("forum.example.com", "forum", "web"), 8.0, 20.0, 5, 3),
+            (("admin.example.com", "", "admin UI"), 2.0, 4.0, 15, 0),
+            (("", "", ""), 0.8, 1.0, 1_000, 0),
+        ];
+        let mut rows = Vec::new();
+        let mut push = |start: Timestamp, span: Duration| {
+            let ago = Duration::from_millis((now.as_millis() - start.as_millis()).unsigned_abs());
+            let day = DAY.as_secs_f64();
+            let phase = (start.as_millis() as f64 / 1_000.0 % day) / day;
+            let wave = 0.3 + 0.7 * (0.5 - 0.5 * (phase * std::f64::consts::TAU).cos());
+            let minutes = span.as_secs_f64() / 60.0;
+            for (n, &(series, peak, latency, client, server)) in routes.iter().enumerate() {
+                // forum was removed 3 days ago.
+                if series.1 == "forum" && ago < 3 * DAY {
+                    continue;
+                }
+                let seed = start.as_millis().unsigned_abs() / 60_000 + n as u64 * 7_919;
+                let rate = peak * wave * (0.8 + 0.4 * Self::noise(seed));
+                let requests = (rate * minutes).round() as u64;
+                if requests == 0 {
+                    continue;
+                }
+                // shop's incident, 10 hours ago: an hour of 5xx and slow responses.
+                let incident = series.1 == "shop" && ago >= 10 * HOUR && ago < 11 * HOUR;
+                let server = if incident { 160 } else { server };
+                let latency = if incident { latency * 4.0 } else { latency };
+                let client = requests * client / 1_000;
+                let server = if server == 0 {
+                    0
+                } else {
+                    (requests * server).div_ceil(1_000).min(requests - client)
+                };
+                rows.push(Self::bucket(
+                    start,
+                    series,
+                    requests,
+                    latency,
+                    (client, server),
+                ));
+            }
+        };
+        let mut start = oldest;
+        while start < minutes_from {
+            push(start, HOUR);
+            start = start + HOUR;
+        }
+        while start < newest {
+            push(start, minute);
+            start = start + minute;
+        }
+        *app.stats.traffic.lock().unwrap() = rows;
+    }
+}
+
 /// The traffic charts (ADR-0062 §9) on a page of their own, with fixture series: a day with a
 /// 5xx spike, an hour, a week, an empty series and a single spike, and the sparklines in each
-/// tone. The pages that draw them (dashboard, stack pages) use them once history is wired in.
+/// tone, beside the pages that draw them from history (the dashboard).
 impl Fixtures {
     /// Requests in bar `i` of `n`: a daily wave between `low` and `high`.
     fn wave(i: usize, n: usize, low: f64, high: f64) -> u64 {
@@ -1550,6 +1673,7 @@ async fn ui_preview() {
         .unwrap()
         .insert("shop.example.com".into(), SystemTime::now() + HOUR);
     Fixtures::statistics(&app);
+    Fixtures::history(&app);
     Fixtures::registries(&app);
     let container = Fixtures::containers(&app).await;
     let schema: i64 = crate::store::Store::expected_schema_version().into();
@@ -1619,6 +1743,18 @@ async fn ui_preview() {
     ] {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("", url), label, &html);
+    }
+
+    // The dashboard on its other ranges.
+    for range in Range::ALL {
+        let html = session
+            .get(&format!("/?range={range}"), StatusCode::OK)
+            .await;
+        preview.write(
+            &format!("states/dashboard-{range}.html"),
+            &format!("Dashboard: the last {range}"),
+            &html,
+        );
     }
 
     // The stacks list filtered to one status.
@@ -2035,7 +2171,7 @@ async fn ui_preview() {
         );
     }
 
-    // The traffic charts (ADR-0062 §9) with fixture series, before any page draws them.
+    // The traffic charts (ADR-0062 §9) with fixture series of every shape.
     preview.write(
         "components/charts.html",
         "Charts: stacked bars, response time lines, sparklines",

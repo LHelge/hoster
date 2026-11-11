@@ -1,7 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% block heading %}Dashboard{% endblock %}
-{% block actions %}<span class="live-note" title="While JavaScript is on, the figures below update as hoster reports changes, and at least every minute"><span class="dot" aria-hidden="true"></span>updates live</span>{% endblock %}
+{% block actions %}<span class="live-note" title="While JavaScript is on, the figures below update as hoster reports changes, and at least every minute; the traffic figures end with the last full minute"><span class="dot" aria-hidden="true"></span>updates live</span>
+<div class="range-picker" role="group" aria-label="Time range">
+  {%- for (range, href, current) in self.ranges() %}
+  <a href="{{ href }}"{% if current %} aria-current="page"{% endif %}>{{ range }}</a>
+  {%- endfor %}
+</div>{% endblock %}
 {% block content %}
 <div id="overview" class="dashboard" hx-sse:connect="{{ self.events_url() }}" hx-swap="innerHTML" hx-sse:close="end">
 {{ overview|safe }}
