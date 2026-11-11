@@ -412,7 +412,7 @@ impl Doctor {
                  sandboxing (ProtectSystem, ProtectHome, ReadWritePaths, PrivateTmp, \
                  ProtectKernelTunables, ProtectControlGroups) is not applied; seccomp filters \
                  and NoNewPrivileges still are",
-                "see https://docs.hoster.lhelge.se/wiki/install/#hardening (OQ-36)",
+                "see https://docs.hoster.lhelge.se/wiki/install/#hardening (ADR-0064)",
             ),
             Ok(value) => Outcome::Pass(format!(
                 "kernel.apparmor_restrict_unprivileged_userns = {value}; the unit's sandboxing \
@@ -424,7 +424,7 @@ impl Doctor {
             }
             Err(e) => Outcome::fail(
                 format!("cannot read kernel.apparmor_restrict_unprivileged_userns: {e}"),
-                "see https://docs.hoster.lhelge.se/wiki/install/#hardening (OQ-36)",
+                "see https://docs.hoster.lhelge.se/wiki/install/#hardening (ADR-0064)",
             ),
         }
     }
@@ -1248,7 +1248,7 @@ mod tests {
             panic!("the restriction must be reported");
         };
         assert!(detail.contains("ProtectSystem"), "{detail}");
-        assert!(hint.contains("OQ-36"), "{hint}");
+        assert!(hint.contains("ADR-0064"), "{hint}");
         let report = fx
             .doctor
             .diagnose(&Err(ConfigError::NotFound(PathBuf::from("/nope"))));

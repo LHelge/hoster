@@ -9,7 +9,7 @@
 #   - the unit starts and stays active;
 #   - NoNewPrivileges and the seccomp filters apply;
 #   - the file-system sandbox (a private mount namespace) applies, unless
-#     kernel.apparmor_restrict_unprivileged_userns=1, where systemd skips it (reported, OQ-36).
+#     kernel.apparmor_restrict_unprivileged_userns=1, where systemd skips it (reported; accepted, ADR-0064).
 #
 # Needs a running user manager (linger or a login session) and XDG_RUNTIME_DIR. The unit runs
 # as `hoster-unit-test.service`, without the podman.socket dependency and with Type=exec (the
@@ -110,7 +110,7 @@ if [ "$(readlink "/proc/$pid/ns/mnt")" != "$(readlink /proc/self/ns/mnt)" ]; the
     echo "ok: file-system sandbox in effect (private mount namespace)"
 elif [ "$restricted" = 1 ]; then
     echo "warn: file-system sandbox skipped: kernel.apparmor_restrict_unprivileged_userns=1" \
-        "(ProtectSystem, ProtectHome, ReadWritePaths, PrivateTmp are not applied; OQ-36)"
+        "(ProtectSystem, ProtectHome, ReadWritePaths, PrivateTmp are not applied; accepted, ADR-0064)"
 else
     fail "file-system sandbox not applied although user namespaces are unrestricted"
 fi

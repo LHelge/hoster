@@ -496,8 +496,11 @@ manager create the user namespace but gives it no capabilities there. Two conseq
   `ReadWritePaths=`, `PrivateTmp=`, `PrivateIPC=`, `ProtectKernelTunables=`,
   `ProtectControlGroups=` and `ProtectHostname=` do **not** apply, and hoster can write wherever
   the `hoster` user can. `NoNewPrivileges=` and the seccomp-based directives still apply.
-  `hoster doctor` reports this as `unit_sandbox`. How to restore the sandbox there is open
-  (OQ-36).
+  `hoster doctor` reports this as `unit_sandbox`. This is accepted ([ADR-0064](https://github.com/LHelge/hoster/blob/main/docs/adr/0064-accept-no-unit-file-system-sandbox-on-ubuntu.md)): the
+  sandbox only guards against hoster writing to a wrong path, never against a compromised hoster,
+  which can bind-mount anything the `hoster` user owns into a container through the podman socket.
+  On every distribution the security boundary is the `hoster` user, so keep it dedicated, with
+  nothing else in its home and no other untrusted local users on the host.
 
 hoster talks to podman only through its API socket. The containers run in podman's own cgroups
 and user namespaces, so none of this restricts the apps.
