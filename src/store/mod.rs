@@ -45,9 +45,10 @@ pub use notifications::{
 };
 #[allow(
     unused_imports,
-    reason = "used by the traffic recorder and the history queries (ADR-0062)"
+    reason = "the bound of the traffic history API (ADR-0062), not yet named outside the store"
 )]
-pub use traffic::{Latencies, Resolution, TrafficBucket, TrafficCounts, TrafficSeries};
+pub use traffic::Latencies;
+pub use traffic::{Resolution, TrafficBucket, TrafficCounts, TrafficSeries};
 #[allow(
     unused_imports,
     reason = "part of the Store API for its future callers"

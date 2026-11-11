@@ -14,6 +14,7 @@
 //! one.
 
 mod latency;
+mod recorder;
 mod traffic;
 
 use std::fmt;
@@ -25,14 +26,22 @@ use async_trait::async_trait;
 use crate::acme::CertMap;
 use crate::store::{DeploymentOutcome, DeploymentState, Store, Timestamp};
 
-pub use self::latency::Latency;
-#[allow(unused_imports, reason = "used by the traffic recorder (ADR-0062)")]
-pub use self::latency::{Histogram, HistogramDecodeError};
+#[allow(
+    unused_imports,
+    reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
+)]
+pub use self::latency::HistogramDecodeError;
+pub use self::latency::{Histogram, Latency};
+pub use self::recorder::TrafficRecorder;
+#[allow(
+    unused_imports,
+    reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
+)]
+pub use self::traffic::StatusCounts;
 pub use self::traffic::{
-    Counts, RequestOutcome, RouteTraffic, StatusClass, TrackedRequest, Traffic, TrafficSnapshot,
+    Counts, RequestOutcome, RouteTraffic, StatusClass, TrackedRequest, Traffic, TrafficDelta,
+    TrafficSnapshot,
 };
-#[allow(unused_imports, reason = "used by the traffic recorder (ADR-0062)")]
-pub use self::traffic::{StatusCounts, TrafficDelta};
 
 /// Where the statistics not kept by [`Traffic`] come from.
 #[async_trait]

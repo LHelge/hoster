@@ -33,7 +33,7 @@ use crate::registry::{Poller, RegistryClient, StoredCredentials, UpdateChecker};
 use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
-use crate::stats::{HostStats, Stats, Traffic};
+use crate::stats::{HostStats, Stats, Traffic, TrafficRecorder};
 use crate::store::Store;
 use crate::web::{Listen, RegistryAccess, WebApp, WebServer};
 
@@ -178,7 +178,7 @@ impl ShutdownRequest {
     }
 }
 
-/// One step of the shutdown sequence (architecture §4, shutdown steps 1–4).
+/// One step of the shutdown sequence (architecture §4, shutdown steps 1–5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShutdownPhase {
     /// 1. Cancel the poller and the Axum app; stop accepting commands.
@@ -189,14 +189,17 @@ enum ShutdownPhase {
     StopProxy,
     /// 4. Join the Pingora thread.
     JoinProxy,
+    /// 5. Flush the traffic recorder once more, now that no request is counted any more.
+    FlushTraffic,
 }
 
 impl ShutdownPhase {
-    const ALL: [ShutdownPhase; 4] = [
+    const ALL: [ShutdownPhase; 5] = [
         ShutdownPhase::StopIntake,
         ShutdownPhase::SettleDeploys,
         ShutdownPhase::StopProxy,
         ShutdownPhase::JoinProxy,
+        ShutdownPhase::FlushTraffic,
     ];
 }
 
@@ -207,6 +210,7 @@ impl fmt::Display for ShutdownPhase {
             ShutdownPhase::SettleDeploys => "settle deploys",
             ShutdownPhase::StopProxy => "stop proxy",
             ShutdownPhase::JoinProxy => "join proxy thread",
+            ShutdownPhase::FlushTraffic => "flush traffic history",
         })
     }
 }
@@ -406,6 +410,38 @@ impl Systemd {
     }
 }
 
+/// The traffic recorder's task (ADR-0062) and its own stop token. It is not a child of the
+/// root token: the recorder must keep running until the proxy has stopped counting requests,
+/// and is stopped in shutdown step 5, which waits for its last flush.
+struct RecorderHandle {
+    stop: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RecorderHandle {
+    /// How long a fast shutdown waits for the last flush.
+    const FAST_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn spawn(recorder: TrafficRecorder) -> Self {
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(recorder.run(stop.clone()));
+        RecorderHandle { stop, task }
+    }
+
+    /// Stops the recorder and waits for its last flush; in fast mode for at most
+    /// [`Self::FAST_FLUSH_TIMEOUT`]. Cancel-safe: waiting again waits for the same task.
+    async fn flush(&mut self, mode: ShutdownMode) -> anyhow::Result<()> {
+        self.stop.cancel();
+        match mode {
+            ShutdownMode::Graceful => (&mut self.task).await?,
+            ShutdownMode::Fast => tokio::time::timeout(Self::FAST_FLUSH_TIMEOUT, &mut self.task)
+                .await
+                .context("the traffic recorder did not finish its last flush in time")??,
+        }
+        Ok(())
+    }
+}
+
 /// Owns the startup and shutdown order of `hoster run`.
 pub struct Supervisor {
     config: Config,
@@ -498,11 +534,14 @@ impl Supervisor {
 /// proxy. Later tasks add the handles of the poller and the deploy tasks here.
 #[derive(Default)]
 struct Teardown {
-    /// Root cancellation token; every orchestrator task gets a child of it (§3.3 #6).
+    /// Root cancellation token; every orchestrator task but the traffic recorder gets a
+    /// child of it (§3.3 #6).
     token: CancellationToken,
     /// The admin app, started in phase 8.
     web: Option<WebServer>,
     proxy: ProxyHandle,
+    /// The traffic recorder, started in phase 8.
+    recorder: Option<RecorderHandle>,
 }
 
 impl Teardown {
@@ -573,6 +612,15 @@ impl Teardown {
                 Ok(())
             }
             ShutdownPhase::JoinProxy => self.proxy.join(mode).await,
+            // The proxy has stopped, so the partial minute is complete (§4 shutdown step 5).
+            ShutdownPhase::FlushTraffic => match self.recorder.as_mut() {
+                Some(recorder) => {
+                    let flushed = recorder.flush(mode).await;
+                    self.recorder = None;
+                    flushed
+                }
+                None => Ok(()),
+            },
         }
     }
 }
@@ -774,6 +822,12 @@ impl Startup for Supervisor {
                     .acme_commands
                     .take()
                     .context("the orchestrator is connected to the ACME task in step 5")?;
+                // The traffic history (ADR-0062): swept now, flushed every minute and once more
+                // after the proxy has stopped (shutdown step 5).
+                self.teardown.recorder = Some(RecorderHandle::spawn(TrafficRecorder::new(
+                    self.traffic.clone(),
+                    store.clone(),
+                )));
                 let (events_tx, events_rx) = mpsc::channel(ACME_EVENTS_CAPACITY);
                 tokio::spawn(Arc::clone(&orchestrator).run_acme_events(events_rx));
                 let stats = Stats::new(
@@ -993,6 +1047,54 @@ mod tests {
             requested(&teardown.proxy.shutdown_tx.borrow()),
             "Some(GracefulTerminate)"
         );
+    }
+
+    #[tokio::test]
+    async fn the_traffic_recorder_flushes_after_the_proxy_has_stopped() {
+        use crate::stats::RequestOutcome;
+        use crate::store::{Resolution, TrafficBucket};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let traffic = Traffic::default();
+        let mut teardown = Teardown {
+            recorder: Some(RecorderHandle::spawn(TrafficRecorder::new(
+                traffic.clone(),
+                store.clone(),
+            ))),
+            ..Teardown::default()
+        };
+        // A stand-in proxy that finishes one last request while it drains.
+        let rx = teardown.proxy.shutdown_tx.subscribe();
+        teardown.proxy.thread = Some(std::thread::spawn(move || {
+            while rx.borrow().is_none() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            traffic.unrouted().finish(RequestOutcome {
+                status: Some(421),
+                latency: Duration::from_millis(1),
+                upstream_error: false,
+            });
+        }));
+
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        teardown
+            .run(ShutdownMode::Graceful, &mut Scripted(rx))
+            .await;
+        assert!(teardown.recorder.is_none());
+        let now = crate::store::Timestamp::now();
+        let buckets: Vec<TrafficBucket<crate::stats::Histogram>> = store
+            .traffic(
+                Resolution::Minute,
+                now - Duration::from_secs(120)..now + Duration::from_secs(1),
+                None,
+            )
+            .await
+            .unwrap();
+        let [bucket] = buckets.as_slice() else {
+            panic!("{buckets:?}");
+        };
+        assert_eq!(bucket.counts.s4xx, 1);
     }
 
     #[tokio::test]

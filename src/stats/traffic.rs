@@ -216,7 +216,6 @@ impl Traffic {
     /// neither. Counters idle across the drain (no request since the previous one, none in
     /// flight) leave the registry; the drainer follows them until nothing else holds them, so
     /// a request that found them just before still counts.
-    #[allow(dead_code, reason = "read by the traffic recorder (ADR-0062)")]
     pub fn drain(&self) -> Vec<TrafficDelta> {
         let mut drained = self
             .0

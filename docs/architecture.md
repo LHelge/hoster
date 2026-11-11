@@ -513,7 +513,9 @@ switched `current`; `Restart=always` then starts the new binary, ADR-0052)
    then shuts its runtimes down with `graceful_shutdown_timeout_seconds`.
 4. Join the Pingora thread.
 5. Flush the traffic recorder once more, so the requests of the partial minute are written
-   (§12). Then exit 0.
+   (§12). The recorder has its own stop token rather than a child of the root token (§3.3
+   #6), so it keeps counting until the proxy is joined; a fast shutdown waits at most 5 s for
+   this flush. Then exit 0.
 
 App containers keep running when hoster stops. They are owned by podman/conmon, not by the
 hoster process. While hoster is down there is no proxy, so the apps are unreachable for about 1–2 s (ADR-0034).
