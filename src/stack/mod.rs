@@ -37,6 +37,11 @@ pub use check::StackCheck;
 pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
 pub use file::{ConfigFile, ContainerPath, FileMode, FileOwner, FileSource, Ownership};
+#[allow(
+    unused_imports,
+    reason = "consumed by the stack's `auto_update` check and the update checker (ADR-0061)"
+)]
+pub use image::{Bump, TagVersion};
 pub use image::{Digest, ImageRef, PinnedImage};
 pub use limits::{Cpus, Limit, Limits};
 pub use route::{Host, NormalizedPrefix};

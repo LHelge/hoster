@@ -263,6 +263,173 @@ impl fmt::Display for PinnedImage {
     }
 }
 
+/// How far a newer version tag is from the current one (ADR-0061 §3). Ordered by size, so a
+/// policy's limit compares with `<=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Bump {
+    Patch,
+    Minor,
+    Major,
+}
+
+impl fmt::Display for Bump {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Patch => "patch",
+            Self::Minor => "minor",
+            Self::Major => "major",
+        })
+    }
+}
+
+/// An image tag that reads as a version (ADR-0061 §3): an optional `v`, 1–3 dot-separated
+/// numeric components, and an optional `-suffix`. `16`, `16.4-alpine`, `v2.3.1` and `24.04`
+/// are versions; `latest`, `1.2.3.4`, `2.0.0rc1` and `16-` are not.
+///
+/// Components are compared as numbers, so `24.04` and `24.4` are the same version; the tag is
+/// kept as written for [`Display`](fmt::Display).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TagVersion {
+    tag: String,
+    v_prefix: bool,
+    components: Vec<u64>,
+    suffix: Option<String>,
+}
+
+/// Words in a suffix that mark a pre-release, matched case-insensitively anywhere in it.
+const PRE_RELEASE_MARKERS: [&str; 7] = [
+    "rc", "beta", "alpha", "dev", "nightly", "preview", "snapshot",
+];
+
+impl TagVersion {
+    /// Whether the suffix marks a pre-release (`-rc1`, `-beta.2`, `-alpine-dev`, …), which is
+    /// never an update candidate.
+    pub fn is_pre_release(&self) -> bool {
+        self.suffix.as_deref().is_some_and(|suffix| {
+            let suffix = suffix.to_ascii_lowercase();
+            PRE_RELEASE_MARKERS
+                .iter()
+                .any(|marker| suffix.contains(marker))
+        })
+    }
+
+    /// Whether `other` is in the same version line: the same `v` style, the same number of
+    /// components and the same suffix. `16.4-alpine` and `16.6-alpine` are; `16.4-alpine` and
+    /// `17.0`, `16.6-bookworm` or `16.4.1-alpine` are not.
+    pub fn same_line(&self, other: &Self) -> bool {
+        self.v_prefix == other.v_prefix
+            && self.components.len() == other.components.len()
+            && self.suffix == other.suffix
+    }
+
+    /// What kind of update `other` is from `self`: the position of the first component that
+    /// grew (major, minor, patch). `None` when `other` is in another line or not newer.
+    pub fn bump_kind(&self, other: &Self) -> Option<Bump> {
+        if !self.same_line(other) || other.components <= self.components {
+            return None;
+        }
+        let position = self
+            .components
+            .iter()
+            .zip(&other.components)
+            .position(|(current, newer)| current != newer)?;
+        Some(match position {
+            0 => Bump::Major,
+            1 => Bump::Minor,
+            _ => Bump::Patch,
+        })
+    }
+
+    /// The highest tag among `tags` that is in `self`'s line, is not a pre-release, and is at
+    /// most a `max_bump` away. Tags that are not versions are ignored. `None` when nothing is
+    /// newer.
+    pub fn newest_in_line<'a>(
+        &self,
+        tags: impl IntoIterator<Item = &'a str>,
+        max_bump: Bump,
+    ) -> Option<Self> {
+        tags.into_iter()
+            .filter_map(|tag| tag.parse::<Self>().ok())
+            .filter(|candidate| !candidate.is_pre_release())
+            .filter(|candidate| {
+                self.bump_kind(candidate)
+                    .is_some_and(|bump| bump <= max_bump)
+            })
+            .max()
+    }
+}
+
+impl FromStr for TagVersion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let not_a_version = || {
+            format!(
+                "tag `{s}` is not a version: expected an optional `v`, one to three numbers \
+                 separated by `.`, and an optional `-suffix` (e.g. `16`, `16.4-alpine`, `v2.3.1`)"
+            )
+        };
+        let (v_prefix, rest) = match s.strip_prefix('v') {
+            Some(rest) => (true, rest),
+            None => (false, s),
+        };
+        let (numbers, suffix) = match rest.split_once('-') {
+            Some((_, "")) => return Err(not_a_version()),
+            Some((numbers, suffix)) => (numbers, Some(suffix.to_owned())),
+            None => (rest, None),
+        };
+        let components = numbers
+            .split('.')
+            .map(|component| {
+                if component.is_empty() || !component.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                component.parse::<u64>().ok()
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(not_a_version)?;
+        if !(1..=3).contains(&components.len()) {
+            return Err(not_a_version());
+        }
+        Ok(Self {
+            tag: s.to_owned(),
+            v_prefix,
+            components,
+            suffix,
+        })
+    }
+}
+
+/// Orders by the numeric components first, so within one line the newest version is the
+/// greatest; the rest only makes the order total.
+impl Ord for TagVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.components
+            .cmp(&other.components)
+            .then_with(|| self.v_prefix.cmp(&other.v_prefix))
+            .then_with(|| self.suffix.cmp(&other.suffix))
+            .then_with(|| self.tag.cmp(&other.tag))
+    }
+}
+
+impl PartialOrd for TagVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl AsRef<str> for TagVersion {
+    fn as_ref(&self) -> &str {
+        &self.tag
+    }
+}
+
+impl fmt::Display for TagVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.tag)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +504,178 @@ mod tests {
             ci.pin(DIGEST.parse().unwrap()).to_string(),
             format!("ghcr.io/acme/app@{DIGEST}")
         );
+    }
+
+    fn version(tag: &str) -> TagVersion {
+        tag.parse().unwrap_or_else(|e| panic!("{tag}: {e}"))
+    }
+
+    #[test]
+    fn tag_versions_parse() {
+        for (tag, components, v_prefix, suffix) in [
+            ("16", &[16][..], false, None),
+            ("16.4", &[16, 4][..], false, None),
+            ("16.4-alpine", &[16, 4][..], false, Some("alpine")),
+            ("16-alpine3.20", &[16][..], false, Some("alpine3.20")),
+            ("v2.3.1", &[2, 3, 1][..], true, None),
+            ("8.0.1", &[8, 0, 1][..], false, None),
+            ("24.04", &[24, 4][..], false, None),
+            (
+                "1.27.3-bookworm-perl",
+                &[1, 27, 3][..],
+                false,
+                Some("bookworm-perl"),
+            ),
+        ] {
+            let parsed = version(tag);
+            assert_eq!(parsed.components, components, "{tag}");
+            assert_eq!(parsed.v_prefix, v_prefix, "{tag}");
+            assert_eq!(parsed.suffix.as_deref(), suffix, "{tag}");
+            assert_eq!(parsed.to_string(), tag);
+        }
+        for tag in [
+            "latest",
+            "bookworm",
+            "1.2.3.4",
+            "2.0.0rc1",
+            "16-",
+            "v",
+            "",
+            "1..2",
+            ".1",
+            "1.",
+            "V1.2",
+            "-alpine",
+            "RELEASE.2025-01-01T00-00-00Z",
+            "99999999999999999999999",
+        ] {
+            let err = tag.parse::<TagVersion>().unwrap_err();
+            assert!(err.contains("is not a version"), "{tag}: {err}");
+        }
+    }
+
+    #[test]
+    fn pre_releases_are_flagged() {
+        for tag in [
+            "2.0.0-rc1",
+            "v3.0.0-beta.2",
+            "1.0-alpha",
+            "8-dev",
+            "1-nightly",
+            "2-Preview",
+            "1.0.0-SNAPSHOT",
+        ] {
+            assert!(version(tag).is_pre_release(), "{tag}");
+        }
+        for tag in ["16", "16.4-alpine", "1.27-bookworm"] {
+            assert!(!version(tag).is_pre_release(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn lines_need_the_same_prefix_style_component_count_and_suffix() {
+        let current = version("16.4-alpine");
+        assert!(current.same_line(&version("16.6-alpine")));
+        assert!(current.same_line(&version("17.0-alpine")));
+        for other in [
+            "17.0",
+            "16.6-bookworm",
+            "16.4.1-alpine",
+            "v16.6-alpine",
+            "16-alpine",
+        ] {
+            assert!(!current.same_line(&version(other)), "{other}");
+        }
+    }
+
+    #[test]
+    fn bumps_are_positional() {
+        for (from, to, bump) in [
+            ("16.4.2", "16.4.3", Some(Bump::Patch)),
+            ("16.4.2", "16.5.0", Some(Bump::Minor)),
+            ("16.4.2", "17.0.0", Some(Bump::Major)),
+            ("16.4", "16.5", Some(Bump::Minor)),
+            ("16.4", "17.0", Some(Bump::Major)),
+            ("16", "17", Some(Bump::Major)),
+            ("v2.3.1", "v2.3.4", Some(Bump::Patch)),
+            ("v2.3.1", "v2.4.0", Some(Bump::Minor)),
+            ("24.04", "24.10", Some(Bump::Minor)),
+            // Not newer, or another line.
+            ("16.4.2", "16.4.2", None),
+            ("16.4.2", "16.4.1", None),
+            ("24.04", "24.4", None),
+            ("16.4", "16.4.1", None),
+            ("16.4-alpine", "16.5", None),
+            ("v2.3.1", "2.3.4", None),
+        ] {
+            assert_eq!(version(from).bump_kind(&version(to)), bump, "{from} → {to}");
+        }
+        assert!(Bump::Patch < Bump::Minor && Bump::Minor < Bump::Major);
+    }
+
+    #[test]
+    fn newest_in_line_picks_the_highest_allowed_candidate() {
+        let tags = [
+            "latest",
+            "16",
+            "17",
+            "16.3",
+            "16.4",
+            "16.6",
+            "16.10",
+            "16.11-alpine",
+            "17.0",
+            "17.2",
+            "18.0-rc1",
+            "18.0-beta1",
+            "1.2.3.4",
+            "16.12-bookworm",
+        ];
+        let newest = |current: &str, max| {
+            version(current)
+                .newest_in_line(tags, max)
+                .map(|v| v.to_string())
+        };
+        // Numeric, not lexical: 16.10 beats 16.6.
+        assert_eq!(newest("16.4", Bump::Minor).as_deref(), Some("16.10"));
+        assert_eq!(newest("16.4", Bump::Major).as_deref(), Some("17.2"));
+        // Patch bumps of a 2-component tag do not exist; they arrive as moved digests.
+        assert_eq!(newest("16.4", Bump::Patch), None);
+        assert_eq!(newest("16", Bump::Major).as_deref(), Some("17"));
+        assert_eq!(newest("16", Bump::Minor), None);
+        // Pre-releases are skipped even when they are the highest.
+        assert_eq!(newest("17.2", Bump::Major), None);
+        // Suffixed lines only see their own suffix.
+        assert_eq!(
+            newest("16.4-alpine", Bump::Minor).as_deref(),
+            Some("16.11-alpine")
+        );
+
+        let semver = [
+            "v2.3.1",
+            "v2.3.4",
+            "v2.4.0",
+            "v2.4.1",
+            "v3.0.0",
+            "v3.1.0-rc.1",
+            "2.9.9",
+        ];
+        let newest = |current: &str, max| {
+            version(current)
+                .newest_in_line(semver, max)
+                .map(|v| v.to_string())
+        };
+        assert_eq!(newest("v2.3.1", Bump::Patch).as_deref(), Some("v2.3.4"));
+        assert_eq!(newest("v2.3.1", Bump::Minor).as_deref(), Some("v2.4.1"));
+        assert_eq!(newest("v2.3.1", Bump::Major).as_deref(), Some("v3.0.0"));
+    }
+
+    #[test]
+    fn equal_versions_written_differently_tie_deterministically() {
+        let picked = version("24.01")
+            .newest_in_line(["24.04", "24.4"], Bump::Minor)
+            .unwrap();
+        // Both are 24.4; the order is total, so the pick is stable.
+        assert_eq!(picked, version("24.4").max(version("24.04")));
     }
 }

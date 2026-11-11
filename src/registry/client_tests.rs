@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use wiremock::matchers::{header, header_exists, method, path, query_param};
+use wiremock::matchers::{basic_auth, header, header_exists, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
@@ -697,6 +697,34 @@ mod live {
         }
     }
 
+    async fn tags(reference: &str) -> Vec<String> {
+        RegistryClient::new(Arc::new(Anonymous))
+            .unwrap()
+            .tags(&image(reference))
+            .await
+            .unwrap_or_else(|e| panic!("{reference}: {e}"))
+    }
+
+    /// Both registries paginate past one page and list versions the matcher understands.
+    #[tokio::test]
+    async fn public_tag_lists_paginate() {
+        if !enabled() {
+            return;
+        }
+        for (reference, known) in [
+            ("docker.io/library/postgres:16", "16.4-alpine"),
+            ("ghcr.io/immich-app/immich-server:v1.0.0", "v1.106.4"),
+        ] {
+            let tags = tags(reference).await;
+            eprintln!("{reference}: {} tags", tags.len());
+            assert!(tags.iter().any(|t| t == known), "{reference} lists {known}");
+            let current: TagVersion = reference.rsplit(':').next().unwrap().parse().unwrap();
+            let newest = current.newest_in_line(tags.iter().map(String::as_str), Bump::Major);
+            eprintln!("{reference}: newest in line {newest:?}");
+            assert!(newest.is_some(), "{reference} has a newer version");
+        }
+    }
+
     #[tokio::test]
     async fn private_image_with_credential() {
         let (Ok(reference), Ok(credential)) = (
@@ -748,4 +776,241 @@ async fn contains_heads_the_manifest_by_digest() {
         .unwrap_err();
     assert!(matches!(err, RegistryError::NotFound { .. }), "{err}");
     assert!(err.to_string().contains(&format!("app@{foreign}")), "{err}");
+}
+
+const TAGS: &str = "/v2/owner/app/tags/list";
+
+/// A tag list page, optionally linking to the next one.
+fn tag_page(tags: &[&str], next: Option<&str>) -> ResponseTemplate {
+    let response = ResponseTemplate::new(200)
+        .set_body_json(serde_json::json!({"name": "owner/app", "tags": tags}));
+    match next {
+        Some(next) => response.insert_header("link", format!(r#"<{next}>; rel="next""#).as_str()),
+        None => response,
+    }
+}
+
+#[tokio::test]
+async fn tags_follow_link_pagination_with_one_token() {
+    let server = MockServer::start().await;
+    let realm = format!("{}/token", server.uri());
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(challenge(&realm))
+        .with_priority(10)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(query_param("scope", "repository:owner/app:pull"))
+        .respond_with(token("list-token"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Page two: the link is relative, as ghcr and Docker Hub send it.
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .and(query_param("last", "v1.1"))
+        .and(header("authorization", "Bearer list-token"))
+        .respond_with(tag_page(&["v1.2", "v2.0"], None))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .and(query_param("n", "1000"))
+        .and(header("authorization", "Bearer list-token"))
+        .respond_with(tag_page(
+            &["latest", "v1.0", "v1.1"],
+            Some("/v2/owner/app/tags/list?last=v1.1&n=1000"),
+        ))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    // The image's own tag and digest don't matter: the whole repository is listed.
+    let tags = client(&server, Arc::new(Anonymous))
+        .tags(&image(&format!("registry.test/owner/app:v1.0@{DIGEST}")))
+        .await
+        .unwrap();
+    assert_eq!(tags, ["latest", "v1.0", "v1.1", "v1.2", "v2.0"]);
+}
+
+#[tokio::test]
+async fn tags_of_an_empty_repository_and_a_missing_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"name": "owner/app", "tags": null})),
+        )
+        .mount(&server)
+        .await;
+    let client = client(&server, Arc::new(Anonymous));
+    assert!(
+        client
+            .tags(&image("registry.test/owner/app:v1"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let err = client
+        .tags(&image("registry.test/owner/gone:v1"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RegistryError::NotFound { .. }), "{err:?}");
+    assert!(
+        err.to_string().contains("registry.test/owner/gone"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn tags_refuse_a_next_link_to_another_origin() {
+    let server = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(tag_page(
+            &["v1"],
+            Some(&format!(
+                "{}/v2/owner/app/tags/list?last=v1",
+                elsewhere.uri()
+            )),
+        ))
+        .mount(&server)
+        .await;
+    let err = client(&server, Arc::new(Anonymous))
+        .tags(&image("registry.test/owner/app:v1"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RegistryError::Tags { .. }), "{err:?}");
+    assert!(err.to_string().contains("leaves the registry"), "{err}");
+    assert!(elsewhere.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tags_give_up_on_endless_pagination() {
+    let server = MockServer::start().await;
+    // Every page links back to itself.
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(tag_page(&[], Some(TAGS)))
+        .mount(&server)
+        .await;
+    let err = client(&server, Arc::new(Anonymous))
+        .tags(&image("registry.test/owner/app:v1"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("more than 1000 pages"), "{err}");
+    assert_eq!(err.class(), "unusable registry response");
+}
+
+#[tokio::test]
+async fn tags_give_up_past_the_tag_cap() {
+    let server = MockServer::start().await;
+    let many: Vec<String> = (0..=MAX_TAGS).map(|i| format!("1.0.{i}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(tag_page(&many, None))
+        .mount(&server)
+        .await;
+    let err = client(&server, Arc::new(Anonymous))
+        .tags(&image("registry.test/owner/app:v1"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("more than 100000 tags"), "{err}");
+}
+
+#[tokio::test]
+async fn rate_limited_tag_lists_carry_retry_after_when_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(MANIFEST))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+    let client = client(&server, Arc::new(Anonymous));
+    let image = image("registry.test/owner/app:v1");
+
+    let err = client.tags(&image).await.unwrap_err();
+    assert!(matches!(err, RegistryError::RateLimited { .. }), "{err:?}");
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+
+    // Without the header the error is still typed, with no wait to honour.
+    let err = client.resolve(&image).await.unwrap_err();
+    assert!(matches!(err, RegistryError::RateLimited { .. }), "{err:?}");
+    assert_eq!(err.retry_after(), None);
+    assert_eq!(err.to_string(), "registry.test is rate-limiting requests");
+}
+
+#[tokio::test]
+async fn tags_through_a_separate_token_server_with_the_credential() {
+    // Docker Hub's shape: the token server is another host and gets basic auth.
+    let registry = MockServer::start().await;
+    let auth = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .respond_with(challenge(&format!("{}/token", auth.uri())))
+        .with_priority(10)
+        .mount(&registry)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .and(basic_auth("bot", "s3cret-token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"access_token": "hub-token"})),
+        )
+        .expect(1)
+        .mount(&auth)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(TAGS))
+        .and(header("authorization", "Bearer hub-token"))
+        .respond_with(tag_page(&["16", "16.4", "17"], None))
+        .mount(&registry)
+        .await;
+    let tags = client(&registry, bot())
+        .tags(&image("registry.test/owner/app:16.4"))
+        .await
+        .unwrap();
+    assert_eq!(tags, ["16", "16.4", "17"]);
+}
+
+#[test]
+fn next_page_links_parse() {
+    let base: Url = "https://registry.test/".parse().unwrap();
+    let current: Url = "https://registry.test/v2/a/tags/list?n=2".parse().unwrap();
+    let next = |values: &[&str]| {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(header::LINK, HeaderValue::from_str(value).unwrap());
+        }
+        RegistryClient::next_page(&base, &current, &headers).map(|u| u.map(|u| u.to_string()))
+    };
+    assert_eq!(next(&[]), Ok(None));
+    assert_eq!(
+        next(&[r#"</v2/a/tags/list?last=b&n=2>; rel="next""#])
+            .unwrap()
+            .as_deref(),
+        Some("https://registry.test/v2/a/tags/list?last=b&n=2")
+    );
+    // Unquoted, other relations first, absolute on the same origin.
+    assert_eq!(
+        next(&[r#"</first>; rel=first, <https://registry.test/v2/a/tags/list?last=c>; rel=next"#])
+            .unwrap()
+            .as_deref(),
+        Some("https://registry.test/v2/a/tags/list?last=c")
+    );
+    assert_eq!(next(&[r#"</prev>; rel="prev""#]), Ok(None));
+    assert!(next(&[r#"/no-brackets; rel="next""#]).is_err());
+    assert!(next(&[r#"<http://registry.test/v2/a/tags/list>; rel="next""#]).is_err());
 }

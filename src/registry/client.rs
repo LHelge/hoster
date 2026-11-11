@@ -1,7 +1,9 @@
-//! Generic OCI distribution client: tag → digest resolution (ADR-0005, ADR-0025).
+//! Generic OCI distribution client: tag → digest resolution (ADR-0005, ADR-0025) and tag
+//! listing for update detection (ADR-0061).
 //!
 //! [`RegistryClient::resolve`] sends `HEAD /v2/<repo>/manifests/<tag>` and returns the
-//! `Docker-Content-Digest`. Authentication is discovered, not configured: a `401` carries a
+//! `Docker-Content-Digest`. [`RegistryClient::tags`] pages through `GET /v2/<repo>/tags/list`
+//! by its `Link` header. Authentication is discovered, not configured: a `401` carries a
 //! `WWW-Authenticate` challenge, and for `Bearer` the client fetches a pull token from the
 //! challenge's realm (ghcr: `ghcr.io/token`; Docker Hub: `auth.docker.io/token`), anonymously or
 //! with the registry host's [`RegistryCredential`] as basic auth. Tokens are cached per
@@ -15,11 +17,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use reqwest::header::{self, HeaderMap, HeaderValue};
-use reqwest::{Response, StatusCode, Url};
+use reqwest::{Method, Response, StatusCode, Url};
 use serde::Deserialize;
 use tokio::time::Instant;
 
 use super::{CredentialError, RegistryCredential, RegistryCredentials};
+#[cfg(test)]
+use crate::stack::{Bump, TagVersion};
 use crate::stack::{Digest, ImageRef, PinnedImage};
 
 /// Manifest media types accepted by the `HEAD`: multi-arch indexes first, so a multi-arch tag
@@ -50,6 +54,19 @@ const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(10);
 const BASIC_AUTH_LIFETIME: Duration = Duration::from_secs(3600);
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Tags asked for per page of a tag list. Registries may send fewer and link to the rest.
+const TAGS_PER_PAGE: &str = "1000";
+
+/// The most tags a repository may list before [`RegistryClient::tags`] gives up. Lists are in
+/// lexical order, so a truncated list could miss the newest versions; failing is more honest.
+/// Repositories that CI pushes per-commit tags to are large: `ghcr.io/immich-app/immich-server`
+/// listed 33,317 tags on 2026-11-11 (docs/architecture.md §1.4).
+const MAX_TAGS: usize = 100_000;
+
+/// The most pages a tag list may span, whatever the page size, so a registry linking in
+/// circles cannot keep the client busy.
+const MAX_TAG_PAGES: usize = 1_000;
 
 /// Why a tag could not be resolved. Messages never contain a credential or token.
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +123,12 @@ pub enum RegistryError {
         image: String,
         reason: String,
     },
+    #[error("{registry} sent no usable tag list for `{image}`: {reason}")]
+    Tags {
+        registry: String,
+        image: String,
+        reason: String,
+    },
 }
 
 fn retry_after_text(retry_after: Option<Duration>) -> String {
@@ -136,9 +159,10 @@ impl RegistryError {
             Self::Credentials(_) => "credential store error".to_owned(),
             Self::Client(_) => "client error".to_owned(),
             Self::NoTag { .. } => "nothing to resolve".to_owned(),
-            Self::Challenge { .. } | Self::Token { .. } | Self::Digest { .. } => {
-                "unusable registry response".to_owned()
-            }
+            Self::Challenge { .. }
+            | Self::Token { .. }
+            | Self::Digest { .. }
+            | Self::Tags { .. } => "unusable registry response".to_owned(),
         }
     }
 }
@@ -291,6 +315,13 @@ impl TokenResponse {
             .flatten()
             .find(|t| !t.is_empty())
     }
+}
+
+/// One page of `GET /v2/<repo>/tags/list`. Registries send `"tags": null` for an empty
+/// repository.
+#[derive(Debug, Deserialize)]
+struct TagList {
+    tags: Option<Vec<String>>,
 }
 
 /// An `Authorization` header value and when it stops being usable.
@@ -476,6 +507,94 @@ impl RegistryClient {
         }
     }
 
+    /// Every tag of `image`'s repository (its own tag and digest play no part), in the order
+    /// the registry lists them. Follows `Link: <…>; rel="next"` pagination on the registry's
+    /// own origin, and fails with [`RegistryError::Tags`] past [`MAX_TAGS`] tags.
+    pub async fn tags(&self, image: &ImageRef) -> Result<Vec<String>, RegistryError> {
+        let registry = image.registry();
+        let repository = image.repository();
+        let named = format!("{registry}/{repository}");
+        let error = |reason: String| RegistryError::Tags {
+            registry: registry.to_owned(),
+            image: named.clone(),
+            reason,
+        };
+        let base = self.endpoint(registry)?;
+        let mut url = base
+            .join(&format!("v2/{repository}/tags/list"))
+            .map_err(|e| error(format!("invalid tag list URL: {e}")))?;
+        url.query_pairs_mut().append_pair("n", TAGS_PER_PAGE);
+
+        let mut tags = Vec::new();
+        for _ in 0..MAX_TAG_PAGES {
+            let response = self
+                .send_authorized(
+                    image,
+                    &named,
+                    "the tag list request",
+                    Method::GET,
+                    &url,
+                    None,
+                )
+                .await?;
+            let next = Self::next_page(&base, &url, response.headers()).map_err(error)?;
+            let page: TagList = response
+                .json()
+                .await
+                .map_err(|e| error(format!("invalid JSON: {}", e.without_url())))?;
+            tags.extend(page.tags.unwrap_or_default());
+            if tags.len() > MAX_TAGS {
+                return Err(error(format!("more than {MAX_TAGS} tags")));
+            }
+            match next {
+                Some(next) => url = next,
+                None => return Ok(tags),
+            }
+        }
+        Err(error(format!("more than {MAX_TAG_PAGES} pages")))
+    }
+
+    /// The `rel="next"` target of a `Link` header, resolved against the page it came with. A
+    /// target on another origin is refused: the request would carry this registry's token.
+    fn next_page(base: &Url, current: &Url, headers: &HeaderMap) -> Result<Option<Url>, String> {
+        for value in headers.get_all(header::LINK) {
+            let value = value
+                .to_str()
+                .map_err(|_| "a Link header is not ASCII".to_owned())?;
+            for link in value.split(',') {
+                let mut parts = link.split(';');
+                let target = parts.next().unwrap_or_default().trim();
+                let is_next = parts.any(|param| {
+                    param.trim().split_once('=').is_some_and(|(key, value)| {
+                        key.trim().eq_ignore_ascii_case("rel")
+                            && value
+                                .trim()
+                                .trim_matches('"')
+                                .split_ascii_whitespace()
+                                .any(|rel| rel.eq_ignore_ascii_case("next"))
+                    })
+                });
+                if !is_next {
+                    continue;
+                }
+                let target = target
+                    .strip_prefix('<')
+                    .and_then(|t| t.strip_suffix('>'))
+                    .ok_or_else(|| format!("malformed Link target `{target}`"))?;
+                let next = current
+                    .join(target)
+                    .map_err(|e| format!("invalid next-page link `{target}`: {e}"))?;
+                if next.origin() != base.origin() {
+                    return Err(format!(
+                        "the next-page link leaves the registry: `{target}`"
+                    ));
+                }
+                return Ok(Some(next));
+            }
+        }
+        Ok(None)
+    }
+
     fn endpoint(&self, registry: &str) -> Result<Url, RegistryError> {
         match self.endpoints.get(registry) {
             Some(url) => Ok(url.clone()),
@@ -488,8 +607,7 @@ impl RegistryClient {
         }
     }
 
-    /// `HEAD` the manifest of `reference` (a tag or a digest), authenticating on demand and
-    /// refreshing a rejected token once.
+    /// `HEAD` the manifest of `reference` (a tag or a digest).
     async fn manifest_digest(
         &self,
         image: &ImageRef,
@@ -499,22 +617,49 @@ impl RegistryClient {
         let repository = image.repository();
         let separator = if reference.contains(':') { '@' } else { ':' };
         let named = format!("{registry}/{repository}{separator}{reference}");
-        let base = self.endpoint(registry)?;
-        let url = base
+        let url = self
+            .endpoint(registry)?
             .join(&format!("v2/{repository}/manifests/{reference}"))
             .map_err(|e| RegistryError::Challenge {
                 registry: registry.to_owned(),
                 reason: format!("invalid manifest URL: {e}"),
             })?;
+        let response = self
+            .send_authorized(
+                image,
+                &named,
+                "the manifest request",
+                Method::HEAD,
+                &url,
+                Some(MANIFEST_ACCEPT),
+            )
+            .await?;
+        Self::digest_of(image, &response)
+    }
+
+    /// Sends `method url` for `image`'s repository and returns the successful response,
+    /// authenticating on demand and refreshing a rejected token once. `named` is how errors
+    /// name what was asked for, `what` how they name the request.
+    async fn send_authorized(
+        &self,
+        image: &ImageRef,
+        named: &str,
+        what: &'static str,
+        method: Method,
+        url: &Url,
+        accept: Option<&'static str>,
+    ) -> Result<Response, RegistryError> {
+        let registry = image.registry();
+        let repository = image.repository();
         let key = (registry.to_owned(), repository.to_owned());
 
         let mut auth = self.cached_auth(&key);
         let mut refreshed = false;
         loop {
-            let mut request = self
-                .http
-                .head(url.clone())
-                .header(header::ACCEPT, MANIFEST_ACCEPT);
+            let mut request = self.http.request(method.clone(), url.clone());
+            if let Some(accept) = accept {
+                request = request.header(header::ACCEPT, accept);
+            }
             if let Some(auth) = &auth {
                 request = request.header(header::AUTHORIZATION, auth.clone());
             }
@@ -523,25 +668,26 @@ impl RegistryClient {
                 .await
                 .map_err(|e| Self::http_error(registry, e))?;
             match response.status() {
-                status if status.is_success() => {
-                    return Self::digest_of(image, &response);
-                }
+                status if status.is_success() => return Ok(response),
                 StatusCode::UNAUTHORIZED if !refreshed => {
                     refreshed = true;
                     self.forget_auth(&key);
                     let challenge = Challenge::from_headers(registry, response.headers())?;
+                    let base = self.endpoint(registry)?;
                     auth = Some(self.authenticate(&key, &base, challenge).await?);
                 }
                 status @ (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => {
                     self.forget_auth(&key);
                     return Err(RegistryError::Unauthorized {
                         registry: registry.to_owned(),
-                        image: named,
+                        image: named.to_owned(),
                         status,
                     });
                 }
                 StatusCode::NOT_FOUND => {
-                    return Err(RegistryError::NotFound { image: named });
+                    return Err(RegistryError::NotFound {
+                        image: named.to_owned(),
+                    });
                 }
                 StatusCode::TOO_MANY_REQUESTS => {
                     return Err(Self::rate_limited(registry, &response));
@@ -549,7 +695,7 @@ impl RegistryClient {
                 status => {
                     return Err(RegistryError::Status {
                         registry: registry.to_owned(),
-                        what: "the manifest request",
+                        what,
                         status,
                     });
                 }
