@@ -2366,6 +2366,7 @@ async fn every_request_that_matched_a_route_gets_an_access_log_line() {
     );
 }
 
+mod address_slots;
 mod limits;
 mod smuggling;
 
