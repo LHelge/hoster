@@ -1,6 +1,6 @@
 # ADR-0025: Registry credentials (classic PAT for ghcr) and image references (third-party tags resolved at apply)
 
-- Status: Accepted (resolves OQ-06, OQ-25)
+- Status: Accepted (resolves OQ-06, OQ-25); third-party images checked for updates by the update checker per ADR-0061
 - Date: 2026-11-07
 
 ## Context

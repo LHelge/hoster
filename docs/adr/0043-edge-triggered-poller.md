@@ -1,6 +1,6 @@
 # ADR-0043: The digest poller deploys only when a tracked tag's digest changes
 
-- Status: Accepted (resolves OQ-13); first sighting of a never-run service deploys since ADR-0051
+- Status: Accepted (resolves OQ-13); first sighting of a never-run service deploys since ADR-0051; the edge-triggered rule reused for third-party updates per ADR-0061
 - Date: 2026-11-07
 
 ## Decision
