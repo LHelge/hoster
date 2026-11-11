@@ -2583,11 +2583,10 @@ async fn reresolve_needs_the_csrf_token() {
 }
 
 #[tokio::test]
-async fn the_overview_shows_kpis_slowest_routes_routes_and_volumes() {
-    use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
-    use crate::stack::RouteTimeouts;
-    use crate::stats::{CertExpiry, RequestOutcome};
-    use crate::store::DeploymentOutcome;
+async fn the_overview_shows_kpis_responses_by_status_routes_and_volumes() {
+    use crate::stats::CertExpiry;
+    use crate::store::{DeploymentOutcome, Resolution, Timestamp};
+    use crate::web::dashboard::tests::{MINUTE, bucket};
 
     let app = TestApp::new().await;
     let browser = app.sign_in().await;
@@ -2595,28 +2594,13 @@ async fn the_overview_shows_kpis_slowest_routes_routes_and_volumes() {
         "{NOTES}\n[[services.api.routes]]\nhost = \"notes.example.com\"\nprefix = \"/files\"\nstrip_prefix = true\nport = 9000\ntimeouts = {{ read = \"60s\" }}\n\n[services.api.volumes]\ndata = \"/data\"\n"
     );
     app.stacks.stacks.lock().unwrap()[0].revision = revision("notes", 1, &toml);
-    let entry = |prefix: &str| RouteEntry {
-        owner: Owner::Route(RouteOwner {
-            stack: "notes".parse().unwrap(),
-            service: "api".parse().unwrap(),
-        }),
-        prefix: prefix.parse().unwrap(),
-        prefix_str: prefix.to_owned(),
-        strip_prefix: false,
-        target: Target::Unavailable {
-            retry_after: std::time::Duration::from_secs(1),
-        },
-        timeouts: RouteTimeouts::default(),
-    };
-    for (prefix, status, ms) in [("/", 200, 5), ("/", 503, 5), ("/files", 200, 2_000)] {
-        app.traffic
-            .route("notes.example.com", &entry(prefix))
-            .finish(RequestOutcome {
-                status: Some(status),
-                latency: std::time::Duration::from_millis(ms),
-                upstream_error: false,
-            });
-    }
+    // Two minutes back is flushed whatever the second.
+    let minute = Resolution::Minute.bucket(Timestamp::now()) - MINUTE * 2;
+    app.stats.traffic.lock().unwrap().push(bucket(
+        minute,
+        ("notes.example.com", "notes", "api"),
+        &[(200, 2, 5), (503, 1, 5)],
+    ));
     app.stats
         .deployments
         .lock()
@@ -2634,24 +2618,27 @@ async fn the_overview_shows_kpis_slowest_routes_routes_and_volumes() {
     });
 
     let html = body(app.get("/stacks/notes", Some(&browser.cookie)).await).await;
-    // The tiles: 3 requests, one 5xx, the slowest route's p95, two failed deploys.
+    // The tiles: 3 requests in the last 5 minutes, one 5xx, two failed deploys.
     assert!(
-        html.contains(r#"<dt class="kpi-label">requests</dt><dd class="kpi-value">3</dd>"#),
+        html.contains(r#"<dt class="kpi-label">req/min · last hour</dt><dd class="kpi-value">0.6</dd><dd class="kpi-sub">peak 3, "#),
         "{html}"
     );
     assert!(
-        html.contains(r#"<div class="kpi kpi-fail" title="Share of 5xx responses since hoster started"><dt class="kpi-label">5xx</dt><dd class="kpi-value">33.3 %</dd><dd class="kpi-sub">1 of 3</dd>"#),
+        html.contains(r#"<div class="kpi kpi-fail" title="Share of 5xx responses over the last hour"><dt class="kpi-label">5xx rate · last hour</dt><dd class="kpi-value">33.3 %</dd><dd class="kpi-sub">1 of 3</dd>"#),
         "{html}"
     );
     assert!(
         html.contains(r#"<dt class="kpi-label">deploys · 30 d</dt><dd class="kpi-value">0 live</dd><dd class="kpi-sub">2 failed</dd>"#),
         "{html}"
     );
-    // The slowest route comes first.
-    let files = html.find(r#"<span class="slow-route-name">notes.example.com/files"#);
-    let root = html.find(r#"<span class="slow-route-name">notes.example.com <span"#);
-    assert!(files.is_some() && root.is_some() && files < root, "{html}");
-    assert!(html.contains("<dt>5xx</dt><dd>1</dd>"), "{html}");
+    // The responses by status over the hour, with the legend's totals; no per-route figures.
+    assert!(
+        html.contains(r#"Responses by status <span class="card-count">· 1h</span></h2>"#),
+        "{html}"
+    );
+    assert!(html.contains("2xx 2</li>"), "{html}");
+    assert!(html.contains("5xx 1</li>"), "{html}");
+    assert!(!html.contains("slow-route"), "{html}");
     // The routes card, with the certificate's days left and the route's settings.
     assert!(
         html.contains(r#"<span class="route-url">https://notes.example.com/files</span>"#),

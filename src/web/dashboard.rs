@@ -64,12 +64,14 @@ use tokio::sync::broadcast;
 
 use super::auth::{Auth, Session};
 use super::certificates::{CertGlance, Certificates};
-use super::charts::{LineChart, Percentiles, Sparkline, StackedBars, Timeline};
+use super::charts::{LineChart, Percentiles, StackedBars, Timeline};
 use super::events::RecentEvents;
 use super::icons::Icon;
 use super::pages::{Layout, Page, Section, Shell};
-use super::stacks::{Condition, DeploymentView, LastDeploy, StackView, Stacks, TrafficLine};
-use super::ui::{CertState, Count, Kpi, PerMinute, Pill, Tone};
+use super::stacks::{
+    Condition, DeploymentView, LastDeploy, RowTraffic, StackView, Stacks, TrafficLine,
+};
+use super::ui::{CertState, Count, Kpi, Pill, Tone};
 use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus, UiEvent};
 use crate::stack::Stack;
@@ -1049,35 +1051,6 @@ impl StackRow {
     }
 }
 
-/// A stack's traffic in its row of the stacks table.
-#[derive(Debug)]
-struct RowTraffic {
-    /// Requests per minute over the last [`ScopeHistory::RATE_WINDOW`].
-    per_minute: PerMinute,
-    /// The figures over the range.
-    line: TrafficLine,
-    /// Its requests over the range, in the tone of the stack's condition.
-    spark: Sparkline,
-}
-
-impl RowTraffic {
-    fn new(scope: &ScopeHistory, condition: Condition) -> Self {
-        RowTraffic {
-            per_minute: PerMinute(scope.per_minute()),
-            line: TrafficLine::from(&scope.totals),
-            spark: Sparkline::new(
-                scope.bars.iter().map(|b| b.traffic.requests()),
-                Tone::from(condition),
-            ),
-        }
-    }
-
-    /// The requests over the range, for the sparkline's cell in words.
-    fn requests(&self) -> Count {
-        Count(self.line.requests)
-    }
-}
-
 /// A stack's finished deployments of the last [`Stats::DEPLOY_HISTORY`].
 #[derive(Debug, Default)]
 struct DeploysCell {
@@ -1209,4 +1182,4 @@ impl OtherTraffic {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

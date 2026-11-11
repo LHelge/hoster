@@ -1121,8 +1121,9 @@ impl Fixtures {
 /// Traffic history (ADR-0062) for the dashboard's range picker: 60 days of hour buckets, and
 /// minute buckets for the last 12 hours (all the minute ranges and their previous periods
 /// read), each route with its own daily wave. shop has a 5xx spike 10 hours ago, blog's 502s
-/// follow its crash-looping worker, forum (removed) went quiet 3 days ago, and hoster's own
-/// admin UI and unrouted requests feed the note under the stacks table.
+/// follow its crash-looping worker, forum (removed) went quiet 3 days ago, wiki only came up 7
+/// minutes ago (the stack pages' mostly empty hour), docs (not deployed) has none, and hoster's
+/// own admin UI and unrouted requests feed the note under the stacks table.
 impl Fixtures {
     /// A number from 0 to 1 that looks random but is the same on every run.
     fn noise(seed: u64) -> f64 {
@@ -1235,6 +1236,18 @@ impl Fixtures {
         while start < newest {
             push(start, minute);
             start = start + minute;
+        }
+        // wiki's first deploy went live 7 minutes ago, before the redeploy that failed: its
+        // hour is mostly empty bars, a few of its minutes with 5xx.
+        for back in 1..=7u32 {
+            let requests = 6 + u64::from(back % 3) * 4;
+            rows.push(Self::bucket(
+                newest - minute * back,
+                ("wiki.example.com", "wiki", "app"),
+                requests,
+                120.0,
+                (1, u64::from(back % 2) * 3),
+            ));
         }
         *app.stats.traffic.lock().unwrap() = rows;
     }

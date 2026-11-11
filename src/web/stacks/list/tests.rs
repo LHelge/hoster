@@ -6,12 +6,11 @@ use axum::http::StatusCode;
 
 use super::*;
 use crate::health::HealthStatus;
-use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
-use crate::stack::RouteTimeouts;
-use crate::stats::{RequestOutcome, Traffic};
-use crate::store::{DeploymentId, Provenance};
+use crate::stats::{Histogram, StatusClass, StatusCounts};
+use crate::store::{DeploymentId, Provenance, Resolution};
 use crate::web::auth::Session;
 use crate::web::auth::tests::TestApp;
+use crate::web::dashboard::tests::{MINUTE, bucket, history, hour};
 use crate::web::stacks::tests::{body, deployment, notes_status};
 
 /// `notes` with both services running and healthy, its last deployment live, no flag.
@@ -32,28 +31,9 @@ fn layout() -> Layout {
     Layout::new(Section::Stacks, &Session::for_tests("octocat", "c0ffee"))
 }
 
-fn entry(stack: &str, prefix: &str) -> RouteEntry {
-    RouteEntry {
-        owner: Owner::Route(RouteOwner {
-            stack: stack.parse().unwrap(),
-            service: "api".parse().unwrap(),
-        }),
-        prefix: prefix.parse().unwrap(),
-        prefix_str: prefix.to_owned(),
-        strip_prefix: false,
-        target: Target::Unavailable {
-            retry_after: Duration::from_secs(1),
-        },
-        timeouts: RouteTimeouts::default(),
-    }
-}
-
-fn request(traffic: &Traffic, host: &str, route: &RouteEntry, status: u16, millis: u64) {
-    traffic.route(host, route).finish(RequestOutcome {
-        status: Some(status),
-        latency: Duration::from_millis(millis),
-        upstream_error: false,
-    });
+/// A history over the stack pages' window without any requests.
+fn quiet() -> TrafficHistory {
+    TrafficHistory::empty(TrafficWindow::RANGE, Timestamp::now())
 }
 
 #[test]
@@ -108,9 +88,10 @@ fn the_filter_counts_every_condition_and_shows_only_the_chosen_one() {
     blog.name = "blog".into();
     blog.services[0].restarts.crash_looping = true;
     let stacks = [healthy(), blog, notes_status()];
-    let traffic = TrafficSnapshot::default();
+    let traffic = quiet();
+    let traffic = Some(&traffic);
 
-    let all = StackList::new(layout(), &stacks, &traffic, None, SystemTime::now());
+    let all = StackList::new(layout(), &stacks, traffic, None, SystemTime::now());
     let links: Vec<(&str, usize, bool)> = all
         .filters
         .iter()
@@ -133,7 +114,7 @@ fn the_filter_counts_every_condition_and_shows_only_the_chosen_one() {
     let degraded = StackList::new(
         layout(),
         &stacks,
-        &traffic,
+        traffic,
         Some(Condition::Degraded),
         SystemTime::now(),
     );
@@ -144,7 +125,7 @@ fn the_filter_counts_every_condition_and_shows_only_the_chosen_one() {
     let html = StackList::new(
         layout(),
         &stacks,
-        &traffic,
+        traffic,
         Some(Condition::Deploying),
         SystemTime::now(),
     )
@@ -164,7 +145,7 @@ fn the_filter_counts_every_condition_and_shows_only_the_chosen_one() {
     let html = StackList::new(
         layout(),
         &stacks,
-        &traffic,
+        traffic,
         Some(Condition::NotDeployed),
         SystemTime::now(),
     )
@@ -182,15 +163,9 @@ fn the_filter_counts_every_condition_and_shows_only_the_chosen_one() {
 
 #[test]
 fn no_stacks_shows_no_filter_but_the_add_card() {
-    let html = StackList::new(
-        layout(),
-        &[],
-        &TrafficSnapshot::default(),
-        None,
-        SystemTime::now(),
-    )
-    .render()
-    .unwrap();
+    let html = StackList::new(layout(), &[], Some(&quiet()), None, SystemTime::now())
+        .render()
+        .unwrap();
     assert!(html.contains("No stacks yet."), "{html}");
     assert!(!html.contains("Status filter"), "{html}");
     assert!(
@@ -214,12 +189,7 @@ fn a_card_shows_the_webhook_commit_the_running_deploy_and_the_queue() {
         actor: "octocat".into(),
         tag: None,
     });
-    let card = StackCard::new(
-        &status,
-        Condition::Running,
-        &TrafficSnapshot::default(),
-        now,
-    );
+    let card = StackCard::new(&status, Condition::Running, Some(&quiet()), now);
     let last = card.last.as_ref().unwrap();
     assert_eq!(last.source, "webhook");
     assert_eq!(last.ago, "3 h ago");
@@ -236,12 +206,7 @@ fn a_card_shows_the_webhook_commit_the_running_deploy_and_the_queue() {
     // While a deployment runs it replaces the last one, and only its target is deploying.
     status.active = Some((DeploymentId::from(3), DeploymentState::Pulling));
     status.queued = Some(DeploymentId::from(4));
-    let card = StackCard::new(
-        &status,
-        Condition::Deploying,
-        &TrafficSnapshot::default(),
-        now,
-    );
+    let card = StackCard::new(&status, Condition::Deploying, Some(&quiet()), now);
     assert!(card.last.is_none());
     assert_eq!(
         card.active,
@@ -268,7 +233,7 @@ fn chips_put_failing_before_deploying() {
     let card = StackCard::new(
         &status,
         Condition::Degraded,
-        &TrafficSnapshot::default(),
+        Some(&quiet()),
         SystemTime::now(),
     );
     let chips: Vec<(Tone, &str, &str)> = card
@@ -287,7 +252,7 @@ fn chips_put_failing_before_deploying() {
     let card = StackCard::new(
         &status,
         Condition::Degraded,
-        &TrafficSnapshot::default(),
+        Some(&quiet()),
         SystemTime::now(),
     );
     assert_eq!(card.services[1].shown_word(), Some("waiting"));
@@ -295,81 +260,168 @@ fn chips_put_failing_before_deploying() {
     assert_eq!(card.services[1].tone, Tone::Neutral);
 }
 
-#[test]
-fn traffic_adds_up_the_stacks_routes_and_takes_the_slowest_p95() {
-    let traffic = Traffic::default();
-    let root = entry("notes", "/");
-    let api = entry("notes", "/api");
-    let other = entry("blog", "/");
-    for _ in 0..97 {
-        request(&traffic, "notes.example.com", &root, 200, 5);
+/// Totals of `count` requests of each (status class, latency in ms).
+fn totals(requests: &[(StatusClass, u64, u64)]) -> TrafficTotals {
+    let mut latency = Histogram::default();
+    for &(_, count, millis) in requests {
+        for _ in 0..count {
+            latency.record(Duration::from_millis(millis));
+        }
     }
-    request(&traffic, "notes.example.com", &api, 503, 2_000);
-    request(&traffic, "notes.example.com", &api, 502, 2_000);
-    request(&traffic, "notes.example.com", &api, 200, 2_000);
-    for _ in 0..50 {
-        request(&traffic, "blog.example.com", &other, 500, 9_000);
-    }
-    let rare = entry("shop", "/");
-    for _ in 0..4_999 {
-        request(&traffic, "shop.example.com", &rare, 200, 5);
-    }
-    request(&traffic, "shop.example.com", &rare, 500, 5);
-    let snapshot = traffic.snapshot();
-    let line = TrafficLine::of(
-        snapshot
-            .routes
+    TrafficTotals {
+        statuses: requests
             .iter()
-            .filter(|r| r.stack() == Some("notes"))
-            .map(|r| &r.counts),
-    );
+            .map(|&(class, count, _)| (class, count))
+            .collect::<StatusCounts>(),
+        upstream_errors: 0,
+        latency,
+    }
+}
+
+#[test]
+fn a_traffic_line_shares_and_flags_the_figures() {
+    use StatusClass::{ServerError, Success};
+    // 97 of the 100 requests took 5 ms: three slow ones do not make the stack slow.
+    let line = TrafficLine::from(&totals(&[
+        (Success, 97, 5),
+        (ServerError, 2, 2_000),
+        (Success, 1, 2_000),
+    ]));
     assert_eq!(line.requests, 100);
     assert_eq!(line.errors, "2.0 %");
     assert_eq!(line.client_errors, "0 %");
     assert_eq!(line.errors_tone, Tone::Fail);
-    // 97 of the 100 requests took 5 ms: the slow route's three do not make the stack slow.
     assert_eq!(line.p95_tone, Tone::Neutral, "{}", line.p95);
     assert_eq!(line.p50, line.p95);
-    let slow = TrafficLine::of(
-        snapshot
-            .routes
-            .iter()
-            .filter(|r| r.stack() == Some("blog"))
-            .map(|r| &r.counts),
-    );
-    assert_eq!(slow.p95_tone, Tone::Warn, "{}", slow.p95);
-    assert_eq!(slow.client_errors, "0 %");
 
-    let quiet = TrafficLine::of(std::iter::empty());
+    let slow = TrafficLine::from(&totals(&[(ServerError, 50, 9_000)]));
+    assert_eq!(slow.p95_tone, Tone::Warn, "{}", slow.p95);
+
+    let quiet = TrafficLine::from(&TrafficTotals::default());
     assert_eq!((quiet.requests, quiet.p95.as_str()), (0, "-"));
     assert_eq!(
         (quiet.errors.as_str(), quiet.errors_tone),
         ("-", Tone::Neutral)
     );
 
-    let fine = TrafficLine::of(
-        snapshot
-            .routes
-            .iter()
-            .filter(|r| r.stack() == Some("notes") && r.prefix == "/")
-            .map(|r| &r.counts),
-    );
-    assert_eq!(
-        (fine.errors.as_str(), fine.p95_tone),
-        ("0 %", Tone::Neutral)
-    );
-
     // One error in 5000 rounds to 0.0 but is not none.
-    let rare = TrafficLine::of(
-        snapshot
-            .routes
-            .iter()
-            .filter(|r| r.stack() == Some("shop"))
-            .map(|r| &r.counts),
-    );
+    let rare = TrafficLine::from(&totals(&[(Success, 4_999, 5), (ServerError, 1, 5)]));
     assert_eq!(
         (rare.errors.as_str(), rare.errors_tone),
         ("<0.1 %", Tone::Neutral)
+    );
+}
+
+#[tokio::test]
+async fn a_card_shows_the_last_hour_of_its_stacks_routes() {
+    let notes = ("notes.example.com", "notes", "api");
+    let files = ("files.example.com", "notes", "storage");
+    let blog = ("blog.example.com", "blog", "web");
+    // `now` is 30 min 30 s into the hour: its newest flushed minute is `hour + 29 min`.
+    let history = history(
+        TrafficWindow::RANGE,
+        vec![
+            // Before the hour's window: not counted.
+            bucket(hour() - MINUTE * 40, notes, &[(500, 900, 5)]),
+            bucket(hour() + MINUTE * 3, notes, &[(200, 40, 5)]),
+            bucket(hour() + MINUTE * 26, notes, &[(200, 48, 5), (503, 2, 5)]),
+            bucket(hour() + MINUTE * 29, files, &[(200, 10, 2_000)]),
+            bucket(hour() + MINUTE * 29, blog, &[(500, 70, 5)]),
+        ],
+    )
+    .await;
+    let card = StackCard::new(
+        &healthy(),
+        Condition::Degraded,
+        Some(&history),
+        SystemTime::now(),
+    );
+    let CardTraffic::Shown(traffic) = &card.traffic else {
+        panic!("{:?}", card.traffic);
+    };
+    // The last 5 minutes held 60 requests: 12 a minute.
+    assert_eq!(traffic.per_minute.to_string(), "12");
+    assert_eq!(traffic.line.requests, 100);
+    assert_eq!(traffic.line.errors, "2.0 %");
+    assert_eq!(traffic.line.errors_tone, Tone::Fail);
+    assert_eq!(traffic.line.p95_tone, Tone::Warn, "{}", traffic.line.p95);
+    // 60 bars of a minute, in the tone of the stack's condition.
+    let spark = traffic.spark.to_string();
+    assert!(spark.contains(r#"class="spark spark-warn""#), "{spark}");
+    assert_eq!(spark.matches(',').count(), 60, "{spark}");
+
+    let html = StackList::new(
+        layout(),
+        &[healthy()],
+        Some(&history),
+        None,
+        SystemTime::now(),
+    )
+    .render()
+    .unwrap();
+    assert!(html.contains("<dt>req/min</dt><dd>12</dd>"), "{html}");
+    assert!(
+        html.contains(r#"<dt>5xx</dt><dd class="stat-fail">2.0 %</dd>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="stack-spark-label">last hour</span>"#),
+        "{html}"
+    );
+    assert!(html.contains(": 100 requests</span>"), "{html}");
+    assert!(!html.contains("style="), "{html}");
+}
+
+#[test]
+fn a_quiet_stack_shows_zeros_one_without_routes_none_and_an_unreadable_history_says_so() {
+    let quiet = quiet();
+    let card = StackCard::new(
+        &healthy(),
+        Condition::Running,
+        Some(&quiet),
+        SystemTime::now(),
+    );
+    let CardTraffic::Shown(traffic) = &card.traffic else {
+        panic!("{:?}", card.traffic);
+    };
+    assert_eq!(traffic.per_minute.to_string(), "0");
+    assert_eq!(traffic.line.p95, "-");
+    assert_eq!(traffic.line.errors, "-");
+    // A flat line along the bottom.
+    let spark = traffic.spark.to_string();
+    let heights: BTreeSet<&str> = spark
+        .split(r#"points=""#)
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .split(' ')
+        .map(|point| point.split(',').nth(1).unwrap())
+        .collect();
+    assert_eq!(heights.len(), 1, "{spark}");
+
+    let unreadable = StackCard::new(&healthy(), Condition::Running, None, SystemTime::now());
+    assert!(matches!(unreadable.traffic, CardTraffic::Unreadable));
+
+    let mut unrouted = healthy();
+    unrouted.revision.toml =
+        "version = 1\nname = \"notes\"\n\n[services.api]\nimage = \"ghcr.io/acme/notes\"\n".into();
+    for history in [Some(&quiet), None] {
+        let card = StackCard::new(&unrouted, Condition::Running, history, SystemTime::now());
+        assert!(card.routes.is_empty());
+        assert!(matches!(card.traffic, CardTraffic::NoRoutes));
+    }
+    let html = StackList::new(layout(), &[unrouted], None, None, SystemTime::now())
+        .render()
+        .unwrap();
+    assert!(html.contains("no routes, no traffic"), "{html}");
+    let html = StackList::new(layout(), &[healthy()], None, None, SystemTime::now())
+        .render()
+        .unwrap();
+    assert!(
+        html.contains("the traffic history cannot be read"),
+        "{html}"
     );
 }
 
@@ -390,9 +442,13 @@ fn ago_uses_the_largest_unit() {
 #[tokio::test]
 async fn the_list_filters_by_query_and_counts_the_stacks_traffic() {
     let app = TestApp::new().await;
-    let route = entry("notes", "/");
-    request(&app.traffic, "notes.example.com", &route, 200, 12);
-    request(&app.traffic, "notes.example.com", &route, 500, 12);
+    // Two minutes back is flushed whatever the second.
+    let minute = Resolution::Minute.bucket(Timestamp::now()) - MINUTE * 2;
+    app.stats.traffic.lock().unwrap().push(bucket(
+        minute,
+        ("notes.example.com", "notes", "api"),
+        &[(200, 4, 12), (500, 6, 12)],
+    ));
     let browser = app.sign_in().await;
 
     let html = body(app.get("/stacks", Some(&browser.cookie)).await).await;
@@ -404,11 +460,27 @@ async fn the_list_filters_by_query_and_counts_the_stacks_traffic() {
         html.contains(r#"<a class="filter" href="/stacks" aria-current="page">all <span class="filter-count">1</span></a>"#),
         "{html}"
     );
-    assert!(html.contains("<dt>requests</dt><dd>2</dd>"), "{html}");
+    // 10 requests in the last 5 minutes: 2 a minute.
+    assert!(html.contains("<dt>req/min</dt><dd>2.0</dd>"), "{html}");
     assert!(
-        html.contains(r#"<dt>5xx</dt><dd class="stat-fail">50.0 %</dd>"#),
+        html.contains(r#"<dt>5xx</dt><dd class="stat-fail">60.0 %</dd>"#),
         "{html}"
     );
+
+    // A history that cannot be read leaves the cards without figures; the page still serves.
+    app.stats
+        .broken
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let response = app.get("/stacks", Some(&browser.cookie)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(
+        html.contains("the traffic history cannot be read"),
+        "{html}"
+    );
+    app.stats
+        .broken
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 
     let html = body(
         app.get("/stacks?status=failed", Some(&browser.cookie))

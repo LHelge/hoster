@@ -8,8 +8,11 @@
 //! A card shows the stack's revision and content hash, its running or latest deployment (with
 //! the commit and repository of a webhook deploy's OIDC provenance, ADR-0047), its services as
 //! chips with a health dot, the hosts its routes serve, and a small row of request statistics
-//! from hoster's in-process counters (ADR-0045): requests since hoster started, the p95 over the
-//! latency window of all the stack's routes together, and the share of 5xx responses.
+//! from the traffic history over the [`TrafficWindow`] (the last hour, ADR-0062 §8), all the
+//! stack's routes together: requests per minute over the last
+//! [`ScopeHistory::RATE_WINDOW`], the p95 and the share of 5xx responses, and a sparkline of
+//! its requests per minute in the tone of its condition. The history of every stack is read
+//! once per render; it lags by up to a minute, as it holds only flushed minutes.
 //!
 //! Under the cards, the managed containers whose stack label names no stack hoster has (left
 //! behind by a removal that did not finish, or made by hand with hoster's labels) are listed
@@ -31,11 +34,12 @@ use crate::health::HealthStatus;
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
 use crate::runtime::{ContainerInfo, label};
 use crate::stack::Stack;
-use crate::stats::{Counts, Elapsed, Latency, Stats, StatusClass, TrafficSnapshot, TrafficTotals};
+use crate::stats::{Elapsed, Range, ScopeHistory, Stats, TrafficHistory, TrafficTotals};
 use crate::store::{Deployment, DeploymentSource, DeploymentState, Timestamp};
+use crate::web::charts::Sparkline;
 use crate::web::containers::Containers;
 use crate::web::pages::{Layout, Page, Section, Shell};
-use crate::web::ui::{Pill, Tone};
+use crate::web::ui::{Count, PerMinute, Pill, Tone};
 
 impl Stacks {
     /// `GET /stacks[?status=…]`: every stack, or those in one [`Condition`].
@@ -48,7 +52,17 @@ impl Stacks {
     ) -> Response {
         let layout = shell.layout(Section::Stacks);
         let filter = query.status.as_deref().and_then(|s| s.parse().ok());
-        match stacks.0.status().await {
+        let (list, history) = tokio::join!(stacks.0.status(), stats.history(TrafficWindow::RANGE));
+        // The cards say so when the history cannot be read; the page still serves.
+        let history = history
+            .inspect_err(|err| {
+                tracing::warn!(
+                    error = format!("{err:#}"),
+                    "cannot read the traffic history"
+                );
+            })
+            .ok();
+        match list {
             Ok(list) => {
                 let managed = containers.managed().await.unwrap_or_else(|err| {
                     tracing::warn!(error = %err, "listing the containers failed");
@@ -56,7 +70,7 @@ impl Stacks {
                 });
                 let updates = stacks.update_counts().await;
                 Page(
-                    StackList::new(layout, &list, &stats.traffic(), filter, SystemTime::now())
+                    StackList::new(layout, &list, history.as_ref(), filter, SystemTime::now())
                         .with_leftovers(&list, &managed)
                         .with_updates(&updates),
                 )
@@ -68,7 +82,7 @@ impl Stacks {
                 let page = StackList::new(
                     layout.with_flash(outcome.into()),
                     &[],
-                    &TrafficSnapshot::default(),
+                    history.as_ref(),
                     filter,
                     SystemTime::now(),
                 );
@@ -109,10 +123,12 @@ impl StackList {
         self
     }
 
+    /// The list of `stacks` under `filter`, with their traffic from `history` (over
+    /// [`TrafficWindow::RANGE`]; `None` when it cannot be read).
     fn new(
         layout: Layout,
         stacks: &[StackStatus],
-        traffic: &TrafficSnapshot,
+        history: Option<&TrafficHistory>,
         filter: Option<Condition>,
         now: SystemTime,
     ) -> Self {
@@ -146,7 +162,7 @@ impl StackList {
             .iter()
             .zip(conditions)
             .filter(|(_, condition)| filter.is_none_or(|wanted| *condition == wanted))
-            .map(|(status, condition)| StackCard::new(status, condition, traffic, now))
+            .map(|(status, condition)| StackCard::new(status, condition, history, now))
             .collect();
         StackList {
             layout,
@@ -331,17 +347,18 @@ pub(super) struct StackCard {
     services: Vec<ServiceChip>,
     /// `host` or `host/prefix` of every route, sorted.
     routes: Vec<String>,
-    /// `None` when the stack routes nothing, so there is no traffic to count.
-    traffic: Option<TrafficLine>,
+    /// Its traffic over the [`TrafficWindow`].
+    traffic: CardTraffic,
     /// Updates on offer, majors aside (ADR-0061 §9).
     updates: usize,
 }
 
 impl StackCard {
+    /// The card of `status`, with its traffic from `history` (`None` when it cannot be read).
     fn new(
         status: &StackStatus,
         condition: Condition,
-        traffic: &TrafficSnapshot,
+        history: Option<&TrafficHistory>,
         now: SystemTime,
     ) -> Self {
         let hash = status.revision.hash.to_string();
@@ -379,15 +396,13 @@ impl StackCard {
                     ServiceChip::new(service, moving)
                 })
                 .collect(),
-            traffic: (!routes.is_empty()).then(|| {
-                TrafficLine::of(
-                    traffic
-                        .routes
-                        .iter()
-                        .filter(|r| r.stack() == Some(status.name.as_str()))
-                        .map(|r| &r.counts),
-                )
-            }),
+            traffic: match history {
+                _ if routes.is_empty() => CardTraffic::NoRoutes,
+                None => CardTraffic::Unreadable,
+                Some(history) => {
+                    CardTraffic::Shown(RowTraffic::new(history.stack(&status.name), condition))
+                }
+            },
             routes,
             updates: 0,
         }
@@ -423,6 +438,67 @@ impl StackCard {
             })
             .collect();
         routes.into_iter().collect()
+    }
+}
+
+/// What a card shows of its stack's traffic.
+#[derive(Debug)]
+enum CardTraffic {
+    /// The stack routes nothing, so there is no traffic to count.
+    NoRoutes,
+    /// The traffic history cannot be read.
+    Unreadable,
+    Shown(RowTraffic),
+}
+
+/// The traffic the stack pages show, which have no range picker (ADR-0062 §8): the cards on
+/// `/stacks` and the stack overview. Its `Display` is how their labels name it (`last hour`),
+/// so changing [`Self::RANGE`] changes both pages and their labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TrafficWindow;
+
+impl TrafficWindow {
+    /// The range read for the stack pages.
+    pub(super) const RANGE: Range = Range::Hour;
+}
+
+impl fmt::Display for TrafficWindow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match Self::RANGE {
+            Range::Hour => f.write_str("last hour"),
+            range => write!(f, "last {range}"),
+        }
+    }
+}
+
+/// A stack's traffic over a range of the history, in its row of the dashboard's stacks table
+/// or on its card: the current rate, the figures over the range and a sparkline.
+#[derive(Debug)]
+pub(in crate::web) struct RowTraffic {
+    /// Requests per minute over the last [`ScopeHistory::RATE_WINDOW`].
+    pub(in crate::web) per_minute: PerMinute,
+    /// The figures over the range.
+    pub(in crate::web) line: TrafficLine,
+    /// Its requests over the range, in the tone of the stack's condition.
+    pub(in crate::web) spark: Sparkline,
+}
+
+impl RowTraffic {
+    /// The traffic of `scope`, a stack in `condition`.
+    pub(in crate::web) fn new(scope: &ScopeHistory, condition: Condition) -> Self {
+        RowTraffic {
+            per_minute: PerMinute(scope.per_minute()),
+            line: TrafficLine::from(&scope.totals),
+            spark: Sparkline::new(
+                scope.bars.iter().map(|b| b.traffic.requests()),
+                Tone::from(condition),
+            ),
+        }
+    }
+
+    /// The requests over the range, for the sparkline in words.
+    pub(in crate::web) fn requests(&self) -> Count {
+        Count(self.line.requests)
     }
 }
 
@@ -589,24 +665,18 @@ impl ServiceChip {
     }
 }
 
-/// A stack's request statistics, over all its routes. The stack overview's KPI tiles and the
-/// dashboard's stacks table show them too, with the figures the card leaves out.
+/// A stack's request statistics over a span of the traffic history (ADR-0062), all its routes
+/// together: the stack cards, the stack overview's KPI tiles and the dashboard.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::web) struct TrafficLine {
-    /// Finished requests: since hoster started (the stack cards), or over a range of the
-    /// traffic history (the dashboard).
+    /// Finished requests.
     pub(in crate::web) requests: u64,
     /// Of those, the 5xx responses.
     pub(in crate::web) server_errors: u64,
-    /// Requests in flight now; 0 for figures from the history, which has no live gauge.
-    pub(in crate::web) inflight: u64,
-    /// How many routes were counted; 0 for figures from the history.
-    pub(in crate::web) routes: usize,
-    /// The p95 of the same requests (those of the latency window for the in-memory counters),
-    /// `-` without samples.
+    /// The p95 of the same requests, `-` without any.
     pub(in crate::web) p95: String,
     pub(in crate::web) p95_tone: Tone,
-    /// The p50 of the same requests, `-` without samples.
+    /// The p50 of the same requests, `-` without any.
     pub(in crate::web) p50: String,
     /// The share of 4xx responses, `-` without requests.
     pub(in crate::web) client_errors: String,
@@ -617,35 +687,9 @@ pub(in crate::web) struct TrafficLine {
 
 impl TrafficLine {
     /// A p95 this slow is flagged.
-    pub(in crate::web) const SLOW: Duration = Duration::from_secs(1);
+    const SLOW: Duration = Duration::from_secs(1);
     /// A 5xx share of this many per mille or more is flagged.
     const FAILING_PER_MILLE: u64 = 10;
-
-    /// The statistics of the routes whose counters are `routes`.
-    pub(in crate::web) fn of<'a>(routes: impl IntoIterator<Item = &'a Counts>) -> Self {
-        let routes: Vec<&Counts> = routes.into_iter().collect();
-        let requests = routes.iter().map(|c| c.statuses.total()).sum();
-        let server_errors = routes
-            .iter()
-            .map(|c| c.statuses.get(StatusClass::ServerError))
-            .sum();
-        let client_errors = routes
-            .iter()
-            .map(|c| c.statuses.get(StatusClass::ClientError))
-            .sum();
-        let latency: Latency = routes.iter().map(|c| &c.latency).sum();
-        TrafficLine {
-            inflight: routes.iter().map(|c| c.inflight).sum(),
-            routes: routes.len(),
-            ..Self::new(
-                requests,
-                client_errors,
-                server_errors,
-                latency.p50,
-                latency.p95,
-            )
-        }
-    }
 
     /// The figures of `requests` with these 4xx and 5xx counts and percentiles.
     fn new(
@@ -658,8 +702,6 @@ impl TrafficLine {
         TrafficLine {
             requests,
             server_errors,
-            inflight: 0,
-            routes: 0,
             p50: Elapsed::cell(p50),
             p95: Elapsed::cell(p95),
             p95_tone: if p95.is_some_and(|p| p >= Self::SLOW) {
@@ -678,17 +720,9 @@ impl TrafficLine {
             },
         }
     }
-
-    /// The tooltip of the p95 figure.
-    fn p95_title(&self) -> String {
-        format!(
-            "p95 of the requests to the stack's routes over the last {}",
-            Elapsed(Stats::LATENCY_WINDOW)
-        )
-    }
 }
 
-/// The figures of a span of the traffic history (ADR-0062): no in-flight gauge, no route count.
+/// The figures of a span of the traffic history (ADR-0062).
 impl From<&TrafficTotals> for TrafficLine {
     fn from(totals: &TrafficTotals) -> Self {
         Self::new(

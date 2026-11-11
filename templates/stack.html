@@ -22,34 +22,21 @@
 </dl>
 </section>
 
-<section class="card slowest" aria-labelledby="slowest-title">
+<section class="card" aria-labelledby="statuses-title">
   <header class="card-head">
-    <h2 id="slowest-title">Slowest routes <span class="card-count">· p95 · last {{ stack.latency_window() }}</span></h2>
-    <span class="card-note">counts since hoster started</span>
+    <h2 id="statuses-title" title="Every route of the stack, over the {{ stack.window_words() }}">Responses by status <span class="card-count">· {{ stack.window() }}</span></h2>
+    {%- if let StatusChart::Shown(chart) = stack.statuses %}
+    {{ chart.legend() }}
+    {%- endif %}
   </header>
-  {%- if stack.slowest.is_empty() %}
-  <p class="card-body muted">{% if stack.route_rows.is_empty() %}The stack routes nothing, so there is no traffic to count.{% else %}No requests since hoster started.{% endif %}</p>
-  {%- else %}
-  <ol class="card-body slow-routes">
-    {%- for route in stack.slowest %}
-    <li>
-      <div class="slow-route-head">
-        <span class="slow-route-name">{{ route.route }}{% if !route.service.is_empty() %} <span class="muted">→ {{ route.service }}</span>{% endif %}</span>
-        <span class="slow-route-p95" title="{{ route.latency_title() }}">{{ route.p95 }}</span>
-      </div>
-      {{ route.meter }}
-      <dl class="slow-route-counts">
-        <div title="{{ route.latency_title() }}"><dt>p50</dt><dd>{{ route.p50 }}</dd></div>
-        {%- for (class, count) in route.classes %}
-        <div><dt>{{ class }}</dt><dd>{{ count }}</dd></div>
-        {%- endfor %}
-        <div><dt>upstream errors</dt><dd>{% if route.upstream_errors > 0 %}{{ crate::web::Tone::Fail.pill(route.upstream_errors) }}{% else %}0{% endif %}</dd></div>
-        <div><dt>in flight</dt><dd>{{ route.inflight }}</dd></div>
-      </dl>
-    </li>
-    {%- endfor %}
-  </ol>
-  {%- endif %}
+  {%- match stack.statuses %}
+  {%- when StatusChart::Shown(chart) %}
+  <div class="card-body">{{ chart }}</div>
+  {%- when StatusChart::NoRoutes %}
+  <p class="card-body muted">The stack routes nothing, so there is no traffic to count.</p>
+  {%- when StatusChart::Unreadable(problem) %}
+  <p class="card-body card-error">Cannot read the traffic history: {{ problem }}</p>
+  {%- endmatch %}
 </section>
 
 {%- if let Some(updates) = updates %}

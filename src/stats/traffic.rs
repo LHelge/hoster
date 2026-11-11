@@ -420,13 +420,6 @@ impl StatusCounts {
     pub fn total(&self) -> u64 {
         self.0.iter().sum()
     }
-
-    /// Every class with its count, in [`StatusClass::ALL`] order.
-    pub fn iter(&self) -> impl Iterator<Item = (StatusClass, u64)> + '_ {
-        StatusClass::ALL
-            .into_iter()
-            .map(|class| (class, self.get(class)))
-    }
 }
 
 impl AddAssign for StatusCounts {
