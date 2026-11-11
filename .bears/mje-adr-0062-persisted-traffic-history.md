@@ -1,15 +1,16 @@
 ---
 id: mje
 title: "ADR-0062: persisted traffic history"
-status: open
+status: done
 priority: P1
 created: "2026-11-11T09:07:59.471694230Z"
-updated: "2026-11-11T09:07:59.471694230Z"
+updated: "2026-11-11T09:18:35.958194835Z"
 tags:
   - docs
   - adr
   - observability
 parent: t97
+attempts: 1
 ---
 
 ## Summary
@@ -43,9 +44,9 @@ Alternatives to record: a separate SQLite file, a ring file, 1 min/24 h + 1 h/30
 
 ## Acceptance Criteria
 
-- [ ] `docs/adr/0062-*.md` in the ADR template, Status: Accepted once the owner has reviewed it
-- [ ] One row in `docs/adr/README.md`; ADR-0045's and ADR-0054's Status lines and index rows mention 0062
-- [ ] `docs/architecture.md` gets a short "Traffic history" section (after §11 Event log) and the recorder appears in §3 (tasks) and §4 (startup and shutdown order)
-- [ ] The later tasks' bodies are corrected if the review changes the design
+- [x] `docs/adr/0062-*.md` in the ADR template, Status: Accepted once the owner has reviewed it
+- [x] One row in `docs/adr/README.md`; ADR-0045's and ADR-0054's Status lines and index rows mention 0062
+- [x] `docs/architecture.md` gets a short "Traffic history" section (after §11 Event log) and the recorder appears in §3 (tasks) and §4 (startup and shutdown order)
+- [x] The later tasks' bodies are corrected if the review changes the design
 
 References: ADR-0045, ADR-0054, ADR-0055, ADR-0022; `docs/architecture.md` §3, §4, §11; `src/stats/`.

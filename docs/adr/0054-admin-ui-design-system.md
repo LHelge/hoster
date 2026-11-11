@@ -1,6 +1,6 @@
 # ADR-0054: Admin UI design system: Catppuccin Mocha/Latte, vendored JetBrains Mono, sidebar shell, stack tabs as URLs, CSP unchanged
 
-- Status: Accepted
+- Status: Accepted (amended by ADR-0062, which adds traffic history, its charts and range picker)
 - Date: 2026-11-08
 
 ## Context
