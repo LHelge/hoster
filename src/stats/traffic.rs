@@ -455,6 +455,18 @@ impl From<&TrafficCounts> for StatusCounts {
     }
 }
 
+/// Counts from `(class, count)` pairs; a class named twice adds up, one left out is zero.
+impl FromIterator<(StatusClass, u64)> for StatusCounts {
+    fn from_iter<I: IntoIterator<Item = (StatusClass, u64)>>(pairs: I) -> Self {
+        let mut counts = StatusCounts::default();
+        for (class, count) in pairs {
+            let sum = &mut counts.0[class.index()];
+            *sum = sum.saturating_add(count);
+        }
+        counts
+    }
+}
+
 impl StatusCounts {
     /// The requests counted here but not in `earlier`, an earlier reading of the same counters.
     fn since(&self, earlier: &StatusCounts) -> StatusCounts {

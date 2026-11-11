@@ -22,6 +22,11 @@
 mod assets;
 mod auth;
 mod certificates;
+#[allow(
+    dead_code,
+    reason = "the traffic charts the dashboard (h6k) and stack pages (5q8) draw, ADR-0062"
+)]
+mod charts;
 mod containers;
 mod dashboard;
 mod events;

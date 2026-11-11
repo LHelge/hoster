@@ -395,7 +395,7 @@ impl fmt::Display for Uptime {
 }
 
 /// Text HTML-escaped the way Askama escapes template values.
-struct Escaped<'a>(&'a str);
+pub(super) struct Escaped<'a>(pub(super) &'a str);
 
 impl fmt::Display for Escaped<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
