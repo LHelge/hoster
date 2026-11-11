@@ -1,15 +1,16 @@
 ---
 id: fq5
 title: "Adversarial HTTP tests: request smuggling and framing at the edge"
-status: open
+status: done
 priority: P2
 created: "2026-11-10T12:56:33.900656Z"
-updated: "2026-11-10T12:56:33.900656Z"
+updated: "2026-11-11T14:55:24.182112250Z"
 tags:
   - proxy
   - security
   - test
 parent: kyn
+attempts: 1
 ---
 
 ## Problem
@@ -75,3 +76,25 @@ upstream if it is Pingora's, and say so in the task.
   `docs/adr/0010-prefix-preservation-and-forwarded-headers.md`,
   `docs/adr/0032-proxy-edge-behaviour.md`, `docs/adr/0033-protocol-support-v1.md`
 - `docs/architecture.md` §6 (routing), §1 (Pingora behaviour)
+
+## Result (2026-11-11)
+
+`src/proxy/tests/smuggling.rs`: about 150 cases against a raw TCP upstream that records what it
+receives (`Recorder` in `src/proxy/tests.rs`) and a hand-written HTTP/2 frame client. Every
+exchange is also followed by two plain requests that would get the wrong answer from a poisoned
+upstream connection.
+
+- **No exploitable case.** In none of them did the upstream receive a second request, and no
+  upstream connection was left with bytes on it. Pingora 0.9.1 refuses most of the list (400,
+  `RST_STREAM`/`GOAWAY PROTOCOL_ERROR`), decodes and re-encodes chunked bodies, and does not
+  pipeline: bytes behind a request are dropped and the connection closed after the response.
+- **One fix in hoster.** Pingora accepts a repeated `Content-Length` and a list (`5, 5`) when
+  the values agree, and forwarded them verbatim (h1 and h2). `Forwarding::apply` now sends the
+  upstream one decimal number.
+- **Advisories** are listed in the module comment of `smuggling.rs` with the fixing version
+  (RustSec database, 2026-11-11): all are fixed in 0.9.0 or earlier.
+- **Routing:** paths are matched and forwarded literally. No spelling reaches another service,
+  but a prefix is not a boundary inside one service (`/api/../x`): OQ-40, decision task `zyd`.
+- **`X-Forwarded-*`:** `-Proto`, `-Host` and `-Prefix` are replaced. `X-Forwarded-For` is
+  appended to, and `Forwarded` / `X-Real-IP` pass through; that is the open OQ-38, pinned as it
+  is today rather than changed here.

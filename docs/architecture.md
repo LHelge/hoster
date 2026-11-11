@@ -850,6 +850,12 @@ collision check as reserved (ADR-0031).
    `/api` matches `/api`, `/api/` and `/api/users`, but not `/apiary`.
 3. **No match.** Unknown host or no matching prefix → built-in responses per ADR-0032 (404; 421 on Host/SNI mismatch).
 
+The path is matched **as the client wrote it**: nothing is percent-decoded, no slashes are merged
+and no dot segments are resolved, before matching or when forwarding. `/api%2fx`, `/API/x` and
+`//api/x` are not `/api`; `/api/../x` is, and goes upstream with its `..`. So a spelling can
+never reach another service than its literal segments name, but a prefix is not a boundary
+inside one service either (OQ-40). `src/proxy/tests/smuggling.rs` pins this, case by case.
+
 Collision detection (ADR-0012) uses the same normalization. Two routes collide when they have the
 same host and the same normalized prefix segments. Different prefixes on the same host owned by
 different stacks are allowed, e.g. stack A at `/` and stack B at `/blog`. Longest-prefix matching
@@ -872,8 +878,18 @@ In `upstream_request_filter`:
   - `X-Forwarded-Proto: https` and `X-Forwarded-Host: <host>` are set.
   - Client-supplied `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Forwarded-Prefix` are
     overwritten. hoster is the edge, so incoming values are untrusted.
+- **`Content-Length`** goes upstream as one decimal number. Pingora accepts a repeated field and
+  a list (`5, 5`) when every value is the same number and would forward them as sent; an upstream
+  that reads such a field differently is what request smuggling needs.
 - **Bodies are streamed.** Pingora streams by default, and hoster installs no body filters that
   buffer (ADR-0011).
+
+What the proxy does with malformed and ambiguous framing (conflicting lengths, obfuscated
+`Transfer-Encoding`, bad chunks, line breaks in HTTP/2 headers, more than one host) is pinned in
+`src/proxy/tests/smuggling.rs` against an upstream that records raw bytes. The rule every case
+is held to: the request is refused, or exactly one request reaches the upstream in a form that
+can be framed one way only, and the upstream connection is clean afterwards. Pingora does not
+pipeline: bytes behind a request are dropped and the connection is closed after its response.
 
 ### 6.4 How the RouteTable is updated
 

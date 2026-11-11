@@ -523,3 +523,41 @@ only if somebody needs them, and F. They turn the worst case from "everything st
 clients are refused", which is what a cap is for. Leave D for a separate decision. Skip E: with
 connections capped, a slow client costs one slot and no more, and the per-route rate is hard to
 get right. Leave 4 unset.
+
+## OQ-40: Dot segments and other non-normal paths at the edge
+
+**Problem.** The proxy matches and forwards the request path exactly as the client wrote it
+(ADR-0009, architecture §6.2). It does not resolve `.` and `..`, merge `//` or decode `%2e` and
+`%2f`. The adversarial tests of task `fq5` (`src/proxy/tests/smuggling.rs`) show two consequences:
+
+- **No cross-service confusion.** A route is chosen by the literal leading segments, so no
+  spelling reaches a service other than the one those segments name. `/x/../api/y` goes to the
+  `/` route, not to `/api`.
+- **A prefix is not a boundary inside a service.** `/api/../internal` matches the `/api` route
+  and is forwarded with its `..` (as `/../internal` with `strip_prefix`). An app or framework
+  that resolves dot segments then serves its own `/internal`, a path the stack file never
+  exposed. The same holds for `%2e%2e` in an app that decodes before resolving. Whoever reads
+  a route's `prefix` as "only these paths of the service are public" is wrong today, and nothing
+  in the stack-format guide says so.
+
+Browsers and HTTP libraries resolve dot segments before sending (RFC 3986 §5.2.4), so such paths
+come from hand-written requests only.
+
+**Options.**
+
+- **A. Keep forwarding literally; document it.** One paragraph in the stack-format guide: a
+  prefix selects a service, it does not restrict it. No behaviour change.
+- **B. Refuse them.** Answer 400 to a path with a `.` or `..` segment, plain or percent-encoded
+  (`%2e`, in either case). Legitimate clients never send one. Simple to state and to test, and
+  it makes the prefix a real boundary for apps that resolve dot segments. It does not cover an
+  app that decodes `%2f` into a separator, or `;`-parameters (`/api/..;/x`, Tomcat).
+- **C. Normalise before matching** like nginx: resolve dot segments, merge slashes, then match
+  and forward the normalised path. Changes what apps receive (S3-style signed paths depend on
+  the exact bytes, ADR-0013), and proxy and app can still disagree about encodings.
+- **D. B, plus refuse `//`, encoded slashes and backslashes.** Closes more app-specific
+  spellings and breaks more legitimate paths (object keys with `//` or `%2F`).
+
+**Recommendation.** B, with A's paragraph. It removes the common case without rewriting any
+path an app sees, and what it refuses no legitimate client sends. C is how the big proxies do
+it, but rewriting paths conflicts with ADR-0010's "forward what the client sent" and with
+signed URLs.
