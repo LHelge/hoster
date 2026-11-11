@@ -26,9 +26,13 @@ use crate::acme::CertMap;
 use crate::store::{DeploymentOutcome, DeploymentState, Store, Timestamp};
 
 pub use self::latency::Latency;
+#[allow(unused_imports, reason = "used by the traffic recorder (ADR-0062)")]
+pub use self::latency::{Histogram, HistogramDecodeError};
 pub use self::traffic::{
     Counts, RequestOutcome, RouteTraffic, StatusClass, TrackedRequest, Traffic, TrafficSnapshot,
 };
+#[allow(unused_imports, reason = "used by the traffic recorder (ADR-0062)")]
+pub use self::traffic::{StatusCounts, TrafficDelta};
 
 /// Where the statistics not kept by [`Traffic`] come from.
 #[async_trait]
