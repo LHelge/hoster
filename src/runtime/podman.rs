@@ -335,6 +335,35 @@ impl<'a> Call<'a> {
     /// create exec sessions on running containers: container state improper" (podman 6.1).
     const NOT_RUNNING: [&str; 1] = ["container state improper"];
 
+    /// Whether podman failed a container stop or remove only in tearing down the rootless
+    /// network namespace afterwards, which it does when the last running container on it goes.
+    /// On Ubuntu 26.04 that is a 500 "rootless netns: kill network process: permission
+    /// denied": AppArmor's `pasta` profile refuses podman's SIGTERM, but the container is
+    /// stopped or removed and pasta is gone (architecture §1.5, Bears ghd). Whether the call
+    /// did its job is for inspect to say, never this message.
+    fn failed_netns_teardown(err: &BollardError) -> bool {
+        matches!(
+            err,
+            BollardError::DockerResponseServerError { status_code: 500, message }
+                if Self::mentions(message, &Self::NETNS_TEARDOWN)
+        )
+    }
+
+    /// Logs a stop or remove that did its job although podman reported the netns teardown as
+    /// failed.
+    fn warn_netns_teardown(id: &ContainerId, err: &BollardError, outcome: &str) {
+        tracing::warn!(
+            container = %id,
+            error = %err,
+            "podman reported a failure but the container is {outcome}: tearing down the rootless \
+             network namespace failed; on Ubuntu 26.04 that is AppArmor's pasta profile lacking \
+             `signal (receive) peer=podman,`, and harmless"
+        );
+    }
+
+    /// How podman names a failed teardown of the rootless network namespace.
+    const NETNS_TEARDOWN: [&str; 1] = ["rootless netns"];
+
     /// Whether `message` contains one of `phrases`, ignoring case.
     fn mentions(message: &str, phrases: &[&str]) -> bool {
         let message = message.to_ascii_lowercase();
@@ -925,10 +954,22 @@ impl ContainerRuntime for PodmanRuntime {
         let seconds = i32::try_from(timeout.as_secs()).unwrap_or(i32::MAX);
         let options = StopContainerOptionsBuilder::new().t(seconds).build();
         // Stopping a stopped container is a 304, which bollard treats as success.
-        self.client_for_stop(timeout)
+        let err = match self
+            .client_for_stop(timeout)
             .stop_container(id.as_ref(), Some(options))
             .await
-            .map_err(|err| call.error(err))
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => err,
+        };
+        if Call::failed_netns_teardown(&err)
+            && let Ok(info) = self.inspect(id).await
+            && !info.state.is_running()
+        {
+            Call::warn_netns_teardown(id, &err, "stopped");
+            return Ok(());
+        }
+        Err(call.error(err))
     }
 
     async fn remove(&self, id: &ContainerId) -> Result<(), RuntimeError> {
@@ -939,10 +980,21 @@ impl ContainerRuntime for PodmanRuntime {
             .force(true)
             .v(false)
             .build();
-        self.docker
+        let err = match self
+            .docker
             .remove_container(id.as_ref(), Some(options))
             .await
-            .map_err(|err| call.error(err))
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => err,
+        };
+        if Call::failed_netns_teardown(&err)
+            && let Err(RuntimeError::NotFound { .. }) = self.inspect(id).await
+        {
+            Call::warn_netns_teardown(id, &err, "removed");
+            return Ok(());
+        }
+        Err(call.error(err))
     }
 
     async fn inspect(&self, id: &ContainerId) -> Result<ContainerInfo, RuntimeError> {
@@ -2679,6 +2731,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn only_a_failed_netns_teardown_is_one() {
+        let server = |status_code, message: &str| BollardError::DockerResponseServerError {
+            status_code,
+            message: message.into(),
+        };
+        // podman 5.7.0 on Ubuntu 26.04.1, verbatim: stop, then a forced remove.
+        assert!(Call::failed_netns_teardown(&server(
+            500,
+            "removing container 6494…: removing container 6494… network: 1 error occurred:\n\
+             \t* rootless netns: kill network process: permission denied\n\n"
+        )));
+        assert!(Call::failed_netns_teardown(&server(
+            500,
+            "cleaning up container 6494…: removing container 6494… network: 1 error \
+             occurred:\n\t* rootless netns: kill network process: permission denied\n\n"
+        )));
+        assert!(!Call::failed_netns_teardown(&server(500, "boom")));
+        assert!(!Call::failed_netns_teardown(&server(
+            404,
+            "rootless netns: no such container"
+        )));
+    }
+
     /// A stack name no other test run uses, so parallel runs on one podman do not collide.
     fn unique_stack() -> Name {
         let nanos = std::time::SystemTime::now()
@@ -3133,11 +3209,14 @@ mod tests {
             if !uploads_supported(&runtime) {
                 return;
             }
-            // A container that runs throughout, so the stops below never leave the rootless
-            // network namespace empty: tearing it down fails on GitHub's ubuntu-26.04 runner
-            // ("rootless netns: kill network process: permission denied", Bears ghd), which
-            // is not what this test is about. It also creates the network and pulls the image.
-            running_sleeper(&runtime, &stack).await;
+            runtime
+                .ensure_network(&NetworkSpec::for_stack(&stack))
+                .await
+                .unwrap();
+            runtime
+                .pull_image(&run_image())
+                .await
+                .expect("pull busybox");
             assert_eq!(
                 runtime.image_volumes(&run_image()).await.unwrap(),
                 Vec::<String>::new()
@@ -3387,6 +3466,33 @@ mod tests {
         if let Err(err) = result {
             std::panic::resume_unwind(err.into_panic());
         }
+    }
+
+    /// Stopping and removing the only running container on a network, which makes podman tear
+    /// down the rootless network namespace: on Ubuntu 26.04 that teardown fails, but the stop
+    /// and the remove did their job (architecture §1.5, Bears ghd).
+    #[tokio::test]
+    async fn the_last_container_on_a_network_stops_and_goes() {
+        with_stack(|runtime, stack| async move {
+            let id = running_sleeper(&runtime, &stack).await;
+            runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
+            let info = runtime.inspect(&id).await.unwrap();
+            assert!(!info.state.is_running(), "{:?}", info.state);
+            // Again, as a stop of a stopped container.
+            runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
+
+            // A forced remove of a running container is a stop too.
+            runtime.start(&id).await.unwrap();
+            runtime.remove(&id).await.unwrap();
+            assert!(
+                matches!(
+                    runtime.inspect(&id).await,
+                    Err(RuntimeError::NotFound { .. })
+                ),
+                "removed"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

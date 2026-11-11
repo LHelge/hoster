@@ -130,6 +130,30 @@ Container IPs live inside the rootless network namespace and cannot be reached f
 is why published loopback ports are the only path from the proxy to a container, which matches
 ADR-0007.
 
+**Tearing down the namespace on Ubuntu 26.04 (podman 5.7.0, passt 0.0~git20260120, apparmor
+5.0.2).** Checked on a fresh, stock Ubuntu 26.04.1 host on 2026-11-11 (Bears ghd); GitHub's
+`ubuntu-26.04` runner does the same. When the last running container on the rootless network
+namespace stops or is force-removed, podman kills its `pasta` process, and AppArmor refuses it:
+the kernel logs `apparmor="DENIED" operation="signal" profile="pasta" signal=term peer="podman"`.
+26.04's apparmor package ships `/etc/apparmor.d/podman`, an unconfined profile that only gives
+podman the label `podman` in place of `unconfined`, and passt's `usr.bin.pasta` profile has no
+`signal` rule for that peer. Through the compat API (and the CLI):
+
+- The stop or forced remove answers **500** `removing container <id> network: … rootless netns:
+  kill network process: permission denied` (a remove prefixes `cleaning up container <id>: `).
+- It did its job all the same: inspect says `exited` after the stop and 404 after the remove;
+  `pasta`, `aardvark-dns` and the netns directory are gone; a later start works. A second stop
+  is a 304.
+- A stop that leaves another container running is a 204. `podman unshare --rootless-netns true`
+  reproduces it on its own.
+- Adding `signal (receive) peer=podman,` to `/etc/apparmor.d/usr.bin.pasta` and reloading it
+  ends the 500. passt has the same fix upstream ("apparmor: Fix signaling issues from podman",
+  Ubuntu LP #2154379); 26.04's archive does not ship it yet. The profile has no `local/` include.
+
+hoster does not touch the host for this: `PodmanRuntime::stop` and `remove` treat a 500 that
+mentions `rootless netns` as done when inspect confirms it (not running, or gone), and log a
+warning; anything else stays an error.
+
 ### 1.6 Exec and podman's healthchecks (podman 6.1.4)
 
 Checked live on a rootless podman 6.1.4 with runc, through the compat API (curl and the
@@ -185,8 +209,8 @@ ADR-0057 requires podman 5.4. Rootless 5.x was first run on 2026-11-10: podman 5
 `ubuntu-26.04` runner, by the live tests in `src/runtime/podman.rs` that CI's `podman` job now
 runs on every PR (owner and mode as root and as `1000:1000`, a read-only root, restarts, refused
 files leaving no container). The findings below held there. Stopping the last running container
-failed on that runner with `rootless netns: kill network process: permission denied`, which is
-not about uploads (Bears ghd). No rootless 5.4 and no SELinux host were tested.
+on that runner answers `rootless netns: kill network process: permission denied`, which is not
+about uploads (§1.5). No rootless 5.4 and no SELinux host were tested.
 
 - **Upload.** Into a created, unstarted container it answers 200, also with `ReadonlyRootfs`;
   into a running read-only container it fails. Files keep the tar header's uid, gid and mode,
