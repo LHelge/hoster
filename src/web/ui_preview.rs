@@ -150,6 +150,37 @@ fn out_dir() -> PathBuf {
 struct Fixtures;
 
 impl Fixtures {
+    /// notes' updates: storage's tag moved two hours ago, a minor and a major were found a
+    /// day ago, and api could not be checked.
+    fn updates() -> crate::orchestrator::StackUpdates {
+        use crate::orchestrator::UpdateOffer;
+        use crate::store::UpdateKind;
+        let offer = |kind, to: &str, digest: Option<String>, seen| UpdateOffer {
+            kind,
+            services: vec!["storage".into()],
+            from: "1.0.0".into(),
+            to: to.into(),
+            digest: digest.map(|d| d.parse().unwrap()),
+            first_seen: seen,
+        };
+        crate::orchestrator::StackUpdates {
+            offers: vec![
+                offer(
+                    UpdateKind::Digest,
+                    "1.0.0",
+                    Some(digest(0xbb)),
+                    ago(2 * HOUR),
+                ),
+                offer(UpdateKind::Minor, "1.1.0", None, ago(DAY)),
+                offer(UpdateKind::Major, "2.0.0", None, ago(DAY)),
+            ],
+            errors: Vec::new(),
+            checked_at: Some(ago(Duration::from_secs(20 * 60))),
+        }
+    }
+}
+
+impl Fixtures {
     fn revision(stack: &str, number: u32, toml: &str) -> StackRevision {
         StackRevision {
             id: RevisionId::from(i64::from(number)),
@@ -1310,6 +1341,12 @@ async fn ui_preview() {
     *app.stacks.log.lock().unwrap() = Fixtures::events();
     // A volume of shop's that an earlier revision declared and the active one dropped.
     *app.stacks.earlier_volumes.lock().unwrap() = vec!["hoster-shop-redis".into()];
+    // notes' storage: its tag moved, and a minor and a major are out (ADR-0061).
+    app.stacks
+        .updates
+        .lock()
+        .unwrap()
+        .insert("notes".into(), Fixtures::updates());
     // notes' secrets: set some days ago, so their rows say when.
     for secret in app.stacks.secrets.lock().unwrap().iter_mut() {
         if secret.updated_at.is_some() {
@@ -1549,6 +1586,17 @@ async fn ui_preview() {
         "states/stack-reresolve.html",
         "Stack: re-resolve preview",
         &Session::inject(&stack, "reresolve-result", &reresolve),
+    );
+    let update = session
+        .post(
+            "/stacks/notes/updates/preview",
+            &[("updates", "storage:minor")],
+        )
+        .await;
+    preview.write(
+        "states/stack-update.html",
+        "Stack: update preview",
+        &Session::inject(&stack, "update-result", &update),
     );
     let deploy = session
         .post("/stacks/notes/deploy", &[("digest.api", &digest(0x42))])

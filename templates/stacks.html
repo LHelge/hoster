@@ -27,6 +27,9 @@
     {%- if let Some(flag) = card.flag %}
     <p class="stack-card-flag">{{ crate::web::Tone::Fail.pill(flag) }}</p>
     {%- endif %}
+    {%- if card.updates > 0 %}
+    <p class="stack-card-flag"><a href="{{ card.url }}#updates">{{ crate::web::Tone::Progress.pill(format!("{} {} available", card.updates, if card.updates == 1 { "update" } else { "updates" })) }}</a></p>
+    {%- endif %}
     <div class="stack-card-source">
       <p>rev {{ card.revision }} <code title="{{ card.full_hash }}">{{ card.hash }}</code></p>
       <p>

@@ -1,0 +1,35 @@
+<section class="card updates" id="updates" aria-labelledby="updates-title">
+  <header class="card-head">
+    <h2 id="updates-title">Updates <span class="card-count">· {{ updates.offers.len() }}</span></h2>
+    <span class="card-note">{{ updates.checked }}</span>
+  </header>
+  {%- if !updates.offers.is_empty() %}
+  <ul class="card-body update-list">
+    {%- for offer in updates.offers %}
+    <li class="update-row">
+      <span class="mono service-name">{{ offer.services }}</span>
+      <span class="update-change mono">{{ offer.change }}</span>
+      {{ offer.kind }}
+      <span class="muted update-found">{{ offer.found }}</span>
+      <form class="inline-form" hx-post="{{ updates.preview_url }}" hx-target="#update-result">
+        <input type="hidden" name="updates" value="{{ offer.choice }}">
+        <button type="submit"{% if offer.major %} title="A major version: read its release notes before you apply it"{% endif %}>Update<span class="visually-hidden"> {{ offer.services }}</span></button>
+      </form>
+    </li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
+  {%- if !updates.errors.is_empty() %}
+  <ul class="card-body update-errors">
+    {%- for (service, error) in updates.errors %}
+    <li><span class="mono service-name">{{ service }}</span> <span class="card-error">could not check: {{ error }}</span></li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
+  {%- if !updates.all.is_empty() %}
+  <form class="card-body inline-form" hx-post="{{ updates.preview_url }}" hx-target="#update-result">
+    <input type="hidden" name="updates" value="{{ updates.all }}">
+    <button type="submit" class="primary" title="Every update but majors, in one revision">{{ crate::web::Icon::CheckUpdates }}Update all</button>
+  </form>
+  {%- endif %}
+</section>

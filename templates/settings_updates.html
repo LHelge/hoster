@@ -1,0 +1,23 @@
+{% extends "settings_base.html" %}
+{% block settings %}
+<section class="card settings-card" aria-labelledby="settings-title">
+  <div class="settings-head">
+    <h2 id="settings-title">Updates</h2>
+    <p class="field-help">hoster checks the tagged third-party images of every stack for moved tags and newer versions, and shows what it finds on the stack pages. A service with <code>auto_update</code> applies its updates by itself. Saved here, not in <code>hoster.toml</code>.</p>
+  </div>
+  <form hx-post="/settings/updates" hx-target="#updates-result">
+    <div class="field">
+      <div class="field-label"><label class="field-name" for="updates-interval">Check every</label><span class="field-help">Between 1h and 7days, e.g. <code>6h</code> or <code>1day</code>. Each check varies by up to a tenth, so many hosters don't ask the registries at once.</span></div>
+      <div class="field-control">
+        <input id="updates-interval" name="interval" value="{{ interval }}" spellcheck="false" autocomplete="off" required>
+        <button type="submit">Save</button>
+      </div>
+    </div>
+  </form>
+  <form class="field" hx-post="/settings/updates/check" hx-target="#updates-result">
+    <div class="field-label"><span class="field-name">Last check</span><span class="field-help">{{ last_pass }}</span></div>
+    <div class="field-control"><button type="submit">{{ crate::web::Icon::CheckUpdates }}Check now</button></div>
+  </form>
+  <div id="updates-result" class="card-result" aria-live="polite"></div>
+</section>
+{% endblock %}

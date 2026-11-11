@@ -25,8 +25,4 @@ pub use credentials::{
     RegistryHost, StoredCredentials,
 };
 pub use poller::{Poller, TrackedService};
-#[allow(
-    unused_imports,
-    reason = "the handle is used by Settings → Updates (Bears j6w)"
-)]
 pub use updates::{UpdateCheckHandle, UpdateChecker};

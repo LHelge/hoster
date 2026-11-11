@@ -20,6 +20,7 @@ mod check;
 mod dependency;
 mod deploy;
 mod diagnostic;
+mod edit;
 mod file;
 mod image;
 mod limits;
@@ -36,6 +37,7 @@ use std::time::Duration;
 pub use check::StackCheck;
 pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
+pub use edit::ImageEdits;
 pub use file::{ConfigFile, ContainerPath, FileMode, FileOwner, FileSource, Ownership};
 #[allow(
     unused_imports,

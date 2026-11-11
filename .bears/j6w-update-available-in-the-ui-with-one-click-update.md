@@ -1,16 +1,17 @@
 ---
 id: j6w
 title: "\"Update available\" in the UI with one-click update"
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:23:25.608421705Z"
-updated: "2026-11-09T17:23:25.608421705Z"
+updated: "2026-11-11T07:18:17.227589109Z"
 tags:
   - web
   - orchestrator
 depends_on:
   - jcw
 parent: "6z3"
+attempts: 1
 ---
 
 ## Summary
@@ -22,7 +23,7 @@ Surface stored update candidates, and let the operator apply them through the ex
 - [ ] Version groups per the ADR are offered and applied together.
 - [ ] The stacks list gets a badge; the dashboard warnings say "N updates available".
 - [ ] Settings → Updates (moved here from jcw): edits the `update_settings` interval (`Store::set_update_settings`, `CheckInterval` bounds 1 h–7 d), then calls `UpdateCheckHandle::reschedule`; shows the last pass time (the `updates.last_pass` kv item) and a "Check now" button (`UpdateCheckHandle::check_now`). Hand the handle (`UpdateChecker::handle`, built in `supervisor.rs`) to `WebApp` and drop the `allow(dead_code)`s that mark it.
-- [ ] Read updates with `Store::image_updates`, keeping only rows whose tag and digest match the active revision (a stale row waits for the next pass); a row's `error` is shown as "could not check: …". Pages refresh on `UiEvent::Updates`.
+- [ ] Read updates with `Store::image_updates`, keeping only rows whose tag and digest match the active revision (a stale row waits for the next pass); a row's `error` is shown as "could not check: …". The dashboard (and its warnings) refreshes on `UiEvent::Updates`; on the stack page new `UpdateAvailable` events appear live in Recent events, and the Updates card itself on reload.
 - [ ] Deployment history shows the update as an apply with the tag change in its diff.
 
 ## Testing
