@@ -48,10 +48,6 @@ pub use self::history::{
 pub use self::latency::HistogramDecodeError;
 pub use self::latency::{Histogram, Latency};
 pub use self::recorder::TrafficRecorder;
-#[allow(
-    unused_imports,
-    reason = "part of the traffic history API (ADR-0062), not yet named outside stats"
-)]
 pub use self::traffic::StatusCounts;
 pub use self::traffic::{
     Counts, RequestOutcome, RouteTraffic, StatusClass, TrackedRequest, Traffic, TrafficDelta,

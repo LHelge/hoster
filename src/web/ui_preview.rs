@@ -33,8 +33,10 @@ use http_body_util::BodyExt as _;
 
 use super::assets::Assets;
 use super::certificates::{AcmeDirectory, CertOverview, CertOwner, CertRow};
+use super::charts::{LineChart, Percentiles, Sparkline, StackedBars, Timeline};
 use super::settings::{EffectiveConfig, Settings};
 use super::system::{Facts, System};
+use super::ui::Tone;
 use crate::acme::{Backoff, DnsMismatch, DnsVerdict, Validity};
 use crate::config::ConfigSource;
 use crate::health::{HealthStats, HealthStatus};
@@ -49,7 +51,7 @@ use crate::runtime::{
     PortBinding, RuntimeError, ServiceGeneration,
 };
 use crate::stack::{ByteSize, RouteTimeouts};
-use crate::stats::{CertExpiry, RequestOutcome};
+use crate::stats::{CertExpiry, Range, RequestOutcome, StatusClass, StatusCounts};
 use crate::store::{
     ContentHash, Deployment, DeploymentEvent, DeploymentId, DeploymentOutcome, DeploymentSource,
     DeploymentState, DigestSet, Event, EventId, EventKind, Provenance, RevisionId, Severity,
@@ -1115,6 +1117,174 @@ impl Fixtures {
     }
 }
 
+/// The traffic charts (ADR-0062 §9) on a page of their own, with fixture series: a day with a
+/// 5xx spike, an hour, a week, an empty series and a single spike, and the sparklines in each
+/// tone. The pages that draw them (dashboard, stack pages) use them once history is wired in.
+impl Fixtures {
+    /// Requests in bar `i` of `n`: a daily wave between `low` and `high`.
+    fn wave(i: usize, n: usize, low: f64, high: f64) -> u64 {
+        let phase = i as f64 / n as f64 * std::f64::consts::TAU;
+        (low + (high - low) * (0.5 - 0.5 * phase.cos())) as u64
+    }
+
+    /// Bars of `n` with a wave of traffic, a little 3xx and 4xx, and a 5xx spike at `spike`.
+    fn status_bars(n: usize, high: f64, spike: Option<usize>) -> Vec<StatusCounts> {
+        (0..n)
+            .map(|i| {
+                let total = Self::wave(i, n, high / 4.0, high);
+                let errors = if Some(i) == spike {
+                    total / 6
+                } else {
+                    total / 400
+                };
+                [
+                    (
+                        StatusClass::Success,
+                        total - total / 40 - total / 60 - errors,
+                    ),
+                    (StatusClass::Redirection, total / 40),
+                    (StatusClass::ClientError, total / 60),
+                    (StatusClass::ServerError, errors),
+                    (StatusClass::NoResponse, total / 2_000),
+                ]
+                .into_iter()
+                .collect()
+            })
+            .collect()
+    }
+
+    /// p50 and p95 following the wave, slower at `spike`, with no samples in `gap`.
+    fn latency_points(n: usize, spike: usize, gap: std::ops::Range<usize>) -> Vec<Percentiles> {
+        (0..n)
+            .map(|i| {
+                if gap.contains(&i) {
+                    return Percentiles::default();
+                }
+                let load = Self::wave(i, n, 0.0, 100.0);
+                let p95 = if i == spike { 412 } else { 150 + load };
+                Percentiles {
+                    p50: Some(Duration::from_millis(30 + load / 5)),
+                    p95: Some(Duration::from_millis(p95)),
+                }
+            })
+            .collect()
+    }
+
+    fn charts() -> String {
+        let card = |title: &str, note: &str, legend: &str, chart: &str| {
+            format!(
+                "<section class=\"card\"><div class=\"card-head\"><h2>{title} \
+                 <span class=\"card-note\">· {note}</span></h2>{legend}</div>\
+                 <div class=\"card-body\">{chart}</div></section>"
+            )
+        };
+        let bars = |range: Range, bars: Vec<StatusCounts>, title: &str, note: &str| {
+            let chart = StackedBars::new(Timeline::from(range), bars).of("all stacks");
+            card(title, note, &chart.legend().to_string(), &chart.to_string())
+        };
+        let lines = |range: Range, points: Vec<Percentiles>, title: &str, note: &str| {
+            let chart = LineChart::new(Timeline::from(range), points);
+            card(title, note, &chart.legend().to_string(), &chart.to_string())
+        };
+        let mut single = vec![StatusCounts::default(); 24];
+        single[14] = [
+            (StatusClass::Success, 800),
+            (StatusClass::ServerError, 1_203),
+        ]
+        .into_iter()
+        .collect();
+        let mut lone = vec![Percentiles::default(); 24];
+        lone[14] = Percentiles {
+            p50: Some(Duration::from_millis(48)),
+            p95: Some(Duration::from_millis(612)),
+        };
+
+        let mut html = String::from("<div class=\"card-pair\">");
+        html += &bars(
+            Range::Day,
+            Self::status_bars(24, 90_000.0, Some(14)),
+            "Responses by status",
+            "24h · a 5xx spike 10h ago",
+        );
+        html += &lines(
+            Range::Day,
+            Self::latency_points(24, 14, 5..7),
+            "Response time",
+            "24h · no samples 19h to 17h ago",
+        );
+        html += &bars(
+            Range::Hour,
+            Self::status_bars(60, 1_400.0, Some(50)),
+            "Responses by status",
+            "1h · 60 x 1 min",
+        );
+        html += &lines(
+            Range::Hour,
+            Self::latency_points(60, 50, 0..0),
+            "Response time",
+            "1h",
+        );
+        html += &bars(
+            Range::Week,
+            Self::status_bars(56, 300_000.0, None),
+            "Responses by status",
+            "7d · 56 x 3 h",
+        );
+        html += &lines(
+            Range::ThirtyDays,
+            Self::latency_points(30, 3, 20..30),
+            "Response time",
+            "30d · nothing in the last 10 days",
+        );
+        html += &bars(Range::Day, Vec::new(), "Responses by status", "24h · empty");
+        html += &lines(Range::Day, Vec::new(), "Response time", "24h · empty");
+        html += &bars(
+            Range::Day,
+            single,
+            "Responses by status",
+            "24h · a single spike",
+        );
+        html += &lines(Range::Day, lone, "Response time", "24h · a single bucket");
+        html += "</div>";
+
+        html += "<section class=\"card\"><div class=\"card-head\"><h2>Sparklines</h2></div>\
+                 <div class=\"table-scroll\"><table class=\"list\"><thead><tr><th>Series</th>\
+                 <th>Tone</th><th>Sparkline</th></tr></thead><tbody>";
+        let wave: Vec<u64> = (0..24).map(|i| Self::wave(i, 24, 100.0, 900.0)).collect();
+        let mut spike = vec![3; 60];
+        spike[42] = 300;
+        for (series, values, tone) in [
+            ("a day of traffic", wave.clone(), Tone::Ok),
+            ("deploying", wave.clone(), Tone::Progress),
+            ("degraded", wave.clone(), Tone::Warn),
+            ("failed", wave, Tone::Fail),
+            ("a single spike", spike, Tone::Ok),
+            ("all zero", vec![0; 24], Tone::Ok),
+            ("stopped, no data", Vec::new(), Tone::Neutral),
+        ] {
+            let _ = write!(
+                html,
+                "<tr><td>{series}</td><td class=\"mono\">{tone}</td><td>{}</td></tr>",
+                Sparkline::new(values, tone)
+            );
+        }
+        html += "</tbody></table></div></section>";
+
+        let mut page = String::from(
+            "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <title>Charts · UI preview · hoster</title>",
+        );
+        let _ = writeln!(
+            page,
+            "<link rel=\"stylesheet\" href=\"{}\"></head><body><main class=\"content\">\
+             <h1>Charts</h1>{html}</main></body></html>",
+            Assets::get().stylesheet.url()
+        );
+        page
+    }
+}
+
 /// The preview being written: its pages and the list `pages.html` links.
 struct Preview {
     dir: PathBuf,
@@ -1864,6 +2034,13 @@ async fn ui_preview() {
             &html,
         );
     }
+
+    // The traffic charts (ADR-0062 §9) with fixture series, before any page draws them.
+    preview.write(
+        "components/charts.html",
+        "Charts: stacked bars, response time lines, sparklines",
+        &Fixtures::charts(),
+    );
 
     // Notification mails (ADR-0058 §10): each variant's HTML part, with its plain-text part
     // beside it.

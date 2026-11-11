@@ -1,16 +1,17 @@
 ---
 id: g8r
 title: "UI: server-drawn stacked bars, percentile lines and sparklines"
-status: open
+status: done
 priority: P2
 created: "2026-11-11T09:08:57.934145636Z"
-updated: "2026-11-11T09:08:57.934145636Z"
+updated: "2026-11-11T10:22:43.785724295Z"
 tags:
   - web
   - ui
 depends_on:
   - mje
 parent: t97
+attempts: 1
 ---
 
 ## Summary
@@ -19,14 +20,14 @@ The three chart components the mockups use, drawn as SVG on the server like `Met
 
 ## Acceptance Criteria
 
-- [ ] `StackedBars`: one bar per bucket, segments 2xx/3xx/4xx/5xx bottom to top in the status colours (green, blue, peach, red), other classes (1xx, no response) in a neutral tone; horizontal grid lines, a y-axis scale with rounded maxima, relative x labels (`-24h … now`); a legend with each class's total
-- [ ] `LineChart`: p95 (yellow) and p50 (teal) polylines over the same x axis, y labels as `Elapsed`; a bucket without samples breaks the line rather than drawing zero
-- [ ] `Sparkline`: 96 x 28, one polyline, tone by class (teal default, peach degraded, muted stopped), flat line for no data, `aria-hidden`
-- [ ] Geometry is attributes computed in Rust; colours and strokes come from classes in `assets/hoster.css` using the existing tokens, in Mocha and Latte, non-text contrast at least 3:1 against the card
-- [ ] Each chart has `role="img"` and an `aria-label` that summarises it in words (range, totals, where the peak was); each bar has a `<title>` with its time and counts as the no-script tooltip
-- [ ] Charts scale to their card's width (viewBox, `preserveAspectRatio`), 375 px included, without the page scrolling sideways
-- [ ] An all-zero series renders an empty chart with its axes, not a division by zero or NaN
-- [ ] A `ui_preview` page or section shows each component with fixture data, an empty series and a single spike
+- [x] `StackedBars`: one bar per bucket, segments 2xx/3xx/4xx/5xx bottom to top in the status colours (green, blue, peach, red), other classes (1xx, no response) in a neutral tone; horizontal grid lines, a y-axis scale with rounded maxima, relative x labels (`-24h … now`); a legend with each class's total
+- [x] `LineChart`: p95 (yellow) and p50 (teal) polylines over the same x axis, y labels as `Elapsed`; a bucket without samples breaks the line rather than drawing zero
+- [x] `Sparkline`: 96 x 28, one polyline, tone by class (teal default, peach degraded, muted stopped), flat line for no data, `aria-hidden`
+- [x] Geometry is attributes computed in Rust; colours and strokes come from classes in `assets/hoster.css` using the existing tokens, in Mocha and Latte, non-text contrast at least 3:1 against the card
+- [x] Each chart has `role="img"` and an `aria-label` that summarises it in words (range, totals, where the peak was); each bar has a `<title>` with its time and counts as the no-script tooltip
+- [x] Charts scale to their card's width (viewBox, `preserveAspectRatio`), 375 px included, without the page scrolling sideways
+- [x] An all-zero series renders an empty chart with its axes, not a division by zero or NaN
+- [x] A `ui_preview` page or section shows each component with fixture data, an empty series and a single spike
 
 ## Implementation Notes
 

@@ -566,6 +566,72 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .meter-warn .meter-fill { fill: var(--warn); }
 .meter-fail .meter-fill { fill: var(--fail); }
 
+/* ---- Charts (src/web/charts.rs): server-drawn SVG, geometry in attributes (ADR-0062 §9) ----- */
+
+/* The plot stretches to the card (viewBox, preserveAspectRatio="none", non-scaling strokes);
+   the axis labels are HTML beside and below it, so they keep their size. The colours are the
+   status and percentile tokens, all at least 3:1 (4.5:1 as text) against --surface. */
+.chart { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; row-gap: 6px; min-width: 0; }
+.chart-y {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 180px;
+  color: var(--muted);
+  font: 10px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.chart-plot { display: block; width: 100%; height: 180px; overflow: visible; }
+.chart-x {
+  grid-column: 2;
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  color: var(--muted);
+  font: 10px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.chart-grid { stroke: var(--divider); stroke-width: 1px; }
+.chart-axis { stroke: var(--border); stroke-width: 1px; }
+.chart-hit { fill: transparent; }
+.chart-bar:hover .chart-hit { fill: var(--hover); }
+/* A hairline of the card between stacked segments, so neighbouring classes never touch. */
+.chart-seg { stroke: var(--surface); stroke-width: 1px; }
+.chart-2xx { fill: var(--ok); background: var(--ok); }
+.chart-3xx { fill: var(--progress); background: var(--progress); }
+.chart-4xx { fill: var(--warn); background: var(--warn); }
+.chart-5xx { fill: var(--fail); background: var(--fail); }
+.chart-other { fill: var(--muted); background: var(--muted); }
+.chart-line { fill: none; stroke-width: 2px; stroke-linejoin: round; stroke-linecap: round; }
+.chart-point { stroke-width: 6px; }
+.chart-p50 { stroke: var(--p50); background: var(--p50); }
+.chart-p95 { stroke: var(--p95); background: var(--p95); }
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-2);
+  font: 12px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.chart-legend li { display: flex; align-items: center; gap: 6px; }
+.chart-key { flex: none; display: inline-block; }
+.chart-key-box { width: 10px; height: 10px; border-radius: 2px; }
+.chart-key-line { width: 14px; height: 2px; }
+
+/* Sparklines: 96 x 28 by default, teal unless the stack's state says otherwise. */
+.spark { display: block; flex: none; }
+.spark polyline { fill: none; stroke: var(--p50); stroke-width: 1.5px; stroke-linejoin: round; stroke-linecap: round; }
+.spark-warn polyline { stroke: var(--warn); }
+.spark-fail polyline { stroke: var(--fail); }
+.spark-neutral polyline { stroke: var(--muted); }
+
 /* ---- KPI tiles ------------------------------------------------------------------------------ */
 
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 0 0 1.25rem; }
