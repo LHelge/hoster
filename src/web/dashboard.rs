@@ -77,7 +77,7 @@ use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus, UiEvent};
 use crate::stack::Stack;
 use crate::stats::{
     CertExpiry, DeployStats, Elapsed, Range, ScopeHistory, Stats, StatusClass, TrafficHistory,
-    TrafficSnapshot, TrafficTotals,
+    TrafficTotals,
 };
 use crate::store::{Event as LoggedEvent, EventKind, Timestamp};
 
@@ -390,7 +390,7 @@ impl Readings {
                 );
                 format!("Cannot show the traffic history: {err:#}.")
             }),
-            inflight: Self::inflight(&stats.traffic()),
+            inflight: stats.in_flight().hosted(),
             deployments: deployments.map_err(|err| {
                 tracing::warn!(
                     error = format!("{err:#}"),
@@ -406,18 +406,6 @@ impl Readings {
             }),
             updates,
         }
-    }
-
-    /// The requests in flight in `traffic` to every stack's routes and unrouted, without
-    /// hoster's own routes.
-    fn inflight(traffic: &TrafficSnapshot) -> u64 {
-        traffic
-            .routes
-            .iter()
-            .filter(|r| !r.is_reserved())
-            .map(|r| r.counts.inflight)
-            .chain([traffic.unrouted.inflight])
-            .sum()
     }
 }
 

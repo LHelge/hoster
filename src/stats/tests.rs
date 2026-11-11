@@ -117,9 +117,14 @@ async fn the_handle_reads_traffic_and_sources() {
         latency: Duration::from_millis(1),
         upstream_error: false,
     });
+    let _open = traffic.unrouted();
     let stats = Stats::new(traffic, source);
 
-    assert_eq!(stats.traffic().unrouted.statuses.total(), 1);
+    assert_eq!(
+        stats.in_flight().hosted(),
+        1,
+        "the finished request is not in flight"
+    );
     assert_eq!(stats.deployments().await.unwrap()[0].succeeded(), 2);
     let certificates = stats.certificates();
     assert_eq!(certificates[0].host, "soon.example.com");

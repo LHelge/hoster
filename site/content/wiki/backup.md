@@ -26,7 +26,8 @@ use that instead. Run every command as the `hoster` user.
 
 The database holds stacks and their revisions, deployment history, port allocations, sessions,
 the settings edited in the admin UI (the instance name and the [[notifications|notification]]
-settings) and the encrypted secrets, the notification provider's API key among them ([ADR-0022](https://github.com/LHelge/hoster/blob/main/docs/adr/0022-sqlite-via-sqlx-state-store.md), [ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). Never copy `hoster.db` with `cp` while hoster runs:
+settings), the event log, the [[overview#traffic-history|traffic history]] behind the dashboard's
+charts (up to 60 days) and the encrypted secrets, the notification provider's API key among them ([ADR-0022](https://github.com/LHelge/hoster/blob/main/docs/adr/0022-sqlite-via-sqlx-state-store.md), [ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). Never copy `hoster.db` with `cp` while hoster runs:
 the newest writes may still be in `hoster.db-wal`, and a plain copy can be torn. Use:
 
 ```sh

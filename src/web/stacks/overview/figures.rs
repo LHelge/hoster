@@ -29,7 +29,7 @@ use super::super::list::{Ago, TrafficLine, TrafficWindow};
 use crate::orchestrator::{ServiceState, StackStatus};
 use crate::stack::{Route, Stack};
 use crate::stats::{
-    CertExpiry, DeployStats, Elapsed, ScopeHistory, Stats, TrafficHistory, TrafficSnapshot,
+    CertExpiry, DeployStats, Elapsed, InFlight, ScopeHistory, Stats, TrafficHistory,
 };
 use crate::store::Timestamp;
 use crate::web::charts::{StackedBars, Timeline};
@@ -40,8 +40,8 @@ use crate::web::ui::{CertState, Count, Kpi, PerMinute, Pill, Tone};
 pub struct Readings {
     /// The traffic history over [`TrafficWindow::RANGE`], or why it cannot be read.
     pub history: Result<TrafficHistory, String>,
-    /// The live counters, for the requests in flight now.
-    pub traffic: TrafficSnapshot,
+    /// The requests in flight now, the one live figure.
+    pub in_flight: InFlight,
     /// The certificates served now.
     pub certificates: Vec<CertExpiry>,
     /// Every stack's deployment statistics, or why they cannot be read.
@@ -57,7 +57,7 @@ impl Default for Readings {
                 TrafficWindow::RANGE,
                 Timestamp::from(now),
             )),
-            traffic: TrafficSnapshot::default(),
+            in_flight: InFlight::default(),
             certificates: Vec::new(),
             deployments: Ok(Vec::new()),
             now,
@@ -77,7 +77,7 @@ impl Readings {
         };
         Self {
             history: history.map_err(|err| problem("the traffic history", err)),
-            traffic: stats.traffic(),
+            in_flight: stats.in_flight(),
             certificates: stats.certificates(),
             deployments: deployments.map_err(|err| problem("deployment statistics", err)),
             now: SystemTime::now(),
@@ -118,13 +118,7 @@ impl Figures {
             .deployments
             .as_ref()
             .map(|all| all.iter().find(|d| d.stack == status.name));
-        let inflight = readings
-            .traffic
-            .routes
-            .iter()
-            .filter(|r| r.stack() == Some(status.name.as_str()))
-            .map(|r| r.counts.inflight)
-            .sum();
+        let inflight = readings.in_flight.stack(&status.name);
         Figures {
             kpis: Self::kpis(status, shown, inflight, deployments),
             statuses: match shown {
@@ -507,7 +501,7 @@ mod tests {
         let _open = traffic.route("notes.example.com", &route);
         let figures = notes_figures(&Readings {
             history: Ok(history(TrafficWindow::RANGE, Vec::new()).await),
-            traffic: traffic.snapshot(),
+            in_flight: traffic.in_flight(),
             ..Readings::default()
         });
         let rate = tile(&figures, "req/min · last hour");

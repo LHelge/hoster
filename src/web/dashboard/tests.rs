@@ -1273,7 +1273,7 @@ async fn the_admin_uis_own_requests_are_not_counted() {
         Readings {
             stacks: Ok(vec![blog()]),
             history: Ok(history),
-            inflight: Readings::inflight(&traffic.snapshot()),
+            inflight: traffic.in_flight().hosted(),
             ..Readings::default()
         },
         SystemTime::now(),

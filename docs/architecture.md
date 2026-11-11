@@ -1092,7 +1092,11 @@ same card on each stack's overview, and the Events page at `/activity`.
 
 Traffic history (ADR-0062) is what the dashboard's range picker, charts and deltas and the stack
 pages' last-hour figures read. It replaces the since-start counters and the rolling latency
-window of ADR-0045; only the in-flight gauge stays live.
+window of ADR-0045, both removed; only the in-flight gauge stays live. `src/stats/` keeps two
+parts: the live per-route counters in `Traffic` (atomics the proxy updates, read only by the
+recorder's drain and by `Traffic::in_flight`), and the history the pages read through
+`Stats::history`. The stack overview's slowest-routes card, which counted since hoster started,
+went with them (a slowest-routes panel over history is a proposal, ADR-0062 §10).
 
 - **Tables.** `traffic_minutes` (kept 24 h) and `traffic_hours` (kept 60 d) in `hoster.db`, one
   shape: `start` (ms since the epoch, aligned to a UTC minute or hour), `host`, `prefix`,
@@ -1102,13 +1106,16 @@ window of ADR-0045; only the in-flight gauge stays live.
   hoster's own routes have `stack = ''` and the reserved purpose as `service`; unrouted
   requests are the series with every key column `''`. Only buckets with requests have rows.
 - **Recorder.** A task in `src/stats/`, spawned by the supervisor with the other background tasks
-  (§4 startup 8). Just after every wall-clock minute it drains `Traffic` (per-route deltas since
+  (§4 startup 8). One second after every wall-clock minute it drains `Traffic` (per-route deltas since
   the previous drain) and, in one transaction, inserts the minute rows of the minute that ended
   and adds them to their hour rows (histograms merged in Rust). A failed write is logged at
   `warn` and retried with the next tick for up to 5 minutes, then dropped. It sweeps both tables
   to their retention at startup and hourly, and flushes once more after the proxy has stopped
-  (§4 shutdown 5). Down-migrating drops both tables and the history.
-- **Reading.** Pages read flushed rows only, so they lag by up to a minute. A range picks its
+  (§4 shutdown 5; a fast shutdown waits at most 5 s for it). Down-migrating drops both tables
+  and the history.
+- **Reading.** Pages read flushed rows only, so they lag by up to a minute: a minute counts as
+  flushed 5 s after it ends (the tick's 1 s plus the write), before that the minute before is
+  the newest. A range picks its
   table and bar plan: 1h = 60 x 1 min and 6h = 72 x 5 min from minutes; 24h = 24 x 1 h, 7d =
   56 x 3 h and 30d = 30 x 1 d from hours, counted back from the newest flushed minute (or the
   current hour), so no time zone is involved. req/min is the last 5 flushed minutes; the
@@ -1116,3 +1123,11 @@ window of ADR-0045; only the in-flight gauge stays live.
   "All hosted traffic" is every stack's routes plus unrouted, without hoster's own routes. The
   dashboard's `?range=` (default 24h) is carried by its overview stream, whose once-a-minute
   refresh picks up each flush; the stack cards and the stack overview show a fixed last hour.
+- **Measured size and flush time** (2026-11-11, a throwaway store test, release build on a
+  developer laptop's SSD): 40 routes busy every minute (200 requests a minute each, latencies
+  of 1–400 ms), 24 h of minute rows (57,600) and 59 days of hour rows (56,640) take 27.4 MB,
+  about 240 bytes a row with both indexes, or 0.68 MB per always-busy route, as ADR-0062
+  estimates. Histogram blobs average 90 bytes, more than the estimate's 20–60 because hour
+  buckets have more non-empty buckets and larger counts; smaller key strings make up for it.
+  A flush of all 40 routes (40 minute rows, 40 hour rows read, merged and written) takes 3.1 ms
+  at the median, 3.4 ms at p95 and 7.3 ms at most.

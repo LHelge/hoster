@@ -2,10 +2,10 @@
 id: t97
 title: "M16: Traffic history and charts"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-08T18:22:29.983359533Z"
-updated: "2026-11-11T09:07:44.178514023Z"
+updated: "2026-11-11T11:22:20.733132116Z"
 tags:
   - design-followup
   - observability
@@ -32,11 +32,11 @@ Today's statistics are counters since hoster started plus a rolling latency wind
 
 ## Acceptance Criteria
 
-- [ ] ADR-0062 accepted; ADR-0045 and ADR-0054 point at it
-- [ ] Traffic history survives a hoster restart and is pruned to its retention
-- [ ] Dashboard: range picker, range-based tiles with deltas, responses-by-status and p50/p95 charts, req/min and sparklines in the stacks table
-- [ ] Stack cards and stack overview show last-hour figures, req/min and a sparkline or chart
-- [ ] No `style=` attributes or inline scripts; the pages work without JavaScript
-- [ ] "Since hoster started" figures and the rolling latency window are gone from the UI and the code
+- [x] ADR-0062 accepted; ADR-0045 and ADR-0054 point at it
+- [x] Traffic history survives a hoster restart and is pruned to its retention
+- [x] Dashboard: range picker, range-based tiles with deltas, responses-by-status and p50/p95 charts, req/min and sparklines in the stacks table
+- [x] Stack cards and stack overview show last-hour figures, req/min and a sparkline or chart
+- [x] No `style=` attributes or inline scripts; the pages work without JavaScript
+- [x] "Since hoster started" figures and the rolling latency window are gone from the UI and the code
 
 References: ADR-0045, ADR-0054, ADR-0055 (the event log, the closest existing pattern), `src/stats/`.
