@@ -97,7 +97,7 @@
   <ul class="card-body route-rows">
     {%- for route in stack.route_rows %}
     <li>
-      <span class="route-url">{{ route.url }}</span>
+      <a class="route-url" href="{{ route.url }}" target="_blank" rel="noopener noreferrer" title="Open {{ route.url }} in a new tab">{{ route.url }}<span aria-hidden="true"> ↗</span></a>
       <span class="route-arrow" aria-hidden="true">→</span><span class="visually-hidden">to</span>
       <span class="route-target">{{ route.target }}</span>
       <span class="route-tags">
