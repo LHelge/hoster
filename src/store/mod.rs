@@ -21,6 +21,7 @@ mod instance;
 mod notifications;
 mod secrets;
 mod sessions;
+mod traffic;
 mod types;
 mod updates;
 mod webhook;
@@ -42,6 +43,11 @@ use thiserror::Error;
 pub use notifications::{
     DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,
 };
+#[allow(
+    unused_imports,
+    reason = "used by the traffic recorder and the history queries (ADR-0062)"
+)]
+pub use traffic::{Latencies, Resolution, TrafficBucket, TrafficCounts, TrafficSeries};
 #[allow(
     unused_imports,
     reason = "part of the Store API for its future callers"
@@ -114,6 +120,12 @@ pub enum StoreError {
     PortTaken(u16),
     #[error("notifications need a from address and a recipient before they can be enabled")]
     NotificationsIncomplete,
+    #[error("the traffic bucket at {} has a malformed latency histogram", start.as_millis())]
+    Latency {
+        start: Timestamp,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("state database error")]
     Database(#[from] sqlx::Error),
 }

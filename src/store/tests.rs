@@ -1588,6 +1588,347 @@ async fn pruning_keeps_the_newest_event_so_ids_are_never_reused() {
     assert_eq!(store.events_after(cursor, 10).await.unwrap(), [next]);
 }
 
+/// Traffic history (ADR-0062), with the histogram the recorder writes.
+mod traffic {
+    use std::ops::Range;
+    use std::time::UNIX_EPOCH;
+
+    use super::*;
+    use crate::stats::Histogram;
+
+    /// A minute-aligned time well after the epoch: 2026-11-11 10:00 UTC.
+    fn hour() -> Timestamp {
+        Timestamp::from(UNIX_EPOCH + Duration::from_secs(1_794_391_200))
+    }
+
+    fn minute(n: u64) -> Timestamp {
+        hour() + Duration::from_secs(60 * n)
+    }
+
+    fn series(stack: &str, service: &str) -> TrafficSeries {
+        TrafficSeries {
+            host: format!("{stack}.example.com"),
+            prefix: "/".into(),
+            stack: stack.into(),
+            service: service.into(),
+        }
+    }
+
+    fn histogram(millis: &[u64]) -> Histogram {
+        let mut histogram = Histogram::default();
+        for &ms in millis {
+            histogram.record(Duration::from_millis(ms));
+        }
+        histogram
+    }
+
+    /// `ok` successes and `errors` server errors, one of them an upstream error, with
+    /// latencies of `millis`.
+    fn bucket(
+        start: Timestamp,
+        series: TrafficSeries,
+        ok: u64,
+        errors: u64,
+        millis: &[u64],
+    ) -> TrafficBucket<Histogram> {
+        TrafficBucket {
+            start,
+            series,
+            counts: TrafficCounts {
+                s2xx: ok,
+                s5xx: errors,
+                upstream_errors: errors.min(1),
+                ..TrafficCounts::default()
+            },
+            latency: histogram(millis),
+        }
+    }
+
+    async fn read(
+        store: &Store,
+        resolution: Resolution,
+        span: Range<Timestamp>,
+        stack: Option<&str>,
+    ) -> Vec<TrafficBucket<Histogram>> {
+        store.traffic(resolution, span, stack).await.unwrap()
+    }
+
+    fn everything() -> Range<Timestamp> {
+        Timestamp::from(UNIX_EPOCH)..hour() + Duration::from_secs(365 * 24 * 60 * 60)
+    }
+
+    #[test]
+    fn buckets_align_to_utc_minutes_and_hours() {
+        let at = minute(7) + Duration::from_millis(12_345);
+        assert_eq!(Resolution::Minute.bucket(at), minute(7));
+        assert_eq!(Resolution::Hour.bucket(at), hour());
+        assert_eq!(Resolution::Minute.bucket(minute(7)), minute(7));
+        let before_epoch = Timestamp::from(UNIX_EPOCH - Duration::from_secs(30));
+        assert_eq!(
+            Resolution::Minute.bucket(before_epoch),
+            Timestamp::from(UNIX_EPOCH - Duration::from_secs(60))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_minute_is_written_to_its_minute_and_hour_and_read_back() {
+        let (_dir, store) = open().await;
+        let notes = bucket(minute(3), series("notes", "web"), 5, 1, &[3, 4, 90]);
+        let admin = bucket(minute(3), series("", "admin UI"), 2, 0, &[1]);
+        let unrouted = bucket(minute(3), TrafficSeries::default(), 0, 0, &[]);
+        store
+            .record_traffic([notes.clone(), admin.clone(), unrouted.clone()])
+            .await
+            .unwrap();
+
+        // In key order: unrouted (all '') first, then by host.
+        let minutes = read(&store, Resolution::Minute, everything(), None).await;
+        assert_eq!(minutes, [unrouted.clone(), admin.clone(), notes.clone()]);
+        let hours = read(&store, Resolution::Hour, everything(), None).await;
+        let at_hour = |b: &TrafficBucket<Histogram>| TrafficBucket {
+            start: hour(),
+            ..b.clone()
+        };
+        assert_eq!(
+            hours,
+            [at_hour(&unrouted), at_hour(&admin), at_hour(&notes)]
+        );
+        assert_eq!(hours[2].latency.samples(), 3);
+    }
+
+    #[tokio::test]
+    async fn writing_a_bucket_again_adds_to_it() {
+        let (_dir, store) = open().await;
+        let first = bucket(minute(1), series("notes", "web"), 5, 1, &[3, 4]);
+        // The rest of the same minute, flushed again (a shutdown, then a restart).
+        let rest = bucket(
+            minute(1) + Duration::from_secs(30),
+            series("notes", "web"),
+            2,
+            0,
+            &[200],
+        );
+        store.record_traffic([first]).await.unwrap();
+        store.record_traffic([rest]).await.unwrap();
+
+        let expected = bucket(minute(1), series("notes", "web"), 7, 1, &[3, 4, 200]);
+        let minutes = read(&store, Resolution::Minute, everything(), None).await;
+        assert_eq!(minutes, std::slice::from_ref(&expected));
+        let hours = read(&store, Resolution::Hour, everything(), None).await;
+        assert_eq!(
+            hours,
+            [TrafficBucket {
+                start: hour(),
+                ..expected
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_hour_row_is_the_sum_of_its_minutes() {
+        let (_dir, store) = open().await;
+        let web = series("notes", "web");
+        let api = series("notes", "api");
+        // Two flushes in one hour, one in the next; a flush may carry several minutes and the
+        // same series twice.
+        store
+            .record_traffic([
+                bucket(minute(0), web.clone(), 1, 0, &[1]),
+                bucket(minute(1), web.clone(), 2, 1, &[10, 20, 30]),
+                bucket(minute(1), web.clone(), 1, 0, &[40]),
+                bucket(minute(1), api.clone(), 4, 0, &[5]),
+            ])
+            .await
+            .unwrap();
+        store
+            .record_traffic([
+                bucket(minute(59), web.clone(), 3, 2, &[500]),
+                bucket(minute(60), web.clone(), 9, 0, &[2]),
+            ])
+            .await
+            .unwrap();
+
+        let minutes = read(&store, Resolution::Minute, everything(), None).await;
+        assert_eq!(minutes.len(), 5, "{minutes:?}");
+        let hours = read(&store, Resolution::Hour, everything(), None).await;
+        assert_eq!(hours.len(), 3, "{hours:?}");
+        for hour in &hours {
+            let mut sum = TrafficBucket {
+                start: hour.start,
+                series: hour.series.clone(),
+                counts: TrafficCounts::default(),
+                latency: Histogram::default(),
+            };
+            for minute in minutes.iter().filter(|m| {
+                m.series == hour.series && Resolution::Hour.bucket(m.start) == hour.start
+            }) {
+                sum += minute.clone();
+            }
+            assert_eq!(*hour, sum);
+        }
+        let first = hours
+            .iter()
+            .find(|h| h.start == hour() && h.series == web)
+            .unwrap();
+        assert_eq!(first.counts.s2xx, 7);
+        assert_eq!(first.counts.s5xx, 3);
+        assert_eq!(first.counts.upstream_errors, 2);
+        assert_eq!(first.latency.samples(), 6);
+    }
+
+    #[tokio::test]
+    async fn a_span_reads_its_buckets_for_one_stack_or_all() {
+        let (_dir, store) = open().await;
+        store
+            .record_traffic([
+                bucket(minute(0), series("notes", "web"), 1, 0, &[1]),
+                bucket(minute(1), series("blog", "web"), 1, 0, &[1]),
+                bucket(minute(2), series("notes", "web"), 1, 0, &[1]),
+                bucket(minute(3), series("notes", "web"), 1, 0, &[1]),
+            ])
+            .await
+            .unwrap();
+        let starts = |buckets: Vec<TrafficBucket<Histogram>>| -> Vec<Timestamp> {
+            buckets.into_iter().map(|b| b.start).collect()
+        };
+
+        // The span includes its start and excludes its end.
+        let span = minute(0)..minute(3);
+        assert_eq!(
+            starts(read(&store, Resolution::Minute, span.clone(), None).await),
+            [minute(0), minute(1), minute(2)]
+        );
+        assert_eq!(
+            starts(read(&store, Resolution::Minute, span.clone(), Some("notes")).await),
+            [minute(0), minute(2)]
+        );
+        assert!(
+            read(&store, Resolution::Minute, span, Some("gone"))
+                .await
+                .is_empty()
+        );
+        let hours = read(&store, Resolution::Hour, hour()..minute(60), Some("blog")).await;
+        assert_eq!(starts(hours), [hour()]);
+        assert!(
+            read(&store, Resolution::Hour, minute(1)..minute(60), None)
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn pruning_deletes_buckets_before_the_cutoff_only() {
+        let (_dir, store) = open().await;
+        let web = series("notes", "web");
+        store
+            .record_traffic([
+                bucket(minute(0), web.clone(), 1, 0, &[1]),
+                bucket(minute(1), web.clone(), 1, 0, &[1]),
+                bucket(minute(2), web.clone(), 1, 0, &[1]),
+                bucket(minute(60), web.clone(), 1, 0, &[1]),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .prune_traffic(Resolution::Minute, minute(1))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .prune_traffic(Resolution::Minute, minute(1))
+                .await
+                .unwrap(),
+            0
+        );
+        let minutes = read(&store, Resolution::Minute, everything(), None).await;
+        assert_eq!(
+            minutes[0].start,
+            minute(1),
+            "the bucket at the cutoff stays"
+        );
+        assert_eq!(minutes.len(), 3);
+        // The hours are swept on their own.
+        assert_eq!(
+            read(&store, Resolution::Hour, everything(), None)
+                .await
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .prune_traffic(Resolution::Hour, minute(60))
+                .await
+                .unwrap(),
+            1
+        );
+        let hours = read(&store, Resolution::Hour, everything(), None).await;
+        assert_eq!(hours.len(), 1);
+        assert_eq!(hours[0].start, minute(60));
+    }
+
+    #[tokio::test]
+    async fn a_removed_stacks_history_stays() {
+        let (_dir, store) = open().await;
+        // No foreign key to `stacks`: even the row's deletion leaves the history.
+        sqlx::query(
+            "INSERT INTO stacks (name, last_generation, created_at, updated_at)
+             VALUES ('notes', 0, 1, 1)",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        store
+            .record_traffic([bucket(minute(0), series("notes", "web"), 1, 0, &[1])])
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM stacks WHERE name = 'notes'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            read(&store, Resolution::Minute, everything(), Some("notes"))
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            read(&store, Resolution::Hour, everything(), Some("notes"))
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_histogram_is_an_error() {
+        let (_dir, store) = open().await;
+        store
+            .record_traffic([bucket(minute(0), series("notes", "web"), 1, 0, &[1])])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE traffic_minutes SET latency = x'02'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let err = store
+            .traffic::<Histogram>(Resolution::Minute, everything(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Latency { .. }), "{err:?}");
+        // A write into the bucket fails too, and leaves the hour row as it was.
+        store
+            .record_traffic([bucket(minute(0), series("notes", "web"), 1, 0, &[1])])
+            .await
+            .unwrap_err();
+        let hours = read(&store, Resolution::Hour, everything(), None).await;
+        assert_eq!(hours[0].counts.s2xx, 1);
+    }
+}
+
 /// Every migration is reversible and every down script restores its predecessor's schema exactly
 /// (ADR-0052): what lets a newer binary roll the database back for an older one.
 mod migrations {
@@ -1720,6 +2061,9 @@ mod migrations {
             (1, 'resend', 'hoster@example.com', 'ops@example.com', 1, 0, 1);
         INSERT INTO notifier_state VALUES (1, 1, 1, 'id', NULL);
         INSERT INTO notified_problems VALUES ('crash_loop_entered', 'notes', 'api', 1, 1);
+        INSERT INTO traffic_minutes VALUES (60000, 'notes.example.com', '/', 'notes', 'api',
+            0, 0, 5, 0, 0, 1, 1, x'01');
+        INSERT INTO traffic_hours VALUES (0, '', '', '', '', 1, 0, 0, 0, 0, 0, 0, x'01');
     ";
 
     #[tokio::test]
