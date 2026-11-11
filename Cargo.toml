@@ -1,6 +1,6 @@
 [package]
 name = "hoster"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 # The minimum is the toolchain pinned in rust-toolchain.toml: CI builds and checks with that
 # version only. Raise both together.
