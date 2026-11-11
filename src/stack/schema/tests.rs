@@ -949,6 +949,21 @@ fn integers_and_enums_agree() {
         ],
     );
     agrees(
+        &MINIMAL.replace(
+            "image = \"ghcr.io/acme/app\"",
+            "image = \"docker.io/acme/app:1.2\"\nauto_update = @@",
+        ),
+        &[
+            "\"off\"",
+            "\"digest\"",
+            "\"patch\"",
+            "\"minor\"",
+            "\"major\"",
+            "\"Off\"",
+            "true",
+        ],
+    );
+    agrees(
         &with_app("read_only = @@"),
         &["true", "false", "\"yes\"", "1"],
     );
@@ -1100,6 +1115,27 @@ fn semantic_rules_are_parser_only() {
         (
             "track on a third-party image",
             two_services.replace("@@", "track = \"main\""),
+        ),
+        (
+            "auto_update on a CI-built image",
+            with_app("auto_update = \"digest\""),
+        ),
+        (
+            "auto_update on a digest-only image",
+            MINIMAL.replace(
+                "ghcr.io/acme/app",
+                &format!(
+                    "docker.io/library/postgres@sha256:{}\"\nauto_update = \"digest",
+                    "0".repeat(64)
+                ),
+            ),
+        ),
+        (
+            "a version policy on a tag that is not a version",
+            MINIMAL.replace(
+                "ghcr.io/acme/app",
+                "docker.io/library/nginx:latest\"\nauto_update = \"patch",
+            ),
         ),
         (
             "an http check on a service without routes",

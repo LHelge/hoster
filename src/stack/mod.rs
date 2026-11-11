@@ -136,6 +136,10 @@ pub struct Service {
     pub depends_on: BTreeSet<Name>,
     /// Tag the ghcr poller watches (ADR-0043). Only set for CI-built ghcr images.
     pub track: Option<String>,
+    /// Whether the update checker applies this image's updates by itself (ADR-0061). Anything
+    /// but `Off` only on third-party images with a tag, and `Patch`/`Minor` only on a tag that
+    /// reads as a version. Not part of the config hash: changing it never redeploys.
+    pub auto_update: AutoUpdate,
     pub command: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub env: BTreeMap<String, String>,
@@ -233,6 +237,41 @@ impl fmt::Display for SecretUse<'_> {
             SecretUse::Env(name) => f.write_str(name),
             SecretUse::File(path) => write!(f, "file {path}"),
         }
+    }
+}
+
+/// Whether hoster applies a third-party image's updates by itself (ADR-0061 §4). Updates are
+/// shown in the UI whatever the policy; majors are never applied automatically.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AutoUpdate {
+    /// Only show available updates.
+    #[default]
+    Off,
+    /// Follow the tag to new digests (a floating tag's rebuilds and patch releases).
+    Digest,
+    /// Also move to newer patch versions in the same line, e.g. `2.3.1` → `2.3.4`.
+    Patch,
+    /// Also move to newer minor versions in the same line, e.g. `2.3.1` → `2.4.0`.
+    Minor,
+}
+
+impl AutoUpdate {
+    /// Whether the policy moves the tag to newer versions, which needs a tag that reads as a
+    /// [`TagVersion`].
+    pub fn follows_versions(self) -> bool {
+        matches!(self, Self::Patch | Self::Minor)
+    }
+}
+
+impl fmt::Display for AutoUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Off => "off",
+            Self::Digest => "digest",
+            Self::Patch => "patch",
+            Self::Minor => "minor",
+        })
     }
 }
 

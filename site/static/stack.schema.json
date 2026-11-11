@@ -44,6 +44,31 @@
     "services"
   ],
   "$defs": {
+    "AutoUpdate": {
+      "description": "Whether hoster applies a third-party image's updates by itself (ADR-0061 §4). Updates are\nshown in the UI whatever the policy; majors are never applied automatically.",
+      "oneOf": [
+        {
+          "description": "Only show available updates.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Follow the tag to new digests (a floating tag's rebuilds and patch releases).",
+          "type": "string",
+          "const": "digest"
+        },
+        {
+          "description": "Also move to newer patch versions in the same line, e.g. `2.3.1` → `2.3.4`.",
+          "type": "string",
+          "const": "patch"
+        },
+        {
+          "description": "Also move to newer minor versions in the same line, e.g. `2.3.1` → `2.4.0`.",
+          "type": "string",
+          "const": "minor"
+        }
+      ]
+    },
     "Deploy": {
       "description": "Deploy authorization: which GitHub Actions OIDC tokens may deploy this stack through the\nwebhook (ADR-0047).",
       "type": "object",
@@ -306,6 +331,11 @@
       "description": "One container of the stack.",
       "type": "object",
       "properties": {
+        "auto_update": {
+          "description": "Whether hoster applies this image's updates by itself (ADR-0061): `\"off\"` only shows\nthem, `\"digest\"` follows the tag to new digests, `\"patch\"` and `\"minor\"` also move to\nnewer version tags within those bounds. Majors are never applied. Only for third-party\nimages with a tag; `\"patch\"` and `\"minor\"` need a tag that reads as a version, e.g.\n`\"16.4\"` or `\"v2.3.1\"`.",
+          "$ref": "#/$defs/AutoUpdate",
+          "default": "off"
+        },
         "command": {
           "description": "Overrides the image's `CMD`.",
           "type": "array",

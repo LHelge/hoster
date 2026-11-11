@@ -902,6 +902,28 @@ update = "stop-first"
         assert_eq!(ready, hash(&exec("[\"ready\"]"), "storage", &none));
     }
 
+    /// `auto_update` only steers the update checker (ADR-0061 §4): a revision that changes it
+    /// alone plans no change for any service.
+    #[test]
+    fn auto_update_is_not_part_of_the_config_hash() {
+        let none = SecretVersions::new();
+        let base = stack(STACK);
+        let image = STACK
+            .lines()
+            .find(|l| l.starts_with("image = \"docker.io/"))
+            .expect("STACK has a third-party service");
+        let policy = stack(&STACK.replace(image, &format!("{image}\nauto_update = \"minor\"")));
+        assert_eq!(
+            hash(&base, "storage", &none),
+            hash(&policy, "storage", &none)
+        );
+
+        // Both run what the revision pins: api its deployed digest, storage the resolved one.
+        let running = vec![pointer(&base, "api", 1, 1), pointer(&base, "storage", 9, 1)];
+        let plan = Plan::new(&policy, &pins(), &DigestSet::new(), &running, &none).unwrap();
+        assert!(plan.changes.is_empty(), "{:?}", plan.changes);
+    }
+
     /// The phases of ADR-0056 Decision 2: a stop-first service without a previous generation
     /// starts with the start-first ones; one with a previous generation is replaced; a
     /// start-phase service depending on it, even through an unchanged one, is held back.

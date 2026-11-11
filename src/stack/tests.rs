@@ -1972,3 +1972,88 @@ fn shm_and_tmpfs_reaching_memory_are_warned_about() {
         "{tmpfs:?}"
     );
 }
+
+/// `auto_update` (ADR-0061 §4): every policy on the images that may use it, `off` everywhere.
+#[test]
+fn auto_update_parses_with_its_default() {
+    let source = r#"version = 1
+name = "demo"
+
+[services.plain]
+image = "docker.io/library/postgres:16"
+
+[services.floating]
+image = "docker.io/library/postgres:16"
+auto_update = "digest"
+
+[services.pinned]
+image = "ghcr.io/immich-app/immich-server:v2.3.1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+auto_update = "minor"
+
+[services.suffixed]
+image = "docker.io/library/redis:7.4-alpine"
+auto_update = "patch"
+
+[services.latest]
+image = "docker.io/library/nginx:latest"
+auto_update = "digest"
+
+[services.ci]
+image = "ghcr.io/acme/app"
+track = "main"
+auto_update = "off"
+"#;
+    let stack = parse(source).unwrap().stack;
+    let policy = |name: &str| stack.services[&name.parse::<Name>().unwrap()].auto_update;
+    assert_eq!(policy("plain"), AutoUpdate::Off);
+    assert_eq!(policy("floating"), AutoUpdate::Digest);
+    assert_eq!(policy("pinned"), AutoUpdate::Minor);
+    assert_eq!(policy("suffixed"), AutoUpdate::Patch);
+    assert_eq!(policy("latest"), AutoUpdate::Digest);
+    assert_eq!(policy("ci"), AutoUpdate::Off);
+    assert!(AutoUpdate::Minor.follows_versions() && !AutoUpdate::Digest.follows_versions());
+}
+
+/// Every rule on `auto_update` (ADR-0061 §4), all in one file.
+#[test]
+fn auto_update_errors_snapshot() {
+    let source = r#"version = 1
+name = "demo"
+
+[services.ci]
+image = "ghcr.io/acme/app"
+auto_update = "digest"
+
+[services.tracked]
+image = "ghcr.io/acme/worker"
+track = "main"
+auto_update = "patch"
+
+[services.digest-only]
+image = "docker.io/library/postgres@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+auto_update = "digest"
+
+[services.latest]
+image = "docker.io/library/nginx:latest"
+auto_update = "minor"
+
+[services.four-parts]
+image = "docker.io/acme/tool:1.2.3.4"
+auto_update = "patch"
+"#;
+    insta::assert_snapshot!(parse(source).unwrap_err().to_string());
+}
+
+/// There is no `major` policy: majors are only ever shown (ADR-0061 §3).
+#[test]
+fn auto_update_has_no_major_policy() {
+    let source = MINIMAL.replace(
+        "image = \"ghcr.io/acme/app\"",
+        "image = \"docker.io/library/postgres:16\"\nauto_update = \"major\"",
+    );
+    let err = parse(&source).unwrap_err().to_string();
+    assert!(
+        err.contains("unknown variant `major`, expected one of `off`, `digest`, `patch`, `minor`"),
+        "{err}"
+    );
+}

@@ -33,6 +33,7 @@ fn stack(stack_name: &str, routes: &[Decl<'_>]) -> Stack {
                 image: "ghcr.io/acme/app".parse().expect("valid image"),
                 depends_on: Default::default(),
                 track: None,
+                auto_update: Default::default(),
                 command: None,
                 entrypoint: None,
                 env: BTreeMap::new(),
