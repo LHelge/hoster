@@ -21,8 +21,8 @@
 //! - `:80` ([`ProxyConfig::http_listen`]) is [`ChallengeOrRedirect`]: ACME HTTP-01 answers from
 //!   the [`ChallengeMap`], 308 to HTTPS for known hosts and 404 for the rest. It never proxies.
 //!
-//! Both refuse a new client at accept while hoster has too many descriptors open
-//! ([`Admission`], ADR-0065).
+//! Both refuse a new client at accept while hoster has too many descriptors open, or the
+//! client's address too many connections ([`Admission`], ADR-0065).
 
 mod admission;
 mod plain;
@@ -40,9 +40,10 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora::apps::HttpServerOptions;
 use pingora::listeners::tls::TlsSettings;
-use pingora::proxy::{ProxyServiceBuilder, Session};
+use pingora::proxy::{ProxyServiceBuilder, Session, http_proxy};
 use pingora::server::configuration::ServerConf;
 use pingora::server::{ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch};
+use pingora::services::listening::Service;
 use tokio::sync::{broadcast, watch};
 
 pub use self::admission::{Admission, FileLimit, FileUse};
@@ -209,15 +210,18 @@ impl Proxy {
         tls.set_cert_resolver(Arc::new(CertResolver::from(certs)));
         tls.enable_h2();
         https.add_tls_with_settings(&config.https_listen.to_string(), None, tls);
+        // Each connection's slot under the per-address cap, taken before its TLS handshake.
+        https.endpoints().set_pre_tls_callback(admission.clone());
         server.add_service(https);
 
-        let mut http = ProxyServiceBuilder::new(
+        // `ProxyServiceBuilder::build` without the builder, so the app can be wrapped: `:80`
+        // has no pre-TLS callback, so the app takes each connection's slot.
+        let mut app = http_proxy(
             &server.configuration,
             ChallengeOrRedirect::new(routes, challenges, config.timeouts, limits),
-        )
-        .name("hoster http")
-        .server_options(limits.server_options())
-        .build();
+        );
+        app.server_options = Some(limits.server_options());
+        let mut http = Service::new("hoster http".to_owned(), admission.claiming(app));
         http.set_connection_filter(admission);
         http.add_tcp(&config.http_listen.to_string());
         server.add_service(http);
