@@ -368,6 +368,7 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 | **Digest poller** | orchestrator runtime | Periodically resolves tracked ghcr tags to digests. Calls `orchestrator.deploy` only when a tag's observed digest changes (ADR-0043). |
 | **Update checker** | orchestrator runtime | Checks third-party images for updates (ADR-0061), every 6 h by default with jitter (Settings → Updates, "Check now"). Sees moved tags by `HEAD` and newer versions in the same line from the tag list, backing off per registry on 429. Stores the last check of each service in `image_checks` and the highest candidate of each kind in `image_updates`, recording newly found ones in the event log (`UpdateAvailable`, never mailed) and announcing `UiEvent::Updates`. For services with `auto_update`, applies a stack's allowed candidates as one new revision and one `AutoUpdate` deployment through the orchestrator, skipping stacks with an active or queued deployment; each candidate is acted on once. |
 | **Notifier** | orchestrator runtime | Mails the operator about problems and recoveries (ADR-0058). Reads the event log (§11) past a persisted cursor, woken by `ui_events` and a one-minute timer; selects, de-duplicates and rate-limits; delivers through a mail `Provider` (Resend) with a short retry, and records `NotificationFailed` when it gives up. Idle until notifications are configured in Settings. Beyond ADR-0058 §7–§8 it keeps the open problems true to what the producers still know: a cancelled deploy (`DeployFailed`, warning) is not mailed; a successful deploy, or a rollback that went live, forgets the stack's crash-loop and health problems, since their generations are gone; `HosterStarted` forgets all of those, which the reconciler and health monitor write again if they persist; `StackRemoved` forgets every problem of the stack, its hosts' included. Open problems with no repeat event are reminded of from the timer, a day after their last mail (deploy problems never). The hourly cap and its held-back count live in memory. |
+| **Traffic recorder** | orchestrator runtime, single task | Drains the proxy's per-route `Traffic` counters just after every minute and writes them as minute rows, rolled up into hour rows, in one transaction (ADR-0062, §12). Sweeps both tables to their retention and flushes once more on graceful shutdown. |
 | **Admin web UI + webhook (Axum)** | orchestrator runtime | One Axum app (ADR-0021).<br/>• **UI:** Askama-rendered pages with vendored HTMX 4 (embedded in the binary). GitHub OAuth login, restricted to `HOSTER_ADMIN_GITHUB`. SQLite sessions and CSRF tokens (ADR-0031).<br/>• **Webhook:** `/hooks/deploy`, authenticated with a GitHub Actions OIDC token (signature via a cached JWKS, `iss`, `aud`, expiry, single-use `jti`) and authorized by the stack's `[deploy]` rule (ADR-0047).<br/>• **Wiring:** calls `Orchestrator` methods directly and renders their typed results. Live views (deploy progress, logs) stream through SSE or HTMX polling. |
 | **GitHub OAuth client** | orchestrator runtime | Authorization-code + PKCE flow against github.com. Compares the login handle case-insensitively with `HOSTER_ADMIN_GITHUB` (ADR-0031). |
 | **:80 service** | Pingora | Answers `/.well-known/acme-challenge/<token>` from `ChallengeMap`. Redirects every other request to `https://` with 308. |
@@ -381,7 +382,8 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 ```
 process hoster
 ├── main thread ── #[tokio::main] orchestrator runtime (multi-thread, N workers)
-│                  supervisor, orchestrator, deploy tasks, ACME, poller, update checker, API, reconciler, notifier
+│                  supervisor, orchestrator, deploy tasks, ACME, poller, update checker, API, reconciler, notifier,
+│                  traffic recorder
 └── "pingora" std::thread ── pingora_core::server::Server::run(RunArgs{ custom watcher })
                  ├── Pingora "Server" runtime (1 thread): main loop, awaits our ShutdownSignalWatch
                  ├── ":80" service runtime  (ServerConf.threads or per-service override)
@@ -390,6 +392,9 @@ process hoster
 
 - The proxy's hot path never shares a runtime with orchestrator work. A slow image pull or a
   blocking podman call cannot add latency to requests, and the reverse is also true.
+- The proxy's threads count requests in lock-free atomics (`Traffic`); the traffic recorder on
+  the orchestrator runtime drains them once a minute into SQLite (§12, ADR-0062), so the hot path
+  never touches the store.
 - The Pingora thread is spawned **after** the initial state is loaded (§4). That way the first
   request already sees a populated `RouteTable` and `CertMap`.
 - `ServerConf` is built in code: `daemon = false`, no upgrade socket, explicit
@@ -494,7 +499,9 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
 7. Spawn the Pingora thread and wait for `ExecutionPhase::Running`. If it fails to bind :80/:443,
    exit non-zero so systemd shows the failure.
 8. Start the ACME task (renewals plus any missing certs, the admin host included), the poller, the
-   notifier (ADR-0058) and the Axum app (web UI + webhook).
+   notifier (ADR-0058), the traffic recorder (its retention sweep first, §12) and the Axum app
+   (web UI + webhook). Requests the proxy served before the recorder's first tick are in the
+   in-memory counters and land in that tick's minute.
 9. Notify systemd that the service is ready (`READY=1` with `Type=notify`).
 
 **Shutdown** (SIGTERM, or the graceful shutdown the System page requests after a self-update
@@ -504,7 +511,9 @@ switched `current`; `Restart=always` then starts the new binary, ADR-0052)
 2. Let in-flight deploy tasks reach a safe point (§5.4), then persist.
 3. Send `GracefulTerminate` to Pingora. Pingora stops accepting, waits `grace_period_seconds`,
    then shuts its runtimes down with `graceful_shutdown_timeout_seconds`.
-4. Join the Pingora thread and exit 0.
+4. Join the Pingora thread.
+5. Flush the traffic recorder once more, so the requests of the partial minute are written
+   (§12). Then exit 0.
 
 App containers keep running when hoster stops. They are owned by podman/conmon, not by the
 hoster process. While hoster is down there is no proxy, so the apps are unreachable for about 1–2 s (ADR-0034).
@@ -1076,3 +1085,32 @@ same card on each stack's overview, and the Events page at `/activity`.
   parameters: `kind` (a group: `deploys`, `containers`, `certificates`, `operator`), `severity`
   (the least severe shown), `stack` and the `before` cursor of the "older" link. It works without
   JavaScript. Unknown filter values are ignored, as on `/stacks`; a malformed cursor is a 400.
+
+## 12. Traffic history
+
+Traffic history (ADR-0062) is what the dashboard's range picker, charts and deltas and the stack
+pages' last-hour figures read. It replaces the since-start counters and the rolling latency
+window of ADR-0045; only the in-flight gauge stays live.
+
+- **Tables.** `traffic_minutes` (kept 24 h) and `traffic_hours` (kept 60 d) in `hoster.db`, one
+  shape: `start` (ms since the epoch, aligned to a UTC minute or hour), `host`, `prefix`,
+  `stack`, `service`, one count per `StatusClass`, `upstream_errors` and `latency` (the
+  versioned sparse histogram blob). Primary key `(start, host, prefix, stack, service)`, index
+  `(stack, start)`, **no foreign key** to stacks. Key columns are `NOT NULL` with `''` for none:
+  hoster's own routes have `stack = ''` and the reserved purpose as `service`; unrouted
+  requests are the series with every key column `''`. Only buckets with requests have rows.
+- **Recorder.** A task in `src/stats/`, spawned by the supervisor with the other background tasks
+  (§4 startup 8). Just after every wall-clock minute it drains `Traffic` (per-route deltas since
+  the previous drain) and, in one transaction, inserts the minute rows of the minute that ended
+  and adds them to their hour rows (histograms merged in Rust). A failed write is logged at
+  `warn` and retried with the next tick for up to 5 minutes, then dropped. It sweeps both tables
+  to their retention at startup and hourly, and flushes once more after the proxy has stopped
+  (§4 shutdown 5). Down-migrating drops both tables and the history.
+- **Reading.** Pages read flushed rows only, so they lag by up to a minute. A range picks its
+  table and bar plan: 1h = 60 x 1 min and 6h = 72 x 5 min from minutes; 24h = 24 x 1 h, 7d =
+  56 x 3 h and 30d = 30 x 1 d from hours, counted back from the newest flushed minute (or the
+  current hour), so no time zone is involved. req/min is the last 5 flushed minutes; the
+  previous period's totals are absent when it has no rows, and the page then shows no delta.
+  "All hosted traffic" is every stack's routes plus unrouted, without hoster's own routes. The
+  dashboard's `?range=` (default 24h) is carried by its overview stream, whose once-a-minute
+  refresh picks up each flush; the stack cards and the stack overview show a fixed last hour.
