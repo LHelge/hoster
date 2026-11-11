@@ -1017,6 +1017,11 @@ certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
 | Container | `hoster-<stack>-<service>-g<generation>` | `hoster.managed=true`, `hoster.stack`, `hoster.service`, `hoster.generation`, `hoster.image=<repo>`, `hoster.digest=<requested digest>`, `hoster.deployment=<id>` |
 | Volume | `hoster-<stack>-<volume>` (ADR-0030) | `hoster.managed=true`, `hoster.stack` |
 
+- **Name ownership (ADR-0063).** Names may contain `-`, so `<stack>-<service>` and
+  `<stack>-<volume>` can be equal across stacks (`a-b`/`c` and `a`/`b-c`). Apply rejects a stack
+  whose container or volume part equals another stack's, counting the labelled volumes kept from
+  removed stacks. A deploy also refuses to mount a volume labelled for another stack. Containers
+  are only ever found by labels, never by name.
 - **Service discovery.** Each container joins its stack network with the alias `<service>`, so
   `http://storage:9000` works inside the stack through netavark/aardvark-dns. During a deploy's
   overlap window, the alias resolves to both generations.
