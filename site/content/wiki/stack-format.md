@@ -128,6 +128,7 @@ name = "notes"       # required; stack name
 |---|---|---|---|
 | `image` | string | yes | Repository reference **without a tag** for CI-built images, e.g. `ghcr.io/acme/notes-api`, whose digest comes from the deploy. Third-party images may use `repo:tag`, `repo:tag@sha256:…` or `repo@sha256:…`. A tag without a digest is **resolved to a digest when the stack is applied**, stored in the stack revision and shown in the apply diff ([ADR-0025](https://github.com/LHelge/hoster/blob/main/docs/adr/0025-registry-credentials-and-image-references.md)). |
 | `track` | string | no | Tag the ghcr poller watches for this service, e.g. `"main"` or `"latest"`. Only for CI-built `ghcr.io` images. The poller deploys only when the tag's digest changes ([ADR-0043](https://github.com/LHelge/hoster/blob/main/docs/adr/0043-edge-triggered-poller.md)). |
+| `auto_update` | string | no | `"off"` (default), `"digest"`, `"patch"` or `"minor"`: whether hoster applies this image's updates by itself (§2.2.4, [ADR-0061](https://github.com/LHelge/hoster/blob/main/docs/adr/0061-third-party-image-updates.md)). Only for third-party images with a tag; `"patch"` and `"minor"` need a tag that reads as a version. Not part of the config hash, so changing it redeploys nothing. |
 | `command` | array of string | no | Overrides the image `CMD`. |
 | `entrypoint` | array of string | no | Overrides the image `ENTRYPOINT`. |
 | `env` | table string → string | no | Plain, non-secret environment variables. For a routed service with exactly one distinct container port, hoster adds `PORT=<that port>` unless `env` (or `secrets`) sets `PORT` itself ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). A service whose routes use two or more different container ports, or that has no routes, gets no `PORT`; set what it needs in `env`. The injected value is part of the service's config hash, so changing the route's `port` redeploys the service. |
@@ -343,6 +344,70 @@ CPU count or a `memory` above its total memory caps nothing, and applying warns 
 A change to a limit is part of the service's config hash (`memory` by bytes, `cpus` by the
 nano-CPUs podman gets), so it recreates the service's containers through a normal deploy. A
 service without limits keeps the hash it had before limits existed.
+
+## 2.2.4 Updates of third-party images ([ADR-0061](https://github.com/LHelge/hoster/blob/main/docs/adr/0061-third-party-image-updates.md))
+
+hoster checks every tagged third-party image for updates in the background, every 6 hours by
+default (Settings → Updates). It looks for two things:
+
+- **A moved tag:** the tag now points at a different digest. Floating tags such as `16`,
+  `8-alpine` or `latest` get their rebuilds and patch releases this way.
+- **A newer version:** the registry lists a higher version in the same **line**. A tag is a
+  version when it is an optional `v`, one to three numbers separated by `.`, and an optional
+  `-suffix`. Two tags are in the same line when they have the same `v` style, the same number of
+  parts and the same suffix: `16.4-alpine` → `16.6-alpine` is an update, but `17.0`,
+  `16.6-bookworm` and `16.4.1-alpine` are not. Pre-releases (a suffix with `rc`, `beta`,
+  `alpha`, `dev`, `nightly`, `preview` or `snapshot`) are never offered.
+
+The parts count by position: the first is the major, the second the minor and the third the
+patch. So `2.3.1` → `2.3.4` is a patch, `2.3.1` → `2.4.0` a minor and `2.3.1` → `3.0.0` a major.
+A tag with fewer parts gets the rest as moved tags: `16.4` → `16.5` is a minor, and `16.4`'s
+patch releases come as new digests of `16.4`.
+
+Available updates are shown on the stack page whatever the policy, majors marked as such, and one
+click opens the usual apply preview. `auto_update` decides what hoster applies **by itself**:
+
+| Value | Applies |
+|---|---|
+| `"off"` (default) | Nothing; updates are only shown. |
+| `"digest"` | Moved tags. |
+| `"patch"` | Moved tags and newer patch versions. On a tag with one or two parts this is the same as `"digest"`. |
+| `"minor"` | Moved tags and newer minor and patch versions. |
+
+A major is never applied automatically. Change the tag yourself, after reading the release notes
+(for a database, see [[third-party-images#4-6-updating-a-database-to-a-new-major-version|updating a
+database to a new major version]]).
+
+```toml
+[services.db]
+image = "docker.io/library/postgres:17"   # floating major: patch releases are new digests
+auto_update = "digest"
+
+[services.server]
+image = "ghcr.io/immich-app/immich-server:v2.3.1"
+auto_update = "minor"
+
+[services.ml]
+image = "ghcr.io/immich-app/immich-machine-learning:v2.3.1"
+auto_update = "minor"
+```
+
+**Services that share a release move together.** In a stack, services whose images have the same
+registry, namespace and tag form a group, like `server` and `ml` above. A new version is offered
+for a group only once every member's repository has it, and the group is applied under the
+strictest policy among its members: one member set to `"off"` keeps the whole group shown but not
+applied.
+
+**How it is applied.** An automatic update writes a new revision with the new tag, keeping the
+file's comments and formatting, and deploys it like any apply. Everything a check finds for one
+stack goes into one revision and one deployment. A stack that is already deploying is left for the
+next check. A target is tried once: if its deployment fails, or you roll back or edit the tag
+back, hoster leaves it alone until a newer one appears.
+
+**Risks.** hoster only sees what the registry shows. A moved tag may be a rebuild with other
+packages inside, and a minor version can still break your app if the image doesn't follow its
+own versioning. `"minor"` means trusting the image's maintainers; prefer `"patch"` or `"digest"`
+for anything holding data, and keep backups ([[backup]]).
 
 ## 2.3 Route
 

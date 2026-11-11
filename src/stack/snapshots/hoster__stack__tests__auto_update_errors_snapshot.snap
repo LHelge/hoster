@@ -1,0 +1,10 @@
+---
+source: src/stack/tests.rs
+expression: parse(source).unwrap_err().to_string()
+---
+invalid stack file (5 errors):
+  line 6, column 15: services.ci.auto_update: `auto_update = "digest"` is only for third-party images; CI-built ghcr.io images get their digest from the deploy (use `track` to follow a tag)
+  line 11, column 15: services.tracked.auto_update: `auto_update = "patch"` is only for third-party images; CI-built ghcr.io images get their digest from the deploy (use `track` to follow a tag)
+  line 15, column 15: services.digest-only.auto_update: `auto_update = "digest"` needs a tag to follow, and `docker.io/library/postgres@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` is pinned by digest only; write `repo:tag@sha256:…`
+  line 19, column 15: services.latest.auto_update: `auto_update = "minor"` needs a version tag such as `16.4` or `v2.3.1`, and `latest` is not one; use `"digest"` to follow `latest` to new digests
+  line 23, column 15: services.four-parts.auto_update: `auto_update = "patch"` needs a version tag such as `16.4` or `v2.3.1`, and `1.2.3.4` is not one; use `"digest"` to follow `1.2.3.4` to new digests

@@ -20,10 +20,11 @@ use super::dependency::Graph;
 use super::file::Overlap;
 use super::schema::Field;
 use super::{
-    ByteSize, ConfigFile, ContainerPath, Cpus, DEFAULT_DRAIN_TIMEOUT, DEFAULT_HEALTH_PATH,
-    DEFAULT_STOP_TIMEOUT, DeployAuth, Diagnostic, ExpectStatus, FieldPath, FileMode, FileOwner,
-    FileSource, HealthCheck, Host, ImageRef, Limits, Location, Name, NormalizedPrefix, ParsedStack,
-    Probe, Route, RouteTimeouts, SUPPORTED_VERSION, Service, Stack, StackError, UpdateStrategy,
+    AutoUpdate, ByteSize, ConfigFile, ContainerPath, Cpus, DEFAULT_DRAIN_TIMEOUT,
+    DEFAULT_HEALTH_PATH, DEFAULT_STOP_TIMEOUT, DeployAuth, Diagnostic, ExpectStatus, FieldPath,
+    FileMode, FileOwner, FileSource, HealthCheck, Host, ImageRef, Limits, Location, Name,
+    NormalizedPrefix, ParsedStack, Probe, Route, RouteTimeouts, SUPPORTED_VERSION, Service, Stack,
+    StackError, TagVersion, UpdateStrategy,
 };
 use crate::health;
 
@@ -119,6 +120,14 @@ struct RawService {
     #[serde(default)]
     #[schemars(schema_with = "Field::tag")]
     track: Option<Str>,
+    /// Whether hoster applies this image's updates by itself (ADR-0061): `"off"` only shows
+    /// them, `"digest"` follows the tag to new digests, `"patch"` and `"minor"` also move to
+    /// newer version tags within those bounds. Majors are never applied. Only for third-party
+    /// images with a tag; `"patch"` and `"minor"` need a tag that reads as a version, e.g.
+    /// `"16.4"` or `"v2.3.1"`.
+    #[serde(default)]
+    #[schemars(with = "AutoUpdate", extend("default" = "off"))]
+    auto_update: Option<Spanned<AutoUpdate>>,
     /// Overrides the image's `CMD`.
     #[serde(default)]
     #[schemars(schema_with = "Field::strings")]
@@ -994,6 +1003,22 @@ impl RawService {
             }
         };
 
+        let auto_update = match &self.auto_update {
+            None => AutoUpdate::Off,
+            Some(policy) => {
+                let value = *policy.get_ref();
+                let reason = image
+                    .as_ref()
+                    .filter(|_| value != AutoUpdate::Off)
+                    .and_then(|image| Self::auto_update_conflict(image, value));
+                if let Some(reason) = reason {
+                    v.error(&path.key("auto_update"), policy.span(), reason);
+                    valid = false;
+                }
+                value
+            }
+        };
+
         let mut env = BTreeMap::new();
         for (key, value) in self.env {
             if !Self::is_env_name(&key) {
@@ -1198,6 +1223,7 @@ impl RawService {
             image: image?,
             depends_on,
             track,
+            auto_update,
             command: self.command,
             entrypoint: self.entrypoint,
             env,
@@ -1215,6 +1241,29 @@ impl RawService {
             limits: limits?,
             routes,
         })
+    }
+
+    /// Why `image` cannot use `policy` (ADR-0061 §4), if it cannot.
+    fn auto_update_conflict(image: &ImageRef, policy: AutoUpdate) -> Option<String> {
+        if image.is_ci_built() {
+            return Some(format!(
+                "`auto_update = \"{policy}\"` is only for third-party images; CI-built ghcr.io \
+                 images get their digest from the deploy (use `track` to follow a tag)"
+            ));
+        }
+        let Some(tag) = image.tag() else {
+            return Some(format!(
+                "`auto_update = \"{policy}\"` needs a tag to follow, and `{image}` is pinned by \
+                 digest only; write `repo:tag@sha256:…`"
+            ));
+        };
+        if policy.follows_versions() && tag.parse::<TagVersion>().is_err() {
+            return Some(format!(
+                "`auto_update = \"{policy}\"` needs a version tag such as `16.4` or `v2.3.1`, and \
+                 `{tag}` is not one; use `\"digest\"` to follow `{tag}` to new digests"
+            ));
+        }
+        None
     }
 
     /// The `tmpfs` table (ADR-0059 §1): each path a mount path outside `/proc`, `/sys` and

@@ -160,6 +160,7 @@ fn service(routes: Vec<Route>) -> Service {
         image: "ghcr.io/acme/app".parse().unwrap(),
         depends_on: Default::default(),
         track: None,
+        auto_update: Default::default(),
         command: None,
         entrypoint: None,
         env: BTreeMap::new(),

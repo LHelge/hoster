@@ -1,15 +1,16 @@
 ---
 id: tsg
 title: "Stack format: `auto_update` policy"
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:22:16.239960436Z"
-updated: "2026-11-09T17:22:16.239960436Z"
+updated: "2026-11-11T06:31:23.173563898Z"
 tags:
   - stack
 depends_on:
   - "7ah"
 parent: "6z3"
+attempts: 1
 ---
 
 ## Summary
