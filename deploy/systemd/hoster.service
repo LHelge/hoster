@@ -56,6 +56,9 @@ TimeoutStopSec=45s
 # hoster is one process; app containers belong to podman/conmon in podman's own cgroup, so
 # stopping hoster never stops them (ADR-0034).
 KillMode=mixed
+# No LimitNOFILE= yet: hoster runs with the default soft limit of 1024 open files, which is
+# also the only bound on client connections to the proxy (docs/architecture.md section 9.1,
+# OQ-39). Raising it alone lets a connection flood use memory instead.
 
 # ---- Hardening (best-effort, ADR-0023) ----
 # A user manager has no privileges, so only directives it can apply as the hoster user work

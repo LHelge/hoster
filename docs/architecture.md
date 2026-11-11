@@ -1020,6 +1020,56 @@ certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
 | Apps → host | Rootless user namespaces. No socket, no privileged mode, own network per stack. The admin app listens on a 0600 Unix socket, so containers cannot reach it even if they can reach host loopback (ADR-0031). Optional per-service `memory`, `pids` and `cpus` limits on delegated cgroup controllers keep one container from starving the host, hoster and the proxy; without them a container has only podman's 2048-pid cap (ADR-0059, §8). |
 | Secrets at rest | Account key and cert keys are `0600`. App secrets are encrypted with XChaCha20-Poly1305 in SQLite, with the key in a separate 0600 file or a user systemd credential (ADR-0029). Once revealed, they are plaintext in the hoster user's podman storage: env secrets in the container config, and secret files in the container's layer (ADR-0057). |
 
+### 9.1 Client limits at the edge
+
+Nothing sits in front of the embedded proxy (ADR-0008), so what a hostile client can hold open or
+make hoster buffer is decided here. Every row was observed against the real proxy on 2026-11-11
+(pingora 0.9.1, h2 0.4.20) and is pinned by a test in `src/proxy/tests/limits.rs`, or in
+`tests/supervisor.rs` for the last row, so an upgrade that changes a bound fails CI. "Both" means
+`:443` and `:80`.
+
+| Client behaviour | Listener | What happens | Bounded by |
+|---|---|---|---|
+| Connects and sends nothing | `:443` | Closed after 60 s | Pingora: TLS handshake timeout, fixed |
+| Stops in the middle of the TLS handshake | `:443` | Closed after 60 s | Pingora, as above |
+| Finishes TLS (HTTP/1.1) or connects to `:80`, sends no request | both | Closed after 60 s | Pingora: 60 s to start a connection's first request, fixed |
+| Sends part of a request header, then nothing | both | Closed after 60 s, no response | Pingora: 60 s per read of the header |
+| Sends a request header a few bytes at a time (slowloris) | both | Stays open; each read restarts the 60 s | **Nothing in total** (OQ-39). The header is at most 1 MiB |
+| Kept-alive HTTP/1.1 connection, idle or with half a next request | both | Closed after 60 s | hoster: `DownstreamLimits::keepalive`. Pingora's default is to wait forever, and a `Keep-Alive: timeout=` from the client is ignored |
+| HTTP/2 connection with no stream | `:443` | Closed after 60 s, without GOAWAY | hoster: `DownstreamLimits::h2_idle`. Pingora's default is never |
+| Negotiates `h2` and never sends the connection preface | `:443` | Stays open | **Nothing** (OQ-39): Pingora has no timeout for the HTTP/2 handshake |
+| Request body stops arriving | `:443` | HTTP/1.1: 400 or 504 after the route's `read` timeout, connection closed. HTTP/2: 504 | hoster: the client read timeout is the route's `read` (HTTP/1.1); the upstream's `read` timeout ends it on HTTP/2, where Pingora has no body timeout |
+| Request body arrives a byte at a time | `:443` | Stays open and in flight on its upstream | **Nothing in total** (OQ-39). A deploy's drain is still bounded by `drain_timeout` |
+| Stops reading a response | `:443` | Dropped after the route's `write` timeout (HTTP/2: `RST_STREAM CANCEL`); the request leaves the upstream's in-flight count | hoster: the client write timeout is the route's `write`. Pingora's default is never, which held the in-flight count until the drain timeout |
+| Request target over 65 535 bytes | both | 400 | `http` crate URI limit |
+| Request head over 1 MiB, or more than 256 header fields | both | 400 | Pingora (`MAX_HEADER_SIZE`, `MAX_HEADERS`). Below that the upstream's own limits apply |
+| More than 100 concurrent HTTP/2 streams | `:443` | The extra streams get `RST_STREAM REFUSED_STREAM` | Pingora's h2 settings |
+| HTTP/2 rapid reset (CVE-2023-44487) | `:443` | `GOAWAY ENHANCE_YOUR_CALM` (`too_many_resets`), connection closed, nothing left in flight | h2 |
+| HTTP/2 CONTINUATION flood | `:443` | `GOAWAY ENHANCE_YOUR_CALM` (`too_many_continuations`) before 1 MiB is read | h2 |
+| HTTP/2 header list over 64 KiB | `:443` | 431 on that stream; the connection stays | Pingora's h2 settings |
+| HTTP/2 SETTINGS, PING or PRIORITY flood | `:443` | SETTINGS and PING are each answered; when the client does not read, the proxy stops reading. No memory growth | h2 and TCP backpressure |
+| Many connections, from one address or many | both | All accepted, up to the process's file-descriptor limit. At the limit (`EMFILE`) hoster keeps running but accepts nothing on `:80`, `:443` **or the admin socket**, and file and socket work elsewhere in the process fails (the ACME account file in the test). It recovers by itself when connections close | **Nothing** but `RLIMIT_NOFILE` (OQ-39) |
+
+Notes:
+
+- **The client timeouts follow the route** (`DownstreamLimits::admit`). A route's `read` and
+  `write` timeouts (ADR-0011) bound a stall on the client's side as well as on the upstream's, so
+  a stream the route allows (the admin UI's event streams, a WebSocket on a route with long
+  timeouts) is not cut from the client's side first. Before this, Pingora's fixed 60 s client
+  read timeout closed a quiet WebSocket whatever the route said. Requests hoster answers itself
+  use the proxy-wide defaults.
+- **A timeout is per read or write, not per request.** Pingora offers no total time for a header
+  or a body, which is why the slow-but-moving rows are unbounded.
+- **File descriptors.** The unit does not set `LimitNOFILE=`, so hoster runs with systemd's
+  default soft limit of 1024. A proxied request needs two descriptors and an idle client
+  connection one, so about a thousand idle connections, re-opened every 60 s, reach the last
+  row. An idle TLS connection costs the process a few tens of KiB (under 80 KiB measured with
+  the test client in the same process), so raising the limit alone trades descriptor exhaustion,
+  which hoster survives, for memory exhaustion, which it does not. Both the limit and a cap on
+  connections are part of OQ-39.
+- Pingora's own 400 for a request it cannot parse carries `Server: Pingora`; hoster's error pages
+  (ADR-0032) carry no `Server` header.
+
 ## 10. Crate and module layout (proposal)
 
 A single binary crate to start, with modules that can later become workspace crates:

@@ -13,8 +13,10 @@ use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorType, Result};
 
+use super::DownstreamLimits;
 use super::router::{AccessRecord, ErrorPage, Forwarding};
 use crate::acme::ChallengeMap;
+use crate::config::Timeouts;
 use crate::routing::RouteTable;
 
 /// Where HTTP-01 challenges are fetched from (RFC 8555 §8.3).
@@ -24,13 +26,26 @@ const CHALLENGE_PREFIX: &str = "/.well-known/acme-challenge/";
 pub struct ChallengeOrRedirect {
     routes: Arc<ArcSwap<RouteTable>>,
     challenges: ChallengeMap,
+    /// How long a client may stall reading an answer.
+    timeouts: Timeouts,
+    limits: DownstreamLimits,
 }
 
 impl ChallengeOrRedirect {
     /// Redirects the hosts in `routes` and answers the tokens in `challenges`, both as they are
-    /// at the time of each request.
-    pub fn new(routes: Arc<ArcSwap<RouteTable>>, challenges: ChallengeMap) -> Self {
-        Self { routes, challenges }
+    /// at the time of each request, to clients held to `limits` and `timeouts`.
+    pub fn new(
+        routes: Arc<ArcSwap<RouteTable>>,
+        challenges: ChallengeMap,
+        timeouts: Timeouts,
+        limits: DownstreamLimits,
+    ) -> Self {
+        Self {
+            routes,
+            challenges,
+            timeouts,
+            limits,
+        }
     }
 }
 
@@ -44,6 +59,7 @@ impl ProxyHttp for ChallengeOrRedirect {
     }
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+        self.limits.admit(session, self.timeouts);
         let answer = PlainAnswer::new(session.req_header(), &self.routes.load(), &self.challenges);
         answer.send(session).await;
         Ok(true)

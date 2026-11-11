@@ -468,3 +468,58 @@ headers.
 **Recommendation.** B now. It matches the stated rule that incoming values are untrusted, and a
 single-VPS install is normally reached directly. D when someone actually runs hoster behind a
 CDN. The decision amends ADR-0010 and architecture §6.3.
+
+## OQ-39: Connection caps and slow-client policy at the edge
+
+**Problem.** The survey of the embedded proxy against hostile clients (task `95p`, architecture
+§9.1) found bounds for most cases and set the timeouts whose value was obvious: 60 s for idle
+keep-alive and HTTP/2 connections, and client read and write timeouts that follow the route's.
+Four cases are left with no bound, and closing each of them is a policy choice:
+
+1. **Connections are not capped**, per address or in total. hoster runs with systemd's default
+   soft `RLIMIT_NOFILE` of 1024 (the unit sets no `LimitNOFILE=`). About a thousand idle
+   connections, re-opened every 60 s by one client, exhaust it. hoster survives `EMFILE` and
+   recovers when the connections close, but while it lasts it accepts nothing on `:80`, `:443`
+   or the admin socket, and whatever else needs a descriptor fails (SQLite, the podman socket,
+   ACME files, upstream connections). So one cheap client can stop ingress, the admin UI and
+   deploys together.
+2. **A slow-but-moving client is never cut.** Pingora's timeouts are per read or write. A request
+   header or body sent a byte every few seconds lasts as long as the client likes; a body also
+   keeps its request in flight on the upstream (a drain is still bounded by `drain_timeout`).
+3. **An `h2` connection that never sends the preface is never closed.** Pingora 0.9.1 has no
+   timeout around the HTTP/2 handshake, and `h2_idle_timeout` starts after it.
+4. **Requests per connection are not limited** (`keepalive_request_limit`). No harm was observed;
+   nginx caps it at 1000 to free per-connection memory.
+
+Each connection in 2 and 3 costs one descriptor and a few tens of KiB, so they are the same
+problem as 1 unless connections are capped.
+
+**Options.**
+
+- **A. Leave it.** The 1024-descriptor default is an accidental cap that also starves hoster
+  itself. No work.
+- **B. A total connection cap below the descriptor limit, and a higher `LimitNOFILE=`.** Pingora
+  has a `connection_filter` feature (a `ConnectionFilter` asked on every accept) that can refuse
+  beyond a count. Set `LimitNOFILE=` in the unit (for example 16384) and cap client connections
+  well below it (for example half), so hoster always has descriptors left for upstream
+  connections, the admin socket, SQLite and podman. A flood then makes the proxy refuse new
+  clients but leaves the admin UI and deploys working. Worst-case memory is the cap times the
+  per-connection cost (8192 × 80 KiB ≈ 640 MiB), so the cap has to fit the smallest supported
+  VPS; that is the number to choose.
+- **C. B plus a per-address cap** in the same filter (for example 100 connections per IPv4
+  address or IPv6 /64). Stops a single client from using the whole total. It costs a map of
+  counters, and it punishes many users behind one NAT if set too low.
+- **D. Request rate limiting** per address (`pingora-limits`). A different problem (request
+  floods to apps, not held connections), with more policy: which routes, which limits, what
+  answer. It can be decided later on its own.
+- **E. A minimum transfer rate.** `Session::set_min_send_rate` exists for HTTP/1.1 responses
+  only. For request headers and bodies hoster would have to time them itself: a body in a
+  `request_body_filter`, a header not at all (no hook runs before the header is complete). It
+  breaks legitimately slow clients (large uploads on bad links) unless set per route.
+- **F. Report 3 upstream** and wait for a fix, since no setting reaches it.
+
+**Recommendation.** B and C together, with the numbers as constants first and `hoster.toml` keys
+only if somebody needs them, and F. They turn the worst case from "everything stops" into "new
+clients are refused", which is what a cap is for. Leave D for a separate decision. Skip E: with
+connections capped, a slow client costs one slot and no more, and the per-route rate is hard to
+get right. Leave 4 unset.
