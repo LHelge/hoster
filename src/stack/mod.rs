@@ -244,7 +244,18 @@ impl fmt::Display for SecretUse<'_> {
 
 /// Whether hoster applies a third-party image's updates by itself (ADR-0061 §4). Updates are
 /// shown in the UI whatever the policy; majors are never applied automatically.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum AutoUpdate {
     /// Only show available updates.
@@ -263,6 +274,17 @@ impl AutoUpdate {
     /// [`TagVersion`].
     pub fn follows_versions(self) -> bool {
         matches!(self, Self::Patch | Self::Minor)
+    }
+
+    /// Whether the policy applies an update of `kind` by itself. A major never is.
+    pub fn allows(self, kind: crate::store::UpdateKind) -> bool {
+        use crate::store::UpdateKind as K;
+        match kind {
+            K::Digest => self >= Self::Digest,
+            K::Patch => self >= Self::Patch,
+            K::Minor => self >= Self::Minor,
+            K::Major => false,
+        }
     }
 }
 

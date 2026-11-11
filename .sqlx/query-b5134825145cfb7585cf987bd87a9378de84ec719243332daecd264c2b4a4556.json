@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM auto_update_attempts WHERE stack = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b5134825145cfb7585cf987bd87a9378de84ec719243332daecd264c2b4a4556"
+}

@@ -31,6 +31,7 @@ struct Targets {
     events: Mutex<Vec<NewEvent>>,
     announced: Mutex<Vec<String>>,
     passes: Mutex<u32>,
+    auto_updates: Mutex<u32>,
 }
 
 #[async_trait]
@@ -46,6 +47,11 @@ impl UpdateTargets for Arc<Targets> {
 
     fn announce(&self, stack: &str) {
         self.announced.lock().unwrap().push(stack.to_owned());
+    }
+
+    async fn auto_update(&self) -> anyhow::Result<()> {
+        *self.auto_updates.lock().unwrap() += 1;
+        Ok(())
     }
 }
 
@@ -222,6 +228,8 @@ async fn a_moved_tag_is_a_digest_update_found_once() {
         ]
     );
     assert_eq!(*f.targets.announced.lock().unwrap(), ["db"]);
+    // Each pass ends by applying what the policies allow.
+    assert_eq!(*f.targets.auto_updates.lock().unwrap(), 1);
 
     // Found again: no new event, and the first-seen time stands.
     f.checker.check().await.unwrap();

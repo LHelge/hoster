@@ -40,7 +40,9 @@ until you ask:
 - Applying the file again (for example after changing `postgres:17` to `postgres:17.2`) resolves
   its tags as well.
 - `image = "docker.io/library/redis:7@sha256:…"` pins the digest in the file itself, and the tag
-  is then only a label. Updating it means editing the file.
+  says which line it follows. An update rewrites both.
+- hoster also checks every tag in the background, every 6 hours by default, and lists moved
+  tags and newer versions on the stack page, where **Update** opens the same preview (§1.4).
 
 Pick the tag for how much should change when you re-resolve: `postgres:17` takes minor
 releases, `postgres:17.2` only rebuilds of that release, and `latest` anything, including a new
@@ -59,6 +61,25 @@ free Docker account raises the limit:
 
 Private images on any registry work the same way: one credential per registry host (`ghcr.io`,
 `quay.io`, `registry.example.com`). It serves both resolving tags and podman's pulls.
+
+## 1.4 Choosing an `auto_update` policy
+
+Updates are only shown unless a service sets `auto_update` ([[stack-format#2-2-4-updates-of-third-party-images|stack
+format, §2.2.4]]). Then hoster applies what the policy allows by itself, all of a stack's updates
+in one new revision and one deployment, recorded in the history as `auto-update`. A failed
+auto-update mails like any failed deploy, and its target is not tried again until a newer one
+appears; a rollback or an edit back to the old tag stays put.
+
+| Service | Policy | Why |
+|---|---|---|
+| A database (`postgres`, `mariadb`, `redis` holding data) | `"off"`, or `"digest"` on a major tag such as `postgres:17` | Patch releases of a major are safe to take as new digests of its tag. A new minor can still change behaviour, and a major needs its own procedure (§4.6). Apply those by hand after reading the release notes and taking a backup ([[backup]]). |
+| An app that versions carefully (immich, gitea, vaultwarden) | `"patch"`, or `"minor"` if you follow its releases | Patches fix bugs. A minor may run migrations on its database; `"minor"` means trusting the maintainers' versioning. |
+| A floating tag (`latest`, `stable`, `alpine`) | `"digest"` or `"off"` | The tag is the only signal. `"digest"` takes whatever the tag points at next, including a new major behind `latest`. |
+| Services that share a release (immich's server and machine learning) | The same policy on each | They move together, under the strictest policy among them. One left `"off"` holds the others. |
+
+hoster never applies a major version by itself. Pinning a tag that names an exact release
+(`v2.3.1`, `16.4`) and setting `"patch"` or `"minor"` is the most predictable choice: the stack
+file always says which version runs, and the diff of each auto-update shows the tag change.
 
 # 2. Translating a compose file
 

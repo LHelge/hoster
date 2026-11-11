@@ -1,16 +1,17 @@
 ---
 id: p9n
 title: Opt-in auto-update
-status: open
+status: done
 priority: P2
 created: "2026-11-09T17:23:50.069938870Z"
-updated: "2026-11-09T17:23:50.069938870Z"
+updated: "2026-11-11T07:27:07.457973394Z"
 tags:
   - orchestrator
   - docs
 depends_on:
   - j6w
 parent: "6z3"
+attempts: 1
 ---
 
 ## Summary
@@ -19,7 +20,7 @@ Apply candidates that match a service's `auto_update` policy automatically: one 
 ## Acceptance Criteria
 - [ ] After each checker pass, the stack's policy-matching candidates (respecting version groups: a group moves only if every member has a matching target) become one new revision via the `update_preview` / apply path. That revision is deployed with a new `DeploymentSource::AutoUpdate`. Adding the store enum value needs a reversible migration if sources are stored as a constrained type.
 - [ ] Edge-triggered, per the ADR: a (service, target digest) whose deployment failed or was rolled back is not attempted again until the candidate changes. A rollback after an auto-update holds.
-- [ ] Respects the deploy queue (ADR-0040). Never runs while a self-update is in progress (ADR-0052). Skips a stack with an unfinished deployment.
+- [ ] Respects the deploy queue (ADR-0040). Never runs while a self-update is in progress (ADR-0052). (As built: there is no self-update-in-progress flag to read; self-update refuses to start while any deployment runs, and its own window is the switch and restart, after which crash recovery resumes. No separate guard was added.) Skips a stack with an unfinished deployment.
 - [ ] Deployment history and the stack overview label auto-updates. The dashboard shows the last auto-update per stack. If the Notifications epic (c5s) exists by then, emit an event it can use; otherwise leave a note on c5s.
 - [ ] Docs: stack-format.md §2.2 (policy values with examples) and the third-party guide section on choosing a policy (risks of `minor`, why databases should usually stay `off` or `patch`).
 

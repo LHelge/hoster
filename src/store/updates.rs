@@ -6,7 +6,7 @@
 //! [`UpdateKind`]. A check of another image, tag or digest than the stored one (the active
 //! revision moved on) replaces the candidates found for the old one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
@@ -174,7 +174,67 @@ pub struct ServiceUpdates {
     pub candidates: Vec<StoredCandidate>,
 }
 
+/// The target an auto-update last tried for a service (ADR-0061 §10): a version's tag, or a
+/// moved tag with its new digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attempt {
+    pub tag: String,
+    pub digest: Option<Digest>,
+}
+
 impl Store {
+    /// The target last tried for each service of `stack` by auto-update, by service.
+    pub async fn auto_update_attempts(&self, stack: &str) -> Result<BTreeMap<String, Attempt>> {
+        let rows = sqlx::query!(
+            "SELECT service, tag, digest FROM auto_update_attempts WHERE stack = ?",
+            stack,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let digest = row.digest.map(|d| d.parse::<Digest>()).transpose().ok()?;
+                Some((
+                    row.service,
+                    Attempt {
+                        tag: row.tag,
+                        digest,
+                    },
+                ))
+            })
+            .collect())
+    }
+
+    /// Records that auto-update tries `attempts` (service → target) for `stack` now.
+    pub async fn record_auto_update_attempts(
+        &self,
+        stack: &str,
+        attempts: &BTreeMap<String, Attempt>,
+    ) -> Result<()> {
+        let now = Timestamp::now();
+        let mut tx = self.begin().await?;
+        for (service, attempt) in attempts {
+            let digest = attempt.digest.as_ref().map(AsRef::<str>::as_ref);
+            sqlx::query!(
+                "INSERT INTO auto_update_attempts (stack, service, tag, digest, attempted_at)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT (stack, service) DO UPDATE SET
+                     tag = excluded.tag, digest = excluded.digest,
+                     attempted_at = excluded.attempted_at",
+                stack,
+                service,
+                attempt.tag,
+                digest,
+                now,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// The update checker's settings: the defaults when none are stored, or when the stored
     /// row no longer validates (reported, so the checker keeps running).
     pub async fn update_settings(&self) -> Result<UpdateSettings> {
