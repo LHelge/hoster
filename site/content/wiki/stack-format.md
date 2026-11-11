@@ -419,6 +419,11 @@ for anything holding data, and keep backups ([[backup]]).
 | `port` | integer | yes | — | Container port, 1–65535, i.e. the port the app listens on inside the container. hoster allocates the host port and binds it on `127.0.0.1`; the app never sees it. **The app must bind `0.0.0.0` or `::`, not `127.0.0.1`:** rootless port forwarding cannot reach a loopback-bound listener. Single-port services also receive it as `PORT` (see `env`). Host-level redirects (`www` → apex) are not expressible in v1 ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)); declare both hosts as routes or redirect in the app. |
 | `timeouts` | table | no | hoster defaults | `connect`, `read`, `write`, `idle` as durations ([ADR-0011](https://github.com/LHelge/hoster/blob/main/docs/adr/0011-streaming-bodies-and-per-route-timeouts.md)). `read` and `write` also bound how long a client may stall while sending a request body or reading a response, so a route with long-lived streams (WebSockets, server-sent events) raises them. |
 
+Every routed host is served over HTTPS only, and port 80 redirects to it. hoster does not add
+`Strict-Transport-Security` to an app's responses: whether a host wants HSTS, and for which
+subdomains, is the app's choice, and the app can send the header itself. (hoster's own admin
+host sends it.)
+
 **Validation (a deploy or apply fails as a whole):**
 
 - Duplicate (host, prefix) inside the stack → error.
