@@ -1,6 +1,6 @@
 //! The facts about the machine the System page shows: hostname, OS, kernel, architecture and
 //! CPUs, memory, the container runtime and its cgroups, hoster's public addresses, the data
-//! directory and the host's uptime.
+//! directory and the host's uptime, and how many of its open files hoster uses (ADR-0065).
 //!
 //! [`HostFacts`] reads them when the page renders. [`LocalHost`] reads them from the files the
 //! kernel and the distribution publish (`/proc/sys/kernel/hostname`, `/etc/os-release`,
@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use crate::acme::DnsCheck;
 use crate::machine::{Machine, Memory};
+use crate::proxy::{Admission, FileUse};
 use crate::runtime::EngineInfo;
 use crate::web::containers::ContainerSource;
 use crate::web::ui::Uptime;
@@ -52,6 +53,8 @@ pub struct Facts {
     pub data_dir: Option<PathBuf>,
     /// How long the host has been up.
     pub uptime: Option<Duration>,
+    /// hoster's own descriptors and the client connections refused at the cap.
+    pub files: Option<FileUse>,
 }
 
 /// One row of the host card: a name and its value, or `None` for "unknown".
@@ -98,6 +101,15 @@ impl Facts {
             public_source: Some("the A/AAAA records of admin.example.com".into()),
             data_dir: Some("/home/hoster/.local/state/hoster".into()),
             uptime: Some(Duration::from_secs(41 * 86_400 + 7 * 3_600)),
+            files: Some(FileUse {
+                open: Some(214),
+                limit: crate::proxy::FileLimit {
+                    soft: Some(16_384),
+                    hard: Some(524_288),
+                },
+                cap: 4096,
+                refused: 0,
+            }),
         }
     }
 
@@ -133,7 +145,30 @@ impl Facts {
                 self.data_dir.as_ref().map(|d| d.display().to_string()),
             ),
             Fact::new("uptime", self.uptime.map(|up| Uptime(up).to_string())),
+            Fact {
+                note: self.files.map(Self::cap),
+                ..Fact::new("open files", self.files.and_then(Self::open_files))
+            },
+            Fact::new(
+                "refused",
+                self.files
+                    .map(|files| format!("{} client connections since start", files.refused)),
+            ),
         ]
+    }
+
+    /// `214 of 16384`.
+    fn open_files(files: FileUse) -> Option<String> {
+        let open = files.open?;
+        Some(match files.limit.soft {
+            Some(limit) => format!("{open} of {limit}"),
+            None => open.to_string(),
+        })
+    }
+
+    /// `new clients refused from 4096`.
+    fn cap(files: FileUse) -> String {
+        format!("new clients refused from {}", files.cap)
     }
 
     /// `podman 5.4.2 · rootless`.
@@ -179,6 +214,8 @@ pub struct LocalHost {
     runtime: Arc<dyn ContainerSource>,
     dns: DnsCheck,
     data_dir: PathBuf,
+    /// The proxy's connection cap, whose descriptor use is shown; `None` shows none.
+    admission: Option<Admission>,
 }
 
 impl LocalHost {
@@ -194,7 +231,14 @@ impl LocalHost {
             runtime,
             dns,
             data_dir,
+            admission: None,
         }
+    }
+
+    /// The same host, showing the descriptor use of `admission`.
+    pub fn with_admission(mut self, admission: Admission) -> Self {
+        self.admission = Some(admission);
+        self
     }
 
     /// The same host with its `/etc`, `/proc` and `/sys` read under `root` (tests).
@@ -270,6 +314,7 @@ impl HostFacts for LocalHost {
             public,
             data_dir: Some(self.data_dir.clone()),
             uptime: self.uptime(),
+            files: self.admission.as_ref().map(Admission::usage),
         }
     }
 }
@@ -356,6 +401,7 @@ mod tests {
             dns(&["203.0.113.42", "2001:db8::42"]),
             "/home/hoster/.local/state/hoster".into(),
         )
+        .with_admission(Admission::new(4096))
         .under(root);
         let facts = host.read().await;
         assert_eq!(facts.hostname.as_deref(), Some("srv-01"));
@@ -381,6 +427,18 @@ mod tests {
         assert_eq!(value("public ip"), "203.0.113.42 · 2001:db8::42");
         assert_eq!(value("data dir"), "/home/hoster/.local/state/hoster");
         assert_eq!(value("uptime"), "41d 6h");
+        // hoster's own descriptors, from the real process.
+        let soft = crate::proxy::FileLimit::current().soft.unwrap();
+        assert!(
+            value("open files").ends_with(&format!(" of {soft}")),
+            "{rows:?}"
+        );
+        assert_eq!(value("refused"), "0 client connections since start");
+        let files = facts.rows().into_iter().find(|f| f.name == "open files");
+        assert_eq!(
+            files.unwrap().note.as_deref(),
+            Some("new clients refused from 4096")
+        );
         let public = facts.rows().into_iter().find(|f| f.name == "public ip");
         assert_eq!(
             public.unwrap().note.as_deref(),
@@ -423,7 +481,10 @@ mod tests {
                 "runtime",
                 "cgroups",
                 "public ip",
-                "uptime"
+                "uptime",
+                // No proxy to report on.
+                "open files",
+                "refused",
             ])
         );
     }

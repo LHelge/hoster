@@ -506,6 +506,8 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
 **Startup**
 
 1. Parse config (`~/.config/hoster/hoster.toml` + `HOSTER_*` env, ADR-0024) and initialize tracing.
+   Raise the soft `RLIMIT_NOFILE` to 16384 and log it with the connection cap it gives (§9.1,
+   ADR-0065).
 2. Open the SQLite state store (sqlx pool, WAL mode) and run the embedded `sqlx::migrate!()` migrations.
    Every migration is a reversible `.up.sql` / `.down.sql` pair (`sqlx migrate add -r`), so a newer
    binary can undo the schema for an older one (ADR-0052).
@@ -1069,8 +1071,8 @@ certs/<host>/meta.json     # not_after, issued_at, CA directory, ARI cert id
 
 Nothing sits in front of the embedded proxy (ADR-0008), so what a hostile client can hold open or
 make hoster buffer is decided here. Every row was observed against the real proxy on 2026-11-11
-(pingora 0.9.1, h2 0.4.20) and is pinned by a test in `src/proxy/tests/limits.rs`, or in
-`tests/supervisor.rs` for the last row, so an upgrade that changes a bound fails CI. "Both" means
+(pingora 0.9.1, h2 0.4.20) and is pinned by a test in `src/proxy/tests/limits.rs`, and the last row in
+`tests/supervisor.rs` too, so an upgrade that changes a bound fails CI. "Both" means
 `:443` and `:80`.
 
 | Client behaviour | Listener | What happens | Bounded by |
@@ -1079,12 +1081,12 @@ make hoster buffer is decided here. Every row was observed against the real prox
 | Stops in the middle of the TLS handshake | `:443` | Closed after 60 s | Pingora, as above |
 | Finishes TLS (HTTP/1.1) or connects to `:80`, sends no request | both | Closed after 60 s | Pingora: 60 s to start a connection's first request, fixed |
 | Sends part of a request header, then nothing | both | Closed after 60 s, no response | Pingora: 60 s per read of the header |
-| Sends a request header a few bytes at a time (slowloris) | both | Stays open; each read restarts the 60 s | **Nothing in total** (OQ-39). The header is at most 1 MiB |
+| Sends a request header a few bytes at a time (slowloris) | both | Stays open; each read restarts the 60 s | **Nothing in total** but the connection cap below, under which it holds one slot. The header is at most 1 MiB |
 | Kept-alive HTTP/1.1 connection, idle or with half a next request | both | Closed after 60 s | hoster: `DownstreamLimits::keepalive`. Pingora's default is to wait forever, and a `Keep-Alive: timeout=` from the client is ignored |
 | HTTP/2 connection with no stream | `:443` | Closed after 60 s, without GOAWAY | hoster: `DownstreamLimits::h2_idle`. Pingora's default is never |
-| Negotiates `h2` and never sends the connection preface | `:443` | Stays open | **Nothing** (OQ-39): Pingora has no timeout for the HTTP/2 handshake |
+| Negotiates `h2` and never sends the connection preface | `:443` | Stays open | Only the connection cap below, under which it holds one slot: Pingora has no timeout for the HTTP/2 handshake (ADR-0065) |
 | Request body stops arriving | `:443` | HTTP/1.1: 400 or 504 after the route's `read` timeout, connection closed. HTTP/2: 504 | hoster: the client read timeout is the route's `read` (HTTP/1.1); the upstream's `read` timeout ends it on HTTP/2, where Pingora has no body timeout |
-| Request body arrives a byte at a time | `:443` | Stays open and in flight on its upstream | **Nothing in total** (OQ-39). A deploy's drain is still bounded by `drain_timeout` |
+| Request body arrives a byte at a time | `:443` | Stays open and in flight on its upstream | **Nothing in total** but the connection cap below. A deploy's drain is still bounded by `drain_timeout` |
 | Stops reading a response | `:443` | Dropped after the route's `write` timeout (HTTP/2: `RST_STREAM CANCEL`); the request leaves the upstream's in-flight count | hoster: the client write timeout is the route's `write`. Pingora's default is never, which held the in-flight count until the drain timeout |
 | Request target over 65 535 bytes | both | 400 | `http` crate URI limit |
 | Request head over 1 MiB, or more than 256 header fields | both | 400 | Pingora (`MAX_HEADER_SIZE`, `MAX_HEADERS`). Below that the upstream's own limits apply |
@@ -1093,7 +1095,7 @@ make hoster buffer is decided here. Every row was observed against the real prox
 | HTTP/2 CONTINUATION flood | `:443` | `GOAWAY ENHANCE_YOUR_CALM` (`too_many_continuations`) before 1 MiB is read | h2 |
 | HTTP/2 header list over 64 KiB | `:443` | 431 on that stream; the connection stays | Pingora's h2 settings |
 | HTTP/2 SETTINGS, PING or PRIORITY flood | `:443` | SETTINGS and PING are each answered; when the client does not read, the proxy stops reading. No memory growth | h2 and TCP backpressure |
-| Many connections, from one address or many | both | All accepted, up to the process's file-descriptor limit. At the limit (`EMFILE`) hoster keeps running but accepts nothing on `:80`, `:443` **or the admin socket**, and file and socket work elsewhere in the process fails (the ACME account file in the test). It recovers by itself when connections close | **Nothing** but `RLIMIT_NOFILE` (OQ-39) |
+| Many connections, from one address or many | both | Accepted while hoster has fewer than 4096 descriptors open; beyond that a new connection is closed at accept, before TLS, and counted (a warning every 10 s while it lasts, the total on the System page). Open connections, the admin socket, SQLite and podman keep working, and new clients are taken on again within 100 ms of connections closing. One address can still take every slot | hoster: the total cap of ADR-0065 (`Admission` in `src/proxy/admission.rs`, a Pingora `ConnectionFilter` counting `/proc/self/fd`), a quarter of `RLIMIT_NOFILE` if the hard limit keeps that below 16384 |
 
 Notes:
 
@@ -1105,13 +1107,15 @@ Notes:
   use the proxy-wide defaults.
 - **A timeout is per read or write, not per request.** Pingora offers no total time for a header
   or a body, which is why the slow-but-moving rows are unbounded.
-- **File descriptors.** The unit does not set `LimitNOFILE=`, so hoster runs with systemd's
-  default soft limit of 1024. A proxied request needs two descriptors and an idle client
-  connection one, so about a thousand idle connections, re-opened every 60 s, reach the last
-  row. An idle TLS connection costs the process a few tens of KiB (under 80 KiB measured with
-  the test client in the same process), so raising the limit alone trades descriptor exhaustion,
-  which hoster survives, for memory exhaustion, which it does not. Both the limit and a cap on
-  connections are part of OQ-39.
+- **File descriptors.** hoster raises its soft `RLIMIT_NOFILE` to 16384 at startup (or to
+  the hard limit, if that is lower), and the unit sets `LimitNOFILE=16384` too; the startup log
+  names the limit and the cap. A proxied request needs two descriptors and an idle client
+  connection one. An idle TLS connection costs the process a few tens of KiB (under 80 KiB
+  measured with the test client in the same process), so the cap of 4096 bounds a connection
+  flood at about 320 MiB and leaves about 12k descriptors for SQLite, podman, ACME files and
+  upstream connections. The cap counts descriptors rather than connections because Pingora's
+  `ConnectionFilter` has no callback when a connection closes; the count is taken at most every
+  100 ms, and every connection accepted since is added to it (ADR-0065).
 - Pingora's own 400 for a request it cannot parse carries `Server: Pingora`; hoster's error pages
   (ADR-0032) carry no `Server` header.
 

@@ -56,6 +56,7 @@ use crate::config::Config;
 use crate::installation::Installation;
 use crate::instance::Instance;
 use crate::orchestrator::Orchestrator;
+use crate::proxy::Admission;
 use crate::registry::UpdateCheckHandle;
 use crate::runtime::ContainerRuntime;
 use crate::secrets::SecretStore;
@@ -172,7 +173,8 @@ impl WebApp {
     /// (shared with the ACME task), registry credentials in `registry`, the GitHub OAuth App's
     /// credentials read from their files or systemd credentials, the dashboard's `stats`, the
     /// `instance` name (ADR-0058), the `secrets` the notification API key is kept in, and
-    /// `shutdown`, which the System page requests after a self-update (ADR-0052). Fails when the
+    /// `shutdown`, which the System page requests after a self-update (ADR-0052), and the proxy's
+    /// `admission`, whose descriptor use the System page shows (ADR-0065). Fails when the
     /// credentials are missing. Deploy webhook tokens are verified against GitHub's key set for
     /// the configured audience (ADR-0047).
     #[expect(
@@ -192,6 +194,7 @@ impl WebApp {
         secrets: SecretStore,
         shutdown: ShutdownRequest,
         updates: UpdateCheckHandle,
+        admission: Admission,
     ) -> anyhow::Result<Self> {
         let installation = Installation::from_env()
             .context("HOME is not set, so the binary layout ~/.local/lib/hoster cannot be found")?;
@@ -206,7 +209,8 @@ impl WebApp {
             .context("setting up the deploy webhook")?;
         let auth =
             Auth::from_config(config, store.clone()).context("setting up the GitHub login")?;
-        let host = LocalHost::new(runtime.clone(), dns.clone(), config.state_dir.clone());
+        let host = LocalHost::new(runtime.clone(), dns.clone(), config.state_dir.clone())
+            .with_admission(admission);
         let certificates = CertificateAccess {
             orchestrator: Arc::clone(&orchestrator),
             certs,

@@ -538,6 +538,7 @@ async fn pebble_issues_over_http01_and_the_certificate_is_served() {
         certs: certs.clone(),
         challenges: challenges.clone(),
         traffic: Default::default(),
+        admission: Default::default(),
     };
     let (shutdown, rx) = watch::channel(None);
     let mut running = Proxy::new(&proxy_config, state).spawn(rx).unwrap();

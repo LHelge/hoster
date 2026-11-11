@@ -28,7 +28,7 @@ use crate::instance::Instance;
 use crate::notify::Notifier;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
-use crate::proxy::{Proxy, ProxyEvents, ProxyState, ProxyThread};
+use crate::proxy::{Admission, FileLimit, Proxy, ProxyEvents, ProxyState, ProxyThread};
 use crate::registry::{Poller, RegistryClient, StoredCredentials, UpdateChecker};
 use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
@@ -469,6 +469,9 @@ pub struct Supervisor {
     routes: Arc<ArcSwap<RouteTable>>,
     /// The per-route request statistics: counted by the proxy, shown by the web UI (ADR-0045).
     traffic: Traffic,
+    /// Which client connections the proxy takes on, for the descriptor limit raised in step 1
+    /// (ADR-0065); the System page shows its refusals.
+    admission: Admission,
     /// Shutdowns requested by the admin app after a self-update (ADR-0052).
     shutdown: ShutdownRequest,
     teardown: Teardown,
@@ -488,6 +491,7 @@ impl Supervisor {
             acme_commands: None,
             routes: Arc::default(),
             traffic: Traffic::default(),
+            admission: Admission::default(),
             shutdown: ShutdownRequest::default(),
             teardown: Teardown::default(),
         }
@@ -635,6 +639,19 @@ impl Startup for Supervisor {
                     upstream_ports = %self.config.upstream_ports,
                     "configuration loaded"
                 );
+                let limit = match FileLimit::raise() {
+                    Ok(limit) => limit,
+                    Err((err, limit)) => {
+                        tracing::warn!(error = %err, %limit, "cannot raise the open file limit");
+                        limit
+                    }
+                };
+                self.admission = Admission::from(limit);
+                tracing::info!(
+                    %limit,
+                    connection_cap = self.admission.cap(),
+                    "open file limit; new client connections are refused at the cap"
+                );
                 Ok(())
             }
             Phase::StateStore => {
@@ -694,6 +711,7 @@ impl Startup for Supervisor {
                         .context("certificates load before the proxy starts")?,
                     challenges: self.challenges.clone(),
                     traffic: self.traffic.clone(),
+                    admission: self.admission.clone(),
                 };
                 self.teardown.proxy.start(&self.config.proxy, state).await
             }
@@ -897,6 +915,7 @@ impl Startup for Supervisor {
                     secrets,
                     self.shutdown.clone(),
                     updates,
+                    self.admission.clone(),
                 )?
                 .start(listen, self.teardown.token.child_token())
                 .await?;

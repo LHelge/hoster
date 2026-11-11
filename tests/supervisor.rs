@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,9 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// negotiation and the startup log), `/_ping`, and empty container and network lists for the
 /// startup reconciliation; one request per connection.
 struct FakePodman;
+
+/// The requests every [`FakePodman`] of this process has answered.
+static PODMAN_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
 impl FakePodman {
     const VERSION: &str = r#"{"Version":"6.1.4","ApiVersion":"1.44","MinAPIVersion":"1.24","Components":[{"Name":"Podman Engine","Version":"6.1.4"}]}"#;
@@ -46,6 +49,7 @@ impl FakePodman {
         while reader.read_line(&mut header).is_ok_and(|n| n > 0) && header != "\r\n" {
             header.clear();
         }
+        PODMAN_REQUESTS.fetch_add(1, Ordering::SeqCst);
         let target = request_line.split_whitespace().nth(1).unwrap_or("");
         let path = target.split('?').next().unwrap_or("");
         let (content_type, body) = if path.ends_with("/_ping") {
@@ -408,14 +412,15 @@ fn a_second_sigterm_during_the_grace_period_exits_promptly() {
     assert!(took < Duration::from_secs(6), "fast shutdown took {took:?}");
 }
 
-/// The first line of the admin app's answer on its Unix socket, or `None` when it does not
-/// answer within `wait`.
-fn admin_status(sandbox: &Sandbox, wait: Duration) -> Option<String> {
+/// The admin app's status line for `/` with a session cookie it does not know, which it looks
+/// up in SQLite; `None` when it does not answer within `wait`.
+fn admin_lookup(sandbox: &Sandbox, wait: Duration) -> Option<String> {
     let mut stream = UnixStream::connect(sandbox.path("state/admin.sock")).ok()?;
     stream.set_read_timeout(Some(wait)).unwrap();
     write!(
         stream,
-        "GET /login HTTP/1.1\r\nHost: hoster.example.com\r\nConnection: close\r\n\r\n"
+        "GET / HTTP/1.1\r\nHost: hoster.example.com\r\nCookie: __Host-hoster_session=00\r\n\
+         Connection: close\r\n\r\n"
     )
     .ok()?;
     let mut response = String::new();
@@ -423,21 +428,43 @@ fn admin_status(sandbox: &Sandbox, wait: Duration) -> Option<String> {
     response.lines().next().map(str::to_owned)
 }
 
-/// Clients that hold more connections than hoster has file descriptors (architecture §9.1):
-/// nothing bounds the connections, so the process runs into `EMFILE`. It keeps running, but
-/// accepts nothing more on either listener or on the admin socket until connections close
-/// (OQ-39), and then recovers by itself.
-#[test]
-fn running_out_of_file_descriptors_stops_accepting_until_connections_close() {
-    const BRIEFLY: Duration = Duration::from_secs(2);
-    let sandbox = Sandbox::new("emfile");
-    let mut hoster = Hoster::spawn(sandbox.command_with_fd_limit(128));
-    hoster.wait_for_line("hoster is ready");
-    assert!(admin_status(&sandbox, TIMEOUT).is_some());
+/// Whether `:80` answers a request on a new connection; a refused one is closed unanswered.
+fn plain_answers(addr: SocketAddr) -> bool {
+    let mut stream = TcpStream::connect(addr).expect("the kernel accepts the connection");
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let _ = write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    );
+    stream.read(&mut [0; 16]).is_ok_and(|n| n > 0)
+}
 
-    // The kernel completes these handshakes in the listen backlog whether or not hoster
-    // accepts them.
-    let held: Vec<TcpStream> = (0..300)
+/// Clients that hold more connections than hoster may have descriptors for (architecture §9.1,
+/// ADR-0065): hoster refuses new clients at a quarter of its limit, so it never runs out.
+/// Connections already open, the admin socket, SQLite and podman keep working, and new
+/// clients are taken on again once connections close.
+#[test]
+fn new_clients_are_refused_at_the_descriptor_cap() {
+    let sandbox = Sandbox::new("fdcap");
+    // A hard limit of 512 keeps the soft one there: the cap is 128.
+    let mut hoster = Hoster::spawn(sandbox.command_with_fd_limit(512));
+    hoster.wait_for_line("connection_cap=128");
+    hoster.wait_for_line("hoster is ready");
+
+    let mut open = TcpStream::connect(sandbox.http).unwrap();
+    open.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let kept_alive = |open: &mut TcpStream| {
+        write!(open, "GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut buf = [0; 4096];
+        let n = open
+            .read(&mut buf)
+            .expect("an answer on the open connection");
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    };
+    assert!(kept_alive(&mut open).starts_with("HTTP/1.1 404"));
+
+    // More than the cap, and short of the limit if hoster accepted them all.
+    let held: Vec<TcpStream> = (0..400)
         .map(|i| {
             let addr = if i % 2 == 0 {
                 sandbox.http
@@ -447,16 +474,22 @@ fn running_out_of_file_descriptors_stops_accepting_until_connections_close() {
             TcpStream::connect(addr).expect("the kernel accepts the connection")
         })
         .collect();
-    hoster.wait_for_line("Too many open files");
+    hoster.wait_for_line("refusing new client connections");
+    assert!(!plain_answers(sandbox.http), "a new client is refused");
 
-    assert_eq!(admin_status(&sandbox, BRIEFLY), None);
-    let mut starved = TcpStream::connect(sandbox.http).unwrap();
-    starved.set_read_timeout(Some(BRIEFLY)).unwrap();
-    write!(starved, "GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
-    assert!(
-        starved.read(&mut [0; 16]).is_err(),
-        "no answer at the limit"
+    // Everything else keeps working: the open connection, the admin socket and SQLite, and
+    // podman at the reconciler's next pass.
+    assert!(kept_alive(&mut open).starts_with("HTTP/1.1 404"));
+    assert_eq!(
+        admin_lookup(&sandbox, TIMEOUT).as_deref(),
+        Some("HTTP/1.1 303 See Other")
     );
+    let podman = PODMAN_REQUESTS.load(Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while PODMAN_REQUESTS.load(Ordering::SeqCst) == podman {
+        assert!(Instant::now() < deadline, "no podman call at the cap");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert_eq!(
         hoster.child.try_wait().unwrap(),
         None,
@@ -464,13 +497,11 @@ fn running_out_of_file_descriptors_stops_accepting_until_connections_close() {
     );
 
     drop(held);
-    drop(starved);
     let recovered = Instant::now() + TIMEOUT;
-    while admin_status(&sandbox, BRIEFLY).is_none() {
-        assert!(Instant::now() < recovered, "the admin app answers again");
+    while !plain_answers(sandbox.http) {
+        assert!(Instant::now() < recovered, "new clients are taken on again");
+        std::thread::sleep(Duration::from_millis(100));
     }
-    let response = http_get(sandbox.http, "/");
-    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
 
     hoster.signal(Signal::SIGINT);
     assert!(hoster.wait().success());

@@ -31,7 +31,7 @@ use tokio::sync::{Notify, watch};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
-use super::{DownstreamLimits, Proxy, ProxyError, ProxyState, ProxyThread};
+use super::{Admission, DownstreamLimits, Proxy, ProxyError, ProxyState, ProxyThread};
 use crate::acme::{CertMap, ChallengeMap};
 use crate::config::{ProxyConfig, Timeouts};
 use crate::routing::{
@@ -213,6 +213,8 @@ struct Harness {
     routes: Arc<ArcSwap<RouteTable>>,
     /// The request statistics the proxy counts.
     traffic: Traffic,
+    /// The connection cap on both listeners.
+    admission: Admission,
     desired: DesiredState,
     reserved: Reserved,
     state: AppState,
@@ -302,6 +304,15 @@ impl Harness {
 
     /// The harness with `defaults` as the proxy's timeouts and `limits` for its clients.
     async fn start_limited(defaults: Timeouts, limits: DownstreamLimits) -> Self {
+        Self::start_admitting(defaults, limits, Admission::default()).await
+    }
+
+    /// The harness with `defaults` and `limits`, refusing clients as `admission` says.
+    async fn start_admitting(
+        defaults: Timeouts,
+        limits: DownstreamLimits,
+        admission: Admission,
+    ) -> Self {
         let state = AppState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let web_port = listener.local_addr().unwrap().port();
@@ -486,6 +497,7 @@ impl Harness {
             certs: certs.clone(),
             challenges: challenges.clone(),
             traffic: traffic.clone(),
+            admission: admission.clone(),
         };
         let (shutdown, rx) = watch::channel(None);
         // A port free a moment ago can be taken by another test's outgoing connection before
@@ -525,6 +537,7 @@ impl Harness {
             web_port,
             routes,
             traffic,
+            admission,
             desired,
             reserved,
             state,
