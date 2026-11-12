@@ -53,15 +53,32 @@ impl Machine {
 
     /// `MemTotal` from `/proc/meminfo`, in bytes.
     pub fn memory(&self) -> Option<u64> {
+        MemInfo(&self.file("proc/meminfo")?).bytes("MemTotal")
+    }
+
+    /// `MemTotal` and `MemAvailable` from `/proc/meminfo`; `None` when either cannot be read.
+    #[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+    pub fn memory_usage(&self) -> Option<MemoryUsage> {
         let text = self.file("proc/meminfo")?;
-        let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
-        let mut words = line.split_whitespace().skip(1);
-        let value: u64 = words.next()?.parse().ok()?;
-        match words.next() {
-            Some("kB") => value.checked_mul(1024),
-            None => Some(value),
-            Some(_) => None,
-        }
+        let info = MemInfo(&text);
+        Some(MemoryUsage {
+            total: info.bytes("MemTotal")?,
+            available: info.bytes("MemAvailable")?,
+        })
+    }
+
+    /// The CPU time the host has spent since boot, from the aggregate `cpu` line of
+    /// `/proc/stat`.
+    #[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+    pub fn cpu_times(&self) -> Option<CpuTimes> {
+        self.file("proc/stat")?.parse().ok()
+    }
+
+    /// The size of the filesystem holding `path`, and what of it an unprivileged user may
+    /// still write, from `statvfs`. `path` is a real absolute path, not one under the root.
+    #[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+    pub fn filesystem(&self, path: &Path) -> Option<FilesystemUsage> {
+        rustix::fs::statvfs(path).ok()?.try_into().ok()
     }
 
     /// The online CPUs from `/sys/devices/system/cpu/online`; when that cannot be read, the CPUs
@@ -149,6 +166,134 @@ impl fmt::Display for Memory {
         } else {
             write!(f, "{mib:.0} MiB")
         }
+    }
+}
+
+/// `/proc/meminfo`'s text: `Name:  value kB` lines.
+struct MemInfo<'a>(&'a str);
+
+impl MemInfo<'_> {
+    /// The field `name`, in bytes; `None` when missing or not a number of bytes or kB.
+    fn bytes(&self, name: &str) -> Option<u64> {
+        let line = self.0.lines().find(|l| {
+            l.split_once(':')
+                .is_some_and(|(field, _)| field.trim() == name)
+        })?;
+        let mut words = line.split_whitespace().skip(1);
+        let value: u64 = words.next()?.parse().ok()?;
+        match words.next() {
+            Some("kB") => value.checked_mul(1024),
+            None => Some(value),
+            Some(_) => None,
+        }
+    }
+}
+
+/// The host's memory, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+pub struct MemoryUsage {
+    /// `MemTotal`.
+    pub total: u64,
+    /// `MemAvailable`: what can be allocated without swapping, page cache included.
+    pub available: u64,
+}
+
+#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+impl MemoryUsage {
+    /// The memory in use: `MemTotal` − `MemAvailable` (ADR-0066).
+    pub fn used(&self) -> u64 {
+        self.total.saturating_sub(self.available)
+    }
+}
+
+/// The host's CPU time since boot, in jiffies (`USER_HZ`), summed over every CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+pub struct CpuTimes {
+    /// Everything but idle and iowait.
+    pub busy: u64,
+    /// Every state: user, nice, system, idle, iowait, irq, softirq and steal. Guest time is
+    /// already counted in user and nice, so it is not added again.
+    pub total: u64,
+}
+
+#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+impl CpuTimes {
+    /// The fraction of CPU time that was busy between `earlier` and this reading, from 0 to 1;
+    /// `None` when no time passed or a counter went backwards.
+    pub fn busy_fraction(&self, earlier: &CpuTimes) -> Option<f64> {
+        let total = self.total.checked_sub(earlier.total).filter(|t| *t > 0)?;
+        let busy = self.busy.checked_sub(earlier.busy)?;
+        #[expect(clippy::cast_precision_loss, reason = "a fraction")]
+        Some((busy as f64 / total as f64).min(1.0))
+    }
+}
+
+/// `/proc/stat` is not a kernel CPU statistics file with an aggregate `cpu` line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("no aggregate `cpu` line in /proc/stat")]
+#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+pub struct NoCpuLine;
+
+/// Parses `/proc/stat`'s text, of which only the aggregate `cpu` line is read: `cpu  user nice
+/// system idle [iowait irq softirq steal guest guest_nice]`. The fields after idle came in
+/// later kernels and count as zero when absent.
+impl std::str::FromStr for CpuTimes {
+    type Err = NoCpuLine;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let line = text
+            .lines()
+            .find_map(|l| l.strip_prefix("cpu "))
+            .ok_or(NoCpuLine)?;
+        let fields: Vec<u64> = line
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(|_| NoCpuLine)?;
+        if fields.len() < 4 {
+            return Err(NoCpuLine);
+        }
+        let field = |i: usize| fields.get(i).copied().unwrap_or(0);
+        let total = (0..8)
+            .map(field)
+            .try_fold(0u64, u64::checked_add)
+            .ok_or(NoCpuLine)?;
+        let idle = field(3) + field(4);
+        Ok(Self {
+            busy: total - idle,
+            total,
+        })
+    }
+}
+
+/// A filesystem's size, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+pub struct FilesystemUsage {
+    /// The filesystem's size.
+    pub total: u64,
+    /// What an unprivileged user may still write (`f_bavail`), so less than free space by the
+    /// blocks reserved for root.
+    pub available: u64,
+}
+
+/// `statvfs` reported sizes that overflow a byte count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("statvfs sizes overflow a byte count")]
+#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
+pub struct Overflow;
+
+impl TryFrom<rustix::fs::StatVfs> for FilesystemUsage {
+    type Error = Overflow;
+
+    fn try_from(stat: rustix::fs::StatVfs) -> Result<Self, Self::Error> {
+        let bytes = |blocks: u64| blocks.checked_mul(stat.f_frsize).ok_or(Overflow);
+        Ok(Self {
+            total: bytes(stat.f_blocks)?,
+            available: bytes(stat.f_bavail)?,
+        })
     }
 }
 
@@ -461,6 +606,103 @@ mod tests {
         assert_eq!(machine.memory(), Some(32_768_000 * 1024));
         assert_eq!(machine.cpus(), Some(8));
         assert_eq!(Machine::under(&root.path().join("x"), 1000).memory(), None);
+    }
+
+    #[test]
+    fn memory_usage_comes_from_meminfo() {
+        let root = tempfile::tempdir().unwrap();
+        let machine = Machine::under(root.path(), 1000);
+        assert_eq!(machine.memory_usage(), None);
+        write(
+            root.path(),
+            "proc/meminfo",
+            "MemTotal:  4194304 kB\nMemFree:  1048576 kB\nMemAvailable:  3145728 kB\n",
+        );
+        let usage = machine.memory_usage().unwrap();
+        assert_eq!(usage.total, 4_194_304 * 1024);
+        assert_eq!(usage.available, 3_145_728 * 1024);
+        assert_eq!(usage.used(), 1024 * 1024 * 1024);
+        assert_eq!(machine.memory(), Some(4_194_304 * 1024));
+
+        // Without MemAvailable (before Linux 3.14) or with a malformed value: unknown.
+        write(root.path(), "proc/meminfo", "MemTotal:  4194304 kB\n");
+        assert_eq!(machine.memory_usage(), None);
+        write(
+            root.path(),
+            "proc/meminfo",
+            "MemTotal:  4194304 kB\nMemAvailable:  lots kB\n",
+        );
+        assert_eq!(machine.memory_usage(), None);
+        assert_eq!(machine.memory(), Some(4_194_304 * 1024));
+        write(root.path(), "proc/meminfo", "MemTotal: 1 MB\n");
+        assert_eq!(machine.memory(), None);
+        // More available than total (never, but not an underflow).
+        let odd = MemoryUsage {
+            total: 1,
+            available: 2,
+        };
+        assert_eq!(odd.used(), 0);
+    }
+
+    #[test]
+    fn cpu_times_come_from_the_aggregate_cpu_line() {
+        let root = tempfile::tempdir().unwrap();
+        let machine = Machine::under(root.path(), 1000);
+        assert_eq!(machine.cpu_times(), None);
+        write(
+            root.path(),
+            "proc/stat",
+            "cpu  100 20 30 800 50 5 5 10 7 3\ncpu0 50 10 15 400 25 2 3 5 0 0\nintr 1 2 3\n",
+        );
+        let times = machine.cpu_times().unwrap();
+        // user + nice + system + irq + softirq + steal; guest is in user and nice already.
+        assert_eq!(times.busy, 170);
+        assert_eq!(times.total, 1020);
+
+        // An old kernel's four fields.
+        assert_eq!(
+            "cpu 1 2 3 4\n".parse::<CpuTimes>(),
+            Ok(CpuTimes { busy: 6, total: 10 })
+        );
+        for malformed in ["", "cpu0 1 2 3 4\n", "cpu 1 2 3\n", "cpu 1 2 x 4\n"] {
+            assert_eq!(
+                malformed.parse::<CpuTimes>(),
+                Err(NoCpuLine),
+                "{malformed:?}"
+            );
+        }
+        write(root.path(), "proc/stat", "cpu 1 2\n");
+        assert_eq!(machine.cpu_times(), None);
+    }
+
+    #[test]
+    fn busy_fraction_is_between_two_readings() {
+        let earlier = CpuTimes {
+            busy: 100,
+            total: 1000,
+        };
+        let later = CpuTimes {
+            busy: 150,
+            total: 1200,
+        };
+        assert_eq!(later.busy_fraction(&earlier), Some(0.25));
+        assert_eq!(earlier.busy_fraction(&earlier), None);
+        assert_eq!(earlier.busy_fraction(&later), None);
+        let busy_backwards = CpuTimes {
+            busy: 50,
+            total: 1200,
+        };
+        assert_eq!(busy_backwards.busy_fraction(&earlier), None);
+    }
+
+    #[test]
+    fn filesystem_usage_comes_from_statvfs() {
+        let dir = tempfile::tempdir().unwrap();
+        let machine = Machine::under(&dir.path().join("unused"), 1000);
+        let usage = machine.filesystem(dir.path()).unwrap();
+        assert!(usage.total > 0);
+        assert!(usage.available <= usage.total);
+        assert_eq!(machine.filesystem(&dir.path().join("missing")), None);
     }
 
     #[test]

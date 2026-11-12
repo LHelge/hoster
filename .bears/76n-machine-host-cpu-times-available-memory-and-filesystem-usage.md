@@ -1,13 +1,14 @@
 ---
 id: "76n"
 title: "Machine: host CPU times, available memory and filesystem usage"
-status: open
+status: done
 priority: P1
 created: "2026-11-12T00:07:43.308823615Z"
-updated: "2026-11-12T00:07:43.308823615Z"
+updated: "2026-11-12T00:13:32.986031394Z"
 tags:
   - observability
 parent: qmw
+attempts: 1
 ---
 
 ## Summary
