@@ -67,15 +67,29 @@ fn build_info_serializes_as_the_version_json() {
         version: "1.2.3".parse().unwrap(),
         target: "x86_64-unknown-linux-musl".to_owned(),
         schema: 7,
+        log_schema: Some(2),
     };
     let json = serde_json::to_string(&info).unwrap();
     assert_eq!(
         json,
-        r#"{"version":"1.2.3","target":"x86_64-unknown-linux-musl","schema":7}"#
+        r#"{"version":"1.2.3","target":"x86_64-unknown-linux-musl","schema":7,"log_schema":2}"#
     );
     assert_eq!(serde_json::from_str::<BuildInfo>(&json).unwrap(), info);
     assert_eq!(
         info.to_string(),
+        "hoster 1.2.3 (x86_64-unknown-linux-musl, schema 7, log schema 2)"
+    );
+
+    // A binary that predates the log store prints no log schema, and reads as having none.
+    let old = BuildInfo {
+        log_schema: None,
+        ..info
+    };
+    let json = r#"{"version":"1.2.3","target":"x86_64-unknown-linux-musl","schema":7}"#;
+    assert_eq!(serde_json::to_string(&old).unwrap(), json);
+    assert_eq!(serde_json::from_str::<BuildInfo>(json).unwrap(), old);
+    assert_eq!(
+        old.to_string(),
         "hoster 1.2.3 (x86_64-unknown-linux-musl, schema 7)"
     );
 
@@ -84,6 +98,10 @@ fn build_info_serializes_as_the_version_json() {
     assert!(!running.target.is_empty());
     assert_eq!(running.schema, i64::from(Store::expected_schema_version()));
     assert!(running.schema >= 7, "{}", running.schema);
+    assert_eq!(
+        running.log_schema,
+        Some(i64::from(LogStore::expected_schema_version()))
+    );
 }
 
 #[test]
@@ -319,6 +337,7 @@ async fn probe_reads_another_binarys_version_json() {
             version: "0.1.0".parse().unwrap(),
             target: "x86_64-unknown-linux-musl".into(),
             schema: 5,
+            log_schema: None,
         }
     );
 

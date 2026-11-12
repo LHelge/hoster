@@ -98,10 +98,11 @@ enum Command {
     /// Back up hoster's state.
     #[command(subcommand)]
     Backup(Backup),
-    /// Print the version, target triple and database schema of this binary. Needs no
+    /// Print the version, target triple and database schemas of this binary. Needs no
     /// configuration.
     Version {
-        /// Print `{"version", "target", "schema"}` as JSON on stdout (read by `hoster rollback`).
+        /// Print `{"version", "target", "schema", "log_schema"}` as JSON on stdout (read by
+        /// `hoster rollback`).
         #[arg(long)]
         json: bool,
     },
@@ -291,6 +292,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::LogStore;
     use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Command {
@@ -338,17 +340,21 @@ mod tests {
     }
 
     #[test]
-    fn version_json_reports_version_target_and_schema() {
+    fn version_json_reports_version_target_and_schemas() {
         let json: serde_json::Value =
             serde_json::from_str(&Command::version(true).unwrap()).unwrap();
         let object = json.as_object().unwrap();
         assert_eq!(
             object.keys().collect::<Vec<_>>(),
-            ["schema", "target", "version"]
+            ["log_schema", "schema", "target", "version"]
         );
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(json["target"], env!("BUILD_TARGET_TRIPLE"));
         assert_eq!(json["schema"], i64::from(Store::expected_schema_version()));
+        assert_eq!(
+            json["log_schema"],
+            i64::from(LogStore::expected_schema_version())
+        );
         let text = Command::version(false).unwrap();
         assert!(
             text.starts_with(concat!("hoster ", env!("CARGO_PKG_VERSION"))),

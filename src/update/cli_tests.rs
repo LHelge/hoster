@@ -277,6 +277,95 @@ async fn rollback_shows_the_migrations_it_undoes_then_rolls_back() {
 }
 
 #[tokio::test]
+async fn rollback_warns_about_log_records_and_reports_the_log_store() {
+    let host = Host::new(&[("0.1.0", 5), ("0.2.0", 7)]).await;
+    host.reinstall("0.1.0", 5, Some(1));
+    host.open_logs().await;
+    let mut console = Script::answering(true);
+    RollbackCommand { yes: false }
+        .run(
+            &host.updater(FakeReleases::default(), "0.2.0"),
+            &mut console,
+        )
+        .await
+        .unwrap();
+    let undone =
+        LogStore::migrations_between(SchemaVersion::from(1), LogStore::expected_schema_version());
+    for expected in [
+        format!(
+            "{undone} log store migration(s) will be undone (log schema {} → 1)",
+            LogStore::expected_schema_version()
+        ),
+        "log records stored by the newer schema may be lost".to_owned(),
+        "the log store is at log schema 1".to_owned(),
+    ] {
+        assert!(
+            console.out.contains(&expected),
+            "{expected}\n{}",
+            console.out
+        );
+    }
+    assert_eq!(host.log_schema().await, Some(SchemaVersion::from(1)));
+}
+
+#[tokio::test]
+async fn rollback_says_when_the_log_store_was_moved_aside() {
+    let host = Host::new(&[("0.1.0", 5), ("0.2.0", 7)]).await;
+    host.reinstall("0.1.0", 5, Some(1));
+    host.open_logs().await;
+    host.log_sql("CREATE INDEX cursors_by_nth ON log_cursors (nth)")
+        .await;
+    let mut console = Script::default();
+    RollbackCommand { yes: true }
+        .run(
+            &host.updater(FakeReleases::default(), "0.2.0"),
+            &mut console,
+        )
+        .await
+        .unwrap();
+    let aside = host.state_dir.join("logs.db.rollback-v0.2.0");
+    assert!(
+        console.out.contains(&format!(
+            "it was moved aside to {} and v0.1.0 starts with an empty one",
+            aside.display()
+        )),
+        "{}",
+        console.out
+    );
+    assert_eq!(host.current(), Some(v("0.1.0")));
+}
+
+#[tokio::test]
+async fn rollback_to_a_binary_without_a_log_store_leaves_it_alone() {
+    let host = Host::new(&[("0.1.0", 5), ("0.2.0", 7)]).await;
+    host.open_logs().await;
+    let mut console = Script::default();
+    RollbackCommand { yes: true }
+        .run(
+            &host.updater(FakeReleases::default(), "0.2.0"),
+            &mut console,
+        )
+        .await
+        .unwrap();
+    assert!(
+        console
+            .out
+            .contains("v0.1.0 predates the log store; logs.db is left as it is"),
+        "{}",
+        console.out
+    );
+    assert!(
+        !console.out.contains("log store migration"),
+        "{}",
+        console.out
+    );
+    assert_eq!(
+        host.log_schema().await,
+        Some(LogStore::expected_schema_version())
+    );
+}
+
+#[tokio::test]
 async fn a_declined_rollback_changes_nothing() {
     let host = Host::new(&[("0.1.0", 5), ("0.2.0", 7)]).await;
     let err = RollbackCommand { yes: false }

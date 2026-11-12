@@ -17,10 +17,17 @@ pub(crate) fn v(s: &str) -> Version {
     s.parse().unwrap()
 }
 
-/// A fake `hoster` binary: a script answering `version --json` like the real one.
+/// A fake `hoster` binary: a script answering `version --json` like the real one, from before
+/// the log store (no `log_schema`).
 pub(crate) fn script(version: &str, schema: i64) -> Vec<u8> {
+    script_with_logs(version, schema, None)
+}
+
+/// A fake `hoster` binary that reports `log_schema` too, when it is `Some`.
+pub(crate) fn script_with_logs(version: &str, schema: i64, log_schema: Option<i64>) -> Vec<u8> {
+    let logs = log_schema.map_or(String::new(), |l| format!(",\"log_schema\":{l}"));
     format!(
-        "#!/bin/sh\necho '{{\"version\":\"{version}\",\"target\":\"{TARGET}\",\"schema\":{schema}}}'\n"
+        "#!/bin/sh\necho '{{\"version\":\"{version}\",\"target\":\"{TARGET}\",\"schema\":{schema}{logs}}}'\n"
     )
     .into_bytes()
 }
@@ -202,19 +209,48 @@ impl Host {
             version: running.parse().unwrap(),
             target: TARGET.into(),
             schema: Store::expected_schema_version().into(),
+            log_schema: Some(LogStore::expected_schema_version().into()),
         })
+    }
+
+    /// Replaces the installed binary of `version` with one reporting these schemas.
+    pub(crate) fn reinstall(&self, version: &str, schema: i64, log_schema: Option<i64>) {
+        fs::write(
+            self.installation.binary(&v(version)),
+            script_with_logs(version, schema, log_schema),
+        )
+        .unwrap();
+    }
+
+    /// Creates `logs.db` at this binary's log schema.
+    pub(crate) async fn open_logs(&self) {
+        LogStore::open(&self.state_dir).await.unwrap().close().await;
+    }
+
+    /// The log schema `logs.db` is at; `None` when there is none.
+    pub(crate) async fn log_schema(&self) -> Option<SchemaVersion> {
+        LogStore::schema_version_in(&self.state_dir).await.unwrap()
+    }
+
+    /// Runs raw SQL against the (stopped) `logs.db`.
+    pub(crate) async fn log_sql(&self, sql: &'static str) {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(self.state_dir.join(LogStore::FILE_NAME));
+        let mut conn = sqlx::ConnectOptions::connect(&options).await.unwrap();
+        sqlx::raw_sql(sql).execute(&mut conn).await.unwrap();
+        sqlx::Connection::close(conn).await.unwrap();
     }
 
     pub(crate) fn current(&self) -> Option<Version> {
         self.installation.current().unwrap()
     }
 
-    /// Files in the state directory besides the database.
+    /// Files in the state directory besides the databases.
     pub(crate) fn snapshots(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(&self.state_dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .filter(|n| !n.starts_with(Store::FILE_NAME))
+            .filter(|n| !n.starts_with(Store::FILE_NAME) && !n.starts_with(LogStore::FILE_NAME))
             .collect();
         names.sort();
         names

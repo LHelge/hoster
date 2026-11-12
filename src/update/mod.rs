@@ -12,8 +12,10 @@
 //!   UI, `systemctl --user restart hoster` from the CLI).
 //! - [`rollback`](Updater::rollback), run by the newer binary, reads the previous binary's
 //!   schema (`hoster version --json`), stops the service, snapshots the database, undoes the
-//!   migrations down to that schema, switches `current` back and starts the service. A failed
-//!   undo restores the snapshot and leaves `current` as it was.
+//!   migrations down to that schema, switches `current` back, undoes `logs.db` to the previous
+//!   binary's log schema and starts the service. A failed undo of `hoster.db` restores the
+//!   snapshot and leaves `current` as it was; a failed undo of `logs.db` moves the file aside
+//!   instead, since logs are expendable (ADR-0067 §9).
 //!
 //! Every failure before the switch leaves the layout as it was: downloads go to a temporary
 //! directory that is always removed, and a version installed for a failed update is removed
@@ -51,7 +53,7 @@ use thiserror::Error;
 
 use crate::installation::{BuildInfo, Installation, InstallationError, Version};
 use crate::orchestrator::{HosterEvents, Operator};
-use crate::store::{NewEvent, SchemaVersion, Store, StoreError};
+use crate::store::{LogStore, NewEvent, SchemaVersion, Store, StoreError};
 
 #[allow(
     unused_imports,
@@ -283,6 +285,11 @@ pub struct RollbackPlan {
     pub database: Option<SchemaVersion>,
     /// The schema the database is undone to: the previous binary's.
     pub target: SchemaVersion,
+    /// The log schema `logs.db` is at; `None` when there is no `logs.db`.
+    pub logs: Option<SchemaVersion>,
+    /// The log schema `logs.db` is undone to: the previous binary's; `None` when that binary
+    /// predates the log store and never opens `logs.db`, which is then left as it is.
+    pub logs_target: Option<SchemaVersion>,
 }
 
 impl RollbackPlan {
@@ -292,6 +299,31 @@ impl RollbackPlan {
             Store::migrations_between(self.target, database)
         })
     }
+
+    /// How many log store migrations the rollback undoes (log records only the newer schema
+    /// holds may be lost).
+    pub fn log_migrations_undone(&self) -> usize {
+        match (self.logs, self.logs_target) {
+            (Some(logs), Some(target)) => LogStore::migrations_between(target, logs),
+            _ => 0,
+        }
+    }
+}
+
+/// What [`Updater::rollback`] did with `logs.db`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogsRollback {
+    /// Left as it is: there is none, the previous binary has no log store, or the file is
+    /// already at its log schema.
+    Kept,
+    /// Undone to the previous binary's log schema.
+    Undone { schema: SchemaVersion },
+    /// The undo failed (`reason`), so the file was moved aside to `path` and the previous
+    /// binary starts on a new, empty log store.
+    MovedAside { path: PathBuf, reason: String },
+    /// Neither undoing nor moving the file aside worked (`reason`): the previous binary runs
+    /// without its log store until `logs.db` is removed by hand.
+    Failed { reason: String },
 }
 
 /// What [`Updater::rollback`] did.
@@ -303,6 +335,8 @@ pub struct RollbackOutcome {
     pub schema: SchemaVersion,
     /// The pre-rollback database snapshot; `None` when there was no database.
     pub snapshot: Option<PathBuf>,
+    /// What happened to `logs.db`.
+    pub logs: LogsRollback,
 }
 
 /// Self-update and rollback for one host (ADR-0052).
@@ -641,11 +675,25 @@ impl Updater {
         }
         // A database already at or below the target has nothing to undo.
         let target = database.map_or(target, |database| database.min(target));
+        // An unreadable `logs.db` is not worth refusing the rollback over: undoing it fails
+        // too, and it is moved aside then.
+        let logs = LogStore::schema_version_in(&self.state_dir)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "cannot read the log store's schema");
+                None
+            });
+        let logs_target = info.log_schema.map(|schema| {
+            let schema = SchemaVersion::from(schema);
+            logs.map_or(schema, |logs| logs.min(schema))
+        });
         Ok(RollbackPlan {
             from: current,
             to: previous,
             database,
             target,
+            logs,
+            logs_target,
         })
     }
 
@@ -656,6 +704,7 @@ impl Updater {
             from: current,
             to: previous,
             target,
+            logs_target,
             ..
         } = self.rollback_plan().await?;
 
@@ -674,6 +723,7 @@ impl Updater {
             return Err(err);
         }
         let snapshot = rolled_back?;
+        let logs = self.undo_logs(&current, logs_target).await;
         self.service.perform(ServiceAction::Start).await?;
         tracing::info!(from = %current, to = %previous, schema = %target, "rolled back");
         Ok(RollbackOutcome {
@@ -681,7 +731,45 @@ impl Updater {
             to: previous,
             schema: target,
             snapshot,
+            logs,
         })
+    }
+
+    /// With the service stopped and `current` switched back: undoes `logs.db` to `target`, the
+    /// previous binary's log schema (`None`: it has no log store, so the file is kept). A
+    /// failure never fails the rollback (ADR-0067 §9): the file, which `current`'s binary
+    /// migrated, is moved aside to `logs.db.rollback-<current>` instead.
+    async fn undo_logs(&self, current: &Version, target: Option<SchemaVersion>) -> LogsRollback {
+        let Some(target) = target else {
+            return LogsRollback::Kept;
+        };
+        let failure = match LogStore::schema_version_in(&self.state_dir).await {
+            Ok(None) => return LogsRollback::Kept,
+            Ok(Some(logs)) if logs <= target => return LogsRollback::Kept,
+            Ok(Some(_)) => match LogStore::undo_migrations(&self.state_dir, target).await {
+                Ok(reached) if reached == target => {
+                    return LogsRollback::Undone { schema: reached };
+                }
+                Ok(reached) => format!("undoing it to log schema {target} left it at {reached}"),
+                Err(e) => format!("{:#}", anyhow::Error::from(e)),
+            },
+            Err(e) => format!("{:#}", anyhow::Error::from(e)),
+        };
+        tracing::warn!(error = %failure, "cannot undo the log store's schema; moving it aside");
+        match LogStore::move_aside(&self.state_dir, &format!("rollback-{current}")) {
+            Ok(path) => LogsRollback::MovedAside {
+                path,
+                reason: failure,
+            },
+            Err(e) => {
+                let reason = format!(
+                    "{failure}; moving it aside failed as well: {:#}",
+                    anyhow::Error::from(e)
+                );
+                tracing::error!(error = %reason, "the previous version starts without its log store");
+                LogsRollback::Failed { reason }
+            }
+        }
     }
 
     /// With the service stopped: snapshots the database, undoes its schema to `target` and

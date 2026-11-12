@@ -140,6 +140,68 @@ pub enum StoreError {
 
 type Result<T, E = StoreError> = std::result::Result<T, E>;
 
+/// One database's embedded migrations (`hoster.db`'s or `logs.db`'s): what [`Store`] and
+/// [`LogStore`] share for reporting and undoing their schema (`hoster rollback`, ADR-0052).
+struct Migrations(&'static Migrator);
+
+impl Migrations {
+    /// The newest embedded migration.
+    fn expected(&self) -> SchemaVersion {
+        self.0
+            .iter()
+            .map(|m| m.version)
+            .max()
+            .unwrap_or_default()
+            .into()
+    }
+
+    /// How many migrations newer than `to` and no newer than `from` there are.
+    fn between(&self, to: SchemaVersion, from: SchemaVersion) -> usize {
+        let (to, from) = (i64::from(to), i64::from(from));
+        self.0
+            .iter()
+            .filter(|m| m.migration_type.is_up_migration() && m.version > to && m.version <= from)
+            .count()
+    }
+
+    /// The newest successfully applied migration of the database behind `pool`, `0` if none.
+    async fn applied(pool: &SqlitePool) -> Result<SchemaVersion> {
+        let has_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema \
+             WHERE type = 'table' AND name = '_sqlx_migrations')",
+        )
+        .fetch_one(pool)
+        .await?;
+        if !has_table {
+            return Ok(SchemaVersion::default());
+        }
+        let version: Option<i64> =
+            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(pool)
+                .await?;
+        Ok(version.unwrap_or_default().into())
+    }
+
+    /// Checks the database at `path` behind `pool`, undoes its migrations newer than `target`
+    /// and returns the schema it is at afterwards.
+    async fn undo(
+        &self,
+        pool: &SqlitePool,
+        path: &Path,
+        target: SchemaVersion,
+    ) -> Result<SchemaVersion> {
+        Store::quick_check(pool, path).await?;
+        self.0
+            .undo(pool, target.into())
+            .await
+            .map_err(|source| StoreError::Migrate {
+                path: path.to_owned(),
+                source,
+            })?;
+        Self::applied(pool).await
+    }
+}
+
 /// Handle to the state store. Cheap to clone; clones share the pool.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -370,12 +432,7 @@ impl Store {
 
     /// The schema version this binary migrates databases to: its newest embedded migration.
     pub fn expected_schema_version() -> SchemaVersion {
-        MIGRATOR
-            .iter()
-            .map(|m| m.version)
-            .max()
-            .unwrap_or_default()
-            .into()
+        Migrations(&MIGRATOR).expected()
     }
 
     /// The schema version of this binary's migration named `description` (`events` for
@@ -393,31 +450,14 @@ impl Store {
     /// How many of this binary's migrations undoing the schema from `from` down to `to` reverts:
     /// those newer than `to` and no newer than `from` (what `hoster rollback` warns about).
     pub fn migrations_between(to: SchemaVersion, from: SchemaVersion) -> usize {
-        let (to, from) = (i64::from(to), i64::from(from));
-        MIGRATOR
-            .iter()
-            .filter(|m| m.migration_type.is_up_migration() && m.version > to && m.version <= from)
-            .count()
+        Migrations(&MIGRATOR).between(to, from)
     }
 
     /// The schema version the database is at: its newest successfully applied migration, `0`
     /// if none has been applied. Reads without migrating, so it also works on a store from
     /// [`Store::open_read_only`] whose database a newer or older binary migrated.
     pub async fn schema_version(&self) -> Result<SchemaVersion> {
-        let has_table: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_schema \
-             WHERE type = 'table' AND name = '_sqlx_migrations')",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        if !has_table {
-            return Ok(SchemaVersion::default());
-        }
-        let version: Option<i64> =
-            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(version.unwrap_or_default().into())
+        Migrations::applied(&self.pool).await
     }
 
     /// Undoes the migrations of the existing database under `state_dir` newer than `target`,
@@ -429,18 +469,9 @@ impl Store {
     /// last migration that was undone; the caller restores its snapshot.
     pub async fn undo_migrations(state_dir: &Path, target: SchemaVersion) -> Result<SchemaVersion> {
         let store = Self::open_existing(state_dir).await?;
-        let result = async {
-            store.check_integrity().await?;
-            MIGRATOR
-                .undo(&store.pool, target.into())
-                .await
-                .map_err(|source| StoreError::Migrate {
-                    path: store.path.clone(),
-                    source,
-                })?;
-            store.schema_version().await
-        }
-        .await;
+        let result = Migrations(&MIGRATOR)
+            .undo(&store.pool, &store.path, target)
+            .await;
         store.close().await;
         result
     }

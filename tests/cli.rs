@@ -27,8 +27,9 @@ fn hoster(args: &[&str]) -> Output {
 }
 
 /// The highest `<version>_` prefix among the migrations, which is the schema the binary embeds.
-fn latest_migration() -> i64 {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+/// The newest migration in `dir` (`migrations` or `migrations_logs`) at the crate root.
+fn latest_migration(dir: &str) -> i64 {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
     std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|entry| {
@@ -40,18 +41,19 @@ fn latest_migration() -> i64 {
 }
 
 #[test]
-fn version_json_prints_version_target_and_schema() {
+fn version_json_prints_version_target_and_schemas() {
     let output = hoster(&["version", "--json"]);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
     keys.sort();
-    assert_eq!(keys, ["schema", "target", "version"]);
+    assert_eq!(keys, ["log_schema", "schema", "target", "version"]);
     assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
     let target = json["target"].as_str().unwrap();
     assert!(target.contains("-linux-"), "{target}");
-    assert_eq!(json["schema"], latest_migration());
+    assert_eq!(json["schema"], latest_migration("migrations"));
+    assert_eq!(json["log_schema"], latest_migration("migrations_logs"));
 }
 
 #[test]

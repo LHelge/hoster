@@ -853,3 +853,75 @@ mod retention {
         assert_eq!(store.file_size().await.unwrap().free, 0);
     }
 }
+
+#[tokio::test]
+async fn rollback_reads_and_undoes_the_log_schema() {
+    let dir = TempDir::new().unwrap();
+    let state = dir.path().join("state");
+    assert_eq!(LogStore::schema_version_in(&state).await.unwrap(), None);
+    assert!(matches!(
+        LogStore::undo_migrations(&state, SchemaVersion::from(1))
+            .await
+            .unwrap_err(),
+        StoreError::Missing(_)
+    ));
+    assert!(!state.join(LogStore::FILE_NAME).exists(), "never created");
+
+    LogStore::open(&state).await.unwrap().close().await;
+    let expected = LogStore::expected_schema_version();
+    assert_eq!(
+        LogStore::schema_version_in(&state).await.unwrap(),
+        Some(expected)
+    );
+    assert_eq!(
+        LogStore::migrations_between(SchemaVersion::from(1), expected),
+        usize::try_from(i64::from(expected)).unwrap() - 1
+    );
+    assert_eq!(LogStore::migrations_between(expected, expected), 0);
+
+    let reached = LogStore::undo_migrations(&state, SchemaVersion::from(1))
+        .await
+        .unwrap();
+    assert_eq!(reached, SchemaVersion::from(1));
+    assert_eq!(
+        LogStore::schema_version_in(&state).await.unwrap(),
+        Some(SchemaVersion::from(1))
+    );
+    // The older schema opens and migrates forward again.
+    LogStore::open(&state).await.unwrap().close().await;
+    assert_eq!(
+        LogStore::schema_version_in(&state).await.unwrap(),
+        Some(expected)
+    );
+}
+
+#[tokio::test]
+async fn moving_the_log_store_aside_takes_its_sidecars_and_drops_stale_ones() {
+    let dir = TempDir::new().unwrap();
+    let state = dir.path().join("state");
+    LogStore::open(&state).await.unwrap().close().await;
+    let file = |name: &str| state.join(name);
+    fs::write(file("logs.db-wal"), b"wal").unwrap();
+    // Left from an earlier move aside: it does not belong to the file moved now.
+    fs::write(file("logs.db.rollback-v0.2.0-shm"), b"stale").unwrap();
+
+    let aside = LogStore::move_aside(&state, "rollback-v0.2.0").unwrap();
+    assert_eq!(aside, file("logs.db.rollback-v0.2.0"));
+    assert!(aside.is_file());
+    assert_eq!(
+        fs::read(file("logs.db.rollback-v0.2.0-wal")).unwrap(),
+        b"wal"
+    );
+    for gone in [
+        "logs.db",
+        "logs.db-wal",
+        "logs.db-shm",
+        "logs.db.rollback-v0.2.0-shm",
+    ] {
+        assert!(!file(gone).exists(), "{gone}");
+    }
+    assert!(matches!(
+        LogStore::move_aside(&state, "rollback-v0.2.0").unwrap_err(),
+        StoreError::Io { .. }
+    ));
+}
