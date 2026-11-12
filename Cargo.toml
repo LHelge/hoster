@@ -36,7 +36,7 @@ oauth2 = { version = "5.0.0", default-features = false }
 pingora = { version = "0.9", default-features = false, features = ["connection_filter", "proxy", "rustls"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "http2"] }
 ring = "0.17.14"
-rustix = { version = "1.1.6", features = ["process", "event"] }
+rustix = { version = "1.1.6", features = ["process", "event", "fs"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7.1"
 schemars = "1.2.3"
