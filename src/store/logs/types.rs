@@ -17,7 +17,7 @@ pub struct UnknownLogText {
 }
 
 impl UnknownLogText {
-    fn new(what: &'static str, text: &str) -> Self {
+    pub(super) fn new(what: &'static str, text: &str) -> Self {
         Self {
             what,
             text: text.to_owned(),
@@ -139,6 +139,44 @@ pub struct LogRecord {
     /// Written by hoster about lines it lost (the rate cap, a gap while it was down); its
     /// message says what.
     pub marker: bool,
+}
+
+impl LogRecord {
+    /// The fields as `(dotted key, value)` pairs, sorted by key:
+    /// nested objects join their keys with `.` and arrays use the index (`spans.0.name`).
+    /// A string value is its text, `null` and other scalars their JSON. Empty without fields,
+    /// or when they are not a JSON object.
+    pub fn flat_fields(&self) -> Vec<(String, String)> {
+        let mut flat = Vec::new();
+        if let Some(serde_json::Value::Object(object)) = self
+            .fields
+            .as_deref()
+            .and_then(|fields| serde_json::from_str(fields).ok())
+        {
+            for (key, value) in object {
+                Self::flatten(key, value, &mut flat);
+            }
+        }
+        flat
+    }
+
+    fn flatten(key: String, value: serde_json::Value, flat: &mut Vec<(String, String)>) {
+        use serde_json::Value;
+        match value {
+            Value::Object(object) if !object.is_empty() => {
+                for (inner, value) in object {
+                    Self::flatten(format!("{key}.{inner}"), value, flat);
+                }
+            }
+            Value::Array(items) if !items.is_empty() => {
+                for (index, value) in items.into_iter().enumerate() {
+                    Self::flatten(format!("{key}.{index}"), value, flat);
+                }
+            }
+            Value::String(text) => flat.push((key, text)),
+            other => flat.push((key, other.to_string())),
+        }
+    }
 }
 
 /// The id the proxy gives a request: 16 random bytes, written as 32 lowercase hex digits, the

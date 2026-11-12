@@ -48,7 +48,8 @@ use thiserror::Error;
     reason = "the record types are written by the log store's recorder as it lands"
 )]
 pub use logs::{
-    Level, LogBatch, LogCursor, LogHead, LogRecord, LogStore, RequestId, RequestRow, Stream,
+    InvalidPattern, Level, LevelCounts, LogBatch, LogCursor, LogEntry, LogHead, LogPage, LogQuery,
+    LogRecord, LogScope, LogStore, PageAt, RecordKey, RequestId, RequestRow, Stream, TextFilter,
     UnknownLogText,
 };
 pub use notifications::{
