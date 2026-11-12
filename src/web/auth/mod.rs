@@ -14,7 +14,10 @@
 //!   `/auth/login`.
 //!
 //! Sessions live 12 h at most and end earlier after `web.session_idle_timeout` without a
-//! request. The cookie `__Host-hoster_session` holds a random token; SQLite keeps its SHA-256.
+//! request. The sidebar host card's poll ([`HostCard::PATH`], ADR-0066 §9) needs a live session
+//! like any admin route but is not activity: it never refreshes the idle timer, so an open tab
+//! left alone still signs out. The cookie `__Host-hoster_session` holds a random token; SQLite
+//! keeps its SHA-256.
 
 mod github;
 mod token;
@@ -37,7 +40,7 @@ use crate::store::{SessionRecord, Store, StoreError, Timestamp};
 use self::github::GithubError;
 pub use self::github::{GithubApp, GithubEndpoints, GithubOAuth, GithubUser};
 use self::token::RandomToken;
-use super::pages::{Flash, FlashKind, Layout, Page};
+use super::pages::{Flash, FlashKind, HostCard, Layout, Page};
 
 /// A signed-in admin session, available to handlers as an `Extension<Session>`.
 #[derive(Debug, Clone)]
@@ -155,8 +158,18 @@ enum Access {
     Webhook,
     /// Reachable without a session.
     Public,
-    /// Needs a session.
+    /// Needs a session, and counts as activity: it refreshes the session's idle timer.
     Admin,
+    /// Needs a session, but is a background poll, not activity: the idle timer is left as it is
+    /// (the sidebar host card's [`HostCard::PATH`]).
+    Poll,
+}
+
+impl Access {
+    /// Whether a request without a session is sent to log in.
+    fn needs_session(self) -> bool {
+        matches!(self, Access::Admin | Access::Poll)
+    }
 }
 
 impl From<&str> for Access {
@@ -169,6 +182,8 @@ impl From<&str> for Access {
                 .any(|prefix| path.starts_with(prefix))
         {
             Access::Public
+        } else if path == HostCard::PATH {
+            Access::Poll
         } else {
             Access::Admin
         }
@@ -343,7 +358,7 @@ impl Auth {
             tracing::warn!(method = %request.method(), path = request.uri().path(), "cross-origin request refused");
             return (StatusCode::FORBIDDEN, "cross-origin request refused\n").into_response();
         }
-        let session = match auth.session(request.headers()).await {
+        let session = match auth.session(request.headers(), access).await {
             Ok(session) => session,
             Err(err) => {
                 tracing::error!(error = %err, "looking up the session failed");
@@ -365,7 +380,7 @@ impl Auth {
             Some(session) => {
                 request.extensions_mut().insert(session);
             }
-            None if access == Access::Admin => {
+            None if access.needs_session() => {
                 return Self::redirect(request.headers(), "/auth/login", !changes_state);
             }
             None => {}
@@ -388,22 +403,35 @@ impl Auth {
         }
     }
 
-    /// The live session the request's cookie names, refreshing its idle timer.
-    async fn session(&self, headers: &HeaderMap) -> Result<Option<Session>, StoreError> {
+    /// The live session the request's cookie names, refreshing its idle timer unless `access`
+    /// is a [`Access::Poll`].
+    async fn session(
+        &self,
+        headers: &HeaderMap,
+        access: Access,
+    ) -> Result<Option<Session>, StoreError> {
         let Some(token) = Cookie::get(headers, Cookie::SESSION) else {
             return Ok(None);
         };
-        self.active(&RandomToken::hash(token)).await
+        let hash = RandomToken::hash(token);
+        match access {
+            Access::Poll => Ok(self.live(&hash, Timestamp::now()).await?.map(Session::from)),
+            _ => self.active(&hash).await,
+        }
+    }
+
+    /// The session with `hash` if it is live at `now` (neither expired nor idle too long),
+    /// leaving its idle timer as it is.
+    async fn live(&self, hash: &str, now: Timestamp) -> Result<Option<SessionRecord>, StoreError> {
+        self.store
+            .active_session(hash, now, now - self.settings.idle_timeout)
+            .await
     }
 
     /// The live session with `hash`, refreshing its idle timer.
     async fn active(&self, hash: &str) -> Result<Option<Session>, StoreError> {
         let now = Timestamp::now();
-        let Some(record) = self
-            .store
-            .active_session(hash, now, now - self.settings.idle_timeout)
-            .await?
-        else {
+        let Some(record) = self.live(hash, now).await? else {
             return Ok(None);
         };
         let touch_every = Self::TOUCH_INTERVAL.min(self.settings.idle_timeout / 2);

@@ -16,7 +16,7 @@ use crate::orchestrator::EventLog;
 use crate::runtime::FakeRuntime;
 use crate::secrets::{SecretKey, SecretStore};
 use crate::stats::tests::FakeStats;
-use crate::stats::{Stats, Traffic};
+use crate::stats::{ResourceUsage, Stats, Traffic};
 use crate::supervisor::ShutdownRequest;
 use crate::update::Updater;
 use crate::update::fake::{FakeDeployments, FakeReleases, FakeService};
@@ -50,6 +50,8 @@ pub struct TestApp {
     pub traffic: Traffic,
     /// The rest of the dashboard's statistics.
     pub stats: Arc<FakeStats>,
+    /// The resource sampler's cache the pages read (ADR-0066); empty until a test records.
+    pub resources: ResourceUsage,
     /// The instance name the sidebar and Settings → General show; the hostname is `srv-01`.
     pub instance: Instance,
     /// The secret store Settings → Notifications keeps its API key in.
@@ -104,6 +106,7 @@ impl TestApp {
         let verifier = OidcVerifier::new(ORIGIN, base.join(JWKS_PATH).unwrap()).unwrap();
         let traffic = Traffic::default();
         let stats = Arc::new(FakeStats::default());
+        let resources = ResourceUsage::default();
         let instance = Instance::with_default(store.clone(), "srv-01".parse().unwrap())
             .await
             .unwrap();
@@ -138,7 +141,7 @@ impl TestApp {
             system,
             verifier,
             store.clone(),
-            Stats::new(traffic.clone(), stats.clone()),
+            Stats::new(traffic.clone(), stats.clone()).with_resources(resources.clone()),
             instance.clone(),
             notifications.clone(),
         );
@@ -151,6 +154,7 @@ impl TestApp {
             registries,
             traffic,
             stats,
+            resources,
             instance,
             secrets,
             mailer,
@@ -458,6 +462,98 @@ async fn a_denied_authorization_is_explained() {
     assert!(html.contains("unknown error"), "{html}");
 }
 
+/// The `last_seen_at` the store holds for `browser`'s session if it is still live at `at`.
+async fn last_seen(
+    app: &TestApp,
+    browser: &Browser,
+    idle: Duration,
+    at: Timestamp,
+) -> Option<Timestamp> {
+    let hash = RandomToken::hash(browser.cookie.split_once('=').unwrap().1);
+    app.store
+        .active_session(&hash, at, at - idle)
+        .await
+        .unwrap()
+        .map(|record| record.last_seen_at)
+}
+
+fn htmx_get(uri: &str, browser: Option<&Browser>) -> Request<Body> {
+    let mut request = Request::get(uri).header("hx-request", "true");
+    if let Some(browser) = browser {
+        request = request.header(header::COOKIE, &browser.cookie);
+    }
+    request.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn the_host_card_poll_does_not_keep_a_session_alive() {
+    let idle = Duration::from_secs(60);
+    let app = TestApp::with_idle_timeout(idle).await;
+    // Last seen 50 s ago: live, and old enough that any activity would be written.
+    let seen = Timestamp::now() - Duration::from_secs(50);
+    let browser = app.sign_in_at(seen).await;
+    for _ in 0..3 {
+        let response = app.send(htmx_get(HostCard::PATH, Some(&browser))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("hx-redirect").is_none());
+    }
+    assert_eq!(
+        last_seen(&app, &browser, idle, Timestamp::now()).await,
+        Some(seen),
+        "the polls were not recorded as activity"
+    );
+    // So the session goes idle 60 s after the last real request, polls or not: 15 s from now
+    // it is over.
+    let later = Timestamp::now() + Duration::from_secs(15);
+    assert_eq!(last_seen(&app, &browser, idle, later).await, None);
+
+    // Once idle, the next poll is sent to log in, and so is a page.
+    let gone = app
+        .sign_in_at(Timestamp::now() - Duration::from_secs(70))
+        .await;
+    let response = app.send(htmx_get(HostCard::PATH, Some(&gone))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header(&response, "hx-redirect"), "/auth/login");
+    let page = app.get("/", Some(&gone.cookie)).await;
+    assert_eq!(page.status(), StatusCode::SEE_OTHER);
+    assert_eq!(header(&page, "location"), "/auth/login");
+}
+
+#[tokio::test]
+async fn a_page_request_still_refreshes_the_idle_timer() {
+    let idle = Duration::from_secs(60);
+    let app = TestApp::with_idle_timeout(idle).await;
+    let browser = app
+        .sign_in_at(Timestamp::now() - Duration::from_secs(50))
+        .await;
+    assert_eq!(
+        app.get("/stacks", Some(&browser.cookie)).await.status(),
+        StatusCode::OK
+    );
+    let later = Timestamp::now() + Duration::from_secs(15);
+    let seen = last_seen(&app, &browser, idle, later)
+        .await
+        .expect("the request kept the session alive");
+    assert!(seen > Timestamp::now() - Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn the_host_card_poll_needs_a_session() {
+    let app = TestApp::new().await;
+    let response = app.get(HostCard::PATH, None).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(header(&response, "location"), "/auth/login");
+    let response = app.send(htmx_get(HostCard::PATH, None)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header(&response, "hx-redirect"), "/auth/login");
+    assert!(body(response).await.is_empty());
+    let bogus = format!("{}=not-a-session", Cookie::SESSION);
+    assert_eq!(
+        app.get(HostCard::PATH, Some(&bogus)).await.status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
 #[tokio::test]
 async fn a_short_idle_timeout_keeps_a_session_in_use_alive() {
     let idle = Duration::from_secs(30);
@@ -707,4 +803,8 @@ fn paths_are_classified() {
     assert_eq!(Access::from("/authx"), Access::Admin);
     assert_eq!(Access::from("/hooksy"), Access::Admin);
     assert_eq!(Access::from("/"), Access::Admin);
+    assert_eq!(Access::from("/shell/host"), Access::Poll);
+    assert_eq!(Access::from("/shell/hostx"), Access::Admin);
+    assert!(Access::Poll.needs_session() && Access::Admin.needs_session());
+    assert!(!Access::Public.needs_session());
 }

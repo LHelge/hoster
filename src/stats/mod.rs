@@ -47,12 +47,10 @@ pub use self::latency::Histogram;
 pub use self::recorder::TrafficRecorder;
 #[allow(
     unused_imports,
-    reason = "named by the sidebar host meters and the stack overview (tasks hzc, rap)"
+    reason = "named by the stack overview's usage columns (task rap)"
 )]
-pub use self::resources::{
-    ContainerReading, ContainerSample, ContainerUsage, History, HostSample, Usage,
-};
-pub use self::resources::{ResourceSampler, ResourceUsage};
+pub use self::resources::{ContainerReading, ContainerSample, ContainerUsage};
+pub use self::resources::{History, HostSample, ResourceSampler, ResourceUsage, Usage};
 pub use self::traffic::{
     InFlight, RequestOutcome, StatusClass, StatusCounts, TrackedRequest, Traffic, TrafficDelta,
 };
@@ -110,10 +108,6 @@ impl Stats {
     }
 
     /// The resource sampler's cache: host and container CPU, memory and disk (ADR-0066).
-    #[allow(
-        dead_code,
-        reason = "read by the sidebar host meters and the stack overview (tasks hzc, rap)"
-    )]
     pub fn resources(&self) -> &ResourceUsage {
         &self.resources
     }

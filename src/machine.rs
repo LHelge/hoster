@@ -78,6 +78,14 @@ impl Machine {
         rustix::fs::statvfs(path).ok()?.try_into().ok()
     }
 
+    /// Whether the real paths `a` and `b` are on one filesystem (the same `st_dev`); `None` when
+    /// either cannot be read.
+    pub fn same_filesystem(&self, a: &Path, b: &Path) -> Option<bool> {
+        use std::os::unix::fs::MetadataExt as _;
+        let device = |path: &Path| std::fs::metadata(path).ok().map(|meta| meta.dev());
+        Some(device(a)? == device(b)?)
+    }
+
     /// The online CPUs from `/sys/devices/system/cpu/online`; when that cannot be read, the CPUs
     /// hoster may run on (which a cgroup quota or affinity mask can make fewer).
     pub fn cpus(&self) -> Option<usize> {

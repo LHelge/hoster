@@ -113,10 +113,6 @@ pub struct History<S> {
     samples: Vec<S>,
 }
 
-#[allow(
-    dead_code,
-    reason = "read by the sidebar host meters and the stack overview (tasks hzc, rap)"
-)]
 impl<S> History<S> {
     /// The newest sample; `None` before the first tick.
     pub fn latest(&self) -> Option<&S> {
@@ -198,7 +194,6 @@ impl ResourceUsage {
     pub const HISTORY: usize = 360;
 
     /// The host's latest sample and history.
-    #[allow(dead_code, reason = "read by the sidebar host meters (task hzc)")]
     pub fn host(&self) -> History<HostSample> {
         self.read().host.history()
     }

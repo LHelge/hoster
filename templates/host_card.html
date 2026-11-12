@@ -1,0 +1,17 @@
+<section class="host-card" id="{{ Self::ID }}" aria-labelledby="host-card-title" hx-get="{{ Self::PATH }}" hx-trigger="{{ Self::POLL }}" hx-swap="outerHTML">
+  <h2 class="host-card-title" id="host-card-title">HOST · {{ hostname }}</h2>
+  {%- for row in rows %}
+  <div class="host-meter">
+    <span class="host-meter-label">{{ row.label }}</span>
+    {%- if let Some(spark) = row.spark %}
+    {{ spark }}
+    {%- endif %}
+    {%- if let Some(value) = row.value %}
+    <span class="host-meter-value">{{ value }}</span>
+    {%- else %}
+    <span class="host-meter-value muted">—</span>
+    {%- endif %}
+    {{ row.meter }}
+  </div>
+  {%- endfor %}
+</section>

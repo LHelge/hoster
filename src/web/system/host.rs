@@ -1,6 +1,7 @@
 //! The facts about the machine the System page shows: hostname, OS, kernel, architecture and
 //! CPUs, memory, the container runtime and its cgroups, hoster's public addresses, the data
-//! directory and the host's uptime, and how many of its open files hoster uses (ADR-0065).
+//! directory (and its filesystem's usage when that is not podman's, ADR-0066 §5) and the host's
+//! uptime, and how many of its open files hoster uses (ADR-0065).
 //!
 //! [`HostFacts`] reads them when the page renders. [`LocalHost`] reads them from the files the
 //! kernel and the distribution publish (`/proc/sys/kernel/hostname`, `/etc/os-release`,
@@ -17,8 +18,9 @@ use crate::acme::DnsCheck;
 use crate::machine::{Machine, Memory};
 use crate::proxy::{Admission, FileUse};
 use crate::runtime::EngineInfo;
+use crate::stats::Usage;
 use crate::web::containers::ContainerSource;
-use crate::web::ui::Uptime;
+use crate::web::ui::{ByteUsage, Uptime};
 
 /// Where the System page's host facts come from.
 #[async_trait::async_trait]
@@ -51,6 +53,10 @@ pub struct Facts {
     pub public_source: Option<String>,
     /// hoster's state directory.
     pub data_dir: Option<PathBuf>,
+    /// The usage of the state directory's filesystem, when it is not the one podman's storage
+    /// root is on (whose usage the sidebar shows, ADR-0066 §5); `None` when it is the same one
+    /// or cannot be told.
+    pub data_disk: Option<Usage>,
     /// How long the host has been up.
     pub uptime: Option<Duration>,
     /// hoster's own descriptors and the client connections refused at the cap.
@@ -101,6 +107,7 @@ impl Facts {
             ],
             public_source: Some("the A/AAAA records of admin.example.com".into()),
             data_dir: Some("/home/hoster/.local/state/hoster".into()),
+            data_disk: None,
             uptime: Some(Duration::from_secs(41 * 86_400 + 7 * 3_600)),
             files: Some(FileUse {
                 open: Some(214),
@@ -129,7 +136,7 @@ impl Facts {
                 .collect::<Vec<_>>()
                 .join(" · ")
         });
-        vec![
+        let mut rows = vec![
             Fact::new("hostname", self.hostname.clone()),
             Fact::new("os", self.os.clone()),
             Fact::new("kernel", self.kernel.clone()),
@@ -145,6 +152,14 @@ impl Facts {
                 "data dir",
                 self.data_dir.as_ref().map(|d| d.display().to_string()),
             ),
+        ];
+        if let Some(disk) = self.data_disk {
+            rows.push(Fact {
+                note: Some("its own filesystem; the containers' is in the sidebar".into()),
+                ..Fact::new("data disk", Some(format!("{} used", ByteUsage(disk))))
+            });
+        }
+        rows.extend([
             Fact::new("uptime", self.uptime.map(|up| Uptime(up).to_string())),
             Fact {
                 note: self.files.map(Self::cap),
@@ -155,7 +170,8 @@ impl Facts {
                 self.files
                     .map(|files| format!("{} client connections since start", files.refused)),
             ),
-        ]
+        ]);
+        rows
     }
 
     /// `214 of 16384`.
@@ -283,6 +299,16 @@ impl LocalHost {
         }
     }
 
+    /// The usage of the state directory's filesystem when it is not the one of `engine`'s
+    /// storage root.
+    fn data_disk(&self, engine: Option<&EngineInfo>) -> Option<Usage> {
+        let storage_root = engine?.storage_root.as_deref()?;
+        if self.machine.same_filesystem(storage_root, &self.data_dir)? {
+            return None;
+        }
+        self.machine.filesystem(&self.data_dir).map(Usage::from)
+    }
+
     async fn engine(&self) -> Option<EngineInfo> {
         match tokio::time::timeout(Self::ENGINE_TIMEOUT, self.runtime.engine()).await {
             Ok(Ok(engine)) => Some(engine),
@@ -302,6 +328,7 @@ impl LocalHost {
 impl HostFacts for LocalHost {
     async fn read(&self) -> Facts {
         let public: Vec<IpAddr> = self.dns.expected().into_iter().collect();
+        let engine = self.engine().await;
         Facts {
             hostname: self.file("proc/sys/kernel/hostname"),
             os: self.os(),
@@ -309,7 +336,8 @@ impl HostFacts for LocalHost {
             arch: Some(std::env::consts::ARCH.to_owned()),
             cpus: self.machine.cpus(),
             memory: self.machine.memory(),
-            engine: self.engine().await,
+            data_disk: self.data_disk(engine.as_ref()),
+            engine,
             cgroups: self.cgroups(),
             public_source: (!public.is_empty()).then(|| self.dns.source().to_string()),
             public,
@@ -487,6 +515,63 @@ mod tests {
                 "open files",
                 "refused",
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn the_data_dirs_filesystem_is_shown_only_when_it_is_not_podmans() {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(FakeRuntime::new());
+        let host = |runtime: &Arc<FakeRuntime>| {
+            LocalHost::new(
+                runtime.clone(),
+                dns(&["203.0.113.42"]),
+                data.path().to_path_buf(),
+            )
+            .under(root.path())
+        };
+        let disk = |facts: &Facts| facts.rows().into_iter().find(|f| f.name == "data disk");
+
+        // The usual VPS: the storage root and the state dir share a filesystem.
+        runtime.set_storage_root(data.path().join("containers"));
+        std::fs::create_dir(data.path().join("containers")).unwrap();
+        let facts = host(&runtime).read().await;
+        assert_eq!(facts.data_disk, None);
+        assert_eq!(disk(&facts), None);
+
+        // On another filesystem (procfs stands in for one).
+        runtime.set_storage_root("/proc");
+        let facts = host(&runtime).read().await;
+        let usage = facts.data_disk.expect("the state dir's filesystem");
+        assert!(usage.total > 0 && usage.used <= usage.total, "{usage:?}");
+        let fact = disk(&facts).unwrap();
+        assert!(fact.value.unwrap().ends_with(" used"));
+        assert_eq!(
+            fact.note.as_deref(),
+            Some("its own filesystem; the containers' is in the sidebar")
+        );
+
+        // A storage root that cannot be read says nothing either way.
+        runtime.set_storage_root(root.path().join("missing"));
+        assert_eq!(host(&runtime).read().await.data_disk, None);
+    }
+
+    #[test]
+    fn a_data_disk_row_follows_the_data_dir() {
+        let facts = Facts {
+            data_disk: Some(Usage {
+                used: 3 * 1024 * 1024 * 1024,
+                total: 40 * 1024 * 1024 * 1024,
+            }),
+            ..Facts::sample()
+        };
+        let names: Vec<&str> = facts.rows().iter().map(|f| f.name).collect();
+        let at = names.iter().position(|n| *n == "data dir").unwrap();
+        assert_eq!(names[at + 1], "data disk", "{names:?}");
+        assert_eq!(
+            facts.rows()[at + 1].value.as_deref(),
+            Some("3.0 / 40.0 GiB used")
         );
     }
 

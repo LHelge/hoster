@@ -29,6 +29,9 @@
         {%- endif %}</a></li>
       {%- endfor %}
     </ul>
+    {%- if let Some(host) = layout.host %}
+    {{ host|safe }}
+    {%- endif %}
     <div class="account">
       <span class="avatar" aria-hidden="true">{{ user.initial() }}</span>
       <span class="account-who">
