@@ -142,6 +142,14 @@ impl ParsedLine {
     }
 }
 
+/// Maps a JSON object by the common keys, as a JSON line holding it would be. hoster's own
+/// layer (ADR-0068) builds the object its JSON formatter would write and maps it here.
+impl From<Map<String, Value>> for ParsedLine {
+    fn from(object: Map<String, Value>) -> Self {
+        Self::object(object)
+    }
+}
+
 /// Parses one line, without its trailing newline (a trailing `\r` is dropped too). Never fails:
 /// what is not a JSON object is text.
 impl From<&str> for ParsedLine {

@@ -17,11 +17,7 @@ mod line;
 )]
 mod recorder;
 
-#[allow(
-    unused_imports,
-    reason = "hoster's own records share the rate cap as they land (task fsw)"
-)]
-pub use cap::{Admission, Gap, RateCap};
+pub use cap::RateCap;
 pub use follower::LogFollowers;
 pub use line::ParsedLine;
 #[cfg(test)]
