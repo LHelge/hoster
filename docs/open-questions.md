@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-38 and OQ-40 are open. All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38, OQ-40 and OQ-42 are open (OQ-42 has the owner's answers and waits for a spike). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -46,6 +46,8 @@ Index:
 | [OQ-34](#oq-34-poller-bootstrap-advisory-dns-check-health-default-path-port-host-redirects) | ~~Poller bootstrap, advisory DNS check, health default path, `PORT` injection, host redirects~~ **Resolved → ADR-0051** | — |
 | [OQ-35](#oq-35-ambiguous-podman-object-names-across-stacks) | ~~Ambiguous podman object names across stacks~~ **Resolved → ADR-0063 (reject at apply, label check kept)** | — |
 | [OQ-38](#oq-38-client-supplied-forwarding-headers-at-the-edge) | Client-supplied forwarding headers at the edge (`X-Forwarded-For` appended, `Forwarded` and `X-Real-IP` passed through) | — |
+| [OQ-41](#oq-41-persisted-structured-container-logs) | ~~Persisted, structured container logs~~ **Resolved → ADR-0067 (separate `logs.db`, 7 days, 1 GiB)** | — |
+| [OQ-42](#oq-42-receiving-opentelemetry-otlp-from-containers) | Receiving OpenTelemetry (OTLP) from containers | `xv9`, `qnh` |
 
 ---
 
@@ -579,3 +581,64 @@ come from hand-written requests only.
 path an app sees, and what it refuses no legitimate client sends. C is how the big proxies do
 it, but rewriting paths conflicts with ADR-0010's "forward what the client sent" and with
 signed URLs.
+
+## OQ-41: Persisted, structured container logs
+
+**Resolved → [ADR-0067](adr/0067-persisted-structured-logs.md)** (2026-11-12): hoster follows every managed container and persists parsed records, and the proxy's requests, in a separate `logs.db`; JSON lines only get levels; 7 days and 1 GiB; search by scanning the range; not in backups. The agent's recommendation of one file per day was not taken.
+
+## OQ-42: Receiving OpenTelemetry (OTLP) from containers
+
+**Problem.** JSON on stdout (OQ-41) gives logs. It cannot give a trace waterfall: that needs
+spans with start, end, parent and a shared trace id, which apps emit through an OpenTelemetry
+SDK over OTLP. `tracing` does so with `tracing-opentelemetry` and
+`opentelemetry-appender-tracing`; most languages have SDKs; most third-party images
+(databases) emit nothing. hoster has no receiver, and containers have no path to the host
+(ADR-0046). Raised 2026-11-12; blocks epics `xv9` and `qnh`. It builds on OQ-41's store.
+
+**Questions and options.**
+
+1. **Whether.**
+   - A. No. stdout JSON only; correlate by a request id the proxy adds.
+   - B. An OTLP receiver in hoster that stores into the OQ-41 store and shows it in the UI. Not
+     an OpenTelemetry Collector (no pipelines, no export). Amends ADR-0018, 0044, 0045, 0046.
+   - C. Document running an existing backend (Jaeger, OpenObserve) as a stack. Needs the same
+     container-to-receiver path, and its UI sits outside hoster's.
+2. **How a container reaches the receiver.** Needs a spike under rootless podman with per-stack
+   networks (ADR-0006, ADR-0007).
+   - A. A hoster listener the container reaches as `host.containers.internal`.
+   - B. A public route that hairpins through the proxy, as stacks reach each other today
+     (ADR-0046). Works everywhere; telemetry leaves and re-enters through TLS.
+   - C. A Unix socket mounted into the container. Few SDKs can export OTLP/HTTP to one.
+3. **Identity.** A per-service bearer token, injected as `OTEL_EXPORTER_OTLP_HEADERS` together
+   with `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES`. hoster
+   takes stack and service from the token and ignores what the payload claims.
+   - A. Injected into every service. Changes every config hash once (ADR-0029), so every stack
+     redeploys.
+   - B. Opt-in per service in the stack file.
+4. **Protocol.** A. OTLP/HTTP protobuf only (three Axum handlers, `opentelemetry-proto` types).
+   B. gRPC as well (nginx's OTel module speaks only gRPC, as far as known; unverified).
+5. **Signals.** Logs, traces, metrics. Metrics overlap ADR-0062 and ADR-0066, which measure
+   from outside, and need series caps.
+6. **Trace context at the edge.** Whether the proxy starts a trace per request and sends
+   `traceparent` upstream, and whether a client-supplied `traceparent` is honoured (compare
+   OQ-38) or replaced.
+7. **Volume.** Span retention shorter than logs, head sampling, per-service rate caps.
+
+**Recommendation.** Decide after the owner has tried OTel output from `aphid-server` against a
+local Jaeger or Aspire Dashboard. Then 1B, 2A if the spike shows it works without host-wide
+changes and 2B otherwise, 3B, 4A, logs and traces only, the proxy always starts the trace and
+replaces a client's `traceparent`, spans kept 3 days with a rate cap per service.
+
+**Owner's answers (2026-11-12).** Not yet an ADR: question 2 waits for spike `h4q`, and the ADR
+is written once it has run (task `yjp`).
+
+1. **B**: build the receiver, without waiting for a trial.
+2. **A if the spike shows it works** without host-wide changes and without exposing other host
+   services, **otherwise B**.
+3. **A**: injected into every service, against the recommendation. The ADR has to say how the
+   one-time redeploy of every stack is handled, for example by keeping hoster's injected
+   variables out of the config hash (ADR-0029; check how `PORT` of ADR-0051 is treated).
+4. **A**: OTLP/HTTP protobuf only.
+5. Logs and traces; no metrics.
+6. The proxy always starts the trace and replaces a client's `traceparent`.
+7. Spans kept 3 days, a rate cap per service, no sampling.
