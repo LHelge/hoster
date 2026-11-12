@@ -1,6 +1,8 @@
 //! `hoster doctor`: preflight checks that the host is set up the way ADR-0023 expects (a systemd
 //! user service with linger, the user `podman.socket`, a lowered unprivileged-port start), so a
-//! misconfiguration is diagnosed before `hoster run`.
+//! misconfiguration is diagnosed before `hoster run`. It also checks the log store, `logs.db` in
+//! the state directory (ADR-0067 §2), opening it read-only without creating or migrating it; that
+//! check is advisory, since hoster runs without persisted logs when the store is unusable.
 //!
 //! [`Doctor`] holds everything a check looks at — the uid, `/proc/sys`, the cgroup tree, the
 //! podman socket candidates, the ports to bind, the running binary and its versioned layout
@@ -25,6 +27,7 @@ use crate::config::{Config, ConfigError, PortRange};
 use crate::installation::Installation;
 use crate::machine::CgroupControllers;
 use crate::runtime::{PodmanSocket, PodmanVersion};
+use crate::store::{LogStore, Store};
 
 /// First systemd release with user-scoped encrypted credentials (`systemd-creds --user`).
 const USER_CREDENTIALS_SYSTEMD: u32 = 256;
@@ -119,8 +122,13 @@ impl Doctor {
 
     /// Runs every check. `config` is the result of loading the configuration; checks that need
     /// it are skipped when it failed.
-    pub fn diagnose(&self, config: &Result<Config, ConfigError>) -> Report {
+    pub async fn diagnose(&self, config: &Result<Config, ConfigError>) -> Report {
         let config = config.as_ref();
+        // hoster runs without persisted logs when the log store is unusable (ADR-0067).
+        let log_store = match config {
+            Ok(config) => Self::check_log_store(&config.state_dir).await,
+            Err(_) => Outcome::Skip("needs a valid configuration".to_owned()),
+        };
         Report {
             checks: vec![
                 Check::required("user", self.check_user()),
@@ -148,6 +156,7 @@ impl Doctor {
                 Check::required("clock", self.check_clock()),
                 // A manual install still works; it just cannot update itself.
                 Check::advisory("binary_layout", self.check_binary_layout()),
+                Check::advisory("log_store", log_store),
             ],
         }
     }
@@ -232,6 +241,80 @@ impl Doctor {
                 format!("cannot write to {shown}: {e}"),
                 format!("chmod 700 {shown}"),
             ),
+        }
+    }
+
+    /// `logs.db` in the state directory (ADR-0067 §2) exists with mode 0600, was created with
+    /// `auto_vacuum = INCREMENTAL`, opens read-only, and its schema is not newer than this
+    /// binary's. It is neither created nor migrated here. Before the first `hoster run` (no
+    /// `hoster.db` either) there is nothing to check.
+    async fn check_log_store(dir: &Path) -> Outcome {
+        let path = dir.join(LogStore::FILE_NAME);
+        let shown = path.display();
+        let aside = format!(
+            "logs are expendable: stop hoster, move it aside (`mv {shown} {shown}.broken`) and \
+             start hoster, which creates an empty one"
+        );
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if dir.join(Store::FILE_NAME).is_file() {
+                    return Outcome::fail(
+                        format!("{shown} does not exist, so logs are not persisted"),
+                        "hoster creates it when it starts; check its journal for why it could \
+                         not (`journalctl --user -u hoster`)",
+                    );
+                }
+                return Outcome::Skip(format!("{shown} is created by the first `hoster run`"));
+            }
+            Err(e) => return Outcome::fail(format!("{shown}: {e}"), aside),
+        };
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            return Outcome::fail(
+                format!("{shown} has mode {mode:03o}, not 600"),
+                format!("chmod 600 {shown}"),
+            );
+        }
+        let facts = match LogStore::inspect_in(dir).await {
+            Ok(Some(facts)) => facts,
+            Ok(None) => return Outcome::Skip(format!("{shown} was removed while checking")),
+            Err(err) => {
+                return Outcome::fail(
+                    format!(
+                        "cannot open {shown}: {:#}; logs are not persisted",
+                        anyhow::Error::from(err)
+                    ),
+                    aside,
+                );
+            }
+        };
+        if !facts.incremental_vacuum {
+            return Outcome::fail(
+                format!(
+                    "{shown} was not created with auto_vacuum = INCREMENTAL, so retention \
+                     cannot shrink it"
+                ),
+                aside,
+            );
+        }
+        let expected = LogStore::expected_schema_version();
+        match facts.schema.cmp(&expected) {
+            std::cmp::Ordering::Greater => Outcome::fail(
+                format!(
+                    "{shown} is at log schema {}, newer than this binary's {expected}; hoster \
+                     refuses it and does not persist logs",
+                    facts.schema
+                ),
+                format!("run the newer hoster again, or {aside}"),
+            ),
+            std::cmp::Ordering::Less => Outcome::Pass(format!(
+                "{shown} (mode 600, log schema {}; the next start migrates it to {expected})",
+                facts.schema
+            )),
+            std::cmp::Ordering::Equal => {
+                Outcome::Pass(format!("{shown} (mode 600, log schema {expected})"))
+            }
         }
     }
 
@@ -1175,8 +1258,142 @@ mod tests {
         assert_eq!(parse(""), None);
     }
 
-    #[test]
-    fn binary_outside_the_layout_only_warns() {
+    /// `check_log_store`'s outcome and its detail and hint, joined.
+    async fn log_store(dir: &Path) -> (&'static str, String) {
+        let outcome = Doctor::check_log_store(dir).await;
+        let text = match &outcome {
+            Outcome::Pass(detail) | Outcome::Skip(detail) => detail.clone(),
+            Outcome::Warn { detail, hint } | Outcome::Fail { detail, hint } => {
+                format!("{detail} / {hint}")
+            }
+        };
+        (status(outcome), text)
+    }
+
+    #[tokio::test]
+    async fn log_store_is_skipped_before_the_first_start_and_passes_once_created() {
+        let mut fx = Fixture::new();
+        let state = fx.state_dir(0o700);
+        let (outcome, text) = log_store(&state).await;
+        assert_eq!(outcome, "skip", "{text}");
+        assert!(text.contains("first `hoster run`"), "{text}");
+        assert!(
+            !state.join(LogStore::FILE_NAME).exists(),
+            "doctor created it"
+        );
+
+        LogStore::open(&state).await.unwrap().close().await;
+        let (outcome, text) = log_store(&state).await;
+        assert_eq!(outcome, "pass", "{text}");
+        assert!(
+            text.contains(&format!(
+                "mode 600, log schema {}",
+                LogStore::expected_schema_version()
+            )),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_store_missing_beside_the_state_store_fails() {
+        let mut fx = Fixture::new();
+        let state = fx.state_dir(0o700);
+        std::fs::write(state.join(Store::FILE_NAME), b"").unwrap();
+        let (outcome, text) = log_store(&state).await;
+        assert_eq!(outcome, "fail", "{text}");
+        assert!(text.contains("does not exist"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn log_store_with_a_loose_mode_fails() {
+        let mut fx = Fixture::new();
+        let state = fx.state_dir(0o700);
+        LogStore::open(&state).await.unwrap().close().await;
+        let file = state.join(LogStore::FILE_NAME);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (outcome, text) = log_store(&state).await;
+        assert_eq!(outcome, "fail", "{text}");
+        assert!(text.contains("mode 644"), "{text}");
+        assert!(text.contains("chmod 600"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn log_store_that_does_not_open_fails() {
+        let mut fx = Fixture::new();
+        let state = fx.state_dir(0o700);
+        let file = state.join(LogStore::FILE_NAME);
+        std::fs::write(&file, b"not a database at all, just text").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (outcome, text) = log_store(&state).await;
+        assert_eq!(outcome, "fail", "{text}");
+        assert!(text.contains("cannot open"), "{text}");
+        assert!(text.contains("move it aside"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn log_store_without_incremental_vacuum_fails() {
+        let mut fx = Fixture::new();
+        let state = fx.state_dir(0o700);
+        let file = state.join(LogStore::FILE_NAME);
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&file)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+        sqlx::query("CREATE TABLE t (x)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (outcome, text) = log_store(&state).await;
+        assert_eq!(outcome, "fail", "{text}");
+        assert!(text.contains("auto_vacuum = INCREMENTAL"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn log_store_from_a_newer_hoster_fails_and_an_older_one_passes() {
+        let mut fx = Fixture::new();
+        let state = fx.state_dir(0o700);
+        let logs = LogStore::open(&state).await.unwrap();
+        let pool = logs.pool().clone();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+             VALUES (999999, 'from the future', 1, x'00', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (outcome, text) = log_store(&state).await;
+        assert_eq!(outcome, "fail", "{text}");
+        assert!(text.contains("log schema 999999, newer"), "{text}");
+
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        logs.close().await;
+        let (outcome, text) = log_store(&state).await;
+        assert_eq!(outcome, "pass", "{text}");
+        assert!(text.contains("the next start migrates it"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn log_store_problems_only_warn_in_the_report() {
+        let mut fx = Fixture::new();
+        let state = fx.state_dir(0o700);
+        std::fs::write(state.join(Store::FILE_NAME), b"").unwrap();
+        let report = fx.doctor.diagnose(&Ok(config(state, 20000..=29999))).await;
+        let check = report
+            .checks()
+            .iter()
+            .find(|c| c.name == "log_store")
+            .unwrap();
+        assert_eq!(check.status, Status::Warn);
+        assert!(!check.required);
+    }
+
+    #[tokio::test]
+    async fn binary_outside_the_layout_only_warns() {
         let mut fx = Fixture::new();
         let Outcome::Pass(detail) = fx.doctor.check_binary_layout() else {
             panic!("the fixture runs from current");
@@ -1190,7 +1407,7 @@ mod tests {
         };
         assert!(detail.contains("is not inside"), "{detail}");
         assert!(hint.contains("install.sh"), "{hint}");
-        let report = fx.doctor.diagnose(&Err(ConfigError::NoConfigDir));
+        let report = fx.doctor.diagnose(&Err(ConfigError::NoConfigDir)).await;
         let check = report
             .checks()
             .iter()
@@ -1216,8 +1433,8 @@ mod tests {
         assert_eq!(status(fx.doctor.check_binary_layout()), "fail");
     }
 
-    #[test]
-    fn healthy_host_passes() {
+    #[tokio::test]
+    async fn healthy_host_passes() {
         let mut fx = Fixture::new();
         let state = fx.state_dir(0o700);
         let uid = fx.doctor.uid.to_string();
@@ -1227,7 +1444,8 @@ mod tests {
         ));
         fx.cgroup_controllers("cpu memory pids");
         fx.podman(&fx.doctor.sockets[0], OK_PING);
-        let report = fx.doctor.diagnose(&Ok(config(state, 20000..=29999)));
+        LogStore::open(&state).await.unwrap().close().await;
+        let report = fx.doctor.diagnose(&Ok(config(state, 20000..=29999))).await;
         if fx.doctor.uid == 0 {
             return; // Running the suite as root: the user check rightly fails.
         }
@@ -1236,8 +1454,8 @@ mod tests {
         assert!(report.to_string().ends_with("all required checks passed"));
     }
 
-    #[test]
-    fn apparmor_userns_restriction_is_reported() {
+    #[tokio::test]
+    async fn apparmor_userns_restriction_is_reported() {
         let fx = Fixture::new();
         // No such sysctl: not an AppArmor kernel with the restriction.
         assert_eq!(status(fx.doctor.check_unit_sandbox()), "pass");
@@ -1251,7 +1469,8 @@ mod tests {
         assert!(hint.contains("ADR-0064"), "{hint}");
         let report = fx
             .doctor
-            .diagnose(&Err(ConfigError::NotFound(PathBuf::from("/nope"))));
+            .diagnose(&Err(ConfigError::NotFound(PathBuf::from("/nope"))))
+            .await;
         let check = report
             .checks()
             .iter()
@@ -1261,11 +1480,11 @@ mod tests {
         assert!(!check.required);
     }
 
-    #[test]
-    fn failures_are_counted_and_advisory_checks_only_warn() {
+    #[tokio::test]
+    async fn failures_are_counted_and_advisory_checks_only_warn() {
         let fx = Fixture::with_commands(FakeCommands::default());
         let error = ConfigError::NotFound(PathBuf::from("/nope/hoster.toml"));
-        let report = fx.doctor.diagnose(&Err(error));
+        let report = fx.doctor.diagnose(&Err(error)).await;
         let by_name = |name| {
             report
                 .checks()

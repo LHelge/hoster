@@ -288,7 +288,6 @@ impl<R: ContainerRuntime> LogFollowers<R> {
     }
 
     /// The containers being followed right now.
-    #[allow(dead_code, reason = "shown on the System page (task uw9)")]
     pub fn followed(&self) -> Vec<ContainerId> {
         let mut followed: Vec<_> = self
             .shared
@@ -303,7 +302,6 @@ impl<R: ContainerRuntime> LogFollowers<R> {
 
     /// Lines the rate cap dropped since hoster started, per container not yet removed; only
     /// containers that lost any.
-    #[allow(dead_code, reason = "shown on the System page (task uw9)")]
     pub fn capped(&self) -> BTreeMap<ContainerId, u64> {
         self.shared
             .lock()

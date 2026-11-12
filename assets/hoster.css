@@ -1625,6 +1625,12 @@ dl.host-facts dt { color: var(--muted); }
 dl.host-facts dd { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
 dl.host-facts dt:last-of-type, dl.host-facts dd:last-of-type { border-bottom: 0; }
 .host-note { color: var(--muted); }
+.log-card { margin-top: 16px; max-width: 100%; }
+.log-card > .flash { margin: 14px 18px; }
+.log-card dl.host-facts { grid-template-columns: 14ch minmax(0, 1fr); }
+.log-card dd .meter { max-width: 320px; margin-top: 6px; }
+.log-losses-title { margin: 0; padding: 12px 18px 4px; border-top: 1px solid var(--divider); }
+.log-losses-none { margin: 0; padding: 4px 18px 14px; color: var(--muted); font: 12px/1.5 var(--mono); }
 
 @media (max-width: 760px) {
   .version-card, .update-check { padding: 16px; }
@@ -1632,6 +1638,9 @@ dl.host-facts dt:last-of-type, dl.host-facts dd:last-of-type { border-bottom: 0;
   .update-meta { display: block; margin-top: 2px; }
   .update-apply button { width: 100%; }
   dl.host-facts dt, dl.host-facts dd { padding: 8px 16px; }
+  .log-card > .flash { margin: 12px 16px; }
+  .log-losses-title { padding-inline: 16px; }
+  .log-losses-none { padding-inline: 16px; }
 }
 
 /* Certificates (src/web/certificates.rs) */

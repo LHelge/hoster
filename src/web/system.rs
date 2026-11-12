@@ -1,6 +1,7 @@
 //! The System page (ADR-0052): a version card (the running version with its target, schema and
 //! hoster's uptime, the installed current and previous versions), an update card for "check for
-//! updates" and "Apply update", and the host's facts ([`HostFacts`], read on every render).
+//! updates" and "Apply update", the host's facts ([`HostFacts`], read on every render) and the
+//! log store's size, reach and losses ([`LogFacts`], ADR-0067, likewise).
 //!
 //! - Checking asks GitHub only when the button is clicked (`POST /system/check`); the release
 //!   notes are shown as escaped preformatted text, never as HTML from the release body.
@@ -46,6 +47,8 @@ struct Inner {
     updater: Updater,
     shutdown: ShutdownRequest,
     host: Arc<dyn HostFacts>,
+    /// The log store's figures; `None` leaves its card out (tests that do not need it).
+    logs: Option<Arc<dyn LogFacts>>,
     /// When this hoster started, for its uptime.
     started: SystemTime,
     /// Held while an update runs: a second one (a double submit, another tab) is refused
@@ -111,9 +114,18 @@ impl System {
             updater,
             shutdown,
             host,
+            logs: None,
             started: SystemTime::now(),
             updating: tokio::sync::Mutex::new(()),
         }))
+    }
+
+    /// The same page with the log store card, showing `logs`.
+    pub fn with_logs(mut self, logs: Arc<dyn LogFacts>) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("set before the page is shared")
+            .logs = Some(logs);
+        self
     }
 
     /// The same page, with hoster started at `started` (the UI preview).
@@ -176,6 +188,10 @@ impl System {
             previous: installed.previous.map(|v| v.to_string()),
             problem,
             host: system.0.host.read().await.rows(),
+            logs: match &system.0.logs {
+                Some(logs) => Some(LogCard::new(logs.read().await, SystemTime::now())),
+                None => None,
+            },
         })
         .into_response()
     }
@@ -348,6 +364,7 @@ pub struct SystemPage {
     /// Shown when the installed versions cannot be read.
     problem: Option<String>,
     host: Vec<Fact>,
+    logs: Option<LogCard>,
 }
 
 impl SystemPage {
@@ -385,10 +402,15 @@ pub struct Restarting {
 }
 
 mod host;
+mod logs;
 
 #[cfg(test)]
 pub use host::Facts;
 pub use host::{HostFacts, LocalHost};
+use logs::LogCard;
+pub use logs::{LocalLogs, LogFacts, LogStoreState};
+#[cfg(test)]
+pub use logs::{LogFigures, LogHealth};
 
 #[cfg(test)]
 mod tests;

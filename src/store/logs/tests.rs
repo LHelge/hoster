@@ -852,6 +852,70 @@ mod retention {
         assert_eq!(report.file_bytes, after);
         assert_eq!(store.file_size().await.unwrap().free, 0);
     }
+
+    #[tokio::test]
+    async fn the_last_hour_is_counted_in_both_tables_and_the_used_size_read() {
+        let (_dir, store) = open().await;
+        seed(&store, now() - HOUR * 2, 3, 2, 10).await;
+        seed(&store, now() - HOUR / 2, 4, 1, 10).await;
+        seed(&store, now(), 1, 0, 10).await;
+        assert_eq!(
+            store.rows_since(now() - HOUR).await.unwrap(),
+            RowCounts {
+                records: 5,
+                requests: 1
+            }
+        );
+        assert_eq!(
+            store.rows_since(now() + HOUR).await.unwrap(),
+            RowCounts::default()
+        );
+        assert_eq!(store.used_bytes().await.unwrap(), used_bytes(&store).await);
+        assert!(store.used_bytes().await.unwrap() > 0);
+    }
+}
+
+#[tokio::test]
+async fn doctor_inspects_an_existing_file_read_only_and_never_creates_one() {
+    let dir = TempDir::new().unwrap();
+    let state = dir.path().join("state");
+    assert_eq!(LogStore::inspect_in(&state).await.unwrap(), None);
+    assert!(!state.exists(), "inspecting created the state directory");
+
+    LogStore::open(&state).await.unwrap().close().await;
+    assert_eq!(
+        LogStore::inspect_in(&state).await.unwrap(),
+        Some(LogFileFacts {
+            incremental_vacuum: true,
+            schema: LogStore::expected_schema_version(),
+        })
+    );
+
+    // A file made without the vacuum mode, as a hand-made or very old file would be.
+    let plain = dir.path().join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(plain.join(LogStore::FILE_NAME))
+        .create_if_missing(true);
+    let pool = SqlitePool::connect_with(options).await.unwrap();
+    sqlx::query("CREATE TABLE t (x)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    assert_eq!(
+        LogStore::inspect_in(&plain).await.unwrap(),
+        Some(LogFileFacts {
+            incremental_vacuum: false,
+            schema: SchemaVersion::from(0),
+        })
+    );
+
+    fs::write(state.join(LogStore::FILE_NAME), b"not a database at all").unwrap();
+    for side in ["-wal", "-shm"] {
+        let _ = fs::remove_file(LogStore::sidecar(&state.join(LogStore::FILE_NAME), side));
+    }
+    assert!(LogStore::inspect_in(&state).await.is_err());
 }
 
 #[tokio::test]

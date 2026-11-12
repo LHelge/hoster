@@ -1044,6 +1044,11 @@ Under hoster's state directory, `~hoster/.local/share/hoster` (ADR-0023):
 ```
 hoster.db         # SQLite state store (ADR-0022), plus -wal/-shm files; holds the sealed secrets:
                   # app secrets `<stack>/<name>` and registry credentials `_registry/<host>` (ADR-0025, ADR-0029)
+logs.db           # SQLite log store (ADR-0067 §2), 0600, WAL, auto_vacuum = INCREMENTAL, its own
+                  # migrations: container records, hoster's own events, request rows, follower cursors.
+                  # Kept to 7 days and 1 GiB; not in `hoster backup db`. If it cannot be opened, hoster
+                  # runs without persisted logs. The System page shows its size and losses;
+                  # `hoster doctor` checks it (`log_store`)
 acme/account.json # instant-acme AccountCredentials (0600)
 certs/<host>/fullchain.pem
 certs/<host>/privkey.pem   (0600)

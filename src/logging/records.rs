@@ -68,10 +68,6 @@ impl HosterRecords {
     /// channel dropped are counted by the sink ([`Drops::hoster_records`]).
     ///
     /// [`Drops::hoster_records`]: crate::logs::Drops::hoster_records
-    #[allow(
-        dead_code,
-        reason = "shown on the System page beside the other losses as it lands (task uw9)"
-    )]
     pub fn capped(&self) -> u64 {
         self.0.capped.load(Ordering::Relaxed)
     }
