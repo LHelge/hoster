@@ -296,6 +296,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// per-service pointers. Call once, before any deployment is submitted.
     pub async fn recover(self: &Arc<Self>) -> Result<ReconcileReport> {
         let mut report = ReconcileReport::default();
+        self.follow_present().await;
         for deployment in self.store.unfinished_deployments().await? {
             if self.holds(&deployment.stack, deployment.id) {
                 continue;
@@ -318,6 +319,28 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             "startup reconciliation done"
         );
         Ok(report)
+    }
+
+    /// Follows every managed container podman has, running or not (ADR-0067 §1): after a
+    /// restart, each follower reads on from its stored cursor, and a stopped container's reads
+    /// what is left of its log and ends. A failed listing is logged; the containers the pass
+    /// starts are followed all the same.
+    async fn follow_present(&self) {
+        if self.logs.get().is_none() {
+            return;
+        }
+        match self.runtime.list_managed().await {
+            Ok(containers) => {
+                for container in containers {
+                    if ServiceGeneration::try_from(&container).is_ok() {
+                        self.follow_logs(&container.id);
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, "cannot list containers to follow their logs");
+            }
+        }
     }
 
     /// One periodic pass: what the reconcile loop runs.
@@ -895,6 +918,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 report,
             );
         }
+        self.drain_logs(&container.id).await;
         match self.runtime.remove(&container.id).await {
             Ok(()) => {
                 self.forget_logs(&container.id);

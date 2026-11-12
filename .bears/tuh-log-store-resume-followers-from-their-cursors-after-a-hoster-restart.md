@@ -1,16 +1,17 @@
 ---
 id: tuh
 title: "Log store: resume followers from their cursors after a hoster restart"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:34:02.707030369Z"
-updated: "2026-11-12T19:34:02.707030369Z"
+updated: "2026-11-12T21:29:50.195165160Z"
 tags:
   - observability
   - runtime
 depends_on:
   - "7n3"
 parent: f8z
+attempts: 1
 ---
 
 ## Summary
@@ -39,3 +40,18 @@ After hoster restarts (self-update, crash, reboot) it starts a follower for ever
 ## References
 - ADR-0067 (§1), ADR-0044 (`k8s-file` size cap), ADR-0034
 - `src/orchestrator/reconcile.rs`, `src/runtime/podman.rs`
+**Changed while implementing (2026-11-12):** followers no longer pass podman a `since`: every
+read starts at the top of the container's log (at most the 10 MiB `k8s-file` cap of ADR-0044)
+and skips by position up to and including the cursor's line, then takes everything after it
+whatever its stamp. That is what makes the clock-stepped-back edge case lossless (podman's
+`since` filters every line by its stamp, so it would drop those lines) and makes gap detection
+exact: a log whose first line is already past the cursor was truncated over unread lines
+("were lost" marker); a cursor line missing further down gives a "may have been lost" marker.
+The cursor stores `nth`, the line's place in the run of consecutive lines with its stamp
+(`migrations_logs/0002_log_cursor_nth`, existing cursors default to 1, 7n3's rule). The startup
+pass follows every managed container podman lists, running or not, before it resolves anything;
+`retire` waits up to 2 s (`LogFollowers::drained`) for a stopped container's follower to finish
+before removing it, so an exited leftover's last lines are read. Cursors are deleted through the
+recorder (one writer, `LogSink::try_forget_cursor`) when a container is forgotten, and by a sweep
+the followers run at startup and hourly (`LogFollowers::sweep_hourly`) rather than in 5d4's
+retention pass, since the sweep needs the runtime's container list.

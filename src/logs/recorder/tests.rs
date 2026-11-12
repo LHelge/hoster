@@ -70,7 +70,13 @@ fn cursor(container: &str, time_ns: i64) -> LogCursor {
     LogCursor {
         container: container.to_owned(),
         time_ns,
+        nth: 1,
     }
+}
+
+/// The stored cursor time of `container`.
+async fn cursor_time(store: &LogStore, container: &str) -> Option<i64> {
+    store.cursor(container).await.unwrap().map(|c| c.time_ns)
 }
 
 /// How many records and request rows the store holds.
@@ -106,8 +112,8 @@ async fn offered_items_are_committed_together_with_their_newest_cursors() {
     let head = head_reaches(&sink, |head| head.record == 4 && head.request == 1).await;
     assert_eq!(head, store.head().await.unwrap());
     assert_eq!(counts(&store).await, (4, 1));
-    assert_eq!(store.cursor("c1").await.unwrap(), Some(20));
-    assert_eq!(store.cursor("c2").await.unwrap(), Some(5));
+    assert_eq!(cursor_time(&store, "c1").await, Some(20));
+    assert_eq!(cursor_time(&store, "c2").await, Some(5));
     assert!(sink.drops().is_empty());
 
     stop.cancel();
@@ -241,8 +247,23 @@ async fn stopping_commits_what_is_still_queued() {
     stop.cancel();
     recorder.with_interval(NEVER).run(stop).await;
     assert_eq!(counts(&store).await, (10, 0));
-    assert_eq!(store.cursor("c").await.unwrap(), Some(9));
+    assert_eq!(cursor_time(&store, "c").await, Some(9));
     assert_eq!(*sink.head().borrow(), store.head().await.unwrap());
+}
+
+#[tokio::test]
+async fn a_forgotten_cursor_is_deleted_after_the_lines_before_it() {
+    let (_dir, store) = store().await;
+    let (recorder, sink) = LogRecorder::new(store.clone()).await.unwrap();
+    sink.try_record_line(record(Stream::Stdout, "kept"), cursor("kept", 1));
+    sink.try_record_line(record(Stream::Stdout, "last"), cursor("gone", 1));
+    assert!(sink.try_forget_cursor("gone"));
+    let stop = CancellationToken::new();
+    stop.cancel();
+    recorder.with_interval(NEVER).run(stop).await;
+    assert_eq!(counts(&store).await, (2, 0));
+    assert_eq!(cursor_time(&store, "kept").await, Some(1));
+    assert_eq!(cursor_time(&store, "gone").await, None);
 }
 
 #[tokio::test]

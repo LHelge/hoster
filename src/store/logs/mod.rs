@@ -174,13 +174,26 @@ impl LogStore {
         }
         for chunk in batch.cursors.chunks(Self::ROWS_PER_INSERT) {
             let mut upsert =
-                QueryBuilder::<Sqlite>::new("INSERT INTO log_cursors (container, time_ns) ");
+                QueryBuilder::<Sqlite>::new("INSERT INTO log_cursors (container, time_ns, nth) ");
             upsert.push_values(chunk, |mut row, cursor| {
                 row.push_bind(cursor.container.as_str())
-                    .push_bind(cursor.time_ns);
+                    .push_bind(cursor.time_ns)
+                    .push_bind(cursor.nth);
             });
-            upsert.push(" ON CONFLICT (container) DO UPDATE SET time_ns = excluded.time_ns");
+            upsert.push(
+                " ON CONFLICT (container) DO UPDATE SET time_ns = excluded.time_ns, nth = excluded.nth",
+            );
             upsert.build().execute(&mut *tx).await?;
+        }
+        for chunk in batch.forgotten.chunks(Self::ROWS_PER_INSERT) {
+            let mut delete =
+                QueryBuilder::<Sqlite>::new("DELETE FROM log_cursors WHERE container IN (");
+            let mut ids = delete.separated(", ");
+            for container in chunk {
+                ids.push_bind(container.as_str());
+            }
+            delete.push(")");
+            delete.build().execute(&mut *tx).await?;
         }
         let head = Self::head_in(&mut tx).await?;
         tx.commit().await?;
@@ -194,13 +207,33 @@ impl LogStore {
     }
 
     /// Where the follower of `container` got to, if it stored anything.
-    pub async fn cursor(&self, container: &str) -> Result<Option<i64>> {
-        Ok(
-            sqlx::query_scalar("SELECT time_ns FROM log_cursors WHERE container = ?")
+    pub async fn cursor(&self, container: &str) -> Result<Option<LogCursor>> {
+        let row: Option<(i64, i64)> =
+            sqlx::query_as("SELECT time_ns, nth FROM log_cursors WHERE container = ?")
                 .bind(container)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
+                .fetch_optional(&self.reads)
+                .await?;
+        Ok(row.map(|(time_ns, nth)| LogCursor {
+            container: container.to_owned(),
+            time_ns,
+            nth,
+        }))
+    }
+
+    /// Every stored cursor, by container: where each follower resumes after a restart.
+    pub async fn cursors(&self) -> Result<Vec<LogCursor>> {
+        let rows: Vec<(String, i64, i64)> =
+            sqlx::query_as("SELECT container, time_ns, nth FROM log_cursors ORDER BY container")
+                .fetch_all(&self.reads)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(container, time_ns, nth)| LogCursor {
+                container,
+                time_ns,
+                nth,
+            })
+            .collect())
     }
 
     async fn head_in(conn: &mut SqliteConnection) -> Result<LogHead> {

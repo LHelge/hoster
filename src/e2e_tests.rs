@@ -582,9 +582,11 @@ stop_timeout = "1s"
 
 /// ADR-0067 §1: what a container hoster starts prints reaches the log store, parsed, with the
 /// labels' stack, service and generation and its stream, and its follower ends at removal.
+/// After a restart, a follower seeded from the stored cursor reads the log again and stores
+/// nothing twice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn container_output_reaches_the_log_store() {
-    use crate::logs::LogRecorder;
+    use crate::logs::{LogFollowers, LogRecorder};
     use crate::store::{Level, LogQuery, LogScope, LogStore, Stream as LogStream, Timestamp};
 
     if !enabled() {
@@ -600,10 +602,11 @@ async fn container_output_reaches_the_log_store() {
     let recording = tokio::spawn(recorder.run(stop.clone()));
     let followers = hoster
         .orchestrator
-        .connect_logs(sink, tokio_util::sync::CancellationToken::new());
+        .connect_logs(sink.clone(), tokio_util::sync::CancellationToken::new());
 
     let scenario = {
         let (hoster, logs, followers) = (Arc::clone(&hoster), logs.clone(), followers.clone());
+        let sink = sink.clone();
         async move {
             let applied = hoster
                 .orchestrator
@@ -647,6 +650,30 @@ async fn container_output_reaches_the_log_store() {
             assert_eq!(text.level, None);
             assert_eq!(text.message, "plain text");
             assert_eq!(followers.followed().len(), 1);
+            let container = followers.followed().remove(0);
+
+            // hoster restarts: the stored cursor seeds the next follower, which reads the log
+            // from its top again, past both lines, and stores neither twice.
+            followers.stop().await;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while logs.cursor(container.as_ref()).await.unwrap().is_none() {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("the cursor is stored");
+            let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(PathBuf::from);
+            let runtime = PodmanRuntime::connect(&PodmanSocket::from_env(socket.as_deref()))
+                .await
+                .unwrap();
+            let stop = tokio_util::sync::CancellationToken::new();
+            let resumed = LogFollowers::new(Arc::new(runtime), sink, stop.clone());
+            assert_eq!(resumed.resume_from(&logs).await.unwrap(), 1);
+            resumed.follow(&container);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert_eq!(resumed.followed(), [container]);
+            assert_eq!(logs.query(&query).await.unwrap().entries.len(), 2);
+            resumed.stop().await;
         }
     };
     let outcome = tokio::spawn(scenario).await;

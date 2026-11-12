@@ -1326,3 +1326,67 @@ async fn containers_hoster_starts_are_followed_until_removed() {
         .unwrap();
     followed(Vec::new()).await;
 }
+
+#[tokio::test]
+async fn after_a_restart_every_container_is_followed_on_from_its_cursor() {
+    use crate::logs::LogSink;
+    use crate::runtime::{LogLine, LogStream};
+    use crate::store::LogCursor;
+
+    let h = bootstrapped().await;
+    let print = |id: &ContainerId, ms: u64, text: &str| {
+        h.runtime.push_log(
+            id,
+            LogLine {
+                stream: LogStream::Stdout,
+                time: Some(std::time::UNIX_EPOCH + Duration::from_millis(ms)),
+                text: text.to_owned(),
+            },
+        );
+    };
+    // While hoster was down: web kept running and printing, and a leftover of api g1 printed
+    // and exited.
+    let web = h.container("hoster-notes-web-g2").id;
+    print(&web, 1, "stored before the restart");
+    print(&web, 2, "while hoster was down");
+    let previous = h.store.deployments("notes", 1).await.unwrap()[0].id;
+    let leftover = container(&h, "notes", "api", 1, previous).await;
+    print(&leftover, 3, "last words");
+    h.runtime
+        .set_state(&leftover, ContainerState::Exited(Some(0)));
+
+    let orchestrator = restarted(&h, RestartPolicy::default());
+    let (sink, mut tap) = LogSink::tapped(1_024);
+    let followers = orchestrator.connect_logs(sink, CancellationToken::new());
+    followers.resume_after(&LogCursor {
+        container: web.to_string(),
+        time_ns: 1_000_000,
+        nth: 1,
+    });
+    let report = orchestrator.recover().await.unwrap();
+    assert_eq!(report.removed, ["hoster-notes-api-g1"]);
+
+    let mut messages = Vec::new();
+    for _ in 0..2 {
+        let (record, _) = tokio::time::timeout(Duration::from_secs(5), tap.next())
+            .await
+            .expect("a record arrives")
+            .unwrap();
+        messages.push(record.message);
+    }
+    messages.sort();
+    assert_eq!(messages, ["last words", "while hoster was down"]);
+    let mut live: Vec<_> = ["api-g2", "storage-g1", "web-g2"]
+        .map(|c| h.container(&format!("hoster-notes-{c}")).id)
+        .into();
+    live.sort();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while followers.followed() != live {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("followed {:?}", followers.followed()));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(tap.drain().is_empty());
+}

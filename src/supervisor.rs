@@ -465,7 +465,6 @@ pub struct Supervisor {
     /// The log store (ADR-0067), opened with the state store; `None` when `logs.db` cannot be
     /// opened, which leaves hoster running without persisted logs (the live container log page
     /// of ADR-0044 reads podman directly).
-    #[allow(dead_code, reason = "read by the logs UI as it lands (epic psq)")]
     logs: Option<LogStore>,
     /// Where producers offer log records and request rows: the log recorder's channel, or a
     /// disconnected sink that drops and counts when there is no log store.
@@ -853,18 +852,31 @@ impl Startup for Supervisor {
                 let (acme_tx, acme_rx) = mpsc::unbounded_channel();
                 orchestrator.connect_acme(acme_tx);
                 self.acme_commands = Some(acme_rx);
-                // Every container started from here on, by the startup pass too, is followed
-                // into the log store (ADR-0067 §1).
-                self.teardown.followers = Some(
-                    orchestrator
-                        .connect_logs(self.log_sink.clone(), self.teardown.token.child_token()),
-                );
+                // Every managed container, found by the startup pass or started from here on, is
+                // followed into the log store (ADR-0067 §1), from where its follower got to
+                // before the restart.
+                let followers = orchestrator
+                    .connect_logs(self.log_sink.clone(), self.teardown.token.child_token());
+                if let Some(logs) = &self.logs {
+                    match followers.resume_from(logs).await {
+                        Ok(cursors) => tracing::debug!(cursors, "log followers resume"),
+                        Err(err) => tracing::warn!(
+                            error = format!("{:#}", anyhow::Error::from(err)),
+                            "cannot read the log cursors; container logs are read from their start"
+                        ),
+                    }
+                }
+                self.teardown.followers = Some(followers.clone());
                 // Interrupted deployments resolved, containers adopted, started or removed
                 // (§4 step 5, §5.4); then the loop keeps them running (ADR-0028).
                 orchestrator
                     .recover()
                     .await
                     .context("startup reconciliation failed")?;
+                // The cursors of containers that are gone are deleted now and hourly.
+                if let Some(logs) = &self.logs {
+                    followers.sweep_hourly(logs.clone());
+                }
                 tokio::spawn(
                     Arc::clone(&orchestrator).run_reconciler(self.teardown.token.child_token()),
                 );
