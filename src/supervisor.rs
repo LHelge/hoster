@@ -25,6 +25,7 @@ use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap, DnsCheck, Pub
 use crate::config::{Config, ProxyConfig};
 use crate::installation::Version;
 use crate::instance::Instance;
+use crate::logging::HosterRecords;
 use crate::logs::{LogFollowers, LogRecorder, LogSink};
 use crate::machine::Machine;
 use crate::notify::Notifier;
@@ -675,6 +676,8 @@ impl Teardown {
             Some(recorder) => {
                 let flushed = recorder.flush(mode).await;
                 self.log_recorder = None;
+                // Its channel is closed: hoster's events are in the journal only from now on.
+                HosterRecords::global().disconnect();
                 flushed
             }
             None => Ok(()),
@@ -699,6 +702,7 @@ impl Supervisor {
                 self.teardown.log_recorder = Some(RecorderHandle::spawn("log recorder", |stop| {
                     recorder.run(stop)
                 }));
+                HosterRecords::global().connect(sink.clone());
                 self.log_sink = sink;
                 self.logs = Some(logs);
             }

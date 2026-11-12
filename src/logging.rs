@@ -28,6 +28,30 @@
 //!   finished), re-logged by [`ClientNoise`].
 //!
 //! `RUST_LOG=info,hoster::access::unrouted=debug,hoster::proxy::client=debug` brings both back.
+//!
+//! # hoster's own records in the log store
+//!
+//! Beside the stderr formatter, [`Logging`] installs a second layer (ADR-0068) that turns every
+//! event at `info` and above into a record of the log store, with service `hoster` and stream
+//! `hoster`, so the admin UI shows hoster's lines beside the apps'. Its filter is fixed, not
+//! `RUST_LOG`: what the UI shows does not depend on how the journal is tuned, and stderr is
+//! unchanged by it. It leaves out the log store's own modules (`hoster::logs`,
+//! `hoster::store::logs`), so recording cannot feed itself, and [`ACCESS_TARGET`], which the
+//! request rows cover.
+//!
+//! A record's stack and generation are the event's `stack` and `generation` fields, or those of
+//! the nearest enclosing span that has them ([`LogSpan`]); a span's generation is taken only for
+//! its own stack. Its level, message and fields are what the log store's line parser makes of
+//! the object the JSON formatter writes for the event, less its `timestamp` (the record's time):
+//! the other fields, `target` and `spans`.
+//!
+//! The layer only offers records to the recorder's channel ([`LogSink::try_record`]): logging is
+//! up before the log store, so the supervisor [`connect`](HosterRecords::connect)s the sink once
+//! the recorder runs and disconnects it when the recorder has stopped, and events outside that
+//! window are in the journal only. hoster counts as one source under the line-rate cap of
+//! ADR-0067 §7, with the same marker record ([`HosterRecords::capped`]).
+//!
+//! [`LogSink::try_record`]: crate::logs::LogSink::try_record
 
 use std::fmt;
 use std::io::IsTerminal;
@@ -37,8 +61,13 @@ use serde::Deserialize;
 use tracing::Span;
 use tracing::field::Empty;
 use tracing_log::{AsLog, LogTracer};
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{EnvFilter, Layer, Registry};
+
+mod records;
+
+pub use records::HosterRecords;
 
 /// The target of the proxy's per-request access log lines.
 pub const ACCESS_TARGET: &str = "hoster::access";
@@ -90,14 +119,22 @@ impl FromStr for LogFormat {
 /// The process-wide log subscriber.
 pub struct Logging {
     format: LogFormat,
+    /// The stderr formatter's filter.
     filter: EnvFilter,
+    /// Where events go into the log store; `None` in tests capturing lines only.
+    records: Option<HosterRecords>,
 }
 
 impl From<LogFormat> for Logging {
-    /// Logging in `format`, filtered by `RUST_LOG` (default `info`).
+    /// Logging in `format`, filtered by `RUST_LOG` (default `info`), and into the log store
+    /// through [`HosterRecords::global`].
     fn from(format: LogFormat) -> Self {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        Self { format, filter }
+        Self {
+            format,
+            filter,
+            records: Some(HosterRecords::global().clone()),
+        }
     }
 }
 
@@ -117,25 +154,29 @@ impl Logging {
         }
     }
 
-    /// The subscriber writing to `writer`; `ansi` colours text output.
+    /// The subscriber writing to `writer`, and recording into the log store if it has
+    /// [`HosterRecords`]; `ansi` colours text output. Each layer has its own filter.
     fn subscriber<W>(self, writer: W, ansi: bool) -> Box<dyn tracing::Subscriber + Send + Sync>
     where
         W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
     {
-        let builder = tracing_subscriber::fmt()
-            .with_env_filter(self.filter)
-            .with_writer(writer);
-        match self.format {
-            LogFormat::Text => Box::new(builder.compact().with_ansi(ansi).finish()),
-            LogFormat::Json => Box::new(
-                builder
-                    .json()
-                    .flatten_event(true)
-                    .with_current_span(false)
-                    .with_span_list(true)
-                    .finish(),
-            ),
-        }
+        let layer = tracing_subscriber::fmt::layer().with_writer(writer);
+        let formatter = match self.format {
+            LogFormat::Text => layer
+                .compact()
+                .with_ansi(ansi)
+                .with_filter(self.filter)
+                .boxed(),
+            LogFormat::Json => layer
+                .json()
+                .flatten_event(true)
+                .with_current_span(false)
+                .with_span_list(true)
+                .with_filter(self.filter)
+                .boxed(),
+        };
+        let records = self.records.map(|records| records.layer());
+        Box::new(Registry::default().with(formatter).with(records))
     }
 }
 
@@ -298,6 +339,7 @@ pub mod capture {
         let logging = Logging {
             format,
             filter: EnvFilter::new(filter),
+            records: None,
         };
         (buffer.clone(), logging.subscriber(buffer, false))
     }
@@ -318,6 +360,7 @@ pub mod capture {
             let logging = Logging {
                 format: LogFormat::Json,
                 filter: EnvFilter::new("off,hoster=info"),
+                records: None,
             };
             tracing::subscriber::set_global_default(logging.subscriber(buffer.clone(), false))
                 .expect("no other global subscriber in tests");
