@@ -1,16 +1,17 @@
 ---
 id: x38
 title: "Log store: hoster rollback undoes logs.db migrations too"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:53:26.724667671Z"
-updated: "2026-11-12T19:53:26.724667671Z"
+updated: "2026-11-12T21:59:20.040703177Z"
 tags:
   - store
   - update
 depends_on:
   - "7ne"
 parent: f8z
+attempts: 1
 ---
 
 ## Summary

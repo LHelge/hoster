@@ -11,8 +11,8 @@
 //! installs a binary as a new version (temp file, fsync, `chmod 0755`, `rename`), switches
 //! `current` atomically (a new symlink `rename(2)`d over the old one) and prunes everything but
 //! the current and previous version. [`BuildInfo`] is what `hoster version --json` prints: the
-//! version, target triple and schema of the running binary, which `hoster rollback` reads from
-//! the previous binary.
+//! version, target triple and schemas (`hoster.db`'s and `logs.db`'s) of the running binary,
+//! which `hoster rollback` reads from the previous binary.
 
 #[cfg(test)]
 mod tests;
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::XdgDirs;
-use crate::store::Store;
+use crate::store::{LogStore, Store};
 
 /// Errors from reading or changing the binary layout.
 #[derive(Debug, Error)]
@@ -134,6 +134,10 @@ pub struct BuildInfo {
     pub target: String,
     /// The newest migration it contains: the schema it runs against.
     pub schema: i64,
+    /// The newest log store migration it contains: the schema it runs `logs.db` against.
+    /// Absent from binaries that predate the log store (ADR-0067), which never open `logs.db`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_schema: Option<i64>,
 }
 
 impl BuildInfo {
@@ -143,6 +147,7 @@ impl BuildInfo {
             version: Version::running().0,
             target: env!("BUILD_TARGET_TRIPLE").to_owned(),
             schema: Store::expected_schema_version().into(),
+            log_schema: Some(LogStore::expected_schema_version().into()),
         }
     }
 }
@@ -194,9 +199,13 @@ impl fmt::Display for BuildInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "hoster {} ({}, schema {})",
+            "hoster {} ({}, schema {}",
             self.version, self.target, self.schema
-        )
+        )?;
+        if let Some(log_schema) = self.log_schema {
+            write!(f, ", log schema {log_schema}")?;
+        }
+        f.write_str(")")
     }
 }
 

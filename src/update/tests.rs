@@ -1,6 +1,6 @@
 use super::fake::*;
 use super::*;
-use crate::store::{DeploymentSource, EventKind, EventQuery, NewDeployment};
+use crate::store::{DeploymentSource, EventKind, EventQuery, LogStore, NewDeployment};
 use tempfile::TempDir;
 
 // -------------------------------------------------------------------------------------------
@@ -450,6 +450,7 @@ async fn rollback_refuses_a_database_newer_than_this_binary() {
             version: "0.2.0".parse().unwrap(),
             target: TARGET.into(),
             schema: 6,
+            log_schema: None,
         });
     let err = updater.rollback().await.unwrap_err();
     assert!(matches!(err, UpdateError::SchemaAhead { .. }), "{err}");
@@ -503,6 +504,166 @@ async fn a_failed_restore_leaves_the_service_stopped() {
         host.service.calls(),
         [ServiceAction::Stop],
         "hoster must not start on a half-undone database"
+    );
+}
+
+// -------------------------------------------------------------------------------------------
+// rollback of logs.db
+// -------------------------------------------------------------------------------------------
+
+/// A host rolling back from 0.2.0 (this binary) to 0.1.0 at schema 5 and log schema
+/// `log_schema` (`None`: from before the log store), with a `logs.db` holding one record.
+async fn host_with_logs(log_schema: Option<i64>) -> Host {
+    let host = Host::new(&[("0.1.0", 5), ("0.2.0", 7)]).await;
+    host.reinstall("0.1.0", 5, log_schema);
+    host.open_logs().await;
+    host.log_sql(
+        "INSERT INTO log_records (time, stack, service, stream, message) \
+         VALUES (1, 'notes', 'api', 'stdout', 'hello')",
+    )
+    .await;
+    host
+}
+
+#[tokio::test]
+async fn rollback_undoes_the_log_store_to_the_previous_log_schema() {
+    let host = host_with_logs(Some(1)).await;
+    let updater = host.updater(FakeReleases::default(), "0.2.0");
+    let plan = updater.rollback_plan().await.unwrap();
+    assert_eq!(plan.logs, Some(LogStore::expected_schema_version()));
+    assert_eq!(plan.logs_target, Some(SchemaVersion::from(1)));
+    assert_eq!(
+        plan.log_migrations_undone(),
+        LogStore::migrations_between(SchemaVersion::from(1), LogStore::expected_schema_version())
+    );
+    assert!(plan.log_migrations_undone() >= 1);
+
+    let outcome = updater.rollback().await.unwrap();
+    assert_eq!(
+        outcome.logs,
+        LogsRollback::Undone {
+            schema: SchemaVersion::from(1)
+        }
+    );
+    assert_eq!(host.schema().await, SchemaVersion::from(5));
+    assert_eq!(host.log_schema().await, Some(SchemaVersion::from(1)));
+    assert_eq!(host.current(), Some(v("0.1.0")));
+    assert_eq!(
+        host.service.calls(),
+        [ServiceAction::Stop, ServiceAction::Start]
+    );
+    // What the older log schema holds survives, and the older binary's store opens.
+    let logs = LogStore::open(&host.state_dir).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM log_records")
+        .fetch_one(logs.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    logs.close().await;
+}
+
+#[tokio::test]
+async fn a_previous_binary_without_a_log_store_leaves_logs_db_alone() {
+    let host = host_with_logs(None).await;
+    let updater = host.updater(FakeReleases::default(), "0.2.0");
+    let plan = updater.rollback_plan().await.unwrap();
+    assert_eq!(plan.logs_target, None);
+    assert_eq!(plan.log_migrations_undone(), 0);
+
+    let outcome = updater.rollback().await.unwrap();
+    assert_eq!(outcome.logs, LogsRollback::Kept);
+    assert_eq!(host.schema().await, SchemaVersion::from(5));
+    assert_eq!(
+        host.log_schema().await,
+        Some(LogStore::expected_schema_version())
+    );
+}
+
+#[tokio::test]
+async fn rollback_without_a_log_store_or_with_nothing_to_undo_keeps_it() {
+    let host = Host::new(&[("0.1.0", 5), ("0.2.0", 7)]).await;
+    host.reinstall("0.1.0", 5, Some(1));
+    let outcome = host
+        .updater(FakeReleases::default(), "0.2.0")
+        .rollback()
+        .await
+        .unwrap();
+    assert_eq!(outcome.logs, LogsRollback::Kept);
+    assert!(
+        !host.state_dir.join(LogStore::FILE_NAME).exists(),
+        "never created"
+    );
+
+    let latest = i64::from(LogStore::expected_schema_version());
+    let host = host_with_logs(Some(latest)).await;
+    let updater = host.updater(FakeReleases::default(), "0.2.0");
+    assert_eq!(
+        updater
+            .rollback_plan()
+            .await
+            .unwrap()
+            .log_migrations_undone(),
+        0
+    );
+    assert_eq!(updater.rollback().await.unwrap().logs, LogsRollback::Kept);
+    assert_eq!(
+        host.log_schema().await,
+        Some(LogStore::expected_schema_version())
+    );
+}
+
+#[tokio::test]
+async fn a_failed_log_undo_moves_logs_db_aside_and_still_rolls_back() {
+    let host = host_with_logs(Some(1)).await;
+    // 0002's down script drops log_cursors.nth, which SQLite refuses for an indexed column.
+    host.log_sql("CREATE INDEX cursors_by_nth ON log_cursors (nth)")
+        .await;
+    let outcome = host
+        .updater(FakeReleases::default(), "0.2.0")
+        .rollback()
+        .await
+        .unwrap();
+    let aside = host.state_dir.join("logs.db.rollback-v0.2.0");
+    match &outcome.logs {
+        LogsRollback::MovedAside { path, reason } => {
+            assert_eq!(path, &aside);
+            assert!(reason.contains("logs.db"), "{reason}");
+        }
+        other => panic!("expected the log store moved aside, got {other:?}"),
+    }
+    assert!(aside.is_file());
+    assert!(!host.state_dir.join(LogStore::FILE_NAME).exists());
+    // hoster.db is undone, not restored, and the previous version is started.
+    assert_eq!(host.schema().await, SchemaVersion::from(5));
+    assert_eq!(host.current(), Some(v("0.1.0")));
+    assert_eq!(
+        host.service.calls(),
+        [ServiceAction::Stop, ServiceAction::Start]
+    );
+    // The previous binary starts on a new, empty log store.
+    LogStore::open(&host.state_dir).await.unwrap().close().await;
+}
+
+#[tokio::test]
+async fn a_failed_database_undo_leaves_logs_db_untouched() {
+    let host = Host::new(&[("0.1.0", 4), ("0.2.0", 7)]).await;
+    host.reinstall("0.1.0", 4, Some(1));
+    host.open_logs().await;
+    // The undo of hoster.db fails at 0005 (see above).
+    host.sql(
+        "INSERT INTO stacks (name, last_generation, created_at, updated_at) VALUES ('notes', 0, 1, 1);
+         CREATE INDEX stacks_by_removal ON stacks (removed_at);",
+    )
+    .await;
+    let err = host
+        .updater(FakeReleases::default(), "0.2.0")
+        .rollback()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UpdateError::Undo { .. }), "{err}");
+    assert_eq!(
+        host.log_schema().await,
+        Some(LogStore::expected_schema_version())
     );
 }
 

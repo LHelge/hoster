@@ -23,6 +23,8 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -42,7 +44,7 @@ pub use types::{
     Level, LogBatch, LogCursor, LogHead, LogRecord, RequestId, RequestRow, Stream, UnknownLogText,
 };
 
-use super::{Result, Store, StoreError};
+use super::{Migrations, Result, SchemaVersion, Store, StoreError};
 
 /// The embedded migrations from `migrations_logs/`, reversible like the state store's; the store
 /// tests enforce it for both.
@@ -121,6 +123,116 @@ impl LogStore {
                 source,
             })?;
         Ok(Self { pool, reads, path })
+    }
+
+    /// Opens the existing `logs.db` under `state_dir` without creating or migrating it, with
+    /// one connection for both pools: for `hoster rollback` to read (`read_only`, next to a
+    /// running hoster) and undo (with hoster stopped) its schema.
+    async fn open_existing(state_dir: &Path, read_only: bool) -> Result<Self> {
+        let path = state_dir.join(Self::FILE_NAME);
+        if !path.is_file() {
+            return Err(StoreError::Missing(path));
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .busy_timeout(Self::BUSY_TIMEOUT);
+        let options = if read_only {
+            options.read_only(true)
+        } else {
+            options.journal_mode(SqliteJournalMode::Wal)
+        };
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(|source| StoreError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(Self {
+            reads: pool.clone(),
+            pool,
+            path,
+        })
+    }
+
+    /// The log schema this binary migrates `logs.db` to: its newest embedded migration.
+    pub fn expected_schema_version() -> SchemaVersion {
+        Migrations(&LOG_MIGRATOR).expected()
+    }
+
+    /// How many of this binary's log migrations undoing the schema from `from` down to `to`
+    /// reverts, like [`Store::migrations_between`].
+    pub fn migrations_between(to: SchemaVersion, from: SchemaVersion) -> usize {
+        Migrations(&LOG_MIGRATOR).between(to, from)
+    }
+
+    /// The log schema the file is at, read without migrating; `0` if nothing was applied.
+    pub async fn schema_version(&self) -> Result<SchemaVersion> {
+        Migrations::applied(&self.pool).await
+    }
+
+    /// The log schema of the existing `logs.db` under `state_dir`; `None` when there is none.
+    pub async fn schema_version_in(state_dir: &Path) -> Result<Option<SchemaVersion>> {
+        let store = match Self::open_existing(state_dir, true).await {
+            Ok(store) => store,
+            Err(StoreError::Missing(_)) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let schema = store.schema_version().await;
+        store.close().await;
+        schema.map(Some)
+    }
+
+    /// Undoes the log migrations of the existing `logs.db` under `state_dir` newer than
+    /// `target`, with this binary's down scripts, and returns the schema the file is at
+    /// afterwards (`hoster rollback`, ADR-0052), like [`Store::undo_migrations`]. Nothing else
+    /// may have the file open. It is never created.
+    pub async fn undo_migrations(state_dir: &Path, target: SchemaVersion) -> Result<SchemaVersion> {
+        let store = Self::open_existing(state_dir, false).await?;
+        let result = Migrations(&LOG_MIGRATOR)
+            .undo(&store.pool, &store.path, target)
+            .await;
+        store.close().await;
+        result
+    }
+
+    /// Moves `logs.db` under `state_dir`, with its `-wal`/`-shm` files, aside to
+    /// `logs.db.<suffix>` (and its `-wal`/`-shm`), replacing an earlier file of that name, and
+    /// returns the new path. Logs are expendable (ADR-0067 §9): when `hoster rollback` cannot
+    /// undo the file, the previous binary starts on a new, empty one instead. Nothing may have
+    /// the file open.
+    pub fn move_aside(state_dir: &Path, suffix: &str) -> Result<PathBuf> {
+        let path = state_dir.join(Self::FILE_NAME);
+        let aside = state_dir.join(format!("{}.{suffix}", Self::FILE_NAME));
+        let io_err = |path: &Path| {
+            let path = path.to_owned();
+            move |source| StoreError::Io { path, source }
+        };
+        // The sidecars first: a `-wal` left behind would be applied to the next file.
+        for side in ["-wal", "-shm"] {
+            let from = Self::sidecar(&path, side);
+            let to = Self::sidecar(&aside, side);
+            match fs::rename(&from, &to) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::remove_file(&to) {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    other => other.map_err(io_err(&to))?,
+                },
+                other => other.map_err(io_err(&from))?,
+            }
+        }
+        fs::rename(&path, &aside).map_err(io_err(&path))?;
+        fs::File::open(state_dir)
+            .and_then(|d| d.sync_all())
+            .map_err(io_err(state_dir))?;
+        Ok(aside)
+    }
+
+    /// `path` with `suffix` (`-wal`, `-shm`) appended to its file name.
+    fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+        let mut side = path.as_os_str().to_owned();
+        side.push(suffix);
+        PathBuf::from(side)
     }
 
     /// Path of the database file.

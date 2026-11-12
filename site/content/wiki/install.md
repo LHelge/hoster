@@ -309,8 +309,11 @@ schema: it asks the previous binary for its schema version
 (`versions/<previous>/hoster version --json`), stops the service, snapshots the database, undoes
 the migrations down to that version, checks the result (restoring the snapshot and stopping if
 it is wrong), switches `current` and starts the service. Data that only the newer schema can hold
-is lost. A plain re-run of `install.sh` afterwards does not switch forward again; name the
-version with `--version` when you want it back.
+is lost. The log store (`logs.db`) is undone the same way, to the previous binary's log schema,
+so log records only the newer schema holds may be lost. Logs are not worth a failed rollback: if
+that undo fails, `logs.db` is moved aside to `logs.db.rollback-<version>` and the previous
+version starts with an empty log store. A plain re-run of `install.sh` afterwards does not
+switch forward again; name the version with `--version` when you want it back.
 
 Running the older binary directly against the newer database does not work: sqlx refuses to
 start on migrations it does not know.

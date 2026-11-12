@@ -9,8 +9,9 @@ use std::os::unix::fs::MetadataExt;
 use clap::Args;
 use thiserror::Error;
 
-use super::{UpdateError, UpdateOutcome, Updater};
+use super::{LogsRollback, UpdateError, UpdateOutcome, Updater};
 use crate::installation::Version;
+use crate::store::LogStore;
 
 /// `hoster update`: installs a newer release and restarts the service on it.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
@@ -227,6 +228,21 @@ impl RollbackCommand {
             ))?,
             _ => console.print(&"no database migrations need to be undone")?,
         }
+        match (plan.logs, plan.logs_target, plan.log_migrations_undone()) {
+            (Some(logs), Some(target), undone @ 1..) => console.print(&format_args!(
+                "{undone} log store migration(s) will be undone (log schema {logs} → {target}): \
+                 log records stored by the newer schema may be lost. If the undo fails, \
+                 {} is moved aside and {} starts with an empty log store.",
+                LogStore::FILE_NAME,
+                plan.to
+            ))?,
+            (Some(_), None, _) => console.print(&format_args!(
+                "{} predates the log store; {} is left as it is",
+                plan.to,
+                LogStore::FILE_NAME
+            ))?,
+            _ => {}
+        }
         console.print(&format_args!(
             "the hoster service is stopped meanwhile and started again on {}",
             plan.to
@@ -245,6 +261,24 @@ impl RollbackCommand {
                 "the pre-rollback database snapshot is {}",
                 snapshot.display()
             ))?;
+        }
+        match outcome.logs {
+            LogsRollback::Kept => {}
+            LogsRollback::Undone { schema } => {
+                console.print(&format_args!("the log store is at log schema {schema}"))?
+            }
+            LogsRollback::MovedAside { path, reason } => console.print(&format_args!(
+                "cannot undo the log store ({reason}); it was moved aside to {} and {} starts \
+                 with an empty one",
+                path.display(),
+                outcome.to
+            ))?,
+            LogsRollback::Failed { reason } => console.print(&format_args!(
+                "cannot undo the log store or move it aside ({reason}); {} runs without its \
+                 log store until {} is removed from the state directory",
+                outcome.to,
+                LogStore::FILE_NAME
+            ))?,
         }
         Ok(())
     }
