@@ -190,7 +190,7 @@ impl Command {
             }
             Command::Run => Supervisor::new(config?).run().await,
             Command::Doctor { json } => {
-                let report = Doctor::from_env()?.diagnose(&config);
+                let report = Doctor::from_env()?.diagnose(&config).await;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {

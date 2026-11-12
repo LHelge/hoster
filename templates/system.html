@@ -57,4 +57,36 @@
     {%- endfor %}
   </dl>
 </section>
+{%- if let Some(logs) = logs %}
+
+<section class="card log-card" aria-labelledby="logs-title">
+  <div class="card-head"><h2 id="logs-title">Log store</h2></div>
+  {%- if let Some(error) = logs.unavailable %}
+  <p class="flash flash-error" role="status"><code>logs.db</code> could not be opened, so logs are not persisted: {{ error }}. A stack's live log still reads podman directly; <code>hoster doctor</code> checks the file.</p>
+  {%- else %}
+  {%- if let Some(problem) = logs.problem %}
+  <p class="flash flash-error" role="status">{{ problem }}</p>
+  {%- endif %}
+  <dl class="host-facts">
+    <dt>size</dt>
+    <dd>{% if let Some((text, share, meter)) = logs.size %}{{ text }} <span class="host-note">· {{ share }}</span>{{ meter }}{% else %}<span class="muted">unknown</span>{% endif %}</dd>
+    {%- for fact in logs.rows %}
+    <dt>{{ fact.name }}</dt>
+    <dd>{% if let Some(value) = fact.value %}{{ value }}{% if let Some(note) = fact.note %} <span class="host-note">· {{ note }}</span>{% endif %}{% else %}<span class="muted">unknown</span>{% endif %}</dd>
+    {%- endfor %}
+  </dl>
+  <h3 class="eyebrow log-losses-title">Lost since hoster started</h3>
+  {%- if logs.losses.is_empty() %}
+  <p class="log-losses-none">Nothing.</p>
+  {%- else %}
+  <dl class="host-facts">
+    {%- for fact in logs.losses %}
+    <dt>{{ fact.name }}</dt>
+    <dd>{% if let Some(value) = fact.value %}{{ value }}{% endif %}{% if let Some(note) = fact.note %} <span class="host-note">· {{ note }}</span>{% endif %}</dd>
+    {%- endfor %}
+  </dl>
+  {%- endif %}
+  {%- endif %}
+</section>
+{%- endif %}
 {% endblock %}

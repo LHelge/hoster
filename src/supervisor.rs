@@ -38,7 +38,7 @@ use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
 use crate::stats::{HostStats, ResourceSampler, Stats, Traffic, TrafficRecorder};
 use crate::store::{LogStore, Store};
-use crate::web::{Listen, RegistryAccess, WebApp, WebServer};
+use crate::web::{Listen, LocalLogs, LogStoreState, RegistryAccess, WebApp, WebServer};
 
 /// One step of the startup sequence, in order (architecture §4 steps 1–9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,12 +467,10 @@ pub struct Supervisor {
     /// opened, which leaves hoster running without persisted logs (the live container log page
     /// of ADR-0044 reads podman directly).
     logs: Option<LogStore>,
+    /// Why `logs.db` could not be opened, for the System page.
+    logs_error: Option<String>,
     /// Where producers offer log records and request rows: the log recorder's channel, or a
     /// disconnected sink that drops and counts when there is no log store.
-    #[allow(
-        dead_code,
-        reason = "handed to the proxy and hoster's own layer as they land (epic f8z)"
-    )]
     log_sink: LogSink,
     /// The secret store (ADR-0029), opened with the state store; its key is generated on the
     /// first start.
@@ -510,6 +508,7 @@ impl Supervisor {
             config,
             store: None,
             logs: None,
+            logs_error: None,
             log_sink: LogSink::disconnected(),
             secrets: None,
             registry: None,
@@ -706,10 +705,11 @@ impl Supervisor {
                 self.log_sink = sink;
                 self.logs = Some(logs);
             }
-            Err(err) => tracing::error!(
-                error = format!("{:#}", anyhow::Error::from(err)),
-                "cannot open the log store; logs are not persisted"
-            ),
+            Err(err) => {
+                let error = format!("{:#}", anyhow::Error::from(err));
+                tracing::error!(error, "cannot open the log store; logs are not persisted");
+                self.logs_error = Some(error);
+            }
         }
     }
 }
@@ -1013,6 +1013,26 @@ impl Startup for Supervisor {
                     orchestrator.subscribe(),
                 );
                 tokio::spawn(notifier.run(self.teardown.token.child_token()));
+                // The System page's log store card (ADR-0067): its figures and what was lost.
+                let followers = self
+                    .teardown
+                    .followers
+                    .clone()
+                    .context("the log followers are connected before the admin app")?;
+                let log_store = match (&self.logs, &self.logs_error) {
+                    (Some(logs), _) => LogStoreState::Open(logs.clone()),
+                    (None, error) => LogStoreState::Unavailable(
+                        error
+                            .clone()
+                            .unwrap_or_else(|| "it was not opened".to_owned()),
+                    ),
+                };
+                let logs = LocalLogs::new(
+                    log_store,
+                    self.log_sink.clone(),
+                    Arc::new(followers),
+                    runtime.clone(),
+                );
                 let web = WebApp::from_config(
                     &self.config,
                     store,
@@ -1027,6 +1047,7 @@ impl Startup for Supervisor {
                     self.shutdown.clone(),
                     updates,
                     self.admission.clone(),
+                    Arc::new(logs),
                 )?
                 .start(listen, self.teardown.token.child_token())
                 .await?;

@@ -519,3 +519,272 @@ async fn system_posts_need_the_csrf_token() {
     assert_eq!(host.current(), Some(v("0.1.0")));
     assert!(!shutdown.is_requested());
 }
+
+mod log_store {
+    use std::collections::BTreeMap;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+
+    use super::super::logs::FollowerCounts;
+    use super::*;
+    use crate::logs::{Drops, LogSink};
+    use crate::runtime::ContainerId;
+    use crate::store::{
+        LogBatch, LogRecord, LogStore, Removed, RequestId, RequestRow, RowCounts, Stream,
+        SweepReport, Timestamp,
+    };
+
+    /// A follower registry with fixed counts.
+    struct Followers {
+        followed: usize,
+        capped: BTreeMap<ContainerId, u64>,
+    }
+
+    impl FollowerCounts for Followers {
+        fn followed(&self) -> usize {
+            self.followed
+        }
+
+        fn capped(&self) -> BTreeMap<ContainerId, u64> {
+            self.capped.clone()
+        }
+    }
+
+    fn record(time: Timestamp, stream: Stream) -> LogRecord {
+        LogRecord {
+            time,
+            stack: Some("notes".to_owned()),
+            service: "api".to_owned(),
+            generation: Some(1),
+            stream,
+            level: None,
+            message: "listening".to_owned(),
+            fields: None,
+            cut: false,
+            marker: false,
+        }
+    }
+
+    fn request(time: Timestamp) -> RequestRow {
+        RequestRow {
+            time,
+            host: "notes.example.com".to_owned(),
+            prefix: "/".to_owned(),
+            stack: "notes".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            path: "/".to_owned(),
+            status: 200,
+            to_header: None,
+            total: Duration::from_millis(3),
+            bytes: 10,
+            client: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            upstream_failed: false,
+            request_id: RequestId::from([1; 16]),
+        }
+    }
+
+    /// The System page of an app whose log store card shows `logs`.
+    async fn page(logs: Arc<dyn LogFacts>) -> String {
+        let host = Host::new(&[("0.1.0", schema())]).await;
+        let mut app = TestApp::new().await;
+        app.app.system = System::new(
+            host.updater(FakeReleases::default(), "0.1.0"),
+            ShutdownRequest::default(),
+            Arc::new(Facts::sample()),
+        )
+        .with_logs(logs);
+        let browser = app.sign_in().await;
+        let response = app.get("/system", Some(&browser.cookie)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body(response).await
+    }
+
+    /// The card's markup, from its heading on.
+    fn card(html: &str) -> &str {
+        let start = html
+            .find(r#"<section class="card log-card""#)
+            .expect("the card");
+        let end = html[start..].find("</section>").unwrap() + start;
+        &html[start..end]
+    }
+
+    #[tokio::test]
+    async fn the_card_shows_size_reach_and_the_last_hour_of_a_seeded_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LogStore::open(dir.path()).await.unwrap();
+        let now = Timestamp::now();
+        let oldest = now - Duration::from_secs(2 * 3_600);
+        store
+            .append(&LogBatch {
+                records: vec![
+                    record(oldest, Stream::Stdout),
+                    record(now - Duration::from_secs(600), Stream::Stdout),
+                    record(now - Duration::from_secs(60), Stream::Stderr),
+                ],
+                requests: vec![request(now - Duration::from_secs(300))],
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        let logs = LocalLogs::new(
+            LogStoreState::Open(store.clone()),
+            LogSink::disconnected(),
+            Arc::new(Followers {
+                followed: 2,
+                capped: BTreeMap::new(),
+            }),
+            Arc::new(crate::runtime::FakeRuntime::new()),
+        );
+        let html = page(Arc::new(logs)).await;
+        let card = card(&html);
+        assert!(
+            card.contains(r#"<h2 id="logs-title">Log store</h2>"#),
+            "{card}"
+        );
+        assert!(card.contains(&store.path().display().to_string()), "{card}");
+        // Far below the cap: an ok meter, in MiB against the GiB.
+        assert!(card.contains(r#"class="meter meter-ok""#), "{card}");
+        assert!(card.contains(" MiB / 1.0 GiB"), "{card}");
+        let shown = humantime::format_rfc3339_seconds(SystemTime::from(oldest)).to_string();
+        assert!(card.contains(&shown), "{card}");
+        assert!(card.contains("<dd>2 records · 1 requests</dd>"), "{card}");
+        assert!(card.contains("<dd>2 containers</dd>"), "{card}");
+        assert!(
+            card.contains("7 days <span class=\"host-note\">· no retention pass has finished"),
+            "{card}"
+        );
+        assert!(
+            card.contains(r#"<p class="log-losses-none">Nothing.</p>"#),
+            "{card}"
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_card_counts_losses_by_cause_and_names_capped_containers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LogStore::open(dir.path()).await.unwrap();
+        // No recorder reads this sink: everything offered is dropped and counted.
+        let sink = LogSink::disconnected();
+        for _ in 0..3 {
+            sink.try_record(record(Timestamp::now(), Stream::Stdout));
+        }
+        sink.try_record(record(Timestamp::now(), Stream::Hoster));
+        let capped = BTreeMap::from([(
+            ContainerId::from("0123456789abcdef0123456789abcdef".to_owned()),
+            1_240,
+        )]);
+        let logs = LocalLogs::new(
+            LogStoreState::Open(store.clone()),
+            sink,
+            Arc::new(Followers {
+                followed: 1,
+                capped,
+            }),
+            Arc::new(crate::runtime::FakeRuntime::new()),
+        );
+        let html = page(Arc::new(logs)).await;
+        let card = card(&html);
+        assert!(
+            card.contains("<dt>channel full</dt>\n    <dd>3 container lines <span"),
+            "{card}"
+        );
+        // A container the runtime does not name is shown by its short id.
+        assert!(
+            card.contains("<dt>line-rate cap</dt>\n    <dd>0123456789ab 1,240 <span"),
+            "{card}"
+        );
+        assert!(card.contains("<dd>1 channel full"), "{card}");
+        // Causes that lost nothing are left out.
+        assert!(!card.contains("failed commits"), "{card}");
+        assert!(!card.contains("Nothing."), "{card}");
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_card_says_when_the_size_cap_decides_and_lists_the_top_capped() {
+        let now = SystemTime::now();
+        let mut figures = LogFigures::sample(now);
+        figures.used_bytes = Some(1_000 * 1024 * 1024);
+        figures.sweep = Some(SweepReport {
+            started: Timestamp::from(now),
+            expired: Removed::default(),
+            capped: Removed {
+                records: 52_000,
+                requests: 1_200,
+            },
+            file_bytes: 1 << 30,
+        });
+        figures.drops = Drops {
+            failed_commits: 2,
+            lost_in_failed_commits: 731,
+            ..Drops::default()
+        };
+        figures.hoster_capped = 7;
+        figures.last_hour = Some(RowCounts {
+            records: 1_204_000,
+            requests: 0,
+        });
+        let html = page(Arc::new(LogHealth::Open(Box::new(figures)))).await;
+        let card = card(&html);
+        // 1000 MiB of 1024: past 95 %.
+        assert!(card.contains(r#"class="meter meter-fail""#), "{card}");
+        assert!(card.contains("1000 MiB / 1.0 GiB"), "{card}");
+        assert!(card.contains("98% of the cap"), "{card}");
+        assert!(
+            card.contains("the 1.0 GiB size cap <span class=\"host-note\">· the last pass removed 52,000 records and 1,200 requests"),
+            "{card}"
+        );
+        assert!(
+            card.contains("<dd>1,204,000 records · 0 requests</dd>"),
+            "{card}"
+        );
+        assert!(
+            card.contains("<dd>2 commits · 731 records and rows"),
+            "{card}"
+        );
+        assert!(
+            card.contains("notes-api-7 12,040 · blog-app-3 310 · shop-web-2 22 · +1 more (5)"),
+            "{card}"
+        );
+        assert!(card.contains("<dd>7 rate cap"), "{card}");
+        assert!(!card.contains("channel full"), "{card}");
+    }
+
+    #[tokio::test]
+    async fn an_unopened_store_is_reported_and_the_rest_of_the_page_works() {
+        let logs = LocalLogs::new(
+            LogStoreState::Unavailable(
+                "cannot open /srv/hoster/logs.db: database disk image is malformed".into(),
+            ),
+            LogSink::disconnected(),
+            Arc::new(Followers {
+                followed: 0,
+                capped: BTreeMap::new(),
+            }),
+            Arc::new(crate::runtime::FakeRuntime::new()),
+        );
+        let html = page(Arc::new(logs)).await;
+        let card = card(&html);
+        assert!(
+            card.contains("could not be opened, so logs are not persisted: cannot open /srv/hoster/logs.db: database disk image is malformed."),
+            "{card}"
+        );
+        assert!(!card.contains("<dt>size</dt>"), "{card}");
+        assert!(
+            html.contains(r#"<span class="version-now">v0.1.0</span>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<dl class="host-facts">"#), "{html}");
+    }
+
+    #[tokio::test]
+    async fn without_log_figures_the_card_is_left_out() {
+        let host = Host::new(&[("0.1.0", schema())]).await;
+        let (app, _) = app_on(&host, FakeReleases::default(), "0.1.0").await;
+        let browser = app.sign_in().await;
+        let html = body(app.get("/system", Some(&browser.cookie)).await).await;
+        assert!(!html.contains("log-card"), "{html}");
+    }
+}

@@ -8,14 +8,14 @@
 //! `auto_vacuum = INCREMENTAL`, so retention can give pages back to the file system. Nothing in
 //! `hoster.db` refers to it, and it has no foreign keys.
 //!
+//! Its own figures (the used size, the rows of the last hour) feed the System page's log store
+//! card, and [`LogStore::inspect_in`] lets `hoster doctor` read an existing file without
+//! creating or migrating it.
+//!
 //! Its queries are runtime-checked (`sqlx::query`, not `query!`): sqlx's macros check against
 //! one database per crate, which is `hoster.db`'s. Every query here is exercised by the tests.
 
-#![allow(
-    dead_code,
-    reason = "written by the recorder and read by the logs UI as they land (epic f8z)"
-)]
-
+mod health;
 mod query;
 mod retention;
 mod types;
@@ -35,6 +35,7 @@ use sqlx::sqlite::{
 };
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 
+pub use health::{LogFileFacts, RowCounts};
 pub use query::{
     InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, PageAt, RecordKey,
     TextFilter,

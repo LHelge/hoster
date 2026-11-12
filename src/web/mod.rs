@@ -34,6 +34,8 @@ mod system;
 mod ui;
 mod webhook;
 
+pub use system::{LocalLogs, LogFacts, LogStoreState};
+
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
@@ -174,7 +176,8 @@ impl WebApp {
     /// credentials read from their files or systemd credentials, the dashboard's `stats`, the
     /// `instance` name (ADR-0058), the `secrets` the notification API key is kept in, and
     /// `shutdown`, which the System page requests after a self-update (ADR-0052), and the proxy's
-    /// `admission`, whose descriptor use the System page shows (ADR-0065). Fails when the
+    /// `admission`, whose descriptor use the System page shows (ADR-0065), and the log store's
+    /// figures `logs`, which it shows too (ADR-0067). Fails when the
     /// credentials are missing. Deploy webhook tokens are verified against GitHub's key set for
     /// the configured audience (ADR-0047).
     #[expect(
@@ -195,6 +198,7 @@ impl WebApp {
         shutdown: ShutdownRequest,
         updates: UpdateCheckHandle,
         admission: Admission,
+        logs: Arc<dyn LogFacts>,
     ) -> anyhow::Result<Self> {
         let installation = Installation::from_env()
             .context("HOME is not set, so the binary layout ~/.local/lib/hoster cannot be found")?;
@@ -239,7 +243,7 @@ impl WebApp {
             Arc::new(orchestrator),
             Arc::new(registry),
             EffectiveConfig::from(config),
-            System::new(updater, shutdown, Arc::new(host)),
+            System::new(updater, shutdown, Arc::new(host)).with_logs(logs),
             verifier,
             store,
             stats,

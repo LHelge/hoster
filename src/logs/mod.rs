@@ -12,8 +12,7 @@ mod follower;
 mod line;
 #[allow(
     dead_code,
-    reason = "request rows, drop counts and the head are used as the proxy, the System page and \
-              the logs UI land (epics f8z, psq)"
+    reason = "request rows and the head are used as the proxy and the logs UI land (epics f8z, psq)"
 )]
 mod recorder;
 
@@ -22,8 +21,4 @@ pub use follower::LogFollowers;
 pub use line::ParsedLine;
 #[cfg(test)]
 pub use recorder::Tap;
-#[allow(
-    unused_imports,
-    reason = "the drop counts are shown on the System page as it lands"
-)]
 pub use recorder::{Drops, LogRecorder, LogSink};

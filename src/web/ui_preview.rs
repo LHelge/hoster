@@ -35,7 +35,7 @@ use super::assets::Assets;
 use super::certificates::{AcmeDirectory, CertOverview, CertOwner, CertRow};
 use super::charts::{LineChart, Percentiles, Sparkline, StackedBars, Timeline};
 use super::settings::{EffectiveConfig, Settings};
-use super::system::{Facts, System};
+use super::system::{Facts, LogFigures, LogHealth, System};
 use super::ui::Tone;
 use crate::acme::{Backoff, DnsMismatch, DnsVerdict, Validity};
 use crate::config::ConfigSource;
@@ -1810,6 +1810,9 @@ async fn ui_preview() {
         ShutdownRequest::default(),
         std::sync::Arc::new(Facts::sample()),
     )
+    .with_logs(std::sync::Arc::new(LogHealth::Open(Box::new(
+        LogFigures::sample(SystemTime::now()),
+    ))))
     .started_at(SystemTime::now() - (9 * DAY + 4 * HOUR));
     let browser = app.sign_in().await;
     let session = Session { app: &app, browser };
