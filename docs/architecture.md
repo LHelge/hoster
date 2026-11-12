@@ -23,6 +23,7 @@ The library behaviour this design depends on was checked against crate sources a
 | Exec API, exec session removal, `Healthcheck NONE` (ADR-0056) | podman **6.1.4** (runc, rootless), bollard 0.21.1, checked 2026-11-09 | live, through the compat API and the podman-gated tests in `src/runtime/podman.rs` | See §1.6. |
 | Container archive upload (ADR-0057) | podman **6.1.4** (runc, rootless, overlay); 5.7.0 and 5.4.2 rootful (crun); 5.7.0 rootless (CI, `ubuntu-26.04`); bollard 0.21.1 (source), checked 2026-11-10 | live through the compat API (curl); bollard's upload options checked in crate source; CI's live tests | See §1.7. |
 | Resource limits, `ShmSize`, `Tmpfs`, `Init`, `OOMKilled` (ADR-0059) | podman **6.1.4** (runc 1.5.2, rootless, cgroup v2, systemd 262); delegation and crun in a throwaway Debian 13 systemd container (systemd 257, podman 5.4.2, crun 1.21); catatonit packages of Debian 13, Ubuntu 22.04/24.04 and Fedora 43; checked 2026-11-10 | live, through the compat and libpod APIs, the CLI and systemctl | See §1.8. |
+| Container stats, storage root (ADR-0066) | podman **6.1.4** (rootless, cgroup v2), compat API `/v1.44`, bollard 0.21.1, checked 2026-11-12 | live through the compat API (curl) and the podman-gated `stats_and_storage_root_on_real_podman` test; bollard's stats types in crate source | See §1.9. |
 
 ### 1.1 Pingora 0.9.1
 
@@ -298,6 +299,33 @@ APIs and the CLI:
 - **Init.** libpod `/info` reports no init path; that is containers.conf `init_path`, default
   `/usr/libexec/podman/catatonit`. The `catatonit` package puts it there on Debian 13, Ubuntu
   22.04 and 24.04 and Fedora 43; Arch uses `/usr/lib/podman/catatonit`.
+
+### 1.9 Container stats and the storage root (podman 6.1.4)
+
+Checked live on rootless podman 6.1.4 (cgroup v2) through the compat API at `/v1.44`, and through
+bollard 0.21.1 in the podman-gated test. Where podman's compat stats differ from Docker's:
+
+- **No second sample.** `GET /containers/{id}/stats?stream=false&one-shot=true` answers in
+  3–5 ms, and as fast without `one-shot`: podman never waits for a second sample, unlike
+  Docker's `stream=false` without `one-shot`. `precpu_stats` is all zeros and `preread` is
+  `0001-01-01T00:00:00Z`, so a CPU rate needs two calls. bollard's `StatsOptions` defaults to
+  `stream: true`; hoster sets `stream(false)` and `one_shot(true)` (query `one-shot`).
+- **CPU.** `cpu_stats.cpu_usage.total_usage` is cumulative CPU time in nanoseconds (the cgroup's
+  `cpu.stat` `usage_usec` × 1000). There is no `percpu_usage`.
+- **Memory.** `memory_stats` has only `usage` and `limit`: no `stats` map (Docker's copy of
+  `memory.stat`), no `max_usage` or `failcnt`. `usage` is already `memory.current` minus
+  `inactive_file`, as `podman stats` shows it; Docker reports `memory.current` and leaves the
+  subtraction to the client. `limit` is `memory.max`, or the host's `MemTotal` when the
+  container has no limit.
+- **Not running.** A container that exists but is not running (created or stopped) answers
+  **HTTP 200** with the body `{"cause":"container is stopped","message":"container is
+  stopped","response":500}`. bollard's `ContainerStatsResponse` has only optional fields and
+  decodes it as a reading with every field missing, without an error (confirmed in the
+  podman-gated test). A missing container is a 404. A paused one answers with a full reading.
+- **Storage root.** Compat `/info` `DockerRootDir` (bollard `SystemInfo::docker_root_dir`) is
+  podman's storage `graphRoot` (`~/.local/share/containers/storage` rootless), the same path as
+  libpod `/info` `store.graphRoot`. Named volumes live under it by default
+  (`store.volumePath`).
 
 ## 2. Component overview
 

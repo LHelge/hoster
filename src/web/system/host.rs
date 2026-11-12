@@ -92,6 +92,7 @@ impl Facts {
                 rootless: Some(true),
                 cgroup_version: Some("2".into()),
                 cgroup_driver: Some("systemd".into()),
+                storage_root: Some("/home/hoster/.local/share/containers/storage".into()),
             }),
             cgroups: Some("2".into()),
             public: vec![

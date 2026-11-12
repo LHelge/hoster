@@ -17,16 +17,16 @@ use bollard::container::LogOutput;
 use bollard::errors::Error as BollardError;
 use bollard::exec::{StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerCreateBody, ContainerInspectResponse, ContainerSummary, EndpointSettings, ExecConfig,
-    ExecInspectResponse, HealthConfig, HostConfig, HostConfigLogConfig, Mount, MountType,
-    NetworkCreateRequest, NetworkingConfig, PortMap, PortSummaryTypeEnum, RestartPolicy,
-    RestartPolicyNameEnum, VolumeCreateRequest,
+    ContainerCreateBody, ContainerInspectResponse, ContainerStatsResponse, ContainerSummary,
+    EndpointSettings, ExecConfig, ExecInspectResponse, HealthConfig, HostConfig,
+    HostConfigLogConfig, Mount, MountType, NetworkCreateRequest, NetworkingConfig, PortMap,
+    PortSummaryTypeEnum, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     ListNetworksOptionsBuilder, LogsOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveImageOptionsBuilder, RemoveVolumeOptions, StopContainerOptionsBuilder,
-    UploadToContainerOptionsBuilder,
+    RemoveImageOptionsBuilder, RemoveVolumeOptions, StatsOptionsBuilder,
+    StopContainerOptionsBuilder, UploadToContainerOptionsBuilder,
 };
 use bollard::{API_DEFAULT_VERSION, Docker, body_full};
 use futures_util::StreamExt;
@@ -40,9 +40,10 @@ use tokio::time::Instant;
 use super::exec::{Argv, ExecProcess, OutputTail};
 use super::files::{Layout, PathStat, StatPath, UploadFailure};
 use super::{
-    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, EngineInfo,
-    ExecGuard, ExecOutcome, ExecOutput, LogLine, LogOptions, LogStream, NetworkSpec, ObjectKind,
-    Operation, PortBinding, PublishedPort, RunningExec, RuntimeError, VolumeSpec, label,
+    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, ContainerStats,
+    EngineInfo, ExecGuard, ExecOutcome, ExecOutput, LogLine, LogOptions, LogStream, NetworkSpec,
+    ObjectKind, Operation, PortBinding, PublishedPort, RunningExec, RuntimeError, VolumeSpec,
+    label,
 };
 use crate::registry::{Anonymous, RegistryCredential, RegistryCredentials};
 use crate::stack::PinnedImage;
@@ -276,6 +277,13 @@ impl<'a> Call<'a> {
                 // Docker answers 409 "is not running", podman 500 "container state improper".
                 (Operation::Exec, 409) => RuntimeError::NotRunning { name },
                 (Operation::Exec, _) if Self::mentions(&message, &Self::NOT_RUNNING) => {
+                    RuntimeError::NotRunning { name }
+                }
+                // Podman 6.1 answers a stopped container's stats with HTTP 200 and an error
+                // body (see `ContainerStats::reported`); a 409 or "state improper" is the
+                // same outcome, should a version answer that way.
+                (Operation::Stats, 409) => RuntimeError::NotRunning { name },
+                (Operation::Stats, _) if Self::mentions(&message, &Self::NOT_RUNNING) => {
                     RuntimeError::NotRunning { name }
                 }
                 _ => RuntimeError::Api {
@@ -517,6 +525,21 @@ impl PublishedPort {
         ip.filter(|ip| !ip.is_empty())
             .and_then(|ip| ip.parse().ok())
             .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+    }
+}
+
+impl ContainerStats {
+    /// A reading as podman's compat stats endpoint reports it, or `None` when it carries no
+    /// CPU or no memory figure. Podman 6.1 answers a container that exists but is not running
+    /// with HTTP 200 and the body `{"cause":"container is stopped",…,"response":500}`, which
+    /// decodes as a response with every field missing (architecture §1).
+    fn reported(stats: ContainerStatsResponse) -> Option<Self> {
+        let cpu = stats.cpu_stats?.cpu_usage?.total_usage?;
+        let memory = stats.memory_stats?.usage?;
+        Some(Self {
+            cpu_time: Duration::from_nanos(cpu),
+            memory,
+        })
     }
 }
 
@@ -1040,8 +1063,33 @@ impl ContainerRuntime for PodmanRuntime {
         self.version.clone()
     }
 
+    /// One `stream=false`, `one-shot=true` call (ADR-0066 §2). Podman answers at once either
+    /// way and never waits for a second sample (`precpu_stats` is zeros), unlike Docker's
+    /// `stream=false` without `one-shot`. A 404, a "not running" answer and a reading without
+    /// figures are all `None`.
+    async fn stats(&self, id: &ContainerId) -> Result<Option<ContainerStats>, RuntimeError> {
+        let call = Call::new(Operation::Stats, ObjectKind::Container, id.as_ref());
+        let options = StatsOptionsBuilder::new()
+            .stream(false)
+            .one_shot(true)
+            .build();
+        let mut readings = std::pin::pin!(self.docker.stats(id.as_ref(), Some(options)));
+        match readings.next().await {
+            Some(Ok(stats)) => Ok(ContainerStats::reported(stats)),
+            Some(Err(err)) => match call.error(err) {
+                RuntimeError::NotFound { .. } | RuntimeError::NotRunning { .. } => Ok(None),
+                err => Err(err),
+            },
+            None => Err(RuntimeError::Api {
+                operation: Operation::Stats,
+                message: format!("container {id}: podman sent no reading"),
+            }),
+        }
+    }
+
     /// podman's compat `/info`: its version, whether it runs rootless (a `name=rootless`
-    /// security option) and the cgroups version and manager.
+    /// security option), the cgroups version and manager, and its storage root
+    /// (`DockerRootDir`, podman's `store.graphRoot`).
     async fn engine(&self) -> Result<EngineInfo, RuntimeError> {
         let info = self
             .docker
@@ -1059,6 +1107,7 @@ impl ContainerRuntime for PodmanRuntime {
                 .map(|options| options.iter().any(|o| o == "name=rootless")),
             cgroup_version: info.cgroup_version.map(|v| v.to_string()).and_then(named),
             cgroup_driver: info.cgroup_driver.map(|d| d.to_string()).and_then(named),
+            storage_root: info.docker_root_dir.and_then(named).map(PathBuf::from),
         })
     }
 
@@ -2652,6 +2701,90 @@ mod tests {
         );
     }
 
+    /// podman 6.1.4's answers to `GET /v1.44/containers/{id}/stats?stream=false&one-shot=true`,
+    /// trimmed: a running container, and one that exists but is stopped (HTTP 200).
+    #[test]
+    fn stats_readings_carry_cpu_time_and_memory_in_use() {
+        let running: ContainerStatsResponse = serde_json::from_value(serde_json::json!({
+            "read": "2026-11-12T01:14:30.343822036+01:00",
+            "preread": "0001-01-01T00:00:00Z",
+            "pids_stats": { "current": 1 },
+            "num_procs": 0,
+            "storage_stats": {},
+            "cpu_stats": {
+                "cpu_usage": {
+                    "total_usage": 3_689_000,
+                    "usage_in_kernelmode": 1_820_000,
+                    "usage_in_usermode": 1_869_000
+                },
+                "system_cpu_usage": 77_502_717_064_000_u64,
+                "online_cpus": 4,
+                "cpu": 0,
+                "throttling_data": { "periods": 0, "throttled_periods": 0, "throttled_time": 0 }
+            },
+            "precpu_stats": {
+                "cpu_usage": { "total_usage": 0, "usage_in_kernelmode": 0, "usage_in_usermode": 0 },
+                "cpu": 0,
+                "throttling_data": { "periods": 0, "throttled_periods": 0, "throttled_time": 0 }
+            },
+            "memory_stats": { "usage": 405_504, "limit": 33_647_095_808_u64 },
+            "name": "probe",
+            "id": "dbf73b731561aed6911f54bcc7c77897e57be68015336040ab11ac6bf8620ba7"
+        }))
+        .unwrap();
+        assert_eq!(
+            ContainerStats::reported(running),
+            Some(ContainerStats {
+                cpu_time: Duration::from_nanos(3_689_000),
+                memory: 405_504,
+            })
+        );
+
+        let stopped: ContainerStatsResponse = serde_json::from_value(serde_json::json!({
+            "cause": "container is stopped",
+            "message": "container is stopped",
+            "response": 500
+        }))
+        .expect("the error body decodes as an empty reading");
+        assert_eq!(ContainerStats::reported(stopped), None);
+
+        let no_memory: ContainerStatsResponse = serde_json::from_value(serde_json::json!({
+            "cpu_stats": { "cpu_usage": { "total_usage": 1 } },
+            "memory_stats": {}
+        }))
+        .unwrap();
+        assert_eq!(ContainerStats::reported(no_memory), None);
+    }
+
+    #[test]
+    fn stats_of_a_stopped_or_missing_container_are_typed() {
+        let server = |status_code, message: &str| BollardError::DockerResponseServerError {
+            status_code,
+            message: message.into(),
+        };
+        let call = Call::new(Operation::Stats, ObjectKind::Container, "c");
+        let not_running = RuntimeError::NotRunning { name: "c".into() };
+        assert_eq!(call.error(server(409, "is not running")), not_running);
+        assert_eq!(
+            call.error(server(500, "container state improper")),
+            not_running
+        );
+        assert_eq!(
+            call.error(server(404, "no such container")),
+            RuntimeError::NotFound {
+                kind: ObjectKind::Container,
+                name: "c".into()
+            }
+        );
+        assert!(matches!(
+            call.error(server(500, "boom")),
+            RuntimeError::Api {
+                operation: Operation::Stats,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn server_errors_become_typed_runtime_errors() {
         let server = |status_code, message: &str| BollardError::DockerResponseServerError {
@@ -3466,6 +3599,59 @@ mod tests {
         if let Err(err) = result {
             std::panic::resume_unwind(err.into_panic());
         }
+    }
+
+    /// Stats of a running container through bollard, and of the same container once stopped
+    /// (podman's HTTP 200 error body) and once removed (404): both are `None`. The engine names
+    /// its storage root, an existing directory.
+    #[tokio::test]
+    async fn stats_and_storage_root_on_real_podman() {
+        with_stack(|runtime, stack| async move {
+            let root = runtime.engine().await.unwrap().storage_root;
+            let root = root.expect("podman reports DockerRootDir");
+            assert!(root.is_dir(), "{}", root.display());
+
+            let id = running_sleeper(&runtime, &stack).await;
+            let first = runtime
+                .stats(&id)
+                .await
+                .unwrap()
+                .expect("a running reading");
+            assert!(first.memory > 0, "{first:?}");
+            sh(
+                &runtime,
+                &id,
+                "i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done",
+            )
+            .await;
+            let second = runtime
+                .stats(&id)
+                .await
+                .unwrap()
+                .expect("a running reading");
+            assert!(
+                second.cpu_time > first.cpu_time,
+                "{first:?} then {second:?}"
+            );
+
+            runtime.stop(&id, Duration::from_secs(1)).await.unwrap();
+            assert_eq!(runtime.stats(&id).await.unwrap(), None, "stopped");
+            // bollard decodes podman's HTTP 200 error body as a reading with no figures.
+            let options = StatsOptionsBuilder::new()
+                .stream(false)
+                .one_shot(true)
+                .build();
+            let mut readings = std::pin::pin!(runtime.docker.stats(id.as_ref(), Some(options)));
+            let body = readings
+                .next()
+                .await
+                .expect("one answer")
+                .expect("HTTP 200");
+            assert_eq!(ContainerStats::reported(body), None);
+            runtime.remove(&id).await.unwrap();
+            assert_eq!(runtime.stats(&id).await.unwrap(), None, "removed");
+        })
+        .await;
     }
 
     /// Stopping and removing the only running container on a network, which makes podman tear
