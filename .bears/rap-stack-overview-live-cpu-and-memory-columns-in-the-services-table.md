@@ -19,10 +19,10 @@ CPU and Memory columns in the services table of the stack overview (`docs/design
 
 ## What
 
-- **CPU column:** the current container's CPU % (basis as ADR-0066 defines), right-aligned mono, with a small `Sparkline` of the last hour; shown against `limits.cpus` where the service sets one (ADR-0059).
-- **Memory column:** usage, and `/ <limit>` with a `Meter` filled to usage/limit where `limits.memory` is set (`ServiceRow.limits`); without a limit, usage alone and no meter (or a sparkline only). Tone thresholds per ADR-0066.
+- **CPU column:** the container's CPU % of one core (ADR-0066 §4), right-aligned mono, with a small `Sparkline` of the last hour; where the service sets `limits.cpus` (ADR-0059) also `/ <cpus × 100>%` and a `Meter` filled to usage/limit; without one, no meter.
+- **Memory column:** usage, and `/ <limit>` with a `Meter` filled to usage/limit where `limits.memory` is set (`ServiceRow.limits`); without a limit, usage and a sparkline, no meter. Limits come from the revision, never from stats. Tones per ADR-0066 §10 (`Ok` < 80 %, `Warn` ≥ 80 %, `Fail` ≥ 95 % of a limit; `Neutral` without one).
 - The muted rows of other containers (draining old generation, starting new one) show their own figures; a service without a running container shows `—`.
-- **Live:** the stack page's SSE task (`src/web/stacks/overview.rs`, subscribed to `ui_events`) also wakes on the sampler's change signal and re-renders the same fragment it already sends, so the columns move every 10 s without a new connection or endpoint. Make sure this does not re-run expensive queries needlessly: if the fragment re-reads traffic history or lists containers from podman on every render, restrict what a sampler tick re-renders or reuse what is cached, and say what you chose.
+- **Live (ADR-0066 §9):** the stack page's one SSE stream today carries only the Recent events card (`StackFeed`, `src/web/events/live.rs`, `/stacks/{name}/events`, swapped into `#stack-events`). It also wakes on the sampler's change signal and then sends `<hx-partial>`s that replace the stack's containers' CPU and memory cells (ids keyed by container id), as the dashboard stream does for its events card (`src/web/events.rs`, `RecentEvents::partial`). The partials are rendered from the sampler's cache alone: a tick never lists containers from podman, reads the store or re-sends the events card. Check that a message carrying only partials leaves `#stack-events` as it is. Rows that appear or go away still change on reload only.
 - The stack cards on `/stacks` and the dashboard are out of scope.
 - The stack-format wiki page's limits section (`site/content/wiki/stack-format.md`) gets one sentence saying usage against the limits is shown on the stack overview; `aphid build` in `site/` must still pass if the tool is installed.
 
@@ -33,4 +33,4 @@ CPU and Memory columns in the services table of the stack overview (`docs/design
 - [ ] No inline styles; CSS in the stylesheet with existing tokens
 - [ ] `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, tests pass
 
-References: ADR-0066, ADR-0054, ADR-0059; `docs/design/StackDetail.dc.html` (services table only), `src/web/stacks/overview.rs`, `src/web/stacks/overview/services.rs`, `templates/stack.html`, `src/web/ui.rs`, `src/web/charts.rs` (`Sparkline`).
+References: ADR-0066, ADR-0054, ADR-0059; `docs/design/StackDetail.dc.html` (services table only), `src/web/stacks/overview.rs`, `src/web/events/live.rs`, `src/web/events.rs` (`RecentEvents::partial`), `src/web/stacks/overview/services.rs`, `templates/stack.html`, `src/web/ui.rs`, `src/web/charts.rs` (`Sparkline`).

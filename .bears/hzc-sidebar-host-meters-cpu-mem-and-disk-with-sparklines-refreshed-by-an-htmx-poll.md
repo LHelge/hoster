@@ -21,10 +21,10 @@ The **HOST** card at the bottom of the sidebar on every signed-in page (every sc
 
 - The card sits between the nav and the account block in `templates/base.html`, headed `HOST · <hostname>`. It is its own template fragment, served also at a small authenticated GET endpoint; the card polls that endpoint with HTMX every 10 s (`hx-trigger="every 10s"`, swapping itself), so the meters stay live on any page without a second SSE connection.
 - Rendering a page reads only the sampler's cache (never podman, never `/proc`).
-- Each row: label, value in JetBrains Mono, a `Meter` (`src/web/ui.rs`) with the tone thresholds of ADR-0066, and for cpu and mem a `Sparkline` (`src/web/charts.rs`) of the last hour. Disk is the filesystem of podman's storage root. An unknown value shows `—` with an empty meter; the card never fails a page.
+- Each row: label, value in JetBrains Mono, a `Meter` (`src/web/ui.rs`) with the tones of ADR-0066 §10 (`Ok` < 80 %, `Warn` ≥ 80 %, `Fail` ≥ 95 %), and for cpu and mem a `Sparkline` (`src/web/charts.rs`) of the last hour. Host cpu is a percent of all cores. `Sparkline` takes integers: pass CPU in tenths of a percent, memory in bytes, and leave unknown samples out (ADR-0066 §11). Disk is the filesystem of podman's storage root. An unknown value shows `—` with an empty meter; the card never fails a page.
 - Byte sizes are formatted consistently with how the UI already prints sizes (see the System page and `ByteSize`); the mockup's `GB` is illustrative.
 - No inline styles (CSP, ADR-0054); new CSS goes in the stylesheet under `assets/` with the existing tokens, light and dark. The site theme in `site/theme/` copies tokens only; leave it unless a token changes.
-- The System page's host card shows the data dir's filesystem usage too when it is a different filesystem from podman's storage (ADR-0066), if that is small; otherwise leave it and say so in the task.
+- The System page's host card shows the state dir's (`state_dir`) filesystem usage too when it is a different filesystem from podman's storage root (a different `st_dev`, ADR-0066 §5), if that is small; otherwise leave it and say so in the task.
 - `ui_preview.rs` (the component preview), if it lists shell parts, gets the card.
 
 ## Acceptance Criteria

@@ -1,15 +1,16 @@
 ---
 id: "3vg"
 title: "ADR-0066: resource usage sampler, container CPU/memory and host meters"
-status: open
+status: done
 priority: P1
 created: "2026-11-12T00:07:43.261713411Z"
-updated: "2026-11-12T00:07:43.261713411Z"
+updated: "2026-11-12T00:15:49.738227747Z"
 tags:
   - docs
   - adr
   - observability
 parent: qmw
+attempts: 1
 ---
 
 ## Summary
