@@ -52,6 +52,7 @@ use self::resolver::{CertResolver, SniCapture};
 use self::router::RoutingProxy;
 use crate::acme::{CertMap, ChallengeMap};
 use crate::config::{ProxyConfig, Timeouts};
+use crate::logs::LogSink;
 use crate::routing::RouteTable;
 use crate::stats::Traffic;
 
@@ -113,6 +114,8 @@ pub struct ProxyState {
     pub traffic: Traffic,
     /// Which new client connections both listeners take on (ADR-0065).
     pub admission: Admission,
+    /// Where the `:443` service offers the rows of requests routed to a stack (ADR-0067 §5).
+    pub logs: LogSink,
 }
 
 /// What hoster allows a client connection on either listener, where Pingora's own default is no
@@ -194,12 +197,13 @@ impl Proxy {
             challenges,
             traffic,
             admission,
+            logs,
         } = state;
         let admission = Arc::new(admission);
 
         let mut https = ProxyServiceBuilder::new(
             &server.configuration,
-            RoutingProxy::new(Arc::clone(&routes), config.timeouts, limits, traffic),
+            RoutingProxy::new(Arc::clone(&routes), config.timeouts, limits, traffic, logs),
         )
         .name("hoster https")
         .server_options(limits.server_options())
@@ -406,6 +410,7 @@ mod thread_tests {
             challenges: ChallengeMap::default(),
             traffic: Traffic::default(),
             admission: Admission::default(),
+            logs: LogSink::disconnected(),
         };
         (state, dir)
     }

@@ -10,10 +10,7 @@
 mod cap;
 mod follower;
 mod line;
-#[allow(
-    dead_code,
-    reason = "request rows and the head are used as the proxy and the logs UI land (epics f8z, psq)"
-)]
+#[allow(dead_code, reason = "the head is used as the logs UI lands (epic psq)")]
 mod recorder;
 
 pub use cap::RateCap;

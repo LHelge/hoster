@@ -605,12 +605,16 @@ impl<'a> Scanner<'a> {
         );
     }
 
-    /// A request for the admin app, whose access line marks a point in the log.
-    fn request(&self, path: &str) {
-        let head =
-            format!("GET {path} HTTP/1.1\r\nHost: hoster.example.com\r\nConnection: close\r\n\r\n");
+    /// A cross-origin `POST` to the admin app, which refuses it with a `warn` line naming
+    /// `path`: a point in the log at the default level. (The proxy's access lines are `debug`
+    /// only, ADR-0067 §5.)
+    fn mark(&self, path: &str) {
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: hoster.example.com\r\nOrigin: https://elsewhere.example\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
         let answer = self.tls(Some(Self::ADMIN_HOST), "http/1.1", head.as_bytes());
-        assert!(answer.starts_with("HTTP/1.1 "), "{answer}");
+        assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
     }
 }
 
@@ -632,7 +636,6 @@ impl Hoster {
 
 /// With the default `RUST_LOG=info`, nothing a scanner does writes a line: not the requests
 /// hoster answers itself, and not Pingora's `error` for each connection the client broke.
-/// A request for a routed host still gets its access line.
 #[test]
 fn scanner_traffic_writes_no_log_line_by_default() {
     let sandbox = Sandbox::new("scanner");
@@ -643,9 +646,9 @@ fn scanner_traffic_writes_no_log_line_by_default() {
     scanner.scan();
     // hoster logs a broken connection when it notices, which can be after the client is done.
     std::thread::sleep(Duration::from_millis(300));
-    scanner.request("/login?end-of-scan");
+    scanner.mark("/end-of-scan");
 
-    let during = hoster.lines_until("path=\"/login\"");
+    let during = hoster.lines_until("path=\"/end-of-scan\"");
     let from_the_proxy: Vec<&String> = during
         .iter()
         .filter(|line| {
@@ -677,9 +680,9 @@ fn scanner_traffic_is_logged_at_debug_under_its_own_targets() {
 
     scanner.scan();
     std::thread::sleep(Duration::from_millis(300));
-    scanner.request("/login?end-of-scan");
+    scanner.mark("/end-of-scan");
 
-    let during = hoster.lines_until("path=\"/login\"");
+    let during = hoster.lines_until("path=\"/end-of-scan\"");
     let count = |target: &str, needle: &str| {
         let target = format!("DEBUG {target}: ");
         during

@@ -10,10 +10,14 @@
 //! streamed because no body filter is installed (ADR-0011), and each route's timeouts end up in
 //! the upstream [`PeerOptions`].
 //!
-//! Every request, answered or failed, ends in the `logging` hook, which writes one
-//! [`AccessRecord`] line to the access log (target [`ACCESS_TARGET`], or [`UNROUTED_TARGET`]
-//! at `debug` for a request that matched no route) and counts the request in the [`Traffic`]
-//! statistics of the web UI (ADR-0045).
+//! Every request, answered or failed, ends in the `logging` hook, which builds one
+//! [`AccessRecord`] and from it writes a `debug` line to the access log (target
+//! [`ACCESS_TARGET`], or [`UNROUTED_TARGET`] for a request that matched no route), counts the
+//! request in the [`Traffic`] statistics of the web UI (ADR-0045) and, for a request routed to
+//! a stack, offers a [`RequestRow`] to the log store (ADR-0067 §5). The row is offered with
+//! [`LogSink::try_request`], which never waits: when the recorder's channel is full the row is
+//! dropped and counted. Each request gets a [`RequestId`] when it arrives, kept in its
+//! [`RequestCtx`].
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -33,9 +37,11 @@ use super::DownstreamLimits;
 use super::resolver::Sni;
 use crate::config::Timeouts;
 use crate::logging::{ACCESS_TARGET, UNROUTED_TARGET};
+use crate::logs::LogSink;
 use crate::routing::{InflightGuard, Owner, RouteEntry, RouteTable, Target};
 use crate::stack::RouteTimeouts;
 use crate::stats::{RequestOutcome, TrackedRequest, Traffic};
+use crate::store::{RequestId, RequestRow, Timestamp};
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
 const X_FORWARDED_HOST: &str = "x-forwarded-host";
@@ -51,22 +57,26 @@ pub struct RoutingProxy {
     limits: DownstreamLimits,
     /// The per-route request statistics the web UI shows.
     traffic: Traffic,
+    /// Where the rows of requests routed to a stack go (ADR-0067 §5).
+    logs: LogSink,
 }
 
 impl RoutingProxy {
     /// A proxy reading `routes`, which the orchestrator replaces as deploys happen, holding
-    /// clients to `limits` and counting requests in `traffic`.
+    /// clients to `limits`, counting requests in `traffic` and offering their rows to `logs`.
     pub fn new(
         routes: Arc<ArcSwap<RouteTable>>,
         defaults: Timeouts,
         limits: DownstreamLimits,
         traffic: Traffic,
+        logs: LogSink,
     ) -> Self {
         Self {
             routes,
             defaults,
             limits,
             traffic,
+            logs,
         }
     }
 }
@@ -76,6 +86,10 @@ impl RoutingProxy {
 pub struct RequestCtx {
     /// When the request header had been read, for the access log's duration.
     started: Instant,
+    /// The wall-clock time of `started`: the request row's time.
+    arrived: Timestamp,
+    /// The request's id in the log store, made when it arrived.
+    request_id: RequestId,
     /// How long after `started` the upstream's response header was ready for the client: the
     /// request's latency in the statistics. `None` until then, and for a request hoster
     /// answers itself.
@@ -94,6 +108,8 @@ impl Default for RequestCtx {
     fn default() -> Self {
         Self {
             started: Instant::now(),
+            arrived: Timestamp::now(),
+            request_id: RequestId::random(),
             header_after: None,
             host: String::new(),
             route: None,
@@ -257,13 +273,18 @@ impl ProxyHttp for RoutingProxy {
         }
     }
 
-    /// One access log line per request, whether it was proxied, answered by hoster or failed
-    /// (at `debug` when it matched no route), and the request counted in its route's
-    /// statistics (requests that failed before routing count as unrouted).
+    /// One access log line per request, whether it was proxied, answered by hoster or failed;
+    /// the request counted in its route's statistics (requests that failed before routing
+    /// count as unrouted); and the row of a request routed to a stack offered to the log store.
+    /// All three come from one [`AccessRecord`], so they agree on the timings.
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
         let record = AccessRecord::new(session, &ctx.host, ctx.route.as_ref(), ctx.started, e)
             .header_after(ctx.header_after);
         record.emit();
+        if let Some(row) = record.request_row(ctx.arrived, ctx.request_id) {
+            // Dropped and counted when the recorder's channel is full; never waits.
+            self.logs.try_request(row);
+        }
         let outcome = RequestOutcome::from(&record);
         ctx.stats
             .get_or_insert_with(|| self.traffic.unrouted())
@@ -341,8 +362,9 @@ impl<'a> AccessRecord<'a> {
         }
     }
 
-    /// Writes the line: at `info` to [`ACCESS_TARGET`] for a request that matched a route, at
-    /// `debug` to [`UNROUTED_TARGET`] for the rest, which is what scanners send.
+    /// Writes the line at `debug`: to [`ACCESS_TARGET`] for a request that matched a route, to
+    /// [`UNROUTED_TARGET`] for the rest, which is what scanners send. The request rows in the
+    /// log store are the access log the UI reads; this line is for debugging the proxy.
     pub(super) fn emit(&self) {
         let route = self.route.map(|route| route.prefix_str.as_str());
         let (stack, service) = match self.route.map(|route| &route.owner) {
@@ -365,10 +387,10 @@ impl<'a> AccessRecord<'a> {
         };
         let client = self.client.map(tracing::field::display);
         let error = self.error.map(tracing::field::display);
-        // The target and the level of an event are fixed where it is written.
+        // The target of an event is fixed where it is written.
         macro_rules! line {
-            ($level:ident, $target:expr) => {
-                tracing::$level!(
+            ($target:expr) => {
+                tracing::debug!(
                     target: $target,
                     host = self.host,
                     method = self.method,
@@ -388,10 +410,55 @@ impl<'a> AccessRecord<'a> {
             };
         }
         if self.route.is_some() || self.answered {
-            line!(info, ACCESS_TARGET);
+            line!(ACCESS_TARGET);
         } else {
-            line!(debug, UNROUTED_TARGET);
+            line!(UNROUTED_TARGET);
         }
+    }
+
+    /// The upstream caused the error that ended the request (connect, read or write failures,
+    /// timeouts).
+    fn upstream_failed(&self) -> bool {
+        self.error
+            .is_some_and(|e| e.esource() == &ErrorSource::Upstream)
+    }
+
+    /// The log store's row of this request, which arrived at `arrived` and was given
+    /// `request_id`, or `None` when it was not routed to a stack: requests hoster answered
+    /// without a route (an unknown host or prefix, a host that is not the SNI name) and those
+    /// to hoster's own reserved hosts have no stack to belong to.
+    ///
+    /// The host is the table's spelling (lowercase, no port), so the rows of one route share
+    /// it. A request whose response header never went out (the client left first) has status
+    /// 0, as Pingora reports it.
+    pub(super) fn request_row(
+        &self,
+        arrived: Timestamp,
+        request_id: RequestId,
+    ) -> Option<RequestRow> {
+        let route = self.route?;
+        let Owner::Route(owner) = &route.owner else {
+            return None;
+        };
+        Some(RequestRow {
+            time: arrived,
+            host: RouteTable::normalize_host(self.host).into_owned(),
+            prefix: route.prefix_str.clone(),
+            stack: owner.stack.to_string(),
+            service: owner.service.to_string(),
+            method: self.method.to_owned(),
+            path: self.path.to_owned(),
+            status: self.status.unwrap_or(0),
+            to_header: self.header_after,
+            total: self.duration,
+            bytes: u64::try_from(self.bytes).unwrap_or(u64::MAX),
+            // A routed request always came over TCP; `::` only if one ever did not.
+            client: self
+                .client
+                .unwrap_or(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)),
+            upstream_failed: self.upstream_failed(),
+            request_id,
+        })
     }
 }
 
@@ -405,9 +472,7 @@ impl From<&AccessRecord<'_>> for RequestOutcome {
         RequestOutcome {
             status: record.status,
             latency: record.header_after.unwrap_or(record.duration),
-            upstream_error: record
-                .error
-                .is_some_and(|e| e.esource() == &ErrorSource::Upstream),
+            upstream_error: record.upstream_failed(),
         }
     }
 }
@@ -904,7 +969,7 @@ mod tests {
     #[test]
     fn access_records_log_the_request_route_and_outcome() {
         use crate::logging::LogFormat;
-        use crate::logging::capture::subscriber;
+        use crate::logging::capture::{self, subscriber};
         use crate::routing::{RouteOwner, Upstream};
 
         let upstream =
@@ -918,7 +983,7 @@ mod tests {
             ..route("/api", false)
         };
         let error = Error::new(ErrorType::ReadTimedout).into_up();
-        let (buffer, subscriber) = subscriber(LogFormat::Json, "info");
+        let (buffer, subscriber) = subscriber(LogFormat::Json, capture::GLOBAL_FILTER);
         tracing::subscriber::with_default(subscriber, || {
             AccessRecord {
                 host: "blog.example.com",
@@ -947,7 +1012,8 @@ mod tests {
                 error: None,
                 answered: false,
             };
-            // Without a route the line is a `debug` one, which `info` does not show.
+            // Every line is a `debug` one; without a route it goes to the unrouted target, which
+            // the filter leaves at `info`.
             bare.emit();
             bare.answered().emit();
         });
@@ -1014,6 +1080,60 @@ mod tests {
             RequestOutcome::from(&record).latency,
             Duration::from_millis(4)
         );
+    }
+
+    /// Only a request routed to a stack has a row; one whose response never went out (the
+    /// client left first) has status 0.
+    #[test]
+    fn only_requests_routed_to_a_stack_have_a_request_row() {
+        use crate::routing::RouteOwner;
+
+        let stacked = RouteEntry {
+            owner: Owner::Route(RouteOwner {
+                stack: "blog".parse().unwrap(),
+                service: "web".parse().unwrap(),
+            }),
+            ..route("/api", true)
+        };
+        let reserved = route("/", false);
+        let record = |route| AccessRecord {
+            host: "Blog.Example.com:443",
+            method: "PUT",
+            path: "/api/posts/1",
+            route,
+            status: None,
+            duration: Duration::from_millis(80),
+            header_after: None,
+            bytes: 7,
+            client: Some(IpAddr::V6("2001:db8::1".parse().unwrap())),
+            error: None,
+            answered: false,
+        };
+        let id = RequestId::from([0xab; 16]);
+        let at = Timestamp::from_millis(1_700_000_000_000);
+
+        let row = record(Some(&stacked)).request_row(at, id).unwrap();
+        assert_eq!(
+            row,
+            RequestRow {
+                time: at,
+                host: "blog.example.com".into(),
+                prefix: "/api".into(),
+                stack: "blog".into(),
+                service: "web".into(),
+                method: "PUT".into(),
+                path: "/api/posts/1".into(),
+                status: 0,
+                to_header: None,
+                total: Duration::from_millis(80),
+                bytes: 7,
+                client: IpAddr::V6("2001:db8::1".parse().unwrap()),
+                upstream_failed: false,
+                request_id: id,
+            }
+        );
+        assert_eq!(record(Some(&reserved)).request_row(at, id), None);
+        assert_eq!(record(None).request_row(at, id), None);
     }
 
     #[test]

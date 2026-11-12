@@ -409,17 +409,18 @@ The fake releases are wired in with `HOSTER_INSTALL_RELEASES_URL`, which replace
 | Running version | `hoster version`, or the admin UI's System page |
 | More log detail | `Environment=RUST_LOG=hoster=debug` in the drop-in, then `restart` |
 | JSON log lines | `[log] format = "json"` in `hoster.toml` (or `HOSTER_LOG__FORMAT=json`), then `journalctl --user -u hoster -o cat \| jq` |
-| Only the access log | `journalctl --user -u hoster -o cat \| grep hoster::access` |
-| No access log | `Environment=RUST_LOG=info,hoster::access=off` in the drop-in |
+| Access log in the journal | `Environment=RUST_LOG=info,hoster::access=debug` in the drop-in, then `journalctl --user -u hoster -o cat \| grep hoster::access` |
 | Log scanner traffic too | `Environment=RUST_LOG=info,hoster::access::unrouted=debug,hoster::proxy::client=debug` in the drop-in |
 | Check for an update | `hoster update --check`: the running and the latest version, and the release notes |
 | Update | `hoster update` (`--version vX.Y.Z` for a specific release or a pre-release, `--yes` to skip the confirmation): installs the release, snapshots the database and restarts the service |
 | Roll back | `hoster rollback` (`--yes` to skip the confirmation): returns to the previous installed version, undoing the database migrations it does not know; their data is lost |
 
-**Log lines.** The proxy writes one line per request that matched a route under the
-`hoster::access` target: host, method, path (without the query), matched route, stack, service,
-generation, upstream, status, duration in ms, response body bytes, client IP and, for a failed
-request, the error.
+**Log lines.** The proxy stores one row per request routed to a stack in the log store
+([[logging#the-proxys-requests|the proxy's requests]]); that is the access log. It also writes a
+line per request that matched a route under the `hoster::access` target, at `debug` only, so it
+is not in the journal by default: host, method, path (without the query), matched route, stack,
+service, generation, upstream, status, duration in ms, response body bytes, client IP and, for a
+failed request, the error.
 
 A server on a public address is probed all day, so what a client can cause without reaching an
 app is logged at `debug` only and does not show by default. There are two targets for it.

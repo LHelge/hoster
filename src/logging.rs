@@ -10,9 +10,10 @@
 //!
 //! Deploy code runs inside the spans of [`LogSpan`], so every line it logs carries `stack`,
 //! `deployment_id`, `generation` and `service`. The proxy logs one access line per request under
-//! the [`ACCESS_TARGET`] target, and the store one line per deployment transition under
-//! [`DEPLOY_TARGET`], so either can be filtered on its own
-//! (`RUST_LOG=info,hoster::access=off`).
+//! the [`ACCESS_TARGET`] target, at `debug` only: the request rows in the log store are the
+//! access log (ADR-0067 §5), so the line is there for debugging the proxy
+//! (`RUST_LOG=info,hoster::access=debug`). The store logs one line per deployment transition
+//! under [`DEPLOY_TARGET`], so it can be filtered on its own.
 //!
 //! # What anyone on the internet can make hoster log
 //!
@@ -28,6 +29,8 @@
 //!   finished), re-logged by [`ClientNoise`].
 //!
 //! `RUST_LOG=info,hoster::access::unrouted=debug,hoster::proxy::client=debug` brings both back.
+//! Nor is any of it stored in the log store: a request row is written only for a request routed
+//! to a stack.
 //!
 //! # hoster's own records in the log store
 //!
@@ -69,7 +72,7 @@ mod records;
 
 pub use records::HosterRecords;
 
-/// The target of the proxy's per-request access log lines.
+/// The target of the proxy's per-request access log lines, logged at `debug`.
 pub const ACCESS_TARGET: &str = "hoster::access";
 /// The target of the access log lines of requests that matched no route, logged at `debug`.
 /// A child of [`ACCESS_TARGET`], so turning that off turns these off too.
@@ -344,9 +347,14 @@ pub mod capture {
         (buffer.clone(), logging.subscriber(buffer, false))
     }
 
+    /// What [`global`] captures: `hoster` at `info`, and the access lines of routed requests,
+    /// which are `debug` ones, but not those of unrouted requests.
+    pub const GLOBAL_FILTER: &str =
+        "off,hoster=info,hoster::access=debug,hoster::access::unrouted=info";
+
     /// The `hoster` lines at `info` and above of every thread in the test process that has no
-    /// scoped subscriber, including Pingora's, as JSON. Installs the process-wide subscriber on
-    /// first use.
+    /// scoped subscriber, including Pingora's, plus the routed access lines at `debug`
+    /// ([`GLOBAL_FILTER`]), as JSON. Installs the process-wide subscriber on first use.
     ///
     /// It also keeps the scoped subscribers of [`subscriber`] reliable: `tracing` caches each
     /// callsite's interest, and while only one dispatcher is alive it asks just the current
@@ -359,7 +367,7 @@ pub mod capture {
             let buffer = Buffer::default();
             let logging = Logging {
                 format: LogFormat::Json,
-                filter: EnvFilter::new("off,hoster=info"),
+                filter: EnvFilter::new(GLOBAL_FILTER),
                 records: None,
             };
             tracing::subscriber::set_global_default(logging.subscriber(buffer.clone(), false))
