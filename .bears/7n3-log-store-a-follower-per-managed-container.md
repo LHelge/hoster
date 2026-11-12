@@ -1,10 +1,10 @@
 ---
 id: "7n3"
 title: "Log store: a follower per managed container"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:33:33.372208975Z"
-updated: "2026-11-12T19:33:33.372208975Z"
+updated: "2026-11-12T21:13:38.915836894Z"
 tags:
   - observability
   - runtime
@@ -13,6 +13,7 @@ depends_on:
   - azv
   - r8w
 parent: f8z
+attempts: 1
 ---
 
 ## Summary
@@ -46,3 +47,11 @@ ADR-0067 §1: for every running managed container hoster reads stdout and stderr
 ## References
 - ADR-0067 (§1, §3, §7), ADR-0044, ADR-0028, ADR-0017
 - `src/runtime/podman.rs`, `src/runtime/fake.rs`, `src/orchestrator/`, `src/supervisor.rs`
+
+**Changed while implementing (2026-11-12):** the follower is started right after `start`
+returns rather than before it: podman has no log stream for a container that is not running yet,
+and the follower reads the log from its start (or from the in-memory cursor of the container's
+previous run), so start-up output is still captured before the health checks. The runtime trait
+needed no change. Until `tuh` seeds cursors from `log_cursors` (`LogFollowers::resume_after`), a
+container that the startup pass starts again is read from the start of its podman log, so lines
+stored before the restart are stored again.

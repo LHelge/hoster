@@ -27,6 +27,9 @@
 //! or removes containers at startup ([`Orchestrator::recover`]), then keeps the current
 //! generation running with backoff ([`Orchestrator::run_reconciler`]).
 //!
+//! Every container the orchestrator starts gets a log follower, and every one it removes is
+//! forgotten by them ([`Orchestrator::connect_logs`], ADR-0067 §1).
+//!
 //! The health monitor (`monitor`, ADR-0038) keeps probing every live generation
 //! ([`Orchestrator::run_health_monitor`]) and reports status changes on `ui_events`
 //! ([`Orchestrator::subscribe`]) and in [`Orchestrator::status`].
@@ -68,21 +71,24 @@ mod updates;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::pin::pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::{Notify, RwLock, Semaphore, broadcast};
+use tokio_util::sync::CancellationToken;
 
 use crate::health::{ExecSlots, HealthStats, HealthStatus, MonitorSettings, NetworkProber, Prober};
+use crate::logs::{LogFollowers, LogSink};
 use crate::machine::{Machine, Undelegated};
 use crate::ports::{PortAllocator, PortError};
 use crate::registry::{RegistryClient, RegistryError, TrackedService};
 use crate::routing::{CollisionError, Reserved, RouteClaims, RouteTable};
 use crate::runtime::{
-    ContainerRuntime, NetworkSpec, ObjectKind, PodmanVersion, RuntimeError, VolumeMount, label,
+    ContainerId, ContainerRuntime, NetworkSpec, ObjectKind, PodmanVersion, RuntimeError,
+    VolumeMount, label,
 };
 use crate::secrets::{SecretError, SecretStore, SecretValue};
 use crate::stack::{
@@ -615,6 +621,8 @@ pub struct Orchestrator<R> {
     ui_events: broadcast::Sender<UiEvent>,
     /// Records events and announces them on `ui_events` (ADR-0055).
     events: EventLog,
+    /// The container log followers (ADR-0067 §1), once connected.
+    logs: OnceLock<LogFollowers<R>>,
 }
 
 /// What the orchestrator's lock guards: only in-memory data, never held across an `.await`.
@@ -807,7 +815,32 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             execs: ExecSlots::default(),
             ui_events,
             events,
+            logs: OnceLock::new(),
         })
+    }
+
+    /// Follows the logs of every container started from now on into `sink`, until `stop`
+    /// fires (ADR-0067 §1). Connect before [`recover`](Self::recover), so the containers it
+    /// starts are followed too. Returns the registry, for the supervisor to stop before the
+    /// recorder; connecting twice returns the first.
+    pub fn connect_logs(&self, sink: LogSink, stop: CancellationToken) -> LogFollowers<R> {
+        self.logs
+            .get_or_init(|| LogFollowers::new(Arc::clone(&self.runtime), sink, stop))
+            .clone()
+    }
+
+    /// Container `id` was just started: follow its log.
+    fn follow_logs(&self, id: &ContainerId) {
+        if let Some(logs) = self.logs.get() {
+            logs.follow(id);
+        }
+    }
+
+    /// Container `id` was just removed: forget it.
+    fn forget_logs(&self, id: &ContainerId) {
+        if let Some(logs) = self.logs.get() {
+            logs.forget(id);
+        }
     }
 
     /// Checks a stack file the way [`apply`](Self::apply) would, without storing or deploying
@@ -1761,6 +1794,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .collect();
         for container in &containers {
             self.runtime.remove(&container.id).await?;
+            self.forget_logs(&container.id);
         }
         match self
             .runtime
