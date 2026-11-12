@@ -1,10 +1,10 @@
 ---
 id: s99
 title: "Docs: logging from an app, and the log store in the guides"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T19:34:19.257840877Z"
-updated: "2026-11-12T19:34:19.257840877Z"
+updated: "2026-11-12T22:20:11.627558201Z"
 tags:
   - docs
   - observability
@@ -12,6 +12,7 @@ depends_on:
   - "7n3"
   - fsw
 parent: f8z
+attempts: 1
 ---
 
 ## Summary

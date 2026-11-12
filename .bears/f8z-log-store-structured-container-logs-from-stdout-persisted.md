@@ -2,10 +2,10 @@
 id: f8z
 title: "Log store: structured container logs from stdout, persisted"
 type: epic
-status: open
+status: done
 priority: P3
 created: "2026-11-12T13:13:16.805209672Z"
-updated: "2026-11-12T13:13:16.805209672Z"
+updated: "2026-11-12T22:20:11.627824447Z"
 tags:
   - observability
   - runtime

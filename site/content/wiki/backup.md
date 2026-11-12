@@ -21,6 +21,7 @@ use that instead. Run every command as the `hoster` user.
 | ACME account | `<state_dir>/acme/` | Optional | Copy the directory |
 | Certificates | `<state_dir>/certs/` | Optional | Copy the directory |
 | App volumes | podman volumes `hoster-<stack>-<volume>` | Per app | `podman volume export` |
+| Log store | `<state_dir>/logs.db` (plus `-wal`/`-shm`) | No | Not backed up |
 
 ## State database
 
@@ -50,6 +51,12 @@ Self-update and rollback ([ADR-0052](https://github.com/LHelge/hoster/blob/main/
 directory: `hoster-pre-update-<from>-to-<to>-<unix time>.db` before switching to a new version
 and `hoster-pre-rollback-<from>-to-<to>-<unix time>.db` before undoing the schema. hoster does
 not delete them; remove old ones by hand once the new version runs well.
+
+## Log store
+
+`logs.db` holds what the containers and hoster printed in the last 7 days ([[logging]]).
+`hoster backup db` does not include it, and you do not need to copy it. A restored server starts
+with empty logs and fills them from then on.
 
 ## Secret-store key
 
