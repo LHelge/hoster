@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Telemetry</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0;background:#1e1e2e}
+*{box-sizing:border-box}
+a{color:#89b4fa;text-decoration:none}a:hover{color:#b4befe}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace}
+button,input,select{font:inherit}
+button,select{cursor:pointer}
+.nav a:hover{background:#313244}
+.ghost:hover{background:#313244}
+.trow:hover{background:#1e1e2e}
+.wrow:hover{background:#26263a}
+.lrow:hover{background:#1e1e2e}
+.dot:hover{transform:translate(-50%,50%) scale(1.4)}
+</style>
+</helmet>
+<div style="min-height: 100vh; display: flex; flex-wrap: wrap; background: #1e1e2e; color: #cdd6f4; font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<nav aria-label="Main" style="flex: 1 1 232px; background: #181825; border-right: 1px solid #313244; padding: 20px 14px; display: flex; flex-direction: column; gap: 22px">
+  <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px">
+    <div aria-hidden="true" style="width: 30px; height: 30px; border-radius: 8px; background: {{accent}}; display: flex; align-items: center; justify-content: center; color: #11111b">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+    </div>
+    <div style="display: flex; flex-direction: column; line-height: 1.25">
+      <span class="mono" style="font-weight: 700; font-size: 15px">[app name]</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">v0.14.2 · srv-01</span>
+    </div>
+  </div>
+  <div class="nav" style="display: flex; flex-direction: column; gap: 2px">
+    <a href="Main.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>
+      Dashboard
+    </a>
+    <a href="Stacks.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"></path><path d="m2 17 10 5 10-5"></path><path d="m2 12 10 5 10-5"></path></svg>
+      Stacks
+      <span class="mono" style="margin-left: auto; font-size: 11px; color: #a6adc8">9</span>
+    </a>
+    <a href="Telemetry.dc.html" aria-current="page" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; background: #313244; color: #cdd6f4; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h11"></path><path d="M7 10h13"></path><path d="M10 15h7"></path><path d="M12 20h4"></path></svg>
+      Telemetry
+    </a>
+    <a href="Certificates.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+      Certificates
+      <span class="mono" aria-label="1 failing" style="margin-left: auto; font-size: 11px; font-weight: 700; color: #11111b; background: #f38ba8; border-radius: 9px; padding: 1px 7px">1</span>
+    </a>
+    <a href="Settings.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>
+      Settings
+    </a>
+    <a href="System.dc.html" style="display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 7px; color: #bac2de; font-size: 14px; font-weight: 500">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="8" rx="2"></rect><rect x="2" y="13" width="20" height="8" rx="2"></rect><path d="M6 7h.01M6 17h.01"></path></svg>
+      System
+      <span class="mono" style="margin-left: auto; font-size: 10px; color: #89b4fa; border: 1px solid #89b4fa; border-radius: 9px; padding: 0 6px">update</span>
+    </a>
+  </div>
+  <div style="flex-grow: 1"></div>
+  <div style="background: #1e1e2e; border: 1px solid #313244; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 10px">
+    <div class="mono" style="font-size: 11px; color: #9399b2; letter-spacing: .06em">HOST · srv-01</div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">cpu</span><span>23%</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 23%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">mem</span><span>11.2 / 32 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 35%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+    <div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 12px"><span style="color: #a6adc8">disk</span><span>412 / 1000 GB</span></div>
+      <div style="height: 4px; background: #313244; border-radius: 2px; margin-top: 5px"><div style="width: 41%; height: 100%; background: #94e2d5; border-radius: 2px"></div></div>
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px; border-top: 1px solid #313244; padding: 14px 4px 0">
+    <div aria-hidden="true" class="mono" style="width: 32px; height: 32px; border-radius: 50%; background: #45475a; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px">A</div>
+    <div style="display: flex; flex-direction: column; line-height: 1.3; min-width: 0">
+      <span style="font-weight: 500">admin</span>
+      <span class="mono" style="font-size: 11px; color: #9399b2">session · 6h left</span>
+    </div>
+    <button aria-label="Log out" style="margin-left: auto; width: 44px; height: 44px; border-radius: 8px; border: 1px solid #313244; background: transparent; color: #bac2de; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></svg>
+    </button>
+  </div>
+</nav>
+
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px 56px; display: flex; flex-direction: column; gap: 18px">
+  <header style="display: flex; flex-direction: column; gap: 14px">
+    <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
+      <div>
+        <div class="mono" style="font-size: 12px; color: #9399b2">~/telemetry/{{tab}}</div>
+        <h1 style="margin: 4px 0 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em">Telemetry</h1>
+      </div>
+      <div class="mono" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; font-size: 12px; color: #a6adc8">
+        <span style="display: flex; align-items: center; gap: 8px"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1; box-shadow: 0 0 0 3px #a6e3a133"></span>otlp receiver · grpc :4317 · http :4318</span>
+        <span>1.2k spans/s · 340 logs/s</span>
+        <span style="color: #9399b2">retention 7d · 3.8 GB</span>
+      </div>
+    </div>
+    <div role="tablist" aria-label="Signal" class="mono" style="display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid #313244; font-size: 13px">
+      <sc-for list="{{tabs}}" as="t" hint-placeholder-count="2">
+        <button role="tab" aria-selected="{{t.on}}" onClick="{{t.pick}}" style="padding: 10px 14px; border: 0; background: transparent; margin-bottom: -1px; font-family: 'JetBrains Mono', monospace; font-size: 13px; {{t.style}}">{{t.label}} <span style="color: #9399b2">{{t.n}}</span></button>
+      </sc-for>
+    </div>
+  </header>
+
+  <div class="mono" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 12px">
+    <label style="display: flex; align-items: center; gap: 6px; color: #a6adc8">stack
+      <select style="height: 36px; background: #181825; color: #cdd6f4; border: 1px solid #313244; border-radius: 8px; padding: 0 8px; font-size: 12px; font-family: 'JetBrains Mono', monospace"><option selected>all stacks</option><option>outline</option><option>gitea</option><option>immich</option><option>plausible</option><option>paperless</option></select>
+    </label>
+    <div style="flex: 1 1 340px; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; background: #181825; border: 1px solid #313244; border-radius: 8px; color: #9399b2">
+      <span aria-hidden="true" style="color: {{accent}}">&gt;</span>
+      <input aria-label="Query" placeholder="{{queryHint}}" style="flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #cdd6f4; font-size: 12px; font-family: 'JetBrains Mono', monospace">
+    </div>
+    <div role="group" aria-label="Time range" style="display: flex; background: #181825; border: 1px solid #313244; border-radius: 8px; padding: 3px; gap: 2px">
+      <sc-for list="{{ranges}}" as="r" hint-placeholder-count="5">
+        <button aria-pressed="{{r.on}}" onClick="{{r.pick}}" style="border: 0; border-radius: 6px; padding: 6px 11px; font-size: 12px; font-family: 'JetBrains Mono', monospace; {{r.style}}">{{r.label}}</button>
+      </sc-for>
+    </div>
+  </div>
+
+  <sc-if value="{{isTraces}}" hint-placeholder-val="{{true}}">
+    <section style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 16px 18px">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 12px">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Trace duration <span class="mono" style="color: #9399b2; font-weight: 400">· root spans · last 15 min · log scale</span></h2>
+        <div class="mono" style="display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #a6adc8">
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #6c7086"></span>ok</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #f38ba8"></span>error</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 50%; border: 2px solid {{accent}}"></span>listed below</span>
+        </div>
+      </div>
+      <div style="display: flex; gap: 10px">
+        <div class="mono" aria-hidden="true" style="position: relative; width: 40px; height: 150px; font-size: 10px; color: #9399b2; text-align: right">
+          <span style="position: absolute; right: 0; bottom: 81%">1 s</span>
+          <span style="position: absolute; right: 0; bottom: 54%">100 ms</span>
+          <span style="position: absolute; right: 0; bottom: 27%">10 ms</span>
+          <span style="position: absolute; right: 0; bottom: 0">1 ms</span>
+        </div>
+        <div style="flex: 1; min-width: 0">
+          <div role="img" aria-label="Scatter of trace durations over the last 15 minutes; two error traces near 1.9 seconds" style="position: relative; height: 150px; border-bottom: 1px solid #313244; border-left: 1px solid #313244; background-image: linear-gradient(to top, #26263a 1px, transparent 1px); background-size: 100% 27%; background-position: bottom">
+            <sc-for list="{{bgDots}}" as="d" hint-placeholder-count="60">
+              <span aria-hidden="true" style="position: absolute; width: 6px; height: 6px; border-radius: 50%; transform: translate(-50%, 50%); left: {{d.x}}%; bottom: {{d.y}}%; background: {{d.c}}; opacity: {{d.o}}"></span>
+            </sc-for>
+            <sc-for list="{{traceList}}" as="t" hint-placeholder-count="9">
+              <button class="dot" aria-label="{{t.dotLabel}}" onClick="{{t.pick}}" style="position: absolute; padding: 0; border-radius: 50%; transform: translate(-50%, 50%); transition: transform .1s; left: {{t.x}}%; bottom: {{t.y}}%; {{t.dotStyle}}"></button>
+            </sc-for>
+          </div>
+          <div class="mono" style="display: flex; justify-content: space-between; font-size: 10px; color: #9399b2; margin-top: 6px"><span>19:45</span><span>19:50</span><span>19:55</span><span>now</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 18px; border-bottom: 1px solid #313244">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Traces <span class="mono" style="color: #9399b2; font-weight: 400">· 9 of 18,204 · newest first</span></h2>
+        <label class="mono" style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a6adc8">sort
+          <select style="height: 32px; background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244; border-radius: 8px; padding: 0 8px; font-size: 12px; font-family: 'JetBrains Mono', monospace"><option selected>newest</option><option>slowest</option><option>errors first</option></select>
+        </label>
+      </div>
+      <div style="overflow-x: auto">
+        <div style="min-width: 920px">
+          <div class="mono" style="display: grid; grid-template-columns: 104px minmax(0, 2.4fr) 96px minmax(0, 1.2fr) 56px 170px 72px; gap: 12px; padding: 9px 18px; border-bottom: 1px solid #313244; font-size: 11px; letter-spacing: .06em; color: #9399b2">
+            <span>TIME</span><span>ROOT SPAN</span><span>STACK</span><span>SERVICES</span><span style="text-align: right">SPANS</span><span>DURATION</span><span>STATUS</span>
+          </div>
+          <sc-for list="{{traceList}}" as="t" hint-placeholder-count="9">
+            <div class="trow" style="display: grid; grid-template-columns: 104px minmax(0, 2.4fr) 96px minmax(0, 1.2fr) 56px 170px 72px; gap: 12px; align-items: center; padding: 0 18px; min-height: 44px; border-bottom: 1px solid #26263a; {{t.rowStyle}}">
+              <span class="mono" style="font-size: 12px; color: #a6adc8">{{t.time}}</span>
+              <button onClick="{{t.pick}}" aria-pressed="{{t.on}}" class="mono" style="text-align: left; border: 0; background: transparent; padding: 10px 0; color: #cdd6f4; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'JetBrains Mono', monospace">{{t.root}}</button>
+              <span class="mono" style="font-size: 12px; color: #bac2de">{{t.stack}}</span>
+              <span style="display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center">
+                <sc-for list="{{t.svcs}}" as="v" hint-placeholder-count="2">
+                  <span class="mono" style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #bac2de"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 2px; background: {{v.c}}"></span>{{v.n}}</span>
+                </sc-for>
+                <sc-if value="{{t.proxyOnly}}" hint-placeholder-val="{{false}}"><span class="mono" style="font-size: 11px; color: #9399b2">app not instrumented</span></sc-if>
+              </span>
+              <span class="mono" style="font-size: 12px; text-align: right; color: #a6adc8">{{t.n}}</span>
+              <span style="display: flex; align-items: center; gap: 8px">
+                <span style="flex: 1; height: 4px; background: #313244; border-radius: 2px"><span style="display: block; height: 100%; border-radius: 2px; width: {{t.pct}}%; background: {{t.barC}}"></span></span>
+                <span class="mono" style="font-size: 12px; width: 62px; text-align: right">{{t.dur}}</span>
+              </span>
+              <span class="mono" style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: {{t.sc}}"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: {{t.sc}}"></span>{{t.status}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </section>
+
+    <section aria-label="Trace waterfall" style="background: #181825; border: 1px solid #313244; border-radius: 10px">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 14px 24px; padding: 16px 18px; border-bottom: 1px solid #313244">
+        <div style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+          <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">TRACE · {{tr.stack}}</span>
+          <h2 class="mono" style="margin: 0; font-size: 18px; font-weight: 700">{{tr.root}}</h2>
+          <span class="mono" style="font-size: 12px; color: #a6adc8">{{tr.traceId}} · {{tr.date}} {{tr.time}}</span>
+        </div>
+        <div class="mono" style="display: flex; flex-wrap: wrap; gap: 22px">
+          <div style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">DURATION</span><span style="font-size: 17px; font-weight: 600">{{tr.dur}}</span></div>
+          <div style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">SPANS</span><span style="font-size: 17px; font-weight: 600">{{tr.n}}</span></div>
+          <div style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">DEPTH</span><span style="font-size: 17px; font-weight: 600">{{tr.depth}}</span></div>
+          <div style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">ERRORS</span><span style="font-size: 17px; font-weight: 600; color: {{tr.errC}}">{{tr.errs}}</span></div>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 18px; border-bottom: 1px solid #313244">
+        <div class="mono" style="display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: #bac2de">
+          <sc-for list="{{tr.legend}}" as="v" hint-placeholder-count="2">
+            <span style="display: inline-flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: {{v.c}}"></span>{{v.n}} <span style="color: #9399b2">{{v.count}}</span></span>
+          </sc-for>
+        </div>
+        <span style="flex-grow: 1"></span>
+        <div class="mono" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px">
+          <span style="display: inline-flex; align-items: center; gap: 8px; color: #a6adc8">
+            <button role="switch" aria-checked="{{critOn}}" aria-label="Highlight critical path" onClick="{{toggleCrit}}" style="width: 34px; height: 20px; border-radius: 10px; border: 0; padding: 2px; display: flex; {{critTrack}}"><span aria-hidden="true" style="width: 16px; height: 16px; border-radius: 50%; background: #11111b; display: block"></span></button>
+            critical path
+          </span>
+          <button class="ghost" onClick="{{expandAll}}" style="height: 32px; padding: 0 10px; border-radius: 6px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; font-size: 12px; font-family: 'JetBrains Mono', monospace">expand all</button>
+          <button class="ghost" onClick="{{collapseAll}}" style="height: 32px; padding: 0 10px; border-radius: 6px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; font-size: 12px; font-family: 'JetBrains Mono', monospace">collapse to services</button>
+          <button class="ghost" onClick="{{toTraceLogs}}" style="height: 32px; padding: 0 10px; border-radius: 6px; border: 1px solid #45475a; background: transparent; color: #cdd6f4; font-size: 12px; font-family: 'JetBrains Mono', monospace">logs in trace ({{tr.logCount}}) →</button>
+        </div>
+      </div>
+
+      <div style="padding: 10px 18px 8px; border-bottom: 1px solid #313244">
+        <div aria-hidden="true" style="position: relative; height: {{tr.miniH}}px; background: #11111b; border-radius: 4px">
+          <sc-for list="{{tr.mini}}" as="m" hint-placeholder-count="12">
+            <span style="position: absolute; height: 2px; border-radius: 1px; top: {{m.top}}px; left: {{m.left}}%; width: {{m.width}}%; background: {{m.c}}"></span>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="overflow-x: auto">
+        <div style="min-width: 860px">
+          <div class="mono" style="display: grid; grid-template-columns: 330px minmax(0, 1fr); border-bottom: 1px solid #313244; font-size: 10px; color: #9399b2">
+            <span style="padding: 8px 18px; letter-spacing: .06em; font-size: 11px">SPAN</span>
+            <div style="display: flex; justify-content: space-between; padding: 8px 18px 8px 0">
+              <sc-for list="{{tr.ticks}}" as="k" hint-placeholder-count="5"><span>{{k}}</span></sc-for>
+            </div>
+          </div>
+          <sc-for list="{{rows}}" as="s" hint-placeholder-count="13">
+            <div class="wrow" style="display: grid; grid-template-columns: 330px minmax(0, 1fr); align-items: stretch; border-bottom: 1px solid #1e1e2e; {{s.rowStyle}}">
+              <div style="display: flex; align-items: center; gap: 6px; min-width: 0; height: 30px; padding-right: 10px; padding-left: {{s.indent}}px; border-left: 3px solid {{s.color}}">
+                <sc-if value="{{s.hasKids}}" hint-placeholder-val="{{true}}">
+                  <button aria-label="{{s.toggleLabel}}" aria-expanded="{{s.expanded}}" onClick="{{s.toggle}}" class="ghost" style="flex: none; width: 20px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: #a6adc8; display: flex; align-items: center; justify-content: center; padding: 0">
+                    <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate({{s.rot}}deg); transition: transform .12s"><path d="m9 6 6 6-6 6"></path></svg>
+                  </button>
+                </sc-if>
+                <sc-if value="{{s.leaf}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="flex: none; width: 20px"></span></sc-if>
+                <button onClick="{{s.pick}}" aria-pressed="{{s.on}}" class="mono" style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; border: 0; background: transparent; padding: 0; text-align: left; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{s.nameC}}">
+                  <sc-if value="{{s.err}}" hint-placeholder-val="{{false}}"><span aria-label="error" style="flex: none; width: 14px; height: 14px; border-radius: 50%; background: #f38ba8; color: #11111b; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center">!</span></sc-if>
+                  <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{s.name}}</span>
+                  <sc-if value="{{s.hasTag}}" hint-placeholder-val="{{false}}"><span style="flex: none; font-size: 10px; padding: 0 5px; border-radius: 4px; background: #313244; color: #bac2de">{{s.tag}}</span></sc-if>
+                  <sc-if value="{{s.hiddenKids}}" hint-placeholder-val="{{false}}"><span style="flex: none; font-size: 10px; color: #9399b2">+{{s.hiddenN}}</span></sc-if>
+                </button>
+              </div>
+              <div style="position: relative; height: 30px; margin-right: 18px; background-image: linear-gradient(to right, #313244 1px, transparent 1px); background-size: 25% 100%">
+                <button tabindex="-1" aria-hidden="true" onClick="{{s.pick}}" style="position: absolute; inset: 0; width: 100%; border: 0; background: transparent; padding: 0"></button>
+                <span aria-hidden="true" style="position: absolute; top: 8px; height: 14px; border-radius: 3px; min-width: 2px; pointer-events: none; {{s.bar}}"></span>
+                <span class="mono" style="position: absolute; top: 0; line-height: 30px; font-size: 11px; white-space: nowrap; pointer-events: none; {{s.labelPos}}">{{s.label}}</span>
+              </div>
+            </div>
+            <sc-if value="{{s.on}}" hint-placeholder-val="{{false}}">
+              <div style="background: #1e1e2e; border-top: 1px solid #313244; border-bottom: 1px solid #313244; padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 16px">
+                <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px">
+                  <span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: {{s.color}}"></span>
+                  <span class="mono" style="font-size: 14px; font-weight: 700">{{s.name}}</span>
+                  <span class="mono" style="font-size: 12px; color: #a6adc8">{{s.svc}}</span>
+                  <span class="mono" style="font-size: 11px; padding: 2px 8px; border-radius: 6px; background: #313244; color: #bac2de">{{s.kind}}</span>
+                  <span class="mono" style="font-size: 11px; padding: 2px 8px; border-radius: 6px; {{s.d.statusTag}}">{{s.d.status}}</span>
+                  <span style="flex-grow: 1"></span>
+                  <button class="ghost mono" onClick="{{s.d.close}}" aria-label="Close span details" style="width: 32px; height: 32px; border: 1px solid #45475a; border-radius: 6px; background: transparent; color: #bac2de; display: flex; align-items: center; justify-content: center; padding: 0">
+                    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+                  </button>
+                </div>
+                <div class="mono" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; font-size: 12px">
+                  <div style="display: flex; flex-direction: column; gap: 3px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">START</span><span>{{s.d.start}}</span></div>
+                  <div style="display: flex; flex-direction: column; gap: 3px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">DURATION</span><span>{{s.label}} <span style="color: #9399b2">· {{s.d.pct}} of trace</span></span></div>
+                  <div style="display: flex; flex-direction: column; gap: 3px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">SELF TIME</span><span>{{s.d.self}}</span></div>
+                  <div style="display: flex; flex-direction: column; gap: 3px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">SPAN ID</span><span>{{s.d.spanId}}</span></div>
+                  <div style="display: flex; flex-direction: column; gap: 3px"><span style="font-size: 10px; letter-spacing: .06em; color: #9399b2">PARENT</span><span style="color: #a6adc8">{{s.d.parentId}}</span></div>
+                </div>
+                <sc-if value="{{s.d.hasMsg}}" hint-placeholder-val="{{false}}">
+                  <div class="mono" style="font-size: 12px; color: #f38ba8; background: #f38ba812; border: 1px solid #f38ba840; border-radius: 8px; padding: 9px 12px">status: ERROR · {{s.d.msg}}</div>
+                </sc-if>
+                <div style="display: flex; flex-wrap: wrap; gap: 16px">
+                  <div style="flex: 3 1 420px; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+                    <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">ATTRIBUTES</span>
+                    <div class="mono" style="border: 1px solid #313244; border-radius: 8px; overflow: hidden; font-size: 12px">
+                      <sc-for list="{{s.d.attrs}}" as="a" hint-placeholder-count="5">
+                        <div style="display: grid; grid-template-columns: minmax(150px, 0.9fr) minmax(0, 1.6fr); gap: 12px; padding: 7px 12px; border-bottom: 1px solid #26263a">
+                          <span style="color: #a6adc8; overflow-wrap: anywhere">{{a.k}}</span>
+                          <span style="overflow-wrap: anywhere; color: {{a.c}}">{{a.v}}</span>
+                        </div>
+                      </sc-for>
+                    </div>
+                    <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2; margin-top: 6px">RESOURCE</span>
+                    <div class="mono" style="display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px">
+                      <sc-for list="{{s.d.resource}}" as="r" hint-placeholder-count="4">
+                        <span style="padding: 3px 8px; border-radius: 6px; background: #181825; border: 1px solid #313244; color: #bac2de"><span style="color: #9399b2">{{r.k}}=</span>{{r.v}}</span>
+                      </sc-for>
+                    </div>
+                  </div>
+                  <div style="flex: 2 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+                    <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2">EVENTS</span>
+                    <sc-if value="{{s.d.noEvents}}" hint-placeholder-val="{{false}}"><span class="mono" style="font-size: 12px; color: #9399b2">no events on this span</span></sc-if>
+                    <sc-for list="{{s.d.events}}" as="e" hint-placeholder-count="1">
+                      <div style="border: 1px solid #f38ba840; border-radius: 8px; overflow: hidden">
+                        <div class="mono" style="display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; background: #f38ba812; font-size: 12px"><span style="color: #f38ba8; font-weight: 600">{{e.name}}</span><span style="color: #a6adc8">{{e.at}}</span></div>
+                        <div class="mono" style="padding: 8px 12px; display: flex; flex-direction: column; gap: 4px; font-size: 12px">
+                          <sc-for list="{{e.lines}}" as="l" hint-placeholder-count="2"><span><span style="color: #a6adc8">{{l.k}}</span> {{l.v}}</span></sc-for>
+                        </div>
+                        <pre class="mono" style="margin: 0; padding: 10px 12px; background: #11111b; border-top: 1px solid #313244; font-size: 11px; line-height: 1.6; color: #bac2de; overflow-x: auto; white-space: pre">{{e.stack}}</pre>
+                      </div>
+                    </sc-for>
+                    <span class="mono" style="font-size: 11px; letter-spacing: .06em; color: #9399b2; margin-top: 6px">LOGS FOR THIS SPAN</span>
+                    <sc-if value="{{s.d.noLogs}}" hint-placeholder-val="{{false}}"><span class="mono" style="font-size: 12px; color: #9399b2">none emitted</span></sc-if>
+                    <sc-for list="{{s.d.logs}}" as="l" hint-placeholder-count="1">
+                      <div class="mono" style="display: flex; gap: 10px; font-size: 12px; padding: 7px 10px; background: #11111b; border-radius: 6px">
+                        <span style="color: #9399b2; flex: none">{{l.t}}</span>
+                        <span style="flex: none; color: {{l.c}}">{{l.sev}}</span>
+                        <span style="min-width: 0; overflow-wrap: anywhere">{{l.body}}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </div>
+              </div>
+            </sc-if>
+          </sc-for>
+        </div>
+      </div>
+    </section>
+  </sc-if>
+
+  <sc-if value="{{isLogs}}" hint-placeholder-val="{{false}}">
+    <section style="background: #181825; border: 1px solid #313244; border-radius: 10px; padding: 16px 18px">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 12px">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">Log records by severity <span class="mono" style="color: #9399b2; font-weight: 400">· 30 s buckets</span></h2>
+        <div class="mono" style="display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #a6adc8">
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #45475a"></span>debug/info</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #f9e2af"></span>warn</span>
+          <span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 2px; background: #f38ba8"></span>error</span>
+        </div>
+      </div>
+      <div role="img" aria-label="Stacked bars of log records per 30 seconds; error spikes at 19:56 and 19:58" style="height: 90px; display: flex; align-items: flex-end; gap: 3px; border-bottom: 1px solid #313244">
+        <sc-for list="{{hist}}" as="b" hint-placeholder-count="30">
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+            <div style="height: {{b.e}}px; background: #f38ba8; border-radius: 2px 2px 0 0"></div>
+            <div style="height: {{b.w}}px; background: #f9e2af"></div>
+            <div style="height: {{b.i}}px; background: #45475a"></div>
+          </div>
+        </sc-for>
+      </div>
+      <div class="mono" style="display: flex; justify-content: space-between; font-size: 10px; color: #9399b2; margin-top: 6px"><span>19:45</span><span>19:50</span><span>19:55</span><span>now</span></div>
+    </section>
+
+    <div class="mono" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px">
+      <div role="group" aria-label="Severity" style="display: flex; flex-wrap: wrap; gap: 6px">
+        <sc-for list="{{sevChips}}" as="c" hint-placeholder-count="5">
+          <button aria-pressed="{{c.on}}" onClick="{{c.pick}}" style="height: 32px; padding: 0 11px; border-radius: 16px; font-size: 12px; font-family: 'JetBrains Mono', monospace; display: inline-flex; align-items: center; gap: 7px; {{c.style}}"><span aria-hidden="true" style="width: 7px; height: 7px; border-radius: 50%; background: {{c.c}}"></span>{{c.label}}</button>
+        </sc-for>
+      </div>
+      <sc-if value="{{hasTraceFilter}}" hint-placeholder-val="{{false}}">
+        <span style="display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 4px 0 11px; border-radius: 16px; border: 1px solid {{accent}}; color: #cdd6f4">trace_id = {{traceFilterShort}}
+          <button aria-label="Clear trace filter" onClick="{{clearTrace}}" class="ghost" style="width: 24px; height: 24px; border: 0; border-radius: 12px; background: transparent; color: #bac2de; display: flex; align-items: center; justify-content: center; padding: 0"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"></path></svg></button>
+        </span>
+      </sc-if>
+      <span style="margin-left: auto; color: #9399b2">{{logCount}} records</span>
+    </div>
+
+    <section style="background: #181825; border: 1px solid #313244; border-radius: 10px; overflow: hidden">
+      <div style="overflow-x: auto">
+        <div style="min-width: 900px">
+          <div class="mono" style="display: grid; grid-template-columns: 24px 104px 64px 112px minmax(0, 1fr) 104px; gap: 12px; padding: 9px 16px; border-bottom: 1px solid #313244; font-size: 11px; letter-spacing: .06em; color: #9399b2">
+            <span></span><span>TIME</span><span>SEV</span><span>SERVICE</span><span>BODY</span><span>TRACE</span>
+          </div>
+          <sc-for list="{{logs}}" as="l" hint-placeholder-count="14">
+            <div class="lrow" style="display: grid; grid-template-columns: 24px 104px 64px 112px minmax(0, 1fr) 104px; gap: 12px; align-items: center; padding: 0 16px; min-height: 38px; border-bottom: 1px solid #26263a; {{l.rowStyle}}">
+              <button aria-label="{{l.expLabel}}" aria-expanded="{{l.expanded}}" onClick="{{l.toggle}}" class="ghost" style="width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: #a6adc8; display: flex; align-items: center; justify-content: center; padding: 0">
+                <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="transform: rotate({{l.rot}}deg)"><path d="m9 6 6 6-6 6"></path></svg>
+              </button>
+              <span class="mono" style="font-size: 12px; color: #9399b2">{{l.t}}</span>
+              <span class="mono" style="font-size: 11px; font-weight: 600; justify-self: start; padding: 1px 7px; border-radius: 5px; color: {{l.c}}; background: {{l.bg}}">{{l.sev}}</span>
+              <span class="mono" style="font-size: 12px; display: inline-flex; align-items: center; gap: 6px; color: #bac2de; min-width: 0"><span aria-hidden="true" style="flex: none; width: 8px; height: 8px; border-radius: 2px; background: {{l.svcC}}"></span><span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{l.svc}}</span></span>
+              <span class="mono" style="font-size: 12px; color: {{l.bodyC}}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{l.body}}</span>
+              <span>
+                <sc-if value="{{l.hasTrace}}" hint-placeholder-val="{{true}}">
+                  <button onClick="{{l.goTrace}}" class="mono ghost" style="font-size: 12px; padding: 4px 6px; border: 0; border-radius: 5px; background: transparent; color: #89b4fa; font-family: 'JetBrains Mono', monospace">{{l.traceShort}} →</button>
+                </sc-if>
+                <sc-if value="{{l.noTrace}}" hint-placeholder-val="{{false}}"><span class="mono" style="font-size: 12px; color: #9399b2">—</span></sc-if>
+              </span>
+            </div>
+            <sc-if value="{{l.expandedBool}}" hint-placeholder-val="{{false}}">
+              <div class="mono" style="padding: 12px 16px 14px 56px; background: #1e1e2e; border-bottom: 1px solid #313244; display: flex; flex-direction: column; gap: 10px; font-size: 12px">
+                <div style="white-space: pre-wrap; overflow-wrap: anywhere; color: #cdd6f4">{{l.body}}</div>
+                <div style="display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px">
+                  <sc-for list="{{l.attrs}}" as="a" hint-placeholder-count="4">
+                    <span style="padding: 3px 8px; border-radius: 6px; background: #181825; border: 1px solid #313244; color: #bac2de"><span style="color: #9399b2">{{a.k}}=</span>{{a.v}}</span>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-if>
+          </sc-for>
+        </div>
+      </div>
+    </section>
+  </sc-if>
+</main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#cba6f7","options":["#cba6f7","#89b4fa","#94e2d5","#fab387"]},"$preview":{"width":1440,"height":2100}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { tab: 'traces', trace: 't1', span: 's9', collapsed: {}, crit: false, logTrace: null, sev: 'all', openLog: null, range: '15m' };
+  }
+  renderVals() {
+    const accent = this.props.accent ?? '#cba6f7';
+    const st = this.state;
+    const SVC = { 'proxy': '#b4befe', 'outline-app': '#94e2d5', 'gitea': '#cba6f7', 'plausible': '#89dceb', 'immich-server': '#74c7ec', 'immich-ml': '#f5c2e7', 'paperless': '#f9e2af' };
+    const VER = { 'proxy': '0.14.2', 'outline-app': '0.81.1', 'gitea': '1.23.4', 'plausible': '2.1.4', 'immich-server': '1.131.0', 'immich-ml': '1.131.0', 'paperless': '2.14.0' };
+    const LANG = { 'proxy': 'rust', 'outline-app': 'nodejs', 'gitea': 'go', 'plausible': 'erlang', 'immich-server': 'nodejs', 'immich-ml': 'python', 'paperless': 'python' };
+    const fmt = (ms) => ms < 1 ? Math.round(ms * 1000) + ' µs' : ms < 100 ? ms.toFixed(1) + ' ms' : ms < 1000 ? Math.round(ms) + ' ms' : (ms / 1000).toFixed(2) + ' s';
+    const hex = (s, n) => { let h = 2166136261; let out = ''; for (let r = 0; out.length < n; r++) { for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i) + r * 31; h = Math.imul(h, 16777619) >>> 0; } out += h.toString(16).padStart(8, '0'); } return out.slice(0, n); };
+    const S = (id, parent, svc, kind, name, start, dur, extra) => Object.assign({ id, parent, svc, kind, name, start, dur }, extra || {});
+    const pg = (q, rows) => [['db.system', 'postgresql'], ['db.namespace', 'outline'], ['db.query.text', q], ['db.response.returned_rows', rows]];
+
+    const t1 = [
+      S('s0', null, 'proxy', 'server', 'POST /api/documents.info', 0, 1912.4, { err: true, msg: 'upstream responded 500', attrs: [['server.address', 'wiki.example.net'], ['http.request.method', 'POST'], ['url.path', '/api/documents.info'], ['http.response.status_code', '500'], ['client.address', '192.168.1.34'], ['network.protocol.version', '2'], ['tls.protocol.version', '1.3'], ['user_agent.original', 'Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Firefox/133.0']] }),
+      S('s1', 's0', 'proxy', 'client', 'upstream outline', 0.6, 1910.9, { err: true, msg: 'upstream responded 500', attrs: [['server.address', 'outline-app'], ['server.port', '3000'], ['http.response.status_code', '500'], ['upstream.stack', 'outline'], ['proxy.retry', 'false'], ['proxy.connect_ms', '0.4']] }),
+      S('s2', 's1', 'outline-app', 'server', 'POST /api/documents.info', 3.8, 1905.2, { err: true, msg: 'QueryCanceledError', attrs: [['http.request.method', 'POST'], ['http.route', '/api/documents.info'], ['http.response.status_code', '500'], ['user.id', 'u_8c1e02f7']] }),
+      S('s3', 's2', 'outline-app', 'internal', 'authenticate', 5.1, 17.6, { attrs: [['code.function', 'authentication'], ['auth.method', 'session cookie'], ['user.id', 'u_8c1e02f7']] }),
+      S('s4', 's3', 'outline-app', 'client', 'GET', 6.9, 1.8, { tag: 'redis', attrs: [['db.system', 'redis'], ['db.operation.name', 'GET'], ['db.query.text', 'GET sess:9f2c…'], ['server.address', 'redis:6379']] }),
+      S('s5', 's3', 'outline-app', 'client', 'SELECT users', 10.4, 9.2, { tag: 'pg', attrs: pg('SELECT * FROM users WHERE id = $1 LIMIT 1', '1') }),
+      S('s6', 's2', 'outline-app', 'internal', 'documents.info', 23.9, 1880.3, { err: true, msg: 'QueryCanceledError', attrs: [['code.function', 'documents.info'], ['code.filepath', 'server/routes/api/documents.ts'], ['document.id', 'doc_4f1a93c2']] }),
+      S('s12', 's6', 'outline-app', 'client', 'GET', 24.6, 0.9, { tag: 'redis', attrs: [['db.system', 'redis'], ['db.query.text', 'GET cache:doc:4f1a93c2'], ['cache.hit', 'false']] }),
+      S('s7', 's6', 'outline-app', 'client', 'SELECT documents', 26.2, 14.1, { tag: 'pg', attrs: pg('SELECT * FROM documents WHERE id = $1 AND deleted_at IS NULL', '1') }),
+      S('s8', 's6', 'outline-app', 'client', 'SELECT collections', 41.0, 8.3, { tag: 'pg', attrs: pg('SELECT * FROM collections WHERE id = $1', '1') }),
+      S('s9', 's6', 'outline-app', 'client', 'SELECT revisions', 51.7, 1800.4, { tag: 'pg', err: true, msg: 'canceling statement due to statement timeout',
+        attrs: [['db.system', 'postgresql'], ['db.namespace', 'outline'], ['db.query.text', 'SELECT r.* FROM revisions r WHERE r.document_id = $1 ORDER BY r.created_at DESC'], ['db.response.status_code', '57014'], ['error.type', 'QueryCanceledError'], ['server.address', 'postgres:5432']],
+        events: [{ at: 1852.1, name: 'exception', lines: [['exception.type', 'SequelizeDatabaseError'], ['exception.message', 'canceling statement due to statement timeout']],
+          stack: 'at Query.formatError (node_modules/sequelize/lib/dialects/postgres/query.js:386:16)\nat Query.run (node_modules/sequelize/lib/dialects/postgres/query.js:87:18)\nat async Revision.findAll (server/models/Revision.ts:112:5)\nat async documents.info (server/routes/api/documents.ts:418:22)' }] }),
+      S('s10', 's6', 'outline-app', 'client', 'ROLLBACK', 1853.6, 2.7, { tag: 'pg', attrs: pg('ROLLBACK', '0') })
+    ];
+    const t2 = [
+      S('g0', null, 'proxy', 'server', 'GET /homelab/stacks/src/branch/main', 0, 142.3, { attrs: [['server.address', 'git.example.net'], ['http.request.method', 'GET'], ['http.response.status_code', '200'], ['client.address', '192.168.1.34']] }),
+      S('g1', 'g0', 'proxy', 'client', 'upstream gitea', 0.5, 141.2),
+      S('g2', 'g1', 'gitea', 'server', 'GET /{owner}/{repo}/src/branch/*', 2.9, 137.6),
+      S('g3', 'g2', 'gitea', 'internal', 'context.Auth', 3.6, 2.8),
+      S('g4', 'g3', 'gitea', 'client', 'SELECT user', 4.0, 1.6, { tag: 'pg' }),
+      S('g5', 'g2', 'gitea', 'internal', 'repo.Load', 6.9, 21.8),
+      S('g6', 'g5', 'gitea', 'client', 'SELECT repository', 7.3, 2.1, { tag: 'pg' }),
+      S('g7', 'g5', 'gitea', 'client', 'git rev-parse', 10.2, 15.9, { tag: 'exec' }),
+      S('g8', 'g2', 'gitea', 'internal', 'repo.Tree', 29.1, 84.6),
+      S('g9', 'g8', 'gitea', 'client', 'git ls-tree', 29.8, 40.7, { tag: 'exec' }),
+      S('g10', 'g8', 'gitea', 'client', 'git log -1 (×18)', 71.2, 41.9, { tag: 'exec' }),
+      S('g11', 'g2', 'gitea', 'internal', 'template.Render repo/home', 114.3, 23.8)
+    ];
+    const t3 = [
+      S('p0', null, 'proxy', 'server', 'POST /api/event', 0, 12.4),
+      S('p1', 'p0', 'proxy', 'client', 'upstream plausible', 0.3, 11.8),
+      S('p2', 'p1', 'plausible', 'server', 'POST /api/event', 1.1, 10.6),
+      S('p3', 'p2', 'plausible', 'internal', 'Event.build', 1.6, 4.1),
+      S('p4', 'p3', 'plausible', 'internal', 'Geolix.lookup', 2.0, 1.3),
+      S('p5', 'p3', 'plausible', 'internal', 'UAInspector.parse', 3.5, 1.7),
+      S('p6', 'p2', 'plausible', 'internal', 'Buffer.insert', 6.1, 0.6)
+    ];
+    const gen = (key, stack, svc, route, dur, err, kids) => {
+      const sp = [S(key + 'a', null, 'proxy', 'server', route, 0, dur, { err, msg: err ? 'upstream responded 500' : null })];
+      sp.push(S(key + 'b', key + 'a', 'proxy', 'client', 'upstream ' + stack, dur * 0.003, dur * 0.994, { err }));
+      if (svc) {
+        sp.push(S(key + 'c', key + 'b', svc, 'server', route, dur * 0.008, dur * 0.985, { err, msg: err ? 'QueryCanceledError' : null }));
+        kids.forEach((k, i) => sp.push(S(key + 'k' + i, key + 'c', k[6] || svc, k[1], k[0], dur * k[3], dur * k[4], { tag: k[2], err: !!k[5], msg: k[5] ? 'canceling statement due to statement timeout' : null })));
+      }
+      return sp;
+    };
+    const data = {
+      t1, t2, t3,
+      t5: gen('t5', 'outline', 'outline-app', 'POST /api/documents.info', 1903.7, true, [['authenticate', 'internal', null, .003, .009], ['GET', 'client', 'redis', .004, .001], ['SELECT documents', 'client', 'pg', .013, .008], ['SELECT revisions', 'client', 'pg', .028, .947, true], ['ROLLBACK', 'client', 'pg', .976, .002]]),
+      t8: gen('t8', 'immich', 'immich-server', 'POST /api/search/smart', 2412.0, false, [['authenticate', 'internal', null, .002, .004], ['POST /predict', 'server', null, .008, .85, false, 'immich-ml'], ['SELECT smart_search (vector)', 'client', 'pg', .87, .11]]),
+      t6: gen('t6', 'gitea', 'gitea', 'POST /homelab/granit.git/git-upload-pack', 1104.2, false, [['context.Auth', 'internal', null, .002, .003], ['SELECT repository', 'client', 'pg', .006, .002], ['git upload-pack', 'client', 'exec', .01, .97]]),
+      t4: gen('t4', 'immich', 'immich-server', 'GET /api/assets/{id}/thumbnail', 486.3, false, [['authenticate', 'internal', null, .004, .01], ['SELECT assets', 'client', 'pg', .016, .012], ['fs.read original', 'internal', 'fs', .03, .06], ['sharp.resize', 'internal', null, .09, .88]]),
+      t7: gen('t7', 'paperless', 'paperless', 'GET /api/documents/', 260.4, false, [['SELECT documents_document', 'client', 'pg', .04, .32], ['SELECT documents_tag', 'client', 'pg', .37, .18], ['serialize', 'internal', null, .56, .4]]),
+      t9: gen('t9', 'vaultwarden', null, 'GET /api/sync', 31.2, false, [])
+    };
+    const meta = [
+      ['t1', '19:58:41.081', 'outline', 1.3], ['t5', '19:56:02.017', 'outline', 4.0], ['t8', '19:55:37.402', 'immich', 4.4],
+      ['t6', '19:54:10.115', 'gitea', 5.8], ['t4', '19:53:48.630', 'immich', 6.2], ['t7', '19:52:15.296', 'paperless', 7.7],
+      ['t2', '19:51:30.020', 'gitea', 8.5], ['t9', '19:50:02.009', 'vaultwarden', 10.0], ['t3', '19:49:44.012', 'plausible', 10.3]
+    ];
+    const tid = (k) => k === 't1' ? '4bf92f3577b34da6a3ce929d0e0e4736' : hex('trace' + k, 32);
+    const ylog = (ms) => (Math.log10(Math.max(ms, 1)) / Math.log10(5000) * 100).toFixed(1);
+    const xAgo = (ago) => (100 - ago / 15 * 100).toFixed(1);
+
+    const LOGS = [
+      ['19:58:42.995', 'WARN', 'proxy', 'upstream outline responded 500 for POST /api/documents.info (1911 ms)', 't1', 's1', [['upstream', 'outline-app:3000'], ['http.response.status_code', '500']]],
+      ['19:58:42.993', 'ERROR', 'outline-app', 'POST /api/documents.info 500 1898ms', 't1', 's2', [['http.response.status_code', '500'], ['user.id', 'u_8c1e02f7']]],
+      ['19:58:42.990', 'ERROR', 'outline-app', 'SequelizeDatabaseError: canceling statement due to statement timeout', 't1', 's9', [['db.statement_timeout', '1800ms'], ['document.id', 'doc_4f1a93c2']]],
+      ['19:58:41.106', 'DEBUG', 'outline-app', 'cache miss doc:4f1a93c2', 't1', 's12', [['cache', 'redis']]],
+      ['19:58:12.440', 'WARN', 'outline-app', 'event loop lag 214ms', null, null, [['nodejs.eventloop.delay.p99', '214']]],
+      ['19:57:58.204', 'INFO', 'plausible', 'buffer flushed 412 events to clickhouse', null, null, [['events', '412']]],
+      ['19:56:03.921', 'ERROR', 'outline-app', 'SequelizeDatabaseError: canceling statement due to statement timeout', 't5', 't5k3', [['db.statement_timeout', '1800ms']]],
+      ['19:56:03.924', 'WARN', 'proxy', 'upstream outline responded 500 for POST /api/documents.info (1897 ms)', 't5', 't5b', [['upstream', 'outline-app:3000']]],
+      ['19:55:39.880', 'WARN', 'immich-ml', 'model ViT-B-32__openai loaded in 1.9 s (cold start)', 't8', 't8k1', [['model', 'ViT-B-32__openai'], ['device', 'cpu']]],
+      ['19:54:11.210', 'INFO', 'gitea', 'git upload-pack homelab/granit sent 14.2 MB', 't6', 't6k2', [['repo', 'homelab/granit'], ['bytes', '14893056']]],
+      ['19:53:00.004', 'INFO', 'proxy', 'acme order created for stats.example.net', null, null, [['acme.challenge', 'http-01']]],
+      ['19:52:15.301', 'INFO', 'paperless', 'GET /api/documents/?page=1 200', 't7', 't7c', [['http.response.status_code', '200']]],
+      ['19:51:30.144', 'DEBUG', 'gitea', 'rendered repo/home in 23.8ms', 't2', 'g11', [['template', 'repo/home']]],
+      ['19:50:02.031', 'INFO', 'proxy', 'GET vault.example.net/api/sync 200 31ms', 't9', 't9a', [['http.response.status_code', '200']]],
+      ['19:49:44.012', 'DEBUG', 'plausible', 'event accepted domain=stats.example.net', 't3', 'p2', [['domain', 'stats.example.net']]]
+    ];
+    const SEV = { DEBUG: ['#9399b2', '#9399b21a'], INFO: ['#89dceb', '#89dceb1a'], WARN: ['#f9e2af', '#f9e2af1f'], ERROR: ['#f38ba8', '#f38ba81f'] };
+
+    const tabs = [['traces', 'traces', '18,204'], ['logs', 'logs', '306k']].map(([id, label, n]) => {
+      const on = st.tab === id;
+      return { label, n, on: on ? 'true' : 'false', pick: () => this.setState({ tab: id }),
+        style: on ? 'color: #cdd6f4; border-bottom: 2px solid ' + accent : 'color: #a6adc8; border-bottom: 2px solid transparent' };
+    });
+    const ranges = ['5m', '15m', '1h', '6h', '24h'].map((label) => {
+      const on = st.range === label;
+      return { label, on: on ? 'true' : 'false', pick: () => this.setState({ range: label }),
+        style: on ? 'background: #313244; color: #cdd6f4' : 'background: transparent; color: #a6adc8' };
+    });
+
+    let seed = 11;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+    const bgDots = [];
+    for (let i = 0; i < 110; i++) {
+      const x = rnd() * 100; const r = rnd();
+      const ms = r < 0.5 ? 6 + rnd() * 50 : r < 0.82 ? 60 + rnd() * 260 : r < 0.96 ? 320 + rnd() * 900 : 1300 + rnd() * 1000;
+      const err = (ms > 1700 && rnd() < 0.5) || rnd() < 0.015;
+      bgDots.push({ x: x.toFixed(1), y: ylog(ms), c: err ? '#f38ba8' : '#6c7086', o: err ? 1 : 0.55 });
+    }
+
+    const maxDur = Math.max(...meta.map((m) => data[m[0]][0].dur));
+    const traceList = meta.map(([key, time, stack, ago]) => {
+      const sp = data[key]; const root = sp[0]; const on = st.trace === key;
+      const err = sp.some((s) => s.err);
+      const svcNames = [...new Set(sp.map((s) => s.svc))];
+      const firstErr = sp.find((s) => s.err && !sp.some((c) => c.parent === s.id && c.err));
+      return { key, time, stack, root: root.name, n: sp.length, dur: fmt(root.dur), pct: Math.max(2, root.dur / maxDur * 100).toFixed(1),
+        barC: err ? '#f38ba8' : '#94e2d5', status: err ? 'error' : 'ok', sc: err ? '#f38ba8' : '#a6e3a1',
+        svcs: svcNames.map((n) => ({ n, c: SVC[n] })), proxyOnly: svcNames.length === 1,
+        on: on ? 'true' : 'false', rowStyle: on ? 'background: #313244' : '',
+        x: xAgo(ago), y: ylog(root.dur),
+        dotLabel: 'Open trace ' + root.name + ', ' + fmt(root.dur),
+        dotStyle: 'width: ' + (on ? 14 : 10) + 'px; height: ' + (on ? 14 : 10) + 'px; background: ' + (err ? '#f38ba8' : '#94e2d5') + '; border: 2px solid ' + (on ? '#cdd6f4' : accent),
+        pick: () => this.setState({ trace: key, span: firstErr ? firstErr.id : root.id, collapsed: {} }) };
+    });
+
+    const key = st.trace; const sp = data[key]; const m = meta.find((x) => x[0] === key);
+    const byId = {}; sp.forEach((s) => { byId[s.id] = s; });
+    const kids = {}; sp.forEach((s) => { if (s.parent) (kids[s.parent] = kids[s.parent] || []).push(s.id); });
+    const depthOf = (s) => s.parent ? depthOf(byId[s.parent]) + 1 : 0;
+    const order = []; const walk = (id) => { order.push(id); (kids[id] || []).slice().sort((a, b) => byId[a].start - byId[b].start).forEach(walk); };
+    sp.filter((s) => !s.parent).forEach((s) => walk(s.id));
+    const total = Math.max(...sp.map((s) => s.start + s.dur));
+    const crit = {}; const mark = (id) => { crit[id] = true; const ks = kids[id] || []; if (!ks.length) return; let best = ks[0]; ks.forEach((k) => { if (byId[k].start + byId[k].dur > byId[best].start + byId[best].dur) best = k; }); mark(best); };
+    sp.filter((s) => !s.parent).forEach((s) => mark(s.id));
+    const col = st.collapsed;
+    const hidden = (s) => { let p = s.parent; while (p) { if (col[p]) return true; p = byId[p].parent; } return false; };
+    const countDesc = (id) => (kids[id] || []).reduce((n, k) => n + 1 + countDesc(k), 0);
+    const selfTime = (s) => { const ks = (kids[s.id] || []).map((k) => byId[k]).sort((a, b) => a.start - b.start); let covered = 0, end = s.start; ks.forEach((k) => { const a = Math.max(k.start, end), b = Math.min(k.start + k.dur, s.start + s.dur); if (b > a) { covered += b - a; end = b; } }); return Math.max(0, s.dur - covered); };
+    const traceLogs = LOGS.filter((l) => l[4] === key);
+    const resourceOf = (svc, stack) => {
+      const r = [['service.name', svc], ['service.version', VER[svc]], ['telemetry.sdk.language', LANG[svc]], ['host.name', 'srv-01']];
+      if (svc !== 'proxy') r.push(['container.name', stack + '-' + svc.replace(/-app$/, '') + '-1'], ['stack', stack]);
+      return r.map(([k, v]) => ({ k, v }));
+    };
+    const defAttrs = (s) => {
+      const a = [];
+      if (s.kind === 'server') { const p = s.name.split(' '); a.push(['http.request.method', p[0]], ['http.route', p.slice(1).join(' ')], ['http.response.status_code', s.err ? '500' : '200']); }
+      else if (s.tag === 'pg') { const p = s.name.split(' '); a.push(['db.system', 'postgresql'], ['db.operation.name', p[0]], ['db.collection.name', p.slice(1).join(' ')]); }
+      else if (s.tag === 'redis') a.push(['db.system', 'redis'], ['db.operation.name', s.name]);
+      else if (s.tag === 'exec') a.push(['process.command', s.name.split(' (')[0]], ['process.exit.code', '0']);
+      else if (s.svc === 'proxy' && s.kind === 'client') a.push(['server.address', m[2]], ['upstream.stack', m[2]], ['http.response.status_code', s.err ? '500' : '200']);
+      else a.push(['code.function', s.name]);
+      return a;
+    };
+
+    const rows = order.map((id) => byId[id]).filter((s) => !hidden(s)).map((s) => {
+      const d = depthOf(s); const hasKids = !!(kids[s.id] || []).length; const isCol = !!col[s.id];
+      const L = s.start / total * 100; const W = Math.max(s.dur / total * 100, 0.3);
+      const color = SVC[s.svc];
+      const dim = st.crit && !crit[s.id];
+      let labelPos;
+      if (W > 55) labelPos = 'left: calc(' + L.toFixed(2) + '% + 8px); color: #11111b; font-weight: 600';
+      else if (L + W > 78) labelPos = 'right: calc(' + (100 - L).toFixed(2) + '% + 6px); color: #a6adc8';
+      else labelPos = 'left: calc(' + (L + W).toFixed(2) + '% + 6px); color: #a6adc8';
+      const on = st.span === s.id;
+      const row = {
+        id: s.id, name: s.name, svc: s.svc, kind: s.kind, color, indent: 8 + d * 16,
+        hasKids, leaf: !hasKids, expanded: isCol ? 'false' : 'true', rot: isCol ? 0 : 90,
+        toggleLabel: (isCol ? 'Expand ' : 'Collapse ') + s.name,
+        toggle: () => this.setState({ collapsed: Object.assign({}, col, { [s.id]: !isCol }) }),
+        hiddenKids: isCol, hiddenN: countDesc(s.id),
+        err: !!s.err, nameC: s.err ? '#f38ba8' : '#cdd6f4', hasTag: !!s.tag, tag: s.tag || '',
+        on, pick: () => this.setState({ span: on ? null : s.id }),
+        rowStyle: on ? 'background: #313244' : '',
+        bar: 'left: ' + L.toFixed(2) + '%; width: ' + W.toFixed(2) + '%; background: ' + color + '; opacity: ' + (dim ? 0.25 : 1) + (s.err ? '; box-shadow: 0 0 0 1.5px #181825, 0 0 0 3px #f38ba8' : ''),
+        label: fmt(s.dur), labelPos: labelPos + (dim ? '; opacity: .5' : '')
+      };
+      if (on) {
+        const attrs = (s.attrs || defAttrs(s)).map(([k, v]) => ({ k, v, c: (k === 'error.type' || (k === 'http.response.status_code' && v[0] === '5')) ? '#f38ba8' : '#cdd6f4' }));
+        const events = (s.events || []).map((e) => ({ name: e.name, at: '@ ' + fmt(e.at) + ' (+' + fmt(e.at - s.start) + ' in span)', lines: e.lines.map(([k, v]) => ({ k, v })), stack: e.stack }));
+        const logs = LOGS.filter((l) => l[4] === key && l[5] === s.id).map((l) => ({ t: l[0].slice(6), sev: l[1], c: SEV[l[1]][0], body: l[3] }));
+        row.d = {
+          start: '+' + fmt(s.start), pct: (s.dur / total * 100).toFixed(1) + '%', self: fmt(selfTime(s)),
+          spanId: hex(key + s.id, 16), parentId: s.parent ? hex(key + s.parent, 16) : '— (root)',
+          status: s.err ? 'error' : 'unset', statusTag: s.err ? 'color: #f38ba8; background: #f38ba81f' : 'color: #bac2de; background: #313244',
+          hasMsg: !!(s.err && s.msg), msg: s.msg || '',
+          attrs, events, noEvents: !events.length, logs, noLogs: !logs.length,
+          resource: resourceOf(s.svc, m[2]),
+          close: () => this.setState({ span: null })
+        };
+      }
+      return row;
+    });
+
+    const legendMap = {}; sp.forEach((s) => { legendMap[s.svc] = (legendMap[s.svc] || 0) + 1; });
+    const tr = {
+      root: sp[0].name, stack: m[2], time: m[1], date: '2026-11-12', traceId: tid(key), dur: fmt(total), n: sp.length,
+      depth: Math.max(...sp.map(depthOf)) + 1, errs: sp.filter((s) => s.err).length,
+      errC: sp.some((s) => s.err) ? '#f38ba8' : '#cdd6f4',
+      legend: Object.keys(legendMap).map((n) => ({ n, c: SVC[n], count: legendMap[n] + (legendMap[n] === 1 ? ' span' : ' spans') })),
+      ticks: [0, .25, .5, .75, 1].map((f) => fmt(total * f)),
+      miniH: order.length * 3 + 6,
+      mini: order.map((id, i) => { const s = byId[id]; return { top: 3 + i * 3, left: (s.start / total * 100).toFixed(2), width: Math.max(s.dur / total * 100, 0.4).toFixed(2), c: s.err ? '#f38ba8' : SVC[s.svc] }; }),
+      logCount: traceLogs.length
+    };
+
+    const sevChips = [['all', '#9399b2'], ['ERROR', '#f38ba8'], ['WARN', '#f9e2af'], ['INFO', '#89dceb'], ['DEBUG', '#9399b2']].map(([id, c]) => {
+      const on = st.sev === id;
+      return { label: id === 'WARN' ? 'warn+' : id.toLowerCase(), c, on: on ? 'true' : 'false', pick: () => this.setState({ sev: id }),
+        style: on ? 'background: #313244; color: #cdd6f4; border: 1px solid #45475a' : 'background: transparent; color: #a6adc8; border: 1px solid #313244' };
+    });
+    const rank = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+    const minRank = st.sev === 'all' ? -1 : rank[st.sev];
+    const logs = LOGS.filter((l) => (st.sev === 'all' || (st.sev === 'INFO' || st.sev === 'DEBUG' ? l[1] === st.sev : rank[l[1]] >= minRank)) && (!st.logTrace || l[4] === st.logTrace)).map((l, i) => {
+      const lk = l[0] + l[2]; const open = st.openLog === lk;
+      return { t: l[0], sev: l[1], c: SEV[l[1]][0], bg: SEV[l[1]][1], svc: l[2], svcC: SVC[l[2]], body: l[3],
+        bodyC: l[1] === 'ERROR' ? '#f38ba8' : '#cdd6f4',
+        hasTrace: !!l[4], noTrace: !l[4], traceShort: l[4] ? tid(l[4]).slice(0, 8) : '',
+        goTrace: () => this.setState({ tab: 'traces', trace: l[4], span: l[5], collapsed: {} }),
+        expanded: open ? 'true' : 'false', expandedBool: open, rot: open ? 90 : 0, expLabel: (open ? 'Collapse' : 'Expand') + ' log record',
+        toggle: () => this.setState({ openLog: open ? null : lk }),
+        rowStyle: open ? 'background: #1e1e2e' : '',
+        attrs: l[6].map(([k, v]) => ({ k, v })).concat(l[4] ? [{ k: 'trace_id', v: tid(l[4]) }, { k: 'span_id', v: hex(l[4] + l[5], 16) }] : []).concat([{ k: 'service.name', v: l[2] }]) };
+    });
+    const hist = [];
+    for (let i = 0; i < 30; i++) {
+      const base = 30 + Math.round(18 * Math.sin(i / 3) + rnd() * 14);
+      const w = (i === 22 || i === 27 ? 6 : Math.round(rnd() * 3));
+      const e = i === 22 ? 14 : i === 27 ? 18 : (rnd() < 0.1 ? 2 : 0);
+      hist.push({ i: base, w, e });
+    }
+
+    return {
+      accent, tabs, ranges, tab: st.tab,
+      isTraces: st.tab === 'traces', isLogs: st.tab === 'logs',
+      queryHint: st.tab === 'traces' ? 'service.name = "outline-app" AND duration > 500ms AND status = error' : 'body ~ "timeout" AND severity >= WARN',
+      bgDots, traceList, tr, rows,
+      critOn: st.crit ? 'true' : 'false', toggleCrit: () => this.setState({ crit: !st.crit }),
+      critTrack: st.crit ? 'background: ' + accent + '; justify-content: flex-end' : 'background: #45475a; justify-content: flex-start',
+      expandAll: () => this.setState({ collapsed: {} }),
+      collapseAll: () => { const c = {}; sp.forEach((s) => { if (s.kind === 'server' && (kids[s.id] || []).length && s.parent) c[s.id] = true; }); this.setState({ collapsed: c }); },
+      toTraceLogs: () => this.setState({ tab: 'logs', logTrace: key, sev: 'all' }),
+      sevChips, logs, logCount: logs.length, hist,
+      hasTraceFilter: !!st.logTrace, traceFilterShort: st.logTrace ? tid(st.logTrace).slice(0, 16) + '…' : '',
+      clearTrace: () => this.setState({ logTrace: null })
+    };
+  }
+}
+</script>
+</body>
+</html>

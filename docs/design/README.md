@@ -25,6 +25,23 @@ One file per screen, linked together by `<a href="X.dc.html">`:
 | Settings.dc.html | Grouped settings sub-nav; General, Source control, Reverse proxy, ACME drawn |
 | System.dc.html | Version/rollback, update flow, host info, images & storage (replaces a Containers menu) |
 | NewStack.dc.html | Create stack: repo/branch/compose file, services→domains, env, plan + pre-flight |
+| Telemetry.dc.html | OTel traces and logs. Traces: duration scatter, trace list, span waterfall (collapse, critical path, inline span details with attributes, events, resource, span logs). Logs: severity histogram, filters, expandable records. Traces and logs link to each other via trace_id/span_id |
+
+Sidebar order: Dashboard, Stacks, Telemetry, Certificates, Settings, System.
+
+### Telemetry notes
+
+Added 2026-11-12 (planned in epics `psq`, `qnh` and `xv9`). Where the mockup disagrees with a
+decision, the decision wins: the receiver speaks OTLP/HTTP protobuf only, not gRPC on :4317
+(OQ-42, question 4); spans are kept 3 days and logs 7 days in a 1 GiB `logs.db` (ADR-0067,
+OQ-42); the query box takes no query language yet, only grep beside filter controls (OQ-43);
+hoster's own records appear under the service `hoster` (ADR-0068), where the mockup says
+`proxy`.
+
+- Service colours are categorical and must not overlap the status colours: proxy `#b4befe`, then `#94e2d5`, `#cba6f7`, `#89dceb`, `#74c7ec`, `#f5c2e7`, `#f9e2af`. Error spans keep their service colour and get a red ring (`#f38ba8`).
+- The proxy emits its own server + upstream client spans for every request, so apps without OTel still get 2-span traces ("app not instrumented").
+- Waterfall math is in `renderVals()`: DFS order by start time, depth from parent chain, critical path = recursively the child with the latest end, self time = duration minus the union of child intervals.
+- Attribute keys follow OTel semantic conventions (`http.route`, `db.query.text`, `server.address`, ...).
 
 ## Reading the .dc.html format
 
