@@ -13,7 +13,7 @@
 //! What the recorder logs itself is under this module's target (`hoster::logs::recorder`),
 //! which hoster's own layer excludes (ADR-0068 §2), so a failing commit cannot feed itself.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -35,6 +35,8 @@ enum Entry {
         cursor: Option<LogCursor>,
     },
     Request(RequestRow),
+    /// The container no longer exists: delete its cursor.
+    ForgetCursor(String),
 }
 
 /// What was lost since hoster started, by cause.
@@ -130,6 +132,13 @@ impl LogSink {
         self.offer(Entry::Request(request))
     }
 
+    /// Asks for the cursor of `container`, which no longer exists, to be deleted, after every
+    /// line offered before. `false` when the request was dropped, which is not counted: the
+    /// followers' hourly sweep asks again.
+    pub fn try_forget_cursor(&self, container: &str) -> bool {
+        self.offer(Entry::ForgetCursor(container.to_owned()))
+    }
+
     /// What was lost since hoster started.
     pub fn drops(&self) -> Drops {
         self.counters.snapshot()
@@ -157,13 +166,14 @@ impl LogSink {
     fn offer(&self, entry: Entry) -> bool {
         let counter = match &entry {
             Entry::Record { record, .. } if record.stream == Stream::Hoster => {
-                &self.counters.hoster_records
+                Some(&self.counters.hoster_records)
             }
-            Entry::Record { .. } => &self.counters.records,
-            Entry::Request(_) => &self.counters.requests,
+            Entry::Record { .. } => Some(&self.counters.records),
+            Entry::Request(_) => Some(&self.counters.requests),
+            Entry::ForgetCursor(_) => None,
         };
         let sent = self.entries.try_send(entry).is_ok();
-        if !sent {
+        if !sent && let Some(counter) = counter {
             Counters::count(counter, 1);
         }
         sent
@@ -183,7 +193,7 @@ impl Tap {
         loop {
             match self.0.recv().await? {
                 Entry::Record { record, cursor } => return Some((record, cursor)),
-                Entry::Request(_) => {}
+                Entry::Request(_) | Entry::ForgetCursor(_) => {}
             }
         }
     }
@@ -318,7 +328,9 @@ struct Batch {
     records: Vec<LogRecord>,
     requests: Vec<RequestRow>,
     /// The newest cursor per container; followers send lines in order.
-    cursors: BTreeMap<String, i64>,
+    cursors: BTreeMap<String, LogCursor>,
+    /// Containers whose cursors are deleted.
+    forgotten: BTreeSet<String>,
 }
 
 impl Batch {
@@ -327,10 +339,15 @@ impl Batch {
             Entry::Record { record, cursor } => {
                 self.records.push(record);
                 if let Some(cursor) = cursor {
-                    self.cursors.insert(cursor.container, cursor.time_ns);
+                    self.forgotten.remove(&cursor.container);
+                    self.cursors.insert(cursor.container.clone(), cursor);
                 }
             }
             Entry::Request(request) => self.requests.push(request),
+            Entry::ForgetCursor(container) => {
+                self.cursors.remove(&container);
+                self.forgotten.insert(container);
+            }
         }
     }
 
@@ -342,11 +359,8 @@ impl Batch {
         LogBatch {
             records: self.records,
             requests: self.requests,
-            cursors: self
-                .cursors
-                .into_iter()
-                .map(|(container, time_ns)| LogCursor { container, time_ns })
-                .collect(),
+            cursors: self.cursors.into_values().collect(),
+            forgotten: self.forgotten.into_iter().collect(),
         }
     }
 }

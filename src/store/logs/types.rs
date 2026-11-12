@@ -241,13 +241,17 @@ pub struct RequestRow {
     pub request_id: RequestId,
 }
 
-/// Where a container's follower got to: podman's timestamp of the last line it handed to the
-/// store, in nanoseconds since the epoch (ADR-0067 §1).
+/// Where a container's follower got to (ADR-0067 §1): the last line it handed to the store, by
+/// podman's timestamp of it in nanoseconds since the epoch and its place among the lines with
+/// that stamp, so two lines stamped alike are told apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogCursor {
     /// The podman container id.
     pub container: String,
     pub time_ns: i64,
+    /// The line's place in the run of consecutive lines stamped `time_ns` in the container's
+    /// log: 1 for the first.
+    pub nth: i64,
 }
 
 /// What one commit writes: records, request rows and the cursors of the lines among the
@@ -258,6 +262,9 @@ pub struct LogBatch {
     pub requests: Vec<RequestRow>,
     /// At most one per container: the newest.
     pub cursors: Vec<LogCursor>,
+    /// Containers whose cursors are deleted, after the cursors above are written: containers
+    /// that no longer exist.
+    pub forgotten: Vec<String>,
 }
 
 impl LogBatch {
@@ -268,7 +275,10 @@ impl LogBatch {
 
     /// Nothing to write.
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty() && self.requests.is_empty() && self.cursors.is_empty()
+        self.records.is_empty()
+            && self.requests.is_empty()
+            && self.cursors.is_empty()
+            && self.forgotten.is_empty()
     }
 }
 

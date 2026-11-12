@@ -211,6 +211,56 @@ fn request_ids_are_32_lowercase_hex_digits() {
     }
 }
 
+#[tokio::test]
+async fn cursors_are_upserted_with_their_place_and_deleted_once_forgotten() {
+    let (_dir, store) = open().await;
+    let cursor = |container: &str, time_ns, nth| LogCursor {
+        container: container.to_owned(),
+        time_ns,
+        nth,
+    };
+    let batch = |cursors, forgotten: &[&str]| LogBatch {
+        cursors,
+        forgotten: forgotten.iter().map(|c| (*c).to_owned()).collect(),
+        ..LogBatch::default()
+    };
+    store
+        .append(&batch(vec![cursor("a", 10, 1), cursor("b", 20, 3)], &[]))
+        .await
+        .unwrap();
+    store
+        .append(&batch(vec![cursor("a", 10, 2)], &[]))
+        .await
+        .unwrap();
+    assert_eq!(store.cursor("a").await.unwrap(), Some(cursor("a", 10, 2)));
+    assert_eq!(
+        store.cursors().await.unwrap(),
+        [cursor("a", 10, 2), cursor("b", 20, 3)]
+    );
+
+    // Forgetting a container deletes its cursor; one never stored is no error.
+    store
+        .append(&batch(Vec::new(), &["b", "never"]))
+        .await
+        .unwrap();
+    assert_eq!(store.cursor("b").await.unwrap(), None);
+    assert_eq!(store.cursors().await.unwrap(), [cursor("a", 10, 2)]);
+    store.close().await;
+}
+
+#[tokio::test]
+async fn cursors_from_before_their_place_was_stored_take_one_line_as_read() {
+    let (_dir, store) = open().await;
+    LOG_MIGRATOR.undo(&store.pool, 1).await.unwrap();
+    sqlx::query("INSERT INTO log_cursors (container, time_ns) VALUES ('a', 10)")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    LOG_MIGRATOR.run(&store.pool).await.unwrap();
+    assert_eq!(store.cursor("a").await.unwrap().map(|c| c.nth), Some(1));
+    store.close().await;
+}
+
 mod queries {
     use std::ops::Range;
     use std::time::{Duration, UNIX_EPOCH};

@@ -360,6 +360,14 @@ impl FakeRuntime {
         }
     }
 
+    /// Empties a container's log as podman does when it reaches its size cap (ADR-0044):
+    /// streams already following it read on.
+    pub fn truncate_log(&self, id: &ContainerId) {
+        if let Some(container) = self.lock().containers.get_mut(id) {
+            container.logs.clear();
+        }
+    }
+
     /// How many streams still follow a container's log; a dropped stream no longer counts.
     pub fn log_followers(&self, id: &ContainerId) -> usize {
         let mut state = self.lock();

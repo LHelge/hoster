@@ -820,8 +820,8 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     }
 
     /// Follows the logs of every container started from now on into `sink`, until `stop`
-    /// fires (ADR-0067 §1). Connect before [`recover`](Self::recover), so the containers it
-    /// starts are followed too. Returns the registry, for the supervisor to stop before the
+    /// fires (ADR-0067 §1). Connect before [`recover`](Self::recover), which follows every
+    /// managed container podman has, so lines written while hoster was down are read too. Returns the registry, for the supervisor to stop before the
     /// recorder; connecting twice returns the first.
     pub fn connect_logs(&self, sink: LogSink, stop: CancellationToken) -> LogFollowers<R> {
         self.logs
@@ -840,6 +840,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     fn forget_logs(&self, id: &ContainerId) {
         if let Some(logs) = self.logs.get() {
             logs.forget(id);
+        }
+    }
+
+    /// Container `id` was just stopped and is about to be removed: let its follower read what
+    /// it printed last.
+    async fn drain_logs(&self, id: &ContainerId) {
+        if let Some(logs) = self.logs.get() {
+            logs.drained(id).await;
         }
     }
 
