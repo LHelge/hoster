@@ -1,8 +1,9 @@
 //! The admin UI's small rendered components (ADR-0054): the [`Tone`] every status maps into
 //! (deployment states, health, [`CertState`] here; DNS verdicts and warnings where they are
-//! defined), the [`Pill`] that shows one, the server-drawn [`Meter`] bar and the [`Uptime`] of
-//! something running. Each renders its own markup in Askama templates (`HtmlSafe`, like
-//! [`Icon`]) and is coloured by a class whose colours are the role tokens in `assets/hoster.css`,
+//! defined), the [`Pill`] that shows one, the server-drawn [`Meter`] bar, the [`Load`] of a
+//! resource meter with its tone, and how figures are written ([`Count`], [`PerMinute`],
+//! [`Percent`], [`ByteUsage`], the [`Uptime`] of something running). Each renders its own
+//! markup in Askama templates (`HtmlSafe`, like [`Icon`]) and is coloured by a class whose colours are the role tokens in `assets/hoster.css`,
 //! so no page names a palette colour and nothing needs an inline `style=` under the CSP.
 
 use std::fmt;
@@ -12,6 +13,7 @@ use askama::filters::{Html, escape};
 
 use super::icons::Icon;
 use crate::health::HealthStatus;
+use crate::stats::Usage;
 use crate::store::DeploymentState;
 
 /// How a status reads at a glance; its `Display` is the CSS class suffix (`pill-ok`,
@@ -385,6 +387,99 @@ impl fmt::Display for PerMinute {
     }
 }
 
+/// A percentage as the resource figures write it (ADR-0066): one decimal below ten (`0.4%`,
+/// `2.6%`), whole from there (`23%`, `150%`), `0%` for none. CPU is a percent of all cores for
+/// the host and of one core for a container, so it can pass 100.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Percent(pub f64);
+
+impl fmt::Display for Percent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let share = self.0;
+        if !share.is_finite() || share <= 0.0 {
+            f.write_str("0%")
+        } else if share < 9.95 {
+            write!(f, "{share:.1}%")
+        } else {
+            write!(f, "{share:.0}%")
+        }
+    }
+}
+
+/// Bytes in use out of a total, both in the total's unit as the System page writes a size
+/// ([`Memory`](crate::machine::Memory): GiB with one decimal, MiB below one GiB): `11.2 / 31.2 GiB`, `120 / 512 MiB`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteUsage(pub Usage);
+
+impl ByteUsage {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * Self::MIB;
+}
+
+impl fmt::Display for ByteUsage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        #[expect(clippy::cast_precision_loss, reason = "shown with one decimal at most")]
+        let (used, total) = (self.0.used as f64, self.0.total as f64);
+        if total >= Self::GIB {
+            write!(f, "{:.1} / {:.1} GiB", used / Self::GIB, total / Self::GIB)
+        } else {
+            write!(f, "{:.0} / {:.0} MiB", used / Self::MIB, total / Self::MIB)
+        }
+    }
+}
+
+/// A figure against its maximum, as a resource meter shows it (ADR-0066 §10): host CPU against
+/// 100 %, memory or disk against their size, a container against its `limits`. Its [`Tone`] is
+/// `Ok` below [`Load::WARN`], `Warn` from there and `Fail` from [`Load::FAIL`] of the maximum;
+/// a figure without a maximum has no `Load` and is `Neutral`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Load {
+    pub value: f64,
+    pub max: f64,
+}
+
+impl Load {
+    /// The share of the maximum from which a load is a warning.
+    pub const WARN: f64 = 0.80;
+    /// The share of the maximum from which a load is bad.
+    pub const FAIL: f64 = 0.95;
+
+    /// A load of `value` out of `max`.
+    pub fn new(value: f64, max: f64) -> Self {
+        Self { value, max }
+    }
+
+    /// The share of the maximum in use; `None` when the maximum is not positive or the value
+    /// is not a number.
+    pub fn share(self) -> Option<f64> {
+        (self.max > 0.0 && self.value.is_finite()).then(|| self.value / self.max)
+    }
+
+    /// Its meter, in its tone, labelled `label` for screen readers.
+    pub fn meter(self, label: impl fmt::Display) -> Meter {
+        Meter::new(self.value, self.max, self.into(), label)
+    }
+}
+
+/// Used bytes out of the total.
+impl From<Usage> for Load {
+    fn from(usage: Usage) -> Self {
+        #[expect(clippy::cast_precision_loss, reason = "only the share matters")]
+        Self::new(usage.used as f64, usage.total as f64)
+    }
+}
+
+impl From<Load> for Tone {
+    fn from(load: Load) -> Self {
+        match load.share() {
+            Some(share) if share >= Load::FAIL => Tone::Fail,
+            Some(share) if share >= Load::WARN => Tone::Warn,
+            Some(_) => Tone::Ok,
+            None => Tone::Neutral,
+        }
+    }
+}
+
 /// How long something (a container, hoster, the host) has been up, in its two largest units:
 /// `45s`, `12m`, `2h 04m`, `12d 6h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -575,6 +670,59 @@ mod tests {
             Meter::new(1.0, 2.0, Tone::Ok, "<x>")
                 .to_string()
                 .contains(r#"aria-label="&#60;x&#62;""#)
+        );
+    }
+
+    #[test]
+    fn percentages_have_a_decimal_only_below_ten() {
+        for (share, text) in [
+            (0.0, "0%"),
+            (-1.0, "0%"),
+            (f64::NAN, "0%"),
+            (0.04, "0.0%"),
+            (0.4, "0.4%"),
+            (9.94, "9.9%"),
+            (9.96, "10%"),
+            (23.4, "23%"),
+            (150.0, "150%"),
+        ] {
+            assert_eq!(Percent(share).to_string(), text, "{share}");
+        }
+    }
+
+    #[test]
+    fn byte_usage_is_written_in_the_totals_unit() {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+        let usage = |used, total| ByteUsage(Usage { used, total }).to_string();
+        assert_eq!(usage(11 * GIB + GIB / 5, 32 * GIB), "11.2 / 32.0 GiB");
+        assert_eq!(usage(412 * MIB, 2 * GIB), "0.4 / 2.0 GiB");
+        assert_eq!(usage(120 * MIB, 512 * MIB), "120 / 512 MiB");
+        assert_eq!(usage(0, 0), "0 / 0 MiB");
+    }
+
+    #[test]
+    fn a_load_turns_warn_at_80_and_fail_at_95_percent() {
+        let tone = |value, max| Tone::from(Load::new(value, max));
+        assert_eq!(tone(0.0, 100.0), Tone::Ok);
+        assert_eq!(tone(79.9, 100.0), Tone::Ok);
+        assert_eq!(tone(80.0, 100.0), Tone::Warn);
+        assert_eq!(tone(94.9, 100.0), Tone::Warn);
+        assert_eq!(tone(95.0, 100.0), Tone::Fail);
+        assert_eq!(tone(300.0, 200.0), Tone::Fail);
+        // No maximum: no judgement.
+        assert_eq!(tone(5.0, 0.0), Tone::Neutral);
+        assert_eq!(tone(f64::NAN, 100.0), Tone::Neutral);
+        assert_eq!(
+            Tone::from(Load::from(Usage {
+                used: 19,
+                total: 20
+            })),
+            Tone::Fail
+        );
+        assert_eq!(
+            Load::new(40.0, 50.0).meter("cpu"),
+            Meter::new(40.0, 50.0, Tone::Warn, "cpu")
         );
     }
 }

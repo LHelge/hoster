@@ -17,9 +17,9 @@
 //! with the partial put into its target element. `empty/` holds the pages of an app with no
 //! stacks, deployments, certificates, registries or containers. `pages.html` links them all.
 //!
-//! Live parts (the dashboard stream, deployment progress, log follow) cannot connect when the
-//! files are served statically, so their `hx-sse:connect` attributes are left out and their
-//! first content is rendered into the page instead.
+//! Live parts (the dashboard stream, deployment progress, log follow, the sidebar host card's
+//! poll) cannot connect when the files are served statically, so their `hx-sse:connect` (or
+//! poll) attributes are left out and their first content is rendered into the page instead.
 //!
 //! When a page gains a state the fixtures cannot show yet, extend [`Fixtures`].
 
@@ -1253,6 +1253,36 @@ impl Fixtures {
     }
 }
 
+/// The sidebar's host card (ADR-0066): an hour of host samples, CPU busy enough to warn, memory
+/// a third used with a gap the sampler could not read, the disk nearly full. The empty app's
+/// pages show the card before the first tick.
+impl Fixtures {
+    fn resources(app: &TestApp) {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let n = crate::stats::ResourceUsage::HISTORY;
+        for i in 0..n {
+            let cpu = 30.0 + 50.0 * Self::noise(i as u64 + 7) + Self::wave(i, n, 0.0, 10.0) as f64;
+            let gap = (200..212).contains(&i);
+            app.resources.record(
+                crate::stats::HostSample {
+                    at: ago(Duration::from_secs(10 * (n - i) as u64)),
+                    // The first tick has no CPU figure (ADR-0066 §7).
+                    cpu: (i > 0).then_some(cpu),
+                    memory: (!gap).then_some(crate::stats::Usage {
+                        used: 10 * GIB + Self::wave(i, n, 0.0, 2.0 * GIB as f64),
+                        total: 32 * GIB,
+                    }),
+                    disk: Some(crate::stats::Usage {
+                        used: 76 * GIB,
+                        total: 80 * GIB,
+                    }),
+                },
+                None,
+            );
+        }
+    }
+}
+
 /// The traffic charts (ADR-0062 §9) on a page of their own, with fixture series: a day with a
 /// 5xx spike, an hour, a week, an empty series and a single spike, and the sparklines in each
 /// tone, beside the pages that draw them from history (the dashboard).
@@ -1457,7 +1487,9 @@ impl Preview {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            Self::without_streams(html).replace(Self::LIVE_CHECK, ""),
+            Self::without_streams(html)
+                .replace(Self::LIVE_CHECK, "")
+                .replace(Self::HOST_POLL, ""),
         )
         .unwrap();
         self.index.push((file.to_owned(), label.to_owned()));
@@ -1466,6 +1498,9 @@ impl Preview {
     /// The stack editor's live check request (ADR-0060), left out like the streams: a static
     /// server cannot answer the POST. The states below show its panel filled in instead.
     const LIVE_CHECK: &str = " hx-post=\"/apply/check\"";
+
+    /// The sidebar host card's poll, left out for the same reason.
+    const HOST_POLL: &str = " hx-get=\"/shell/host\" hx-trigger=\"every 10s\"";
 
     /// `html` without its `hx-sse:connect` attributes: a static server has no streams, and
     /// htmx would swap the server's 404 page into the element.
@@ -1696,6 +1731,7 @@ async fn ui_preview() {
         .insert("shop.example.com".into(), SystemTime::now() + HOUR);
     Fixtures::statistics(&app);
     Fixtures::history(&app);
+    Fixtures::resources(&app);
     Fixtures::registries(&app);
     let container = Fixtures::containers(&app).await;
     let schema: i64 = crate::store::Store::expected_schema_version().into();

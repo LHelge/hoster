@@ -1,16 +1,17 @@
 ---
 id: hzc
 title: "Sidebar host meters: cpu, mem and disk with sparklines, refreshed by an HTMX poll"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T00:08:17.739858239Z"
-updated: "2026-11-12T00:08:17.739858239Z"
+updated: "2026-11-12T01:12:03.198661540Z"
 tags:
   - web
   - observability
 depends_on:
   - bqt
 parent: qmw
+attempts: 1
 ---
 
 ## Summary

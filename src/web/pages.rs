@@ -3,8 +3,11 @@
 //!
 //! Signed-in pages sit in the shell of ADR-0054: a sidebar with the version and instance name, the
 //! navigation with its counts and the session, and a page header with a `~/path` breadcrumb, the
-//! h1 and an actions slot (the `crumb`, `heading` and `actions` blocks). Handlers take a
-//! [`Shell`] extractor, which gathers the counts per request, and call [`Shell::layout`].
+//! h1 and an actions slot (the `crumb`, `heading` and `actions` blocks). The sidebar ends with
+//! the [`HostCard`], the host's resource meters (ADR-0066). Handlers take a [`Shell`] extractor,
+//! which gathers the counts and the card per request, and call [`Shell::layout`].
+
+mod host_card;
 
 use std::fmt;
 use std::sync::Arc;
@@ -22,7 +25,10 @@ use super::certificates::CertificateControl;
 use super::icons::Icon;
 use super::stacks::StackControl;
 use crate::instance::{Instance, InstanceName};
+use crate::stats::ResourceUsage;
 use crate::store::Timestamp;
+
+pub use self::host_card::HostCard;
 
 /// A section of the admin UI, each but [`Section::Events`] in the sidebar's navigation. The
 /// containers and their logs belong to the stacks (ADR-0054).
@@ -147,13 +153,16 @@ impl NavCounts {
 }
 
 /// Where the shell's data comes from: shared by every route as a request extension, so the
-/// layout can gather the navigation's counts on every full page render.
+/// layout can gather the navigation's counts and the host card on every full page render.
 #[derive(Clone)]
 pub struct ShellSource {
     stacks: Arc<dyn StackControl>,
     certificates: Arc<dyn CertificateControl>,
-    /// The instance name (ADR-0058 §2), cached in memory: no store read per page.
+    /// The instance name (ADR-0058 §2), cached in memory: no store read per page. Its default
+    /// is the hostname, read once, which the host card is headed with.
     instance: Instance,
+    /// The resource sampler's cache, the host card's only source (ADR-0066 §1).
+    resources: ResourceUsage,
 }
 
 impl ShellSource {
@@ -161,12 +170,19 @@ impl ShellSource {
         stacks: Arc<dyn StackControl>,
         certificates: Arc<dyn CertificateControl>,
         instance: Instance,
+        resources: ResourceUsage,
     ) -> Self {
         Self {
             stacks,
             certificates,
             instance,
+            resources,
         }
+    }
+
+    /// The host card as the sampler's cache has it now.
+    fn host_card(&self) -> HostCard {
+        HostCard::of(self.instance.default_name().clone(), &self.resources)
     }
 
     /// The navigation's counts: one stack query and the in-memory certificate status. A count
@@ -182,12 +198,14 @@ impl ShellSource {
     }
 }
 
-/// The shell of a signed-in page, extracted per request: the session, the navigation's counts
-/// and the instance name. A handler turns it into the page's [`Layout`] with [`Shell::layout`].
+/// The shell of a signed-in page, extracted per request: the session, the navigation's counts,
+/// the instance name and the host card. A handler turns it into the page's [`Layout`] with
+/// [`Shell::layout`].
 pub struct Shell {
     session: Session,
     counts: NavCounts,
     instance: InstanceName,
+    host: HostCard,
 }
 
 impl Shell {
@@ -196,6 +214,7 @@ impl Shell {
         Layout {
             counts: self.counts,
             instance: Some(self.instance),
+            host: Some(self.host),
             ..Layout::new(section, &self.session)
         }
     }
@@ -224,6 +243,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Shell {
             session,
             counts: source.counts().await,
             instance: source.instance.name(),
+            host: source.host_card(),
         })
     }
 }
@@ -301,6 +321,9 @@ pub struct Layout {
     counts: NavCounts,
     /// The instance name, next to the version in the sidebar.
     pub instance: Option<InstanceName>,
+    /// The sidebar's host card; `None` on public pages and in layouts built without a
+    /// [`Shell`].
+    pub host: Option<HostCard>,
 }
 
 impl Layout {
@@ -317,6 +340,7 @@ impl Layout {
             }),
             counts: NavCounts::default(),
             instance: None,
+            host: None,
         }
     }
 
@@ -328,6 +352,7 @@ impl Layout {
             user: None,
             counts: NavCounts::default(),
             instance: None,
+            host: None,
         }
     }
 

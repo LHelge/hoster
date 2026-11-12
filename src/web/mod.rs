@@ -73,7 +73,7 @@ use self::containers::{ContainerSource, Containers};
 use self::dashboard::Dashboard;
 use self::events::EventsPage;
 pub(crate) use self::icons::Icon;
-use self::pages::ShellSource;
+use self::pages::{HostCard, ShellSource};
 use self::settings::{
     EffectiveConfig, Notifications, Registries, RegistryControl, Settings, UpdatesSection,
 };
@@ -273,6 +273,7 @@ impl WebApp {
                 Arc::clone(&stacks),
                 Arc::clone(&certificates),
                 instance.clone(),
+                stats.resources().clone(),
             ),
             stats,
             system,
@@ -417,6 +418,7 @@ impl WebApp {
             .route("/healthz", get(WebApp::healthz))
             .route(StackSchema::ADMIN_PATH, get(WebApp::stack_schema))
             .route("/assets/{file}", get(Assets::serve))
+            .route(HostCard::PATH, get(HostCard::fragment))
             .merge(Auth::routes())
             .layer(Extension(self.shell.clone()))
             .fallback(WebApp::not_found)

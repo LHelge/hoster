@@ -123,6 +123,8 @@ live pages can await.
 - **Sidebar.** The HOST card is its own fragment, served at a small authenticated GET endpoint.
   It polls that endpoint with HTMX every 10 s (`hx-trigger="every 10s"`) and swaps itself. Each
   open tab costs one cache read and one render every 10 s, with no second SSE connection.
+  The poll needs a live session like any admin route but does not count as activity for the
+  idle timeout (ADR-0031): it never refreshes the session's idle timer.
 
 **10. Tones.** For a meter with a maximum (memory against `limits.memory`, CPU against
 `limits.cpus`, host CPU, memory and disk): `Ok` below 80 %, `Warn` from 80 %, `Fail` from 95 %.

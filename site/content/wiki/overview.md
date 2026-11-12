@@ -42,9 +42,9 @@ registries, translating a compose file and the usual pitfalls.
 
 # The admin UI
 
-Every page shares one layout: a sidebar with the version, the hostname and the navigation
-(Dashboard, Stacks, Certificates, Settings, System), which moves above the page on a phone. The
-colours follow your system's light or dark mode.
+Every page shares one layout: a sidebar with the version, the hostname, the navigation
+(Dashboard, Stacks, Certificates, Settings, System) and the host's resource meters, which moves
+above the page on a phone. The colours follow your system's light or dark mode.
 
 | Page | What you see and do |
 |---|---|
@@ -54,9 +54,19 @@ colours follow your system's light or dark mode.
 | **Stack** | One stack under four tabs that share a header with **Redeploy** and **Re-resolve tags**. **Overview**: the last hour of traffic (requests per minute and the busiest minute, p50, p95, 5xx rate, the requests in flight now, and the responses by status), the services with their containers, generations, uptime and ports, routes, volumes, deploying explicit digests, applying a new revision of the stack file (with a diff), refused webhook attempts, the stack's recent events, and removing the stack at the bottom. **Logs**: tail and follow the logs of each service's containers. **Environment**: the environment variables and the secrets, whose values are write-only. **Deployments**: the history, with each step and failure reasons; "Redeploy this one" or "Roll back to this one" is the rollback. |
 | **Certificates** | Hosts, issuer, expiry, the last ACME error and the DNS check, per host or for all at once; retry the failing ones. |
 | **Settings** | General, notifications, registries (credentials for private images), deploy webhook, reverse proxy and certificates. The instance name, [[notifications|mail notifications]] and registries are edited here; the rest shows the effective `hoster.toml`. |
-| **System** | The running and previous versions, the host; check for updates, read the release notes and update. |
+| **System** | The running and previous versions, the host (and the data directory's disk usage when it is on a different filesystem from podman's storage); check for updates, read the release notes and update. |
 
 There is no separate containers page: a container and its logs are on its stack's pages.
+
+## Resource usage
+
+The **HOST** card at the bottom of the sidebar shows the host's CPU (busy share of all cores),
+memory (in use, not counting what the kernel can reclaim) and disk (the filesystem podman keeps
+its images and volumes on), each with a meter, and CPU and memory with a line of the last hour.
+A meter turns orange from 80 % and red from 95 %. hoster samples them every 10 seconds and keeps
+an hour in memory only, so the lines start empty after a restart or an update, and a figure it
+could not read shows as `—`. The card refreshes itself, but that does not count as activity:
+a tab left open still signs you out after the idle timeout.
 
 ## Traffic history
 
