@@ -16,6 +16,8 @@ parent: psq
 ## Summary
 Add the **log source** switch of `docs/design/StackLogs.dc.html` (containers, access log, deploy) to the stack logs tab and implement the **deploy** source: the stack's deployment transitions and output over the chosen time range, read from what `hoster.db` already holds. The access-log source is its own task because it waits for the edge request log epic.
 
+**Scope (2026-11-12).** The owner chose one log view with two scopes: the stack tab and the Telemetry page's Logs tab (`ckc`) are the same view, the stack tab with its stack fixed. Sources are a stack-scope feature: the switch is mounted on the stack tab only.
+
 ## Acceptance Criteria
 - [ ] A source switch above the toolbar, `?source=containers` (the default) or `deploy`; the access-log entry is absent until its task lands
 - [ ] `source=deploy` lists the stack's deployment events (`deployment_events`) in the time range, in time order across deployments: time, deployment (linked to its page), the transition or step, and its message or failure reason

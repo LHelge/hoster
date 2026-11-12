@@ -16,6 +16,8 @@ parent: psq
 ## Summary
 A record that came from a JSON line carries its remaining keys as fields (ADR-0067 §3). Show them on demand in the stack logs tab and let a field value become a filter, so "every line of this request" or "every line from this module" is one click.
 
+**Scope (2026-11-12).** The owner chose one log view with two scopes: the stack tab and the Telemetry page's Logs tab (`ckc`) are the same view, the stack tab with its stack fixed. Fields and field chips work in both scopes (the Telemetry mockup's expanded record shows the same `key=value` list).
+
 ## Acceptance Criteria
 - [ ] A record with fields expands in place (a `<details>` row, no script) to a key/value list: nested objects flattened to dotted keys (`fields.user_id`, `span.name`), values in the mono font, long values wrapped not truncated
 - [ ] The expanded row also shows what the list view leaves out: full timestamp, stream, container generation, and whether the line was cut at the length cap

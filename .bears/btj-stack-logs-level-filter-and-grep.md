@@ -14,10 +14,10 @@ parent: psq
 ---
 
 ## Summary
-Add the two filters of `docs/design/StackLogs.dc.html` to the stack logs tab: **level** (all, warn+, error) and **grep** (a substring, or a regular expression with the `.*` toggle). Both run in the log store's query, which scans the indexed range in Rust (ADR-0067 §8).
+Add the two filters of `docs/design/StackLogs.dc.html` to the shared log view (both scopes, so the Telemetry Logs tab `ckc` gets them too): **level** (all, error, warn+, info, debug: the chips of both mockups together) and **grep** (a substring, or a regular expression with the `.*` toggle). Both run in the log store's query, which scans the indexed range in Rust (ADR-0067 §8).
 
 ## Acceptance Criteria
-- [ ] `?level=warn` shows `warn` and `error`, `?level=error` shows `error`; the default shows everything
+- [ ] `?level=warn` shows `warn` and `error`, `?level=error` shows `error`; `?level=info` and `?level=debug` show that level alone, as the Telemetry mockup's chips do (`trace` records are shown with debug); the default shows everything
 - [ ] Records without a level (text lines, ADR-0067 §3) are shown only under "all". The toolbar says so when a level filter hides them, with the count hidden if the store can give it cheaply
 - [ ] `?q=` matches a case-insensitive substring of the message and of the fields JSON; with `?regex=on` it is a regular expression. Matches in the message are wrapped in `<mark>`
 - [ ] An invalid regular expression re-renders the tab with the error beside the field and no records; it is never a 500
@@ -42,4 +42,4 @@ Add the two filters of `docs/design/StackLogs.dc.html` to the stack logs tab: **
 
 ## References
 - ADR-0067 (§3, §8), ADR-0054
-- `docs/design/StackLogs.dc.html`, `src/web/stacks/logs.rs`, `src/web/containers.rs` (`LogQuery`, `LogOptions`)
+- `docs/design/StackLogs.dc.html`, `docs/design/Telemetry.dc.html` (severity chips), `src/web/stacks/logs.rs`, `src/web/containers.rs` (`LogQuery`, `LogOptions`)

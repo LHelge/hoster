@@ -16,6 +16,8 @@ parent: psq
 ## Summary
 A **Download** button on the stack logs tab saves what the current filters select, over the whole time range and not only the page shown, as a file.
 
+**Scope (2026-11-12).** The owner chose one log view with two scopes: the stack tab and the Telemetry page's Logs tab (`ckc`) are the same view, the stack tab with its stack fixed. Download is mounted on the stack tab only for now; it is built on the shared view's query, so offering it on the Telemetry page later is a mount, not new code.
+
 ## Acceptance Criteria
 - [ ] `GET /stacks/{name}/logs/download` takes the tab's parameters (service, since, level, grep, field filters where they exist) and answers with `Content-Disposition: attachment` and a file name of stack, range and format (`blog-2026-11-12T10-00Z-1h.log`)
 - [ ] `format=text` (the default): one line per record, `<RFC 3339 time> <service> <level or -> <message>`. `format=jsonl`: one JSON object per record with time, stack, service, generation, stream, level, message and fields

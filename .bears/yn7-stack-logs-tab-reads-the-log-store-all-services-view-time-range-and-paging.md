@@ -16,11 +16,15 @@ parent: psq
 ## Summary
 `GET /stacks/{name}/logs` shows the stack's persisted records from the log store (ADR-0067) instead of one container's podman stream: every service merged in time order, with a service column, a time range and paging back through history. This is the base the other tasks of the epic add filters, follow, fields, download and sources to.
 
+**Scope (2026-11-12).** The owner chose one log view with two scopes: the stack tab and the Telemetry page's Logs tab (`ckc`) are the same view, the stack tab with its stack fixed. This task builds that view as a module of its own and mounts it on the stack tab first.
+
 ## Acceptance Criteria
+- [ ] The view, its parameter parsing and its templates are one module (for example `src/web/logs/`) parameterised by a `LogScope` (`Stack(name)` or `All { stack: Option<…> }`); the stack tab mounts it with `Stack`, and the Telemetry Logs tab (`ckc`) will mount it with `All` without copying handlers or templates
+- [ ] hoster's own records that name the stack (ADR-0068) are listed under the service `hoster`, with its own chip
 - [ ] The tab lists the stack's records oldest to newest (newest at the bottom): time, service, level, message. Order is by time, then record id
 - [ ] Service chips as in `docs/design/StackLogs.dc.html`: **all** (the default) plus one per service that has records in the range or is in the current revision; `?service=` picks one. The service column is colour-coded with a fixed palette of CSS classes assigned by service order (no inline styles, ADR-0054)
 - [ ] Records of replaced and removed containers are shown, with the deployment generation visible where a service has more than one in the range
-- [ ] `since` presets 15m, 1h, 6h, 24h and 7d plus the free text the tab accepts today (a duration or a UTC time); default 1h. All options are plain GET parameters and every link keeps the others, as `LogView` does now
+- [ ] `since` presets 5m, 15m, 1h, 6h, 24h and 7d (shared with the Telemetry Logs tab) plus the free text the tab accepts today (a duration or a UTC time); default 1h. All options are plain GET parameters and every link keeps the others, as `LogView` does now
 - [ ] A page shows at most a fixed number of records (a constant); "older" and "newer" links page by record id, not by offset
 - [ ] When the store's oldest record is newer than the start of the asked range (size cap or a young server), the page says from when its data starts
 - [ ] A text line (no level) and a `stderr` line are distinguishable, as stdout/stderr are today
@@ -45,5 +49,5 @@ parent: psq
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, tests pass
 
 ## References
-- ADR-0067 (§4, §7, §8, §10), ADR-0054, ADR-0021
-- `docs/design/StackLogs.dc.html`, `src/web/stacks/logs.rs`, `src/web/containers.rs`, `templates/log_*.html`
+- ADR-0067 (§4, §7, §8, §10), ADR-0068, ADR-0054, ADR-0021
+- `docs/design/StackLogs.dc.html`, `docs/design/Telemetry.dc.html` (logs tab), `src/web/stacks/logs.rs`, `src/web/containers.rs`, `templates/log_*.html`

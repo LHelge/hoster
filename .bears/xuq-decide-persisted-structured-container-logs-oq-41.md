@@ -1,10 +1,10 @@
 ---
 id: xuq
 title: "Decide: persisted, structured container logs (OQ-41)"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T13:13:40.130227673Z"
-updated: "2026-11-12T13:13:40.130227673Z"
+updated: "2026-11-12T19:39:09.754411549Z"
 tags:
   - decision
 parent: f8z
@@ -17,7 +17,7 @@ Architecture decision gate (project owner decides, agent drafts). Resolve OQ-41 
 - [x] Owner has chosen an option for each numbered question of OQ-41 (docs/open-questions.md): persist or not, where, record shape and parsing, retention and caps, search, backups, the access-log source
 - [x] The decision is recorded as ADR-0067 in docs/adr/ (amending ADR-0044 and ADR-0045) and listed in docs/adr/README.md
 - [x] OQ-41 is marked resolved in docs/open-questions.md
-- [ ] Epic `f8z` is broken down into tasks, and the bodies of `psq` and the edge request log epic (`usf`) are updated if the decision differs from the recommendation
+- [x] Epic `f8z` is broken down into tasks (2026-11-12), and the bodies of `psq` and the edge request log epic (`usf`) are updated if the decision differs from the recommendation
 
 ## Implementation Notes
 - An agent may prepare a comparison and a draft ADR, but the choice is the owner's. Do not mark done without explicit owner sign-off
