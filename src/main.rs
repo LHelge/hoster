@@ -12,6 +12,7 @@ mod health;
 mod installation;
 mod instance;
 mod logging;
+mod logs;
 mod machine;
 mod notify;
 mod orchestrator;
