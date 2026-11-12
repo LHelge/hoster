@@ -407,7 +407,7 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 process hoster
 ├── main thread ── #[tokio::main] orchestrator runtime (multi-thread, N workers)
 │                  supervisor, orchestrator, deploy tasks, ACME, poller, update checker, API, reconciler, notifier,
-│                  traffic recorder
+│                  traffic recorder, resource sampler
 └── "pingora" std::thread ── pingora_core::server::Server::run(RunArgs{ custom watcher })
                  ├── Pingora "Server" runtime (1 thread): main loop, awaits our ShutdownSignalWatch
                  ├── ":80" service runtime  (ServerConf.threads or per-service override)
@@ -419,6 +419,8 @@ process hoster
 - The proxy's threads count requests in lock-free atomics (`Traffic`); the traffic recorder on
   the orchestrator runtime drains them once a minute into SQLite (§12, ADR-0062), so the hot path
   never touches the store.
+- The resource sampler (§13, ADR-0066) calls podman and reads `/proc` every 10 s on the
+  orchestrator runtime. Pages, the sidebar included, read only its in-memory cache.
 - The Pingora thread is spawned **after** the initial state is loaded (§4). That way the first
   request already sees a populated `RouteTable` and `CertMap`.
 - `ServerConf` is built in code: `daemon = false`, no upgrade socket, explicit
@@ -525,7 +527,8 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
 7. Spawn the Pingora thread and wait for `ExecutionPhase::Running`. If it fails to bind :80/:443,
    exit non-zero so systemd shows the failure.
 8. Start the ACME task (renewals plus any missing certs, the admin host included), the poller, the
-   notifier (ADR-0058), the traffic recorder (its retention sweep first, §12) and the Axum app
+   notifier (ADR-0058), the traffic recorder (its retention sweep first, §12), the resource
+   sampler (§13; it reads the engine info for podman's storage root first) and the Axum app
    (web UI + webhook). Requests the proxy served before the recorder's first tick are in the
    in-memory counters and land in that tick's minute.
 9. Notify systemd that the service is ready (`READY=1` with `Type=notify`).
@@ -533,7 +536,8 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
 **Shutdown** (SIGTERM, or the graceful shutdown the System page requests after a self-update
 switched `current`; `Restart=always` then starts the new binary, ADR-0052)
 
-1. Cancel the poller and the Axum app, and stop accepting new commands.
+1. Cancel the poller, the resource sampler and the Axum app, and stop accepting new commands.
+   The sampler's history is in memory only and is dropped.
 2. Let in-flight deploy tasks reach a safe point (§5.4), then persist.
 3. Send `GracefulTerminate` to Pingora. Pingora stops accepting, waits `grace_period_seconds`,
    then shuts its runtimes down with `graceful_shutdown_timeout_seconds`.
@@ -1231,3 +1235,31 @@ went with them (a slowest-routes panel over history is a proposal, ADR-0062 §10
   buckets have more non-empty buckets and larger counts; smaller key strings make up for it.
   A flush of all 40 routes (40 minute rows, 40 hour rows read, merged and written) takes 3.1 ms
   at the median, 3.4 ms at p95 and 7.3 ms at most.
+
+## 13. Resource usage
+
+The resource sampler (ADR-0066) is what the sidebar's HOST card and the CPU and Memory columns
+of a stack's services table read. It lives in `src/stats/` next to the traffic recorder. Its
+whole state is in memory.
+
+- **Tick.** Every 10 s (`MissedTickBehavior::Skip`), spawned with a child of the root token in
+  startup phase 8. One `list_containers` by the managed label, then one compat
+  `stats?stream=false&one-shot=true` per running container (`ContainerRuntime::stats`), at most
+  8 at a time, all within a 5 s deadline. Then `Machine`'s CPU times, memory and `statvfs` of
+  podman's storage root (`EngineInfo`, compat `DockerRootDir`; read again while unknown).
+- **Figures.** Container CPU is the `total_usage` delta (ns) over the wall time between two
+  readings, as a percent of one core. Memory is podman's `usage` (`memory.current` minus
+  `inactive_file`, measured on 6.1.4, see ADR-0066). Host CPU is the busy share of all cores
+  from `/proc/stat` deltas (busy = everything but idle and iowait). Host memory is
+  `MemTotal − MemAvailable`. Disk used is size minus what an unprivileged user may write.
+  Limits shown next to container figures come from the service's revision (ADR-0059), not from
+  stats' `limit`, which is the host's `MemTotal` when no limit is set.
+- **State.** The latest sample and a ring of 360 (1 h) per listed container, keyed by container
+  id with its stack and service, and one for the host. A ring is dropped once its container is
+  no longer listed. A figure is unknown (`—`) before the first tick, on a container's first
+  reading (CPU), after a counter went backwards, and when podman or `/proc` did not answer.
+  Runtime failures are logged once per change of state.
+- **Readers.** A cheap clonable handle in the web app's state. After each tick it bumps a
+  `watch` counter. The stack overview's `StackFeed` stream wakes on it and sends `<hx-partial>`s
+  for the stack's usage cells, rendered from the cache alone. The sidebar card polls its own
+  fragment endpoint every 10 s with HTMX. Nothing is persisted and there is no migration.

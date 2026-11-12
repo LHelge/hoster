@@ -1,6 +1,6 @@
 # ADR-0045: Observability lives in the web UI only (no metrics endpoint, no alerting) in v1
 
-- Status: Accepted (resolves OQ-26; amended by ADR-0055, by ADR-0058, which adds email notifications, and by ADR-0062, which persists traffic history)
+- Status: Accepted (resolves OQ-26; amended by ADR-0055, by ADR-0058, which adds email notifications, by ADR-0062, which persists traffic history, and by ADR-0066, which adds container and host resource usage)
 - Date: 2026-11-07
 
 ## Decision
