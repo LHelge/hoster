@@ -22,6 +22,7 @@ Keep `logs.db` within ADR-0067 §7: hourly, delete records and request rows olde
 - [ ] Size is measured as `page_count * page_size` minus `freelist_count * page_size` before vacuum, so freed pages that have not yet been returned are not counted twice
 - [ ] The size pass removes whole hours, oldest first, from `log_records` and `requests` together, and repeats until under the cap
 - [ ] `PRAGMA incremental_vacuum` after each pass gives the freed pages back; the file size on disk falls in a test
+- [ ] Neither sweep ever deletes the newest row of `log_records` or `requests`, so ids are never reused (the tables use `INTEGER PRIMARY KEY` without AUTOINCREMENT, as the events table does; see the migration's header)
 - [ ] Each pass logs at debug what it removed and how large the file is; the figures are kept for the System page task
 - [ ] The span table added later by the OTLP epic plugs into the same sweep (leave a clear place; spans are kept 3 days per OQ-42)
 

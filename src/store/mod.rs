@@ -1,9 +1,11 @@
 //! State store: SQLite via sqlx (ADR-0022).
 //!
-//! [`Store`] is the only place in hoster that talks SQL. It owns a WAL-mode `SqlitePool` on
-//! `<state_dir>/hoster.db`, runs the embedded migrations (`migrations/` at the crate root) when it
-//! opens, and exposes typed async methods. The queries are compile-time checked against the
-//! offline metadata in `.sqlx/`; after changing one, run `cargo sqlx prepare` (see README).
+//! This module is the only place in hoster that talks SQL. [`Store`] owns a WAL-mode
+//! `SqlitePool` on `<state_dir>/hoster.db`, runs the embedded migrations (`migrations/` at the
+//! crate root) when it opens, and exposes typed async methods. The queries are compile-time
+//! checked against the offline metadata in `.sqlx/`; after changing one, run `cargo sqlx prepare`
+//! (see README). [`LogStore`] is the second database, `logs.db` (ADR-0067), with its own pool and
+//! migrations (`migrations_logs/`).
 //!
 //! The orchestrator is the logical single writer of desired state (ADR-0050); the pool
 //! serializes SQLite writes underneath. [`Store::commit`] is the deploy commit point
@@ -18,6 +20,7 @@
 mod events;
 mod images;
 mod instance;
+mod logs;
 mod notifications;
 mod secrets;
 mod sessions;
@@ -40,6 +43,11 @@ use sqlx::sqlite::{
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 use thiserror::Error;
 
+#[allow(
+    unused_imports,
+    reason = "the record types are written by the log store's recorder as it lands"
+)]
+pub use logs::{Level, LogRecord, LogStore, RequestId, RequestRow, Stream, UnknownLogText};
 pub use notifications::{
     DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,
 };
@@ -529,18 +537,23 @@ impl Store {
     }
 
     async fn check_integrity(&self) -> Result<()> {
+        Self::quick_check(&self.pool, &self.path).await
+    }
+
+    /// `PRAGMA quick_check` on the database at `path` behind `pool`; shared with [`LogStore`].
+    async fn quick_check(pool: &SqlitePool, path: &Path) -> Result<()> {
         // PRAGMAs cannot be described by the query macros.
         let report: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
-            .fetch_all(&self.pool)
+            .fetch_all(pool)
             .await
             .map_err(|source| StoreError::Open {
-                path: self.path.clone(),
+                path: path.to_owned(),
                 source,
             })?;
         match report.as_slice() {
             [ok] if ok == "ok" => Ok(()),
             _ => Err(StoreError::Corrupt {
-                path: self.path.clone(),
+                path: path.to_owned(),
                 report: report.join("; "),
             }),
         }
