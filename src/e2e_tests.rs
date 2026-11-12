@@ -627,7 +627,7 @@ async fn container_output_reaches_the_log_store() {
             );
             let records = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    let page = logs.query(&query).await.unwrap();
+                    let page = logs.records(&query).await.unwrap();
                     if page.entries.len() >= 2 {
                         break page.entries;
                     }
@@ -673,7 +673,7 @@ async fn container_output_reaches_the_log_store() {
             resumed.follow(&container);
             tokio::time::sleep(Duration::from_secs(2)).await;
             assert_eq!(resumed.followed(), [container]);
-            assert_eq!(logs.query(&query).await.unwrap().entries.len(), 2);
+            assert_eq!(logs.records(&query).await.unwrap().entries.len(), 2);
             resumed.stop().await;
         }
     };

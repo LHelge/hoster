@@ -327,7 +327,7 @@ mod queries {
 
     async fn messages(store: &LogStore, query: &LogQuery) -> Vec<String> {
         store
-            .query(query)
+            .records(query)
             .await
             .unwrap()
             .entries
@@ -435,7 +435,7 @@ mod queries {
 
         let mut query = LogQuery::new(everything(), LogScope::Stack("s".into()));
         query.limit = 10;
-        let newest = store.query(&query).await.unwrap();
+        let newest = store.records(&query).await.unwrap();
         assert!(newest.older && !newest.newer && newest.scan_stopped.is_none());
         let mut seen: Vec<String> = Vec::new();
         let mut page = newest;
@@ -453,7 +453,7 @@ mod queries {
                 break;
             }
             query.page = PageAt::Before(page.entries[0].key());
-            page = store.query(&query).await.unwrap();
+            page = store.records(&query).await.unwrap();
             assert!(page.newer);
         }
         let mut expected = vec!["first".to_owned()];
@@ -463,7 +463,7 @@ mod queries {
 
         // And forwards from the oldest.
         query.page = PageAt::After(page.entries[0].key());
-        let after = store.query(&query).await.unwrap();
+        let after = store.records(&query).await.unwrap();
         assert!(after.older && after.newer);
         assert_eq!(after.entries.len(), 10);
         assert_eq!(after.entries[0].record.message, "same 00");
@@ -471,7 +471,7 @@ mod queries {
             time: at(5),
             id: after.entries[9].id + 100,
         });
-        let tail = store.query(&query).await.unwrap();
+        let tail = store.records(&query).await.unwrap();
         assert_eq!(tail.entries.len(), 1);
         assert!(!tail.newer);
         store.close().await;
@@ -486,14 +486,14 @@ mod queries {
 
         let mut query = LogQuery::new(everything(), LogScope::Stack("s".into()));
         query.text = Some(TextFilter::substring("needle"));
-        let page = store.query(&query).await.unwrap();
+        let page = store.records(&query).await.unwrap();
         assert!(page.entries.is_empty());
         let stopped = page.scan_stopped.expect("stopped early");
         assert_eq!(stopped.time, at(2 + 10));
         assert!(page.older);
 
         query.page = PageAt::Before(stopped);
-        let older = store.query(&query).await.unwrap();
+        let older = store.records(&query).await.unwrap();
         assert_eq!(older.entries.len(), 1);
         assert_eq!(older.entries[0].record.message, "the needle");
         assert!(!older.older && older.scan_stopped.is_none());
@@ -509,7 +509,7 @@ mod queries {
         let (_dir, store) = mixed().await;
         assert_eq!(store.oldest_record_time().await.unwrap(), Some(at(1_000)));
         let query = LogQuery::new(at(0)..at(500), LogScope::All);
-        let page = store.query(&query).await.unwrap();
+        let page = store.records(&query).await.unwrap();
         assert_eq!(page, LogPage::default());
         store.close().await;
     }
@@ -557,7 +557,7 @@ mod queries {
         .await
         .unwrap();
         let query = LogQuery::new(everything(), LogScope::All);
-        let page = tokio::time::timeout(Duration::from_secs(1), store.query(&query))
+        let page = tokio::time::timeout(Duration::from_secs(1), store.records(&query))
             .await
             .expect("did not wait")
             .unwrap();
@@ -605,6 +605,288 @@ mod queries {
         for bad in ["", "12", "a.1", "1.b", "1.2.3"] {
             assert!(bad.parse::<RecordKey>().is_err(), "{bad:?}");
         }
+    }
+}
+
+mod request_queries {
+    use std::net::IpAddr;
+    use std::ops::Range;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::*;
+    use crate::store::Timestamp;
+
+    fn at(millis: u64) -> Timestamp {
+        Timestamp::from(UNIX_EPOCH) + Duration::from_millis(millis)
+    }
+
+    fn everything() -> Range<Timestamp> {
+        at(0)..at(1_000_000_000)
+    }
+
+    fn id(n: u8) -> RequestId {
+        RequestId::from([n; 16])
+    }
+
+    fn request(time: u64, stack: &str, service: &str, path: &str, status: u16) -> RequestRow {
+        RequestRow {
+            time: at(time),
+            host: format!("{stack}.example.com"),
+            prefix: "/".into(),
+            stack: stack.into(),
+            service: service.into(),
+            method: "GET".into(),
+            path: path.into(),
+            status,
+            to_header: Some(Duration::from_millis(3)),
+            total: Duration::from_millis(time / 100),
+            bytes: 512,
+            client: IpAddr::from([203, 0, 113, 7]),
+            upstream_failed: false,
+            // Unique per row in these tests: the time's low byte.
+            request_id: id((time / 1_000) as u8),
+        }
+    }
+
+    async fn seed(requests: Vec<RequestRow>) -> (TempDir, LogStore) {
+        let (dir, store) = open().await;
+        store
+            .append(&LogBatch {
+                requests,
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        (dir, store)
+    }
+
+    /// Two stacks: `notes` with `web` and `api`, `blog` with `app`.
+    async fn mixed() -> (TempDir, LogStore) {
+        seed(vec![
+            request(1_000, "notes", "web", "/", 200),
+            request(2_000, "notes", "web", "/missing", 404),
+            request(3_000, "notes", "api", "/api/users/7", 500),
+            request(4_000, "blog", "app", "/posts", 200),
+            request(5_000, "notes", "api", "/api/users", 502),
+            request(6_000, "notes", "web", "/login", 401),
+        ])
+        .await
+    }
+
+    async fn paths(store: &LogStore, query: &RequestQuery) -> Vec<String> {
+        store
+            .requests(query)
+            .await
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| entry.request.path)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_row_reads_back_as_written() {
+        let mut row = request(7_000, "notes", "web", "/ws", 101);
+        row.client = "2001:db8::1:2:3:4".parse().unwrap();
+        row.to_header = None;
+        row.total = Duration::from_millis(61_000);
+        row.upstream_failed = true;
+        row.bytes = 1 << 40;
+        let (_dir, store) = seed(vec![row.clone()]).await;
+        let page = store
+            .requests(&RequestQuery::new(everything(), LogScope::All))
+            .await
+            .unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].request, row);
+        assert!(!page.older && !page.newer && page.scan_stopped.is_none());
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn each_filter_narrows_alone_and_together() {
+        let (_dir, store) = mixed().await;
+        let all = || RequestQuery::new(everything(), LogScope::All);
+        assert_eq!(paths(&store, &all()).await.len(), 6);
+
+        let mut q = RequestQuery::new(everything(), LogScope::Stack("blog".into()));
+        assert_eq!(paths(&store, &q).await, ["/posts"]);
+        q.scope = LogScope::Hoster;
+        assert!(paths(&store, &q).await.is_empty(), "hoster has no requests");
+
+        let mut q = all();
+        q.range = at(2_000)..at(5_000);
+        assert_eq!(
+            paths(&store, &q).await,
+            ["/missing", "/api/users/7", "/posts"]
+        );
+
+        let mut q = all();
+        q.services = vec!["api".into(), "app".into()];
+        assert_eq!(
+            paths(&store, &q).await,
+            ["/api/users/7", "/posts", "/api/users"]
+        );
+
+        let mut q = all();
+        q.status = Some(StatusFilter::Class(5));
+        assert_eq!(paths(&store, &q).await, ["/api/users/7", "/api/users"]);
+        q.status = Some(StatusFilter::Code(404));
+        assert_eq!(paths(&store, &q).await, ["/missing"]);
+
+        let mut q = all();
+        q.min_total = Some(Duration::from_millis(50));
+        assert_eq!(paths(&store, &q).await, ["/api/users", "/login"]);
+
+        let mut q = all();
+        q.path = Some(TextFilter::substring("/API/users"));
+        assert_eq!(paths(&store, &q).await, ["/api/users/7", "/api/users"]);
+        q.path = Some(TextFilter::regex(r"^/api/users/\d+$").unwrap());
+        assert_eq!(paths(&store, &q).await, ["/api/users/7"]);
+
+        let mut q = all();
+        q.request_id = Some(id(4));
+        assert_eq!(paths(&store, &q).await, ["/posts"]);
+
+        // Together: notes' 4xx and 5xx of `web` or `api` under /api that took 30 ms or more.
+        let mut q = RequestQuery::new(everything(), LogScope::Stack("notes".into()));
+        q.services = vec!["web".into(), "api".into()];
+        q.status = Some(StatusFilter::Class(5));
+        q.min_total = Some(Duration::from_millis(30));
+        q.path = Some(TextFilter::substring("/api"));
+        assert_eq!(paths(&store, &q).await, ["/api/users/7", "/api/users"]);
+        store.close().await;
+    }
+
+    #[test]
+    fn status_filters_round_trip_through_their_text() {
+        for (text, filter) in [
+            ("1xx", StatusFilter::Class(1)),
+            ("5xx", StatusFilter::Class(5)),
+            ("404", StatusFilter::Code(404)),
+            ("0", StatusFilter::Code(0)),
+        ] {
+            assert_eq!(text.parse(), Ok(filter), "{text}");
+            assert_eq!(filter.to_string(), text);
+        }
+        assert_eq!("4XX".parse(), Ok(StatusFilter::Class(4)));
+        for bad in ["", "6xx", "0xx", "44xx", "x", "1000", "-1", "+4", "4 04"] {
+            assert!(bad.parse::<StatusFilter>().is_err(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn counts_cover_the_range_scope_and_services() {
+        let (_dir, store) = mixed().await;
+        let mut q = RequestQuery::new(everything(), LogScope::Stack("notes".into()));
+        // The page's other filters do not change what the footer counts.
+        q.status = Some(StatusFilter::Code(404));
+        let counts = store.request_counts(&q).await.unwrap();
+        assert_eq!(
+            counts,
+            RequestCounts {
+                rows: 5,
+                client_errors: 2,
+                server_errors: 2,
+            }
+        );
+        q.services = vec!["web".into()];
+        q.range = at(0)..at(2_500);
+        let counts = store.request_counts(&q).await.unwrap();
+        assert_eq!(
+            (counts.rows, counts.client_errors, counts.server_errors),
+            (2, 1, 0)
+        );
+        q.range = at(0)..at(500);
+        assert_eq!(
+            store.request_counts(&q).await.unwrap(),
+            RequestCounts::default()
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_request_is_found_by_its_id() {
+        let (_dir, store) = mixed().await;
+        let found = store.request(id(3)).await.unwrap().expect("stored");
+        assert_eq!(found.request.path, "/api/users/7");
+        assert_eq!(found.request.request_id, id(3));
+        assert_eq!(store.request(id(99)).await.unwrap(), None);
+
+        // The lookup uses its index rather than scanning the table.
+        let plan: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as("EXPLAIN QUERY PLAN SELECT id FROM requests WHERE request_id = 'x'")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            plan.iter()
+                .any(|row| row.3.contains("requests_by_request_id")),
+            "{plan:?}"
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn pages_walk_both_ways_with_the_shared_flags() {
+        let rows: Vec<RequestRow> = (1..=7)
+            .map(|n| request(n * 1_000, "s", "a", &format!("/{n}"), 200))
+            .collect();
+        let (_dir, store) = seed(rows).await;
+        let mut q = RequestQuery::new(everything(), LogScope::Stack("s".into()));
+        q.limit = 3;
+        let newest = store.requests(&q).await.unwrap();
+        assert_eq!(
+            newest
+                .entries
+                .iter()
+                .map(|e| e.request.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/5", "/6", "/7"]
+        );
+        assert!(newest.older && !newest.newer);
+
+        q.page = PageAt::Before(newest.entries[0].key());
+        let older = store.requests(&q).await.unwrap();
+        assert_eq!(older.entries.len(), 3);
+        assert_eq!(older.entries[0].request.path, "/2");
+        assert!(older.older && older.newer);
+
+        q.page = PageAt::After(older.entries[0].key());
+        let newer = store.requests(&q).await.unwrap();
+        assert_eq!(newer.entries[0].request.path, "/3");
+        assert!(newer.older && newer.newer);
+        q.page = PageAt::After(newest.entries[0].key());
+        let tail = store.requests(&q).await.unwrap();
+        assert_eq!(tail.entries.len(), 2);
+        assert!(!tail.newer);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_path_scan_stops_at_the_shared_cap() {
+        let cap = u64::from(LogQuery::SCAN_CAP);
+        let mut rows = vec![request(1, "s", "a", "/needle", 200)];
+        rows.extend((0..cap + 10).map(|i| {
+            let mut row = request(2 + i, "s", "a", "/hay", 200);
+            row.request_id = RequestId::from((u128::from(i) + 1).to_be_bytes());
+            row
+        }));
+        let (_dir, store) = seed(rows).await;
+
+        let mut q = RequestQuery::new(everything(), LogScope::Stack("s".into()));
+        q.path = Some(TextFilter::substring("needle"));
+        let page = store.requests(&q).await.unwrap();
+        assert!(page.entries.is_empty());
+        let stopped = page.scan_stopped.expect("stopped early");
+        assert_eq!(stopped.time, at(2 + 10));
+
+        q.page = PageAt::Before(stopped);
+        let older = store.requests(&q).await.unwrap();
+        assert_eq!(older.entries.len(), 1);
+        assert_eq!(older.entries[0].request.path, "/needle");
+        assert!(older.scan_stopped.is_none());
+        store.close().await;
     }
 }
 

@@ -2,10 +2,10 @@
 id: usf
 title: "Edge request log: one row per proxied request"
 type: epic
-status: open
+status: done
 priority: P3
 created: "2026-11-12T13:13:40.148023110Z"
-updated: "2026-11-12T19:38:38.020507073Z"
+updated: "2026-11-12T22:54:53.949260670Z"
 tags:
   - observability
   - proxy

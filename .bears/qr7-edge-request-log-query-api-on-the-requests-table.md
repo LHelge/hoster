@@ -1,16 +1,17 @@
 ---
 id: qr7
 title: "Edge request log: query API on the requests table"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:34:37.130754340Z"
-updated: "2026-11-12T19:34:37.130754340Z"
+updated: "2026-11-12T22:54:53.937744086Z"
 tags:
   - store
   - observability
 depends_on:
   - gh4
 parent: usf
+attempts: 1
 ---
 
 ## Summary
