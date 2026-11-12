@@ -421,6 +421,7 @@ route in Pingora. Pingora reaches it through a Unix-socket upstream (ADR-0031).
 | **Update checker** | orchestrator runtime | Checks third-party images for updates (ADR-0061), every 6 h by default with jitter (Settings → Updates, "Check now"). Sees moved tags by `HEAD` and newer versions in the same line from the tag list, backing off per registry on 429. Stores the last check of each service in `image_checks` and the highest candidate of each kind in `image_updates`, recording newly found ones in the event log (`UpdateAvailable`, never mailed) and announcing `UiEvent::Updates`. For services with `auto_update`, applies a stack's allowed candidates as one new revision and one `AutoUpdate` deployment through the orchestrator, skipping stacks with an active or queued deployment; each candidate is acted on once. |
 | **Notifier** | orchestrator runtime | Mails the operator about problems and recoveries (ADR-0058). Reads the event log (§11) past a persisted cursor, woken by `ui_events` and a one-minute timer; selects, de-duplicates and rate-limits; delivers through a mail `Provider` (Resend) with a short retry, and records `NotificationFailed` when it gives up. Idle until notifications are configured in Settings. Beyond ADR-0058 §7–§8 it keeps the open problems true to what the producers still know: a cancelled deploy (`DeployFailed`, warning) is not mailed; a successful deploy, or a rollback that went live, forgets the stack's crash-loop and health problems, since their generations are gone; `HosterStarted` forgets all of those, which the reconciler and health monitor write again if they persist; `StackRemoved` forgets every problem of the stack, its hosts' included. Open problems with no repeat event are reminded of from the timer, a day after their last mail (deploy problems never). The hourly cap and its held-back count live in memory. |
 | **Traffic recorder** | orchestrator runtime, single task | Drains the proxy's per-route `Traffic` counters just after every minute and writes them as minute rows, rolled up into hour rows, in one transaction (ADR-0062, §12). Sweeps both tables to their retention and flushes once more on graceful shutdown. |
+| **Log recorder** | orchestrator runtime, single task | The one writer of `logs.db` (ADR-0067 §6). Producers hold a `LogSink` and `try_send` records, request rows and follower cursors into its bounded channel, never waiting; a full channel, or no log store, drops the item and counts it by kind. Commits about once a second, or at 4096 items, in one transaction, then publishes the newest ids on a `watch` for pages and follow streams. A failed commit loses its batch, counted. Stopped last on shutdown. |
 | **Admin web UI + webhook (Axum)** | orchestrator runtime | One Axum app (ADR-0021).<br/>• **UI:** Askama-rendered pages with vendored HTMX 4 (embedded in the binary). GitHub OAuth login, restricted to `HOSTER_ADMIN_GITHUB`. SQLite sessions and CSRF tokens (ADR-0031).<br/>• **Webhook:** `/hooks/deploy`, authenticated with a GitHub Actions OIDC token (signature via a cached JWKS, `iss`, `aud`, expiry, single-use `jti`) and authorized by the stack's `[deploy]` rule (ADR-0047).<br/>• **Wiring:** calls `Orchestrator` methods directly and renders their typed results. Live views (deploy progress, logs) stream through SSE or HTMX polling. |
 | **GitHub OAuth client** | orchestrator runtime | Authorization-code + PKCE flow against github.com. Compares the login handle case-insensitively with `HOSTER_ADMIN_GITHUB` (ADR-0031). |
 | **:80 service** | Pingora | Answers `/.well-known/acme-challenge/<token>` from `ChallengeMap`. Redirects every other request to `https://` with 308. |
@@ -540,7 +541,9 @@ stacks can never overwrite each other's routes (ADR-0035 #1, ADR-0050).
    ADR-0065).
 2. Open the SQLite state store (sqlx pool, WAL mode) and run the embedded `sqlx::migrate!()` migrations.
    Every migration is a reversible `.up.sql` / `.down.sql` pair (`sqlx migrate add -r`), so a newer
-   binary can undo the schema for an older one (ADR-0052).
+   binary can undo the schema for an older one (ADR-0052). Then open the log store, `logs.db`
+   with its own migrations (`migrations_logs/`), and start its recorder (ADR-0067); if either
+   fails, hoster logs it and runs without persisted logs.
 3. Load the certificates on disk into `CertMap`. Expired ones are skipped and queued for
    issuance.
 4. Connect to podman, run `negotiate_version()` and `ping()`. The socket comes from the same
@@ -573,7 +576,11 @@ switched `current`; `Restart=always` then starts the new binary, ADR-0052)
 5. Flush the traffic recorder once more, so the requests of the partial minute are written
    (§12). The recorder has its own stop token rather than a child of the root token (§3.3
    #6), so it keeps counting until the proxy is joined; a fast shutdown waits at most 5 s for
-   this flush. Then exit 0.
+   this flush.
+6. Stop the log recorder (ADR-0067 §6), which commits what is still in its channel: the proxy's
+   last request rows and what the container log followers and hoster's own events (ADR-0068)
+   offered before the root token stopped them. Like the traffic recorder it has its own stop
+   token, and a fast shutdown waits at most 5 s for it. Then exit 0.
 
 App containers keep running when hoster stops. They are owned by podman/conmon, not by the
 hoster process. While hoster is down there is no proxy, so the apps are unreachable for about 1–2 s (ADR-0034).

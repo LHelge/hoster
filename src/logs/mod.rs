@@ -3,6 +3,8 @@
 //!
 //! [`ParsedLine`] is the first step: one line a container printed, mapped to a level, a message
 //! and the remaining fields of a JSON line, or kept whole when it is not JSON (ADR-0067 §3).
+//! [`LogRecorder`] is the last: the one writer of `logs.db`, fed through [`LogSink`]s that never
+//! block (ADR-0067 §6).
 
 #![allow(
     dead_code,
@@ -10,9 +12,15 @@
 )]
 
 mod line;
+mod recorder;
 
 #[allow(
     unused_imports,
     reason = "read by the container log followers as they land (epic f8z)"
 )]
 pub use line::ParsedLine;
+#[allow(
+    unused_imports,
+    reason = "the drop counts are shown on the System page as it lands"
+)]
+pub use recorder::{Drops, LogRecorder, LogSink};

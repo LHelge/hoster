@@ -29,8 +29,11 @@ use sqlx::sqlite::{
     SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions,
     SqliteSynchronous,
 };
+use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 
-pub use types::{Level, LogRecord, RequestId, RequestRow, Stream, UnknownLogText};
+pub use types::{
+    Level, LogBatch, LogCursor, LogHead, LogRecord, RequestId, RequestRow, Stream, UnknownLogText,
+};
 
 use super::{Result, Store, StoreError};
 
@@ -52,6 +55,8 @@ impl LogStore {
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
     /// One writer (the recorder) and readers for the logs pages.
     const MAX_CONNECTIONS: u32 = 4;
+    /// Rows per multi-row `INSERT`: at 14 columns, far under SQLite's 32766 bound parameters.
+    const ROWS_PER_INSERT: usize = 500;
 
     /// Opens (creating if needed) `logs.db` under `state_dir` and migrates it to the current
     /// schema. The directory and file get the state store's modes (0700 and 0600). A file
@@ -93,6 +98,105 @@ impl LogStore {
     /// Path of the database file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Writes `batch` in one transaction and returns the newest ids after it. Rows are inserted
+    /// in chunks of multi-row `INSERT`s, under SQLite's limit on bound parameters.
+    pub async fn append(&self, batch: &LogBatch) -> Result<LogHead> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        for chunk in batch.records.chunks(Self::ROWS_PER_INSERT) {
+            let mut insert = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO log_records \
+                 (time, stack, service, generation, stream, level, message, fields, cut, marker) ",
+            );
+            insert.push_values(chunk, |mut row, record| {
+                row.push_bind(record.time.as_millis())
+                    .push_bind(record.stack.as_deref())
+                    .push_bind(record.service.as_str())
+                    .push_bind(record.generation.map(i64::from))
+                    .push_bind(record.stream.as_str())
+                    .push_bind(record.level.map(Level::as_str))
+                    .push_bind(record.message.as_str())
+                    .push_bind(record.fields.as_deref())
+                    .push_bind(record.cut)
+                    .push_bind(record.marker);
+            });
+            insert.build().execute(&mut *tx).await?;
+        }
+        for chunk in batch.requests.chunks(Self::ROWS_PER_INSERT) {
+            let mut insert = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO requests (time, host, prefix, stack, service, method, path, status, \
+                 header_ms, total_ms, bytes, client, upstream_failed, request_id) ",
+            );
+            insert.push_values(chunk, |mut row, request| {
+                row.push_bind(request.time.as_millis())
+                    .push_bind(request.host.as_str())
+                    .push_bind(request.prefix.as_str())
+                    .push_bind(request.stack.as_str())
+                    .push_bind(request.service.as_str())
+                    .push_bind(request.method.as_str())
+                    .push_bind(request.path.as_str())
+                    .push_bind(i64::from(request.status))
+                    .push_bind(request.to_header.map(Self::millis))
+                    .push_bind(Self::millis(request.total))
+                    .push_bind(i64::try_from(request.bytes).unwrap_or(i64::MAX))
+                    .push_bind(request.client.to_string())
+                    .push_bind(request.upstream_failed)
+                    .push_bind(request.request_id.to_string());
+            });
+            insert.build().execute(&mut *tx).await?;
+        }
+        for chunk in batch.cursors.chunks(Self::ROWS_PER_INSERT) {
+            let mut upsert =
+                QueryBuilder::<Sqlite>::new("INSERT INTO log_cursors (container, time_ns) ");
+            upsert.push_values(chunk, |mut row, cursor| {
+                row.push_bind(cursor.container.as_str())
+                    .push_bind(cursor.time_ns);
+            });
+            upsert.push(" ON CONFLICT (container) DO UPDATE SET time_ns = excluded.time_ns");
+            upsert.build().execute(&mut *tx).await?;
+        }
+        let head = Self::head_in(&mut tx).await?;
+        tx.commit().await?;
+        Ok(head)
+    }
+
+    /// The newest committed ids.
+    pub async fn head(&self) -> Result<LogHead> {
+        let mut conn = self.pool.acquire().await?;
+        Self::head_in(&mut conn).await
+    }
+
+    /// Where the follower of `container` got to, if it stored anything.
+    pub async fn cursor(&self, container: &str) -> Result<Option<i64>> {
+        Ok(
+            sqlx::query_scalar("SELECT time_ns FROM log_cursors WHERE container = ?")
+                .bind(container)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    async fn head_in(conn: &mut SqliteConnection) -> Result<LogHead> {
+        let (record, request): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT coalesce(max(id), 0) FROM log_records), \
+                    (SELECT coalesce(max(id), 0) FROM requests)",
+        )
+        .fetch_one(conn)
+        .await?;
+        Ok(LogHead { record, request })
+    }
+
+    /// A duration as whole milliseconds, saturating.
+    fn millis(duration: Duration) -> i64 {
+        i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+    }
+
+    /// The pool, for tests elsewhere in the crate that check what was written before the query
+    /// API reads it.
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Closes every connection, checkpointing the WAL.

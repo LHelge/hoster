@@ -202,3 +202,42 @@ pub struct RequestRow {
     pub upstream_failed: bool,
     pub request_id: RequestId,
 }
+
+/// Where a container's follower got to: podman's timestamp of the last line it handed to the
+/// store, in nanoseconds since the epoch (ADR-0067 §1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogCursor {
+    /// The podman container id.
+    pub container: String,
+    pub time_ns: i64,
+}
+
+/// What one commit writes: records, request rows and the cursors of the lines among the
+/// records, in one transaction, so a cursor never runs ahead of the lines it covers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogBatch {
+    pub records: Vec<LogRecord>,
+    pub requests: Vec<RequestRow>,
+    /// At most one per container: the newest.
+    pub cursors: Vec<LogCursor>,
+}
+
+impl LogBatch {
+    /// Records plus request rows.
+    pub fn len(&self) -> usize {
+        self.records.len() + self.requests.len()
+    }
+
+    /// Nothing to write.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty() && self.requests.is_empty() && self.cursors.is_empty()
+    }
+}
+
+/// The newest committed ids: what a page or a follow stream has seen up to. `0` for an empty
+/// table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LogHead {
+    pub record: i64,
+    pub request: i64,
+}
