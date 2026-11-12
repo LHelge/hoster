@@ -1252,3 +1252,77 @@ async fn a_failed_restart_records_the_start_error_as_the_reason() {
     );
     assert!(restart_messages(&h).await.is_empty());
 }
+
+#[tokio::test]
+async fn containers_hoster_starts_are_followed_until_removed() {
+    use crate::logs::LogSink;
+    use crate::runtime::{LogLine, LogStream};
+
+    let h = harness().await;
+    let (sink, mut tap) = LogSink::tapped(1_024);
+    let followers = h.orchestrator.connect_logs(sink, CancellationToken::new());
+    h.bootstrap().await;
+    let followed = |expected: Vec<ContainerId>| {
+        let followers = followers.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while followers.followed() != expected {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("followed {:?}", followers.followed()));
+        }
+    };
+    // The live generations; the replaced ones' followers ended with their containers.
+    let mut live: Vec<_> = ["api-g2", "storage-g1", "web-g2"]
+        .map(|c| h.container(&format!("hoster-notes-{c}")).id)
+        .into();
+    live.sort();
+    followed(live.clone()).await;
+
+    let api = h.container("hoster-notes-api-g2").id;
+    let print = |text: &str| {
+        h.runtime.push_log(
+            &api,
+            LogLine {
+                stream: LogStream::Stdout,
+                time: Some(std::time::SystemTime::now()),
+                text: text.to_owned(),
+            },
+        );
+    };
+    let mut next = async || {
+        tokio::time::timeout(Duration::from_secs(5), tap.next())
+            .await
+            .expect("a record arrives")
+            .unwrap()
+            .0
+    };
+    print("serving");
+    let record = next().await;
+    assert_eq!(
+        (
+            record.stack.as_deref(),
+            record.service.as_str(),
+            record.generation
+        ),
+        (Some("notes"), "api", Some(2))
+    );
+    assert_eq!(record.message, "serving");
+
+    // A crash ends the follower; the reconciler's restart starts a new one, which reads on.
+    h.runtime.set_state(&api, ContainerState::Exited(Some(1)));
+    followed(live.iter().filter(|id| **id != api).cloned().collect()).await;
+    print("crashed");
+    let report = h.orchestrator.reconcile_at(Instant::now()).await.unwrap();
+    assert_eq!(report.started, ["hoster-notes-api-g2"]);
+    followed(live).await;
+    assert_eq!(next().await.message, "crashed");
+
+    h.orchestrator
+        .remove(RemoveStack::keeping_volumes("notes"))
+        .await
+        .unwrap();
+    followed(Vec::new()).await;
+}

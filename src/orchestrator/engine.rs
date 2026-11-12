@@ -915,6 +915,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     format!("cannot start {}: {err}", container.name),
                 )
             })?;
+            self.follow_logs(&container.id);
             if let Ok(key) = ServiceGeneration::try_from(container) {
                 self.restarted(&key, Instant::now());
             }
@@ -1098,8 +1099,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 {
                     problems.push(format!("cannot stop {}: {err}", container.name));
                 }
-                if let Err(err) = self.runtime.remove(&container.id).await {
-                    problems.push(format!("cannot remove {}: {err}", container.name));
+                match self.runtime.remove(&container.id).await {
+                    Ok(()) => self.forget_logs(&container.id),
+                    Err(err) => problems.push(format!("cannot remove {}: {err}", container.name)),
                 }
             }
             for port in pointer.ports.values() {
@@ -1124,8 +1126,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     async fn abort(&self, run: &mut Run, reason: String) -> Event {
         let mut problems = Vec::new();
         for (_, id) in std::mem::take(&mut run.created).into_iter().rev() {
-            if let Err(err) = self.runtime.remove(&id).await {
-                problems.push(format!("cannot remove new container {id}: {err}"));
+            match self.runtime.remove(&id).await {
+                Ok(()) => self.forget_logs(&id),
+                Err(err) => problems.push(format!("cannot remove new container {id}: {err}")),
             }
         }
         let mut stopped = std::mem::take(&mut run.stopped);
@@ -1145,8 +1148,9 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
         for (_, id) in stopped {
             self.before_start(&id).await;
-            if let Err(err) = self.runtime.start(&id).await {
-                problems.push(format!("cannot restart old container {id}: {err}"));
+            match self.runtime.start(&id).await {
+                Ok(()) => self.follow_logs(&id),
+                Err(err) => problems.push(format!("cannot restart old container {id}: {err}")),
             }
         }
         // The stopped stop-first services serve from their old upstreams again.
@@ -1254,6 +1258,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                 .start(&id)
                 .await
                 .map_err(|err| format!("cannot start {}: {err}", spec.name))?;
+            self.follow_logs(&id);
             tracing::info!(container = %spec.name, image = %change.image, "container started");
             Ok(id)
         }

@@ -25,7 +25,7 @@ use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap, DnsCheck, Pub
 use crate::config::{Config, ProxyConfig};
 use crate::installation::Version;
 use crate::instance::Instance;
-use crate::logs::{LogRecorder, LogSink};
+use crate::logs::{LogFollowers, LogRecorder, LogSink};
 use crate::machine::Machine;
 use crate::notify::Notifier;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
@@ -471,7 +471,7 @@ pub struct Supervisor {
     /// disconnected sink that drops and counts when there is no log store.
     #[allow(
         dead_code,
-        reason = "handed to the followers, the proxy and hoster's own layer as they land (epic f8z)"
+        reason = "handed to the proxy and hoster's own layer as they land (epic f8z)"
     )]
     log_sink: LogSink,
     /// The secret store (ADR-0029), opened with the state store; its key is generated on the
@@ -577,6 +577,8 @@ struct Teardown {
     recorder: Option<RecorderHandle>,
     /// The log recorder (ADR-0067), started with the log store in phase 2.
     log_recorder: Option<RecorderHandle>,
+    /// The container log followers (ADR-0067 §1), connected to the orchestrator in phase 5.
+    followers: Option<LogFollowers<PodmanRuntime>>,
 }
 
 impl Teardown {
@@ -658,14 +660,25 @@ impl Teardown {
             },
             // Every producer has stopped: the proxy in step 4, the followers and hoster's own
             // events with the root token.
-            ShutdownPhase::FlushLogs => match self.log_recorder.as_mut() {
-                Some(recorder) => {
-                    let flushed = recorder.flush(mode).await;
-                    self.log_recorder = None;
-                    flushed
+            ShutdownPhase::FlushLogs => {
+                if let Some(followers) = &self.followers {
+                    // Cancelled with the root token; this waits for their last records.
+                    followers.stop().await;
                 }
-                None => Ok(()),
-            },
+                self.flush_logs(mode).await
+            }
+        }
+    }
+
+    /// Stops the log recorder, which commits what is left in its channel.
+    async fn flush_logs(&mut self, mode: ShutdownMode) -> anyhow::Result<()> {
+        match self.log_recorder.as_mut() {
+            Some(recorder) => {
+                let flushed = recorder.flush(mode).await;
+                self.log_recorder = None;
+                flushed
+            }
+            None => Ok(()),
         }
     }
 }
@@ -840,6 +853,12 @@ impl Startup for Supervisor {
                 let (acme_tx, acme_rx) = mpsc::unbounded_channel();
                 orchestrator.connect_acme(acme_tx);
                 self.acme_commands = Some(acme_rx);
+                // Every container started from here on, by the startup pass too, is followed
+                // into the log store (ADR-0067 §1).
+                self.teardown.followers = Some(
+                    orchestrator
+                        .connect_logs(self.log_sink.clone(), self.teardown.token.child_token()),
+                );
                 // Interrupted deployments resolved, containers adopted, started or removed
                 // (§4 step 5, §5.4); then the loop keeps them running (ADR-0028).
                 orchestrator

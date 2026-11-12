@@ -565,3 +565,105 @@ async fn scenario(hoster: Arc<Hoster>) {
         "v2 keeps serving after v3 failed"
     );
 }
+
+/// A container printing a JSON line on stdout and a text line on stderr, then idling.
+fn printing_stack(stack: &str) -> String {
+    format!(
+        r#"version = 1
+name = "{stack}"
+
+[services.printer]
+image = "{IMAGE}"
+command = ["sh", "-c", '''echo '{{"level":"warn","msg":"hello from e2e","n":1}}'; echo 'plain text' >&2; exec sleep 3600''']
+stop_timeout = "1s"
+"#
+    )
+}
+
+/// ADR-0067 §1: what a container hoster starts prints reaches the log store, parsed, with the
+/// labels' stack, service and generation and its stream, and its follower ends at removal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn container_output_reaches_the_log_store() {
+    use crate::logs::LogRecorder;
+    use crate::store::{Level, LogQuery, LogScope, LogStore, Stream as LogStream, Timestamp};
+
+    if !enabled() {
+        eprintln!("skipped: set TEST_HOSTER_PODMAN=1 to run against rootless podman");
+        return;
+    }
+    crate::logging::capture::global();
+    let hoster = Arc::new(Hoster::start().await);
+    let dir = TempDir::new().unwrap();
+    let logs = LogStore::open(dir.path()).await.unwrap();
+    let (recorder, sink) = LogRecorder::new(logs.clone()).await.unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let recording = tokio::spawn(recorder.run(stop.clone()));
+    let followers = hoster
+        .orchestrator
+        .connect_logs(sink, tokio_util::sync::CancellationToken::new());
+
+    let scenario = {
+        let (hoster, logs, followers) = (Arc::clone(&hoster), logs.clone(), followers.clone());
+        async move {
+            let applied = hoster
+                .orchestrator
+                .apply(&printing_stack(&hoster.stack))
+                .await
+                .unwrap();
+            let id = applied.deployment.expect("a new stack deploys").deployment;
+            let deployed = tokio::time::timeout(DEPLOY_TIMEOUT, hoster.orchestrator.wait(id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(deployed.state, DeploymentState::Live, "{deployed:?}");
+
+            let query = LogQuery::new(
+                Timestamp::from_millis(0)..Timestamp::now() + Duration::from_secs(3600),
+                LogScope::Stack(hoster.stack.clone()),
+            );
+            let records = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let page = logs.query(&query).await.unwrap();
+                    if page.entries.len() >= 2 {
+                        break page.entries;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("both lines are stored");
+            let mut records: Vec<_> = records.into_iter().map(|e| e.record).collect();
+            records.sort_by_key(|r| r.stream == LogStream::Stderr);
+            let [json, text] = &records[..] else {
+                panic!("two records: {records:?}");
+            };
+            assert_eq!(json.service, "printer");
+            assert_eq!(json.generation, Some(1));
+            assert_eq!(json.stream, LogStream::Stdout);
+            assert_eq!(json.level, Some(Level::Warn));
+            assert_eq!(json.message, "hello from e2e");
+            assert_eq!(json.fields.as_deref(), Some(r#"{"n":1}"#));
+            assert_eq!(text.stream, LogStream::Stderr);
+            assert_eq!(text.level, None);
+            assert_eq!(text.message, "plain text");
+            assert_eq!(followers.followed().len(), 1);
+        }
+    };
+    let outcome = tokio::spawn(scenario).await;
+    hoster.clean_up().await;
+    if outcome.is_ok() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !followers.followed().is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the follower ends with its container");
+    }
+    followers.stop().await;
+    stop.cancel();
+    recording.await.unwrap();
+    if let Err(err) = outcome {
+        std::panic::resume_unwind(err.into_panic());
+    }
+}

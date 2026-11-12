@@ -773,6 +773,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             self.before_start(&container.id).await;
             match self.runtime.start(&container.id).await {
                 Ok(()) => {
+                    self.follow_logs(&container.id);
                     report.started.push(container.name.clone());
                     self.restarted(generation, now);
                     if !past.is_empty() {
@@ -836,6 +837,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         };
         match started {
             Ok(()) => {
+                self.follow_logs(&container.id);
                 tracing::warn!(
                     stack, service, generation = gen_no, container = %container.name,
                     exit = %reason, restarts = total, next_backoff = ?backoff,
@@ -894,9 +896,14 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             );
         }
         match self.runtime.remove(&container.id).await {
-            Ok(()) => report.removed.push(container.name.clone()),
+            Ok(()) => {
+                self.forget_logs(&container.id);
+                report.removed.push(container.name.clone());
+            }
             // Removed meanwhile, e.g. by a deployment's clean-up.
-            Err(err) if is_not_found(&err, ObjectKind::Container) => {}
+            Err(err) if is_not_found(&err, ObjectKind::Container) => {
+                self.forget_logs(&container.id);
+            }
             Err(err) => self.problem(
                 generation,
                 format!("cannot remove {}: {err}", container.name),

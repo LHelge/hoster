@@ -140,6 +140,20 @@ impl LogSink {
         self.head.clone()
     }
 
+    /// A sink whose records a test reads straight off its channel of `capacity`, with no
+    /// recorder behind it.
+    #[cfg(test)]
+    pub fn tapped(capacity: usize) -> (Self, Tap) {
+        let (entries, rx) = mpsc::channel(capacity);
+        let (_, head) = watch::channel(LogHead::default());
+        let sink = Self {
+            entries,
+            counters: Arc::default(),
+            head,
+        };
+        (sink, Tap(rx))
+    }
+
     fn offer(&self, entry: Entry) -> bool {
         let counter = match &entry {
             Entry::Record { record, .. } if record.stream == Stream::Hoster => {
@@ -153,6 +167,36 @@ impl LogSink {
             Counters::count(counter, 1);
         }
         sent
+    }
+}
+
+/// The records offered to a [`LogSink::tapped`] sink, for tests.
+#[cfg(test)]
+#[derive(Debug)]
+pub struct Tap(mpsc::Receiver<Entry>);
+
+#[cfg(test)]
+impl Tap {
+    /// The next record and the cursor it came with; `None` once every sink is gone. Request
+    /// rows are skipped.
+    pub async fn next(&mut self) -> Option<(LogRecord, Option<LogCursor>)> {
+        loop {
+            match self.0.recv().await? {
+                Entry::Record { record, cursor } => return Some((record, cursor)),
+                Entry::Request(_) => {}
+            }
+        }
+    }
+
+    /// The records offered so far, without waiting.
+    pub fn drain(&mut self) -> Vec<(LogRecord, Option<LogCursor>)> {
+        let mut records = Vec::new();
+        while let Ok(entry) = self.0.try_recv() {
+            if let Entry::Record { record, cursor } = entry {
+                records.push((record, cursor));
+            }
+        }
+        records
     }
 }
 
@@ -201,7 +245,7 @@ impl LogRecorder {
 
     /// The same recorder committing after `interval` instead.
     #[cfg(test)]
-    fn with_interval(mut self, interval: Duration) -> Self {
+    pub(crate) fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = interval;
         self
     }
