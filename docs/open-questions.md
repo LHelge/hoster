@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-38, OQ-40 and OQ-42 are open (OQ-42 has the owner's answers and waits for a spike). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38, OQ-40, OQ-42 and OQ-43 are open (OQ-42 has the owner's answers and waits for a spike; OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -48,6 +48,7 @@ Index:
 | [OQ-38](#oq-38-client-supplied-forwarding-headers-at-the-edge) | Client-supplied forwarding headers at the edge (`X-Forwarded-For` appended, `Forwarded` and `X-Real-IP` passed through) | — |
 | [OQ-41](#oq-41-persisted-structured-container-logs) | ~~Persisted, structured container logs~~ **Resolved → ADR-0067 (separate `logs.db`, 7 days, 1 GiB)** | — |
 | [OQ-42](#oq-42-receiving-opentelemetry-otlp-from-containers) | Receiving OpenTelemetry (OTLP) from containers | `xv9`, `qnh` |
+| [OQ-43](#oq-43-a-filter-language-for-the-telemetry-query-box) | A filter language for the Telemetry query box | `ddf` |
 
 ---
 
@@ -623,6 +624,17 @@ SDK over OTLP. `tracing` does so with `tracing-opentelemetry` and
    `traceparent` upstream, and whether a client-supplied `traceparent` is honoured (compare
    OQ-38) or replaced.
 7. **Volume.** Span retention shorter than logs, head sampling, per-service rate caps.
+8. **The proxy's spans.** Added 2026-11-12 from `docs/design/Telemetry.dc.html`, which shows a
+   server span and an upstream client span from the proxy for every request, so an app that
+   sends nothing still has a 2-span trace ("app not instrumented").
+   - A. Derived when a trace is read, from the request row (ADR-0067 §5), which then also stores
+     the trace id, both span ids and the time the upstream request started. No extra writes.
+   - B. Two rows per request written to the spans table beside the request row. One shape for
+     every span, three writes per request instead of one.
+   - C. No proxy spans; a trace holds only what apps send.
+
+   Agent's recommendation: A. The row already holds everything but the ids, and the proxy's
+   write path stays one row per request.
 
 **Recommendation.** Decide after the owner has tried OTel output from `aphid-server` against a
 local Jaeger or Aspire Dashboard. Then 1B, 2A if the spike shows it works without host-wide
@@ -642,3 +654,34 @@ is written once it has run (task `yjp`).
 5. Logs and traces; no metrics.
 6. The proxy always starts the trace and replaces a client's `traceparent`.
 7. Spans kept 3 days, a rate cap per service, no sampling.
+8. Open (added after the answers above). On 2026-11-12 the owner chose not to split the edge
+   part (questions 6 and 8) into an ADR of its own, so the trace pages (`qnh`) wait for this
+   ADR and the receiver (`xv9`).
+
+## OQ-43: A filter language for the Telemetry query box
+
+**Problem.** The Telemetry mockup (`docs/design/Telemetry.dc.html`) has one query box per tab
+that takes expressions: `service.name = "outline-app" AND duration > 500ms AND status = error`
+for traces, `body ~ "timeout" AND severity >= WARN` for logs. ADR-0067 §8 searches by narrowing
+time, stack, service, level and stream with the index and then matching a substring or regular
+expression in Rust. It has no language, and filters come from controls and GET parameters.
+Raised 2026-11-12 while planning the telemetry epics.
+
+**Options.**
+
+- **A. No language.** The box is grep. Every other filter is a control or a value clicked in a
+  record (field chips, `qs4`), carried as GET parameters. Nothing to learn and nothing to parse.
+- **B. A small language.** `field op value` terms joined by `AND` only. The ops are `=`, `!=`,
+  `~` (regular expression) and `<` `>` on durations and levels. Fields are the record columns,
+  span columns and flattened attribute keys. It is parsed in Rust into the same query type the
+  controls fill: terms on indexed columns narrow the index range, and the rest become the
+  scan's predicate. The controls write terms into the box, and the box round-trips to a URL.
+- **C. A fuller language** with `OR`, parentheses and functions (LogQL, TraceQL style): more
+  power, and a parser, an error UX and docs to maintain.
+
+**Recommendation.** A now, B as its own epic once the Logs and Traces tabs are in use and it is
+clear which filters people type rather than click.
+
+**Owner's interim answer (2026-11-12).** A now: controls plus grep. Whether to add B later is
+open and tracked by epic `ddf`.
+
