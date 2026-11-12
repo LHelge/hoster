@@ -645,6 +645,11 @@ timeouts = { read = "10m", write = "10m", idle = "10m" }   # large objects, stre
   tags") redeploys `storage` stop-first, which causes a short storage outage. The file says so
   explicitly ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)).
 
+**Logs:** what each container prints on stdout and stderr is stored for 7 days, under its stack,
+service and generation. If `api` prints JSON lines (`tracing`'s JSON formatter, for example),
+its records get levels and fields; text, as nginx prints it, is kept whole without a level
+([[logging]]).
+
 ## 3.2 Worked example: an app with postgres and redis
 
 A generic web app built in CI, a background worker from the same repository, and two third-party
