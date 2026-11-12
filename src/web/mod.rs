@@ -301,9 +301,9 @@ impl WebApp {
             .route(EventsPage::PATH, get(EventsPage::page))
             .route("/stacks", get(Stacks::list))
             .route("/stacks/{name}", get(Stacks::show))
+            .route("/stacks/{name}/events", get(Stacks::events))
             .layer(Extension(self.stats.clone()))
             .route("/stacks/{name}/logs", get(Stacks::logs))
-            .route("/stacks/{name}/events", get(Stacks::events))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))
             .route(

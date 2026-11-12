@@ -91,6 +91,8 @@ pub struct ContainerReading {
     pub stack: String,
     /// The `hoster.service` label; empty when missing.
     pub service: String,
+    /// The `hoster.generation` label; `None` when missing or not a number.
+    pub generation: Option<u32>,
     pub sample: ContainerSample,
 }
 
@@ -102,6 +104,7 @@ impl From<(&ContainerInfo, ContainerSample)> for ContainerReading {
             id: info.id.clone(),
             stack: label(label::STACK),
             service: label(label::SERVICE),
+            generation: label(label::GENERATION).parse().ok(),
             sample,
         }
     }
@@ -125,15 +128,13 @@ impl<S> History<S> {
     }
 }
 
-/// What the sampler holds about one container.
+/// What the sampler holds about one container: who it belongs to, from its labels, and its
+/// samples.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "read by the stack overview's usage columns (task rap)"
-)]
 pub struct ContainerUsage {
     pub stack: String,
     pub service: String,
+    pub generation: Option<u32>,
     pub history: History<ContainerSample>,
 }
 
@@ -161,6 +162,7 @@ struct State {
 struct Tracked {
     stack: String,
     service: String,
+    generation: Option<u32>,
     samples: Ring<ContainerSample>,
 }
 
@@ -199,10 +201,6 @@ impl ResourceUsage {
     }
 
     /// The latest sample and history of every listed container of `stack`, by container id.
-    #[allow(
-        dead_code,
-        reason = "read by the stack overview's usage columns (task rap)"
-    )]
     pub fn stack(&self, stack: &str) -> BTreeMap<ContainerId, ContainerUsage> {
         self.read()
             .containers
@@ -212,6 +210,7 @@ impl ResourceUsage {
                 let usage = ContainerUsage {
                     stack: tracked.stack.clone(),
                     service: tracked.service.clone(),
+                    generation: tracked.generation,
                     history: tracked.samples.history(),
                 };
                 (id.clone(), usage)
@@ -220,10 +219,6 @@ impl ResourceUsage {
     }
 
     /// A receiver that changes after every tick (a tick counter), for live pages to await.
-    #[allow(
-        dead_code,
-        reason = "awaited by the stack overview's live stream (task rap)"
-    )]
     pub fn changes(&self) -> watch::Receiver<u64> {
         self.inner.ticks.subscribe()
     }
@@ -251,6 +246,7 @@ impl ResourceUsage {
                                 .unwrap_or_else(|| Tracked {
                                     stack: reading.stack,
                                     service: reading.service,
+                                    generation: reading.generation,
                                     samples: Ring::default(),
                                 });
                         tracked.samples.push(reading.sample);

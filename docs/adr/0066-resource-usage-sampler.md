@@ -94,8 +94,8 @@ usage over that limit. Where no limit is set, there is no meter.
 
 **6. History** *(owner: about an hour, in memory, lost on restart)*. Each container and the host
 have a fixed ring of **360 samples** (1 h at 10 s). Each sample holds its time and its figures,
-and each figure may be unknown. A container's ring is keyed by container id and holds its stack
-and service from the labels. It is kept while the container is listed, so a stopped container
+and each figure may be unknown. A container's ring is keyed by container id and holds its stack,
+service and generation from the labels. It is kept while the container is listed, so a stopped container
 gets unknown samples, and it is dropped once the container is no longer listed. A new
 generation is a new container, so its line starts empty after a deploy. A sample is about
 32 bytes, so a container's ring is about 11.5 KiB, and 50 containers plus the host take

@@ -2,10 +2,10 @@
 id: qmw
 title: "Resource usage: container CPU/memory and host meters"
 type: epic
-status: open
+status: done
 priority: P3
 created: "2026-11-08T18:22:30.005241476Z"
-updated: "2026-11-10T21:57:32.224171376Z"
+updated: "2026-11-12T01:37:45.313062022Z"
 tags:
   - design-followup
   - observability

@@ -1,16 +1,17 @@
 ---
 id: rap
 title: "Stack overview: live CPU and memory columns in the services table"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T00:08:17.756976088Z"
-updated: "2026-11-12T00:08:17.756976088Z"
+updated: "2026-11-12T01:37:45.287610850Z"
 tags:
   - web
   - observability
 depends_on:
   - bqt
 parent: qmw
+attempts: 1
 ---
 
 ## Summary
