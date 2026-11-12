@@ -148,14 +148,14 @@ release. The release notes are git-cliff's grouping of the Conventional Commits 
 tag (`cliff.toml`); `chore(release)` commits are left out. See [Installing hoster](https://docs.hoster.lhelge.se/wiki/install/).
 
 The same run builds the documentation site in `site/` with aphid. On a tag it packs the site into
-an nginx image (`site/Dockerfile`), pushes `ghcr.io/lhelge/hoster-docs` and deploys it to
+an aphid-server image (`site/Dockerfile`), pushes `ghcr.io/lhelge/hoster-docs` and deploys it to
 <https://docs.hoster.lhelge.se> through hoster's own deploy webhook. Run `aphid` in `site/` to
 preview it on <http://localhost:3000> with live reload.
 
 App repositories deploy to hoster from their own release workflows with a GitHub Actions OIDC
 token; see [Deploying from CI](https://docs.hoster.lhelge.se/wiki/deploying-from-ci/) and the example in
 [examples/github-actions/release.yml](examples/github-actions/release.yml).
-Static sites are packed into an nginx image and deployed the same way; see
+Static sites are packed into a small static-file server image and deployed the same way; see
 [Hosting a static site](https://docs.hoster.lhelge.se/wiki/static-sites/).
 
 ## License

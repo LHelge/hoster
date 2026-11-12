@@ -9,7 +9,7 @@ name: Release
 # - Run it by hand (workflow_dispatch) to build and check everything without publishing; the
 #   files are then attached to the workflow run as an artifact.
 # - The documentation site in site/ is built with aphid on every run. A tag push also packs it
-#   into an nginx image, pushes it to ghcr.io/lhelge/hoster-docs and deploys it to
+#   into an aphid-server image (site/Dockerfile), pushes it to ghcr.io/lhelge/hoster-docs and deploys it to
 #   docs.hoster.lhelge.se through hoster's own deploy webhook (the `docs` stack, whose
 #   `[deploy]` rule allows this repository's `v*` tags in the `production` environment).
 
@@ -23,8 +23,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # aphid, for the documentation site (site/).
-  APHID_VERSION: v0.3.0
+  # aphid, for the documentation site (site/). The `LHelge/aphid@` refs below and the
+  # aphid-server tag in site/Dockerfile must name the same version; the site job checks both.
+  APHID_VERSION: v0.4.1
   RUSTFLAGS: -D warnings
   # git-cliff for the release notes, pinned by version and by the SHA-512 of its x86_64 tarball.
   GIT_CLIFF_VERSION: 2.14.2
@@ -242,8 +243,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The site is served by the aphid-server of the aphid release that built it.
+      - name: aphid versions agree
+        run: |
+          want="${APHID_VERSION#v}"
+          from=$(sed -n 's|^FROM ghcr.io/lhelge/aphid-server:||p' site/Dockerfile)
+          if [ "$from" != "$want" ]; then
+            echo "::error file=site/Dockerfile::aphid-server:$from does not match APHID_VERSION $APHID_VERSION"
+            exit 1
+          fi
+          bad=$(grep -n '^ *- uses: LHelge/aphid@' .github/workflows/release.yml | grep -v "@$APHID_VERSION\$" || true)
+          if [ -n "$bad" ]; then
+            echo "::error file=.github/workflows/release.yml::LHelge/aphid action ref does not match APHID_VERSION $APHID_VERSION: $bad"
+            exit 1
+          fi
+
       # Fails on a broken [[wiki-link]].
-      - uses: LHelge/aphid@v0.3.0
+      - uses: LHelge/aphid@v0.4.1
         with:
           version: ${{ env.APHID_VERSION }}
           config: site/aphid.toml
