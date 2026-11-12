@@ -29,7 +29,7 @@ use super::super::list::{Ago, TrafficLine, TrafficWindow};
 use crate::orchestrator::{ServiceState, StackStatus};
 use crate::stack::{Route, Stack};
 use crate::stats::{
-    CertExpiry, DeployStats, Elapsed, InFlight, ScopeHistory, Stats, TrafficHistory,
+    CertExpiry, DeployStats, Elapsed, InFlight, ResourceUsage, ScopeHistory, Stats, TrafficHistory,
 };
 use crate::store::Timestamp;
 use crate::web::charts::{StackedBars, Timeline};
@@ -46,6 +46,8 @@ pub struct Readings {
     pub certificates: Vec<CertExpiry>,
     /// Every stack's deployment statistics, or why they cannot be read.
     pub deployments: Result<Vec<DeployStats>, String>,
+    /// The resource sampler's cache, for the services' CPU and memory (ADR-0066).
+    pub resources: ResourceUsage,
     pub now: SystemTime,
 }
 
@@ -60,6 +62,7 @@ impl Default for Readings {
             in_flight: InFlight::default(),
             certificates: Vec::new(),
             deployments: Ok(Vec::new()),
+            resources: ResourceUsage::default(),
             now,
         }
     }
@@ -80,6 +83,7 @@ impl Readings {
             in_flight: stats.in_flight(),
             certificates: stats.certificates(),
             deployments: deployments.map_err(|err| problem("deployment statistics", err)),
+            resources: stats.resources().clone(),
             now: SystemTime::now(),
         }
     }

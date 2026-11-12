@@ -340,6 +340,9 @@ applied, and a deployment of a stored revision (a rollback, a CI deploy) is reje
 delegation]]). If hoster cannot read the user manager's `cgroup.controllers`, only stacks that set
 a limit are rejected. The editor's live check marks the limit itself. A `cpus` above the host's
 CPU count or a `memory` above its total memory caps nothing, and applying warns about it.
+The stack's overview shows each running container's CPU and memory against its service's
+`cpus` and `memory`, with a meter that turns orange from 80 % and red from 95 %
+([[overview#resource-usage|Resource usage]]).
 
 A change to a limit is part of the service's config hash (`memory` by bytes, `cpus` by the
 nano-CPUs podman gets), so it recreates the service's containers through a normal deploy. A

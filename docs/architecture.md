@@ -1283,7 +1283,7 @@ whole state is in memory.
   Limits shown next to container figures come from the service's revision (ADR-0059), not from
   stats' `limit`, which is the host's `MemTotal` when no limit is set.
 - **State.** The latest sample and a ring of 360 (1 h) per listed container, keyed by container
-  id with its stack and service, and one for the host. A ring is dropped once its container is
+  id with its stack, service and generation (from the labels), and one for the host. A ring is dropped once its container is
   no longer listed. A figure is unknown (`—`) before the first tick, on a container's first
   reading (CPU), after a counter went backwards, and when podman or `/proc` did not answer.
   A running container whose stats call failed or ran out of time keeps its earlier reading
@@ -1292,6 +1292,9 @@ whole state is in memory.
 - **Readers.** `ResourceSampler` (`src/stats/resources.rs`) records into a cheap clonable
   `ResourceUsage`, which reaches the web app inside `Stats` (`Stats::resources`): the host's
   history and, per stack, each container's by id, the newest sample last. After each tick it
-  bumps a `watch` counter (`ResourceUsage::changes`). The stack overview's `StackFeed` stream wakes on it and sends `<hx-partial>`s
-  for the stack's usage cells, rendered from the cache alone. The sidebar card polls its own
+  bumps a `watch` counter (`ResourceUsage::changes`). The stack overview's `StackFeed` stream
+  wakes on it and sends `<hx-partial>`s (`UsageFeed`, `src/web/stacks/overview/usage.rs`) that
+  replace the content of each container's `cpu-<id>` and `mem-<id>` cells, rendered from the
+  cache alone. Limits apply only to the container of the generation its service runs, taken
+  from the stack status read once when the stream connects; other generations show no meter. The sidebar card polls its own
   fragment endpoint every 10 s with HTMX. Nothing is persisted and there is no migration.

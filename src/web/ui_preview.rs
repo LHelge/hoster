@@ -48,7 +48,7 @@ use crate::registry::{RegistryCheck, RegistryCredential};
 use crate::routing::{Owner, RouteEntry, RouteOwner, Target};
 use crate::runtime::{
     ContainerRuntime, ContainerSpec, ContainerState, LogLine, LogStream, NetworkSpec, Operation,
-    PortBinding, RuntimeError, ServiceGeneration,
+    PortBinding, RuntimeError, ServiceGeneration, label,
 };
 use crate::stack::{ByteSize, RouteTimeouts};
 use crate::stats::{CertExpiry, Histogram, Range, RequestOutcome, StatusClass, StatusCounts};
@@ -290,6 +290,11 @@ impl Fixtures {
     /// `notes` healthy and live (with a refused webhook), `blog` with a crash-looping worker,
     /// `shop` mid-deployment with one queued, `wiki` whose latest deploy failed, `docs` waiting
     /// for its first digest (with a route under a prefix).
+    /// notes' stack file, with limits on api for the services table's meters.
+    fn notes_toml() -> String {
+        format!("{NOTES}\n[services.api.limits]\nmemory = \"512MiB\"\ncpus = 1.5\n")
+    }
+
     fn stacks() -> Vec<StackStatus> {
         let mut notes_api =
             Self::service("api", Self::running(2, 1), HealthStatus::Healthy, 0, false);
@@ -317,7 +322,7 @@ impl Fixtures {
             StackStatus {
                 name: "notes".into(),
                 committed: None,
-                revision: Self::revision("notes", 1, NOTES),
+                revision: Self::revision("notes", 1, &Self::notes_toml()),
                 services: vec![notes_api, storage],
                 active: None,
                 queued: None,
@@ -1253,19 +1258,42 @@ impl Fixtures {
     }
 }
 
-/// The sidebar's host card (ADR-0066): an hour of host samples, CPU busy enough to warn, memory
-/// a third used with a gap the sampler could not read, the disk nearly full. The empty app's
+/// Resource usage (ADR-0066), an hour of samples: the sidebar's host card with CPU busy enough
+/// to warn, memory a third used with a gap the sampler could not read, the disk nearly full; and
+/// the containers' CPU and memory for the stack overviews. notes' api runs close to its memory
+/// limit, its draining generation idles, storage (no limits) holds a large cache, blog's worker
+/// stopped ten minutes ago and shop's new storefront has only just started. The empty app's
 /// pages show the card before the first tick.
 impl Fixtures {
-    fn resources(app: &TestApp) {
+    async fn resources(app: &TestApp) {
         const GIB: u64 = 1024 * 1024 * 1024;
         let n = crate::stats::ResourceUsage::HISTORY;
+        let listed = app.runtime.list_managed().await.unwrap();
         for i in 0..n {
             let cpu = 30.0 + 50.0 * Self::noise(i as u64 + 7) + Self::wave(i, n, 0.0, 10.0) as f64;
             let gap = (200..212).contains(&i);
+            let at = ago(Duration::from_secs(10 * (n - i) as u64));
+            let containers = listed
+                .iter()
+                .enumerate()
+                .map(|(k, info)| {
+                    let figures = |i| Self::container_figures(info, k, i, n);
+                    // A container's first reading has no CPU figure (ADR-0066 §7).
+                    let earlier = i.checked_sub(1).and_then(figures);
+                    let now = figures(i);
+                    crate::stats::ContainerReading::from((
+                        info,
+                        crate::stats::ContainerSample {
+                            at,
+                            cpu: now.zip(earlier).map(|((cpu, _), _)| cpu),
+                            memory: now.map(|(_, memory)| memory),
+                        },
+                    ))
+                })
+                .collect();
             app.resources.record(
                 crate::stats::HostSample {
-                    at: ago(Duration::from_secs(10 * (n - i) as u64)),
+                    at,
                     // The first tick has no CPU figure (ADR-0066 §7).
                     cpu: (i > 0).then_some(cpu),
                     memory: (!gap).then_some(crate::stats::Usage {
@@ -1277,8 +1305,40 @@ impl Fixtures {
                         total: 80 * GIB,
                     }),
                 },
-                None,
+                Some(containers),
             );
+        }
+    }
+
+    /// The CPU (percent of one core) and memory of the `k`th listed container at sample `i` of
+    /// `n`; `None` while it does not run.
+    fn container_figures(
+        info: &crate::runtime::ContainerInfo,
+        k: usize,
+        i: usize,
+        n: usize,
+    ) -> Option<(f64, u64)> {
+        const MIB: u64 = 1024 * 1024;
+        let label = |name| info.labels.get(name).map_or("", String::as_str);
+        // A slow swing of its own per container, with a little noise on it.
+        let swing = 0.5 - 0.5 * ((i as f64 / 23.0) + k as f64).cos();
+        let jitter = 0.8 * swing + 0.2 * Self::noise((i * 31 + k * 977) as u64);
+        let latest = label(label::GENERATION) == "8" || label(label::GENERATION) == "2";
+        match (label(label::STACK), label(label::SERVICE)) {
+            // Rising towards its 512 MiB limit: past 80 % by now.
+            ("notes", "api") if latest => Some((
+                20.0 + 40.0 * jitter,
+                300 * MIB + (140 * MIB) * i as u64 / n as u64,
+            )),
+            ("notes", "api") => Some((0.5 + jitter, 180 * MIB)),
+            ("notes", "storage") => Some((
+                3.0 + 6.0 * jitter,
+                1024 * MIB + Self::wave(i, n, 0.0, 400.0 * MIB as f64),
+            )),
+            ("blog", "worker") => (i < n - 60).then_some((80.0 + 60.0 * jitter, 90 * MIB)),
+            ("shop", "storefront") if latest => (i >= n - 2).then_some((140.0, 210 * MIB)),
+            _ if info.state.is_running() => Some((2.0 + 8.0 * jitter, 120 * MIB)),
+            _ => None,
         }
     }
 }
@@ -1731,9 +1791,9 @@ async fn ui_preview() {
         .insert("shop.example.com".into(), SystemTime::now() + HOUR);
     Fixtures::statistics(&app);
     Fixtures::history(&app);
-    Fixtures::resources(&app);
     Fixtures::registries(&app);
     let container = Fixtures::containers(&app).await;
+    Fixtures::resources(&app).await;
     let schema: i64 = crate::store::Store::expected_schema_version().into();
     let host = Host::new(&[("0.1.2", schema), ("0.1.3", schema)]).await;
     let mut releases = FakeReleases::default().publish_binary("0.2.0", script("0.2.0", schema));

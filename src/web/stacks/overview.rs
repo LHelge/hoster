@@ -14,12 +14,15 @@
 //! active revision mounts each.
 //!
 //! The tiles, the responses by status and the routes card are built in `figures.rs`; the services
-//! table, which lists the stack's containers too, in `services.rs`.
+//! table, which lists the stack's containers too, in `services.rs`; its CPU and Memory cells,
+//! which the same stream keeps live after each resource sampler tick (ADR-0066 §9), in
+//! `usage.rs`.
 //!
 //! [`Orchestrator::volumes`]: crate::orchestrator::Orchestrator::volumes
 
 mod figures;
 mod services;
+mod usage;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -34,6 +37,7 @@ use self::figures::{Figures, Readings, RouteRow, StatusChart};
 pub(super) use self::services::Role;
 pub(super) use self::services::{LogCandidate, LogPick, StackContainers};
 use self::services::{ServiceRow, ServiceTable};
+pub(in crate::web) use self::usage::UsageFeed;
 use super::frame::{StackHeader, Tab};
 use super::list::{StackCard, TrafficWindow};
 use super::{Outcome, Stacks, UpdatesCard, When};
@@ -108,19 +112,25 @@ impl Stacks {
     }
 
     /// `GET /stacks/{name}/events`: the overview's Recent events card as `text/event-stream`,
-    /// sent again as the stack's events are recorded, until the session ends.
+    /// sent again as the stack's events are recorded, and its containers' CPU and memory cells
+    /// after each resource sampler tick, until the session ends.
     pub async fn events(
         State(auth): State<Arc<Auth>>,
         Extension(stacks): Extension<Stacks>,
+        Extension(stats): Extension<Stats>,
         Extension(session): Extension<Session>,
         Path(name): Path<String>,
     ) -> Response {
         // Subscribed before the stack is looked up, so no event between the two is missed.
         let events = stacks.subscribe();
-        if let Err(outcome) = stacks.find(&name).await {
-            return outcome.into_response();
-        }
-        StackFeed::new(stacks, &name).respond(events, auth, session)
+        let status = match stacks.find(&name).await {
+            Ok(status) => status,
+            Err(outcome) => return outcome.into_response(),
+        };
+        let usage = UsageFeed::new(&status, stats.resources().clone());
+        StackFeed::new(stacks, &name)
+            .with_usage(usage)
+            .respond(events, auth, session)
     }
 }
 
@@ -241,7 +251,8 @@ impl StackView {
         readings: &Readings,
     ) -> Self {
         let stack = status.revision.toml.parse::<Stack>().ok();
-        let services = ServiceTable::new(status, stack.as_ref(), containers, readings.now);
+        let usage = readings.resources.stack(&status.name);
+        let services = ServiceTable::new(status, stack.as_ref(), containers, usage, readings.now);
         let figures = Figures::new(status, stack.as_ref(), readings);
         Self {
             now: readings.now,

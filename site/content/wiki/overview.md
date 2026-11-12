@@ -68,6 +68,15 @@ an hour in memory only, so the lines start empty after a restart or an update, a
 could not read shows as `—`. The card refreshes itself, but that does not count as activity:
 a tab left open still signs you out after the idle timeout.
 
+A stack's overview adds **CPU** and **Memory** columns to its services table, one figure per
+container. CPU is a percent of one core (`150%` is one and a half cores), with a line of the
+last hour. Memory is what `podman stats` shows: what the container uses, not counting page
+cache the kernel would reclaim first. Where the service sets `limits.cpus` or `limits.memory`
+([[stack-format#2-2-3-resource-limits-adr-0059|limits]]), the figure is shown against the limit
+with a meter in the same colours. A container of another generation (draining or starting
+during a deploy) shows its own figures without a meter, and a service with no container shows
+`—`. The figures update every 10 seconds while the page is open.
+
 ## Traffic history
 
 hoster keeps a history of the traffic to each route: one record per minute for the last 24 hours

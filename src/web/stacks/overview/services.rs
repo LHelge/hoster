@@ -24,6 +24,9 @@
 //! or not recreated by the reconciler yet) is shown stopped; when the containers cannot be
 //! listed at all, its state comes from its health probes alone.
 //!
+//! Each container's row has its CPU and memory from the resource sampler (`usage.rs`, ADR-0066);
+//! a service without a container shows `—` there.
+//!
 //! Every other container of the stack follows its service as a muted row: the old generation
 //! draining during a deploy, or the new one starting. A container whose service the active
 //! revision no longer has is listed after the services. The containers are read from the
@@ -35,10 +38,12 @@ use std::time::SystemTime;
 
 use super::super::ShortDigest;
 use super::super::list::{ServiceChip, StackCard};
+use super::usage::{StackUsage, UsageCells, UsageLimits};
 use crate::health::{CheckSpec, HealthStatus};
 use crate::orchestrator::{ServiceState, ServiceStatus, StackStatus};
-use crate::runtime::{ContainerInfo, PublishedPort, label};
+use crate::runtime::{ContainerId, ContainerInfo, PublishedPort, label};
 use crate::stack::{Limits, Service, Stack};
+use crate::stats::ContainerUsage;
 use crate::web::ui::Uptime;
 use crate::web::ui::{Pill, Tone};
 
@@ -72,6 +77,13 @@ impl From<Vec<ContainerInfo>> for StackContainers {
             (&a.service, b.generation, &a.info.name).cmp(&(&b.service, a.generation, &b.info.name))
         });
         Self(placed)
+    }
+}
+
+impl Placed {
+    /// Its CPU and memory cells, from `usage`.
+    fn cells(&self, usage: &StackUsage<'_>) -> UsageCells {
+        usage.cells(&self.info.id, &self.service, self.generation)
     }
 }
 
@@ -194,40 +206,24 @@ pub struct ServiceTable {
 
 impl ServiceTable {
     /// The services of `status` (whose active revision is `stack`, when it parses), with the
-    /// `containers` the runtime reports, or why it could not, as of `now`. Dependencies and
-    /// checks come from the revision the reconciler and the monitor use: the last committed
-    /// deployment's (ADR-0056 Decision 3), else the active one.
+    /// `containers` the runtime reports, or why it could not, and what the resource sampler has
+    /// about them (`usage`), as of `now`. Dependencies, checks and limits come from the revision
+    /// the reconciler and the monitor use: the last committed deployment's (ADR-0056 Decision
+    /// 3), else the active one.
     pub fn new(
         status: &StackStatus,
         stack: Option<&Stack>,
         containers: Result<StackContainers, String>,
+        usage: BTreeMap<ContainerId, ContainerUsage>,
         now: SystemTime,
     ) -> Self {
         let (containers, error) = match containers {
             Ok(containers) => (containers, None),
             Err(err) => (StackContainers::default(), Some(err)),
         };
-        let declared: BTreeMap<&str, &Service> = stack
-            .into_iter()
-            .flat_map(|stack| &stack.services)
-            .map(|(name, service)| (name.as_ref(), service))
-            .collect();
-        let committed = status
-            .committed
-            .as_ref()
-            .and_then(|revision| revision.toml.parse::<Stack>().ok());
-        let in_effect = |name: &str| {
-            committed
-                .as_ref()
-                .and_then(|stack| {
-                    stack
-                        .services
-                        .iter()
-                        .find(|(n, _)| n.as_ref() == name)
-                        .map(|(_, service)| service)
-                })
-                .or_else(|| declared.get(name).copied())
-        };
+        let declarations = Declarations::new(status, stack);
+        let limits = UsageLimits::new(status, &declarations);
+        let usage = StackUsage::new(&limits, usage);
         let listed = error.is_none();
         let deploying = StackCard::deploying(status);
         let rows = status
@@ -242,10 +238,10 @@ impl ServiceTable {
                     service,
                     moving,
                     Declared {
-                        active: declared.get(service.name.as_str()).copied(),
-                        in_effect: in_effect(&service.name),
+                        active: declarations.active(&service.name),
+                        in_effect: declarations.in_effect(&service.name),
                     },
-                    &containers,
+                    (&containers, &usage),
                     listed,
                     now,
                 )
@@ -255,7 +251,7 @@ impl ServiceTable {
             .0
             .iter()
             .filter(|c| !status.services.iter().any(|s| s.name == c.service))
-            .map(|c| ContainerRow::new(&status.name, c, Role::Orphan, now))
+            .map(|c| ContainerRow::new(&status.name, c, Role::Orphan, &usage, now))
             .collect();
         Self {
             rows,
@@ -263,6 +259,47 @@ impl ServiceTable {
             containers: containers.0.len(),
             error,
         }
+    }
+}
+
+/// The revisions that declare a stack's services: the active one, and the last committed
+/// deployment's, which the reconciler and the monitor use (ADR-0056 Decision 3).
+pub(super) struct Declarations<'a> {
+    active: Option<&'a Stack>,
+    committed: Option<Stack>,
+}
+
+impl<'a> Declarations<'a> {
+    /// The revisions of `status`, whose active one is `active` when it parses.
+    pub(super) fn new(status: &StackStatus, active: Option<&'a Stack>) -> Self {
+        Self {
+            active,
+            committed: status
+                .committed
+                .as_ref()
+                .and_then(|revision| revision.toml.parse::<Stack>().ok()),
+        }
+    }
+
+    /// `name` in the active revision.
+    fn active(&self, name: &str) -> Option<&'a Service> {
+        Self::service(self.active?, name)
+    }
+
+    /// `name` in the revision in effect: the committed one, else the active one.
+    pub(super) fn in_effect(&self, name: &str) -> Option<&Service> {
+        self.committed
+            .as_ref()
+            .and_then(|stack| Self::service(stack, name))
+            .or_else(|| self.active(name))
+    }
+
+    fn service<'s>(stack: &'s Stack, name: &str) -> Option<&'s Service> {
+        stack
+            .services
+            .iter()
+            .find(|(n, _)| n.as_ref() == name)
+            .map(|(_, service)| service)
     }
 }
 
@@ -300,6 +337,8 @@ pub struct ServiceRow {
     pub logs: String,
     /// Whether it has a container whose log the logs tab can show.
     pub has_log: bool,
+    /// The CPU and memory of the container running it; `None` when none does.
+    pub usage: Option<UsageCells>,
     /// The service's containers of other generations.
     pub others: Vec<ContainerRow>,
 }
@@ -311,7 +350,7 @@ impl ServiceRow {
         service: &ServiceStatus,
         deploying: bool,
         declared: Declared<'_>,
-        containers: &StackContainers,
+        (containers, usage): (&StackContainers, &StackUsage<'_>),
         listed: bool,
         now: SystemTime,
     ) -> Self {
@@ -336,7 +375,7 @@ impl ServiceRow {
                     (Some(theirs), Some(running)) if theirs < running => Role::Previous,
                     _ => Role::Other,
                 };
-                ContainerRow::new(stack, c, role, now)
+                ContainerRow::new(stack, c, role, usage, now)
             })
             .collect();
         Self {
@@ -370,6 +409,7 @@ impl ServiceRow {
             up: current.and_then(|c| Uptime::of(&c.info, now)),
             logs: format!("/stacks/{stack}/logs?service={}", service.name),
             has_log: current.is_some() || !others.is_empty(),
+            usage: current.map(|c| c.cells(usage)),
             others,
         }
     }
@@ -584,10 +624,18 @@ pub struct ContainerRow {
     pub generation: Option<u32>,
     pub up: Option<Uptime>,
     pub logs: String,
+    /// Its own CPU and memory.
+    pub usage: UsageCells,
 }
 
 impl ContainerRow {
-    fn new(stack: &str, container: &Placed, role: Role, now: SystemTime) -> Self {
+    fn new(
+        stack: &str,
+        container: &Placed,
+        role: Role,
+        usage: &StackUsage<'_>,
+        now: SystemTime,
+    ) -> Self {
         Self {
             name: container.info.name.clone(),
             service: container.service.clone(),
@@ -604,6 +652,7 @@ impl ContainerRow {
                 "/stacks/{stack}/logs?service={}&container={}",
                 container.service, container.info.name
             ),
+            usage: container.cells(usage),
         }
     }
 }
@@ -693,6 +742,7 @@ mod tests {
                 status,
                 Some(&stack),
                 Ok(StackContainers::from(containers)),
+                BTreeMap::new(),
                 now,
             );
             table.rows.into_iter().nth(1).unwrap()
@@ -750,7 +800,13 @@ mod tests {
         );
         // A revision that does not parse declares nothing.
         status.revision = revision("notes", 3, "not toml");
-        let table = ServiceTable::new(&status, None, Ok(StackContainers::default()), now);
+        let table = ServiceTable::new(
+            &status,
+            None,
+            Ok(StackContainers::default()),
+            BTreeMap::new(),
+            now,
+        );
         assert!(
             table
                 .rows
@@ -794,7 +850,7 @@ mod tests {
         let orphan = container("cache", 1, ContainerState::Exited(Some(0)));
         let containers = StackContainers::from(vec![orphan, draining, running]);
         let stack: Stack = NOTES.parse().unwrap();
-        let table = ServiceTable::new(&status, Some(&stack), Ok(containers), now);
+        let table = ServiceTable::new(&status, Some(&stack), Ok(containers), BTreeMap::new(), now);
 
         let api = &table.rows[0];
         assert_eq!(api.container.as_deref(), Some("hoster-notes-api-g2"));
@@ -873,7 +929,13 @@ mod tests {
             generation: 3,
             digest: digest(3),
         };
-        let table = ServiceTable::new(&status, Some(&stack), Err("podman is down".into()), now);
+        let table = ServiceTable::new(
+            &status,
+            Some(&stack),
+            Err("podman is down".into()),
+            BTreeMap::new(),
+            now,
+        );
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.rows[0].port, "—");
         assert_eq!(table.error.as_deref(), Some("podman is down"));

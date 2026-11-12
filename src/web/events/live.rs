@@ -5,6 +5,13 @@
 //! could not be read before. With nothing recorded the card is sent again at least every
 //! [`StackFeed::REFRESH`], so its "5 min ago" times keep up. The stream ends with an `end`
 //! event when the session ends, after replacing the card with a notice.
+//!
+//! The same stream keeps the services table's CPU and Memory cells live (ADR-0066 §9): after
+//! each tick of the resource sampler it sends `<hx-partial>`s that replace the content of the
+//! cells of the stack's containers ([`UsageFeed`]), rendered from the sampler's cache alone. A
+//! message of only partials swaps nothing into the events card: the SSE extension swaps each
+//! message with `swapEmpty:false`, and htmx takes the partials out before deciding whether
+//! anything is left for the element itself.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -20,12 +27,13 @@ use super::RecentEvents;
 use crate::orchestrator::UiEvent;
 use crate::store::Event;
 use crate::web::auth::{Auth, Session};
-use crate::web::stacks::Stacks;
+use crate::web::stacks::{Stacks, UsageFeed};
 
-/// One stack's Recent events card, read and followed.
+/// One stack's Recent events card, read and followed, and its containers' usage.
 pub(in crate::web) struct StackFeed {
     stacks: Stacks,
     stack: String,
+    usage: Option<UsageFeed>,
 }
 
 /// What the feed waited for.
@@ -62,6 +70,15 @@ impl StackFeed {
         Self {
             stacks,
             stack: stack.to_owned(),
+            usage: None,
+        }
+    }
+
+    /// The feed, also sending `usage` after every sampler tick.
+    pub(in crate::web) fn with_usage(self, usage: UsageFeed) -> Self {
+        Self {
+            usage: Some(usage),
+            ..self
         }
     }
 
@@ -102,10 +119,11 @@ impl StackFeed {
             .into_response()
     }
 
-    /// The card now, then once per change, until the orchestrator is gone or `cut` resolves
-    /// (which sends [`Self::SIGNED_OUT`] first); then `end`.
+    /// The card now, then once per change, and the usage partials after every sampler tick,
+    /// until the orchestrator is gone or `cut` resolves (which sends [`Self::SIGNED_OUT`]
+    /// first); then `end`.
     fn stream(
-        self,
+        mut self,
         events: broadcast::Receiver<UiEvent>,
         cut: impl Future<Output = ()> + Send + 'static,
     ) -> impl Stream<Item = Result<SseEvent, Infallible>> + Send + 'static {
@@ -114,6 +132,10 @@ impl StackFeed {
             Update(String),
             Stop(Option<String>),
         }
+        let ticks = match self.usage.take() {
+            Some(usage) => Self::ticks(usage).map(Item::Update).boxed(),
+            None => stream::empty().boxed(),
+        };
         let updates = stream::unfold(Some((self, events, None)), |state| async move {
             let (this, mut events, card): (Self, _, Option<RecentEvents>) = state?;
             let mut card = match card {
@@ -137,9 +159,12 @@ impl StackFeed {
             Some((html, Some((this, events, Some(card)))))
         });
         let merged = stream::select(
-            updates
-                .map(Item::Update)
-                .chain(stream::once(std::future::ready(Item::Stop(None)))),
+            stream::select(
+                updates
+                    .map(Item::Update)
+                    .chain(stream::once(std::future::ready(Item::Stop(None)))),
+                ticks,
+            ),
             stream::once(cut).map(|()| Item::Stop(Some(Self::SIGNED_OUT.to_owned()))),
         )
         .boxed();
@@ -158,6 +183,18 @@ impl StackFeed {
             SseEvent::default().event(Self::END).data(""),
         )))
         .map(Ok)
+    }
+
+    /// The usage partials after each sampler tick, from the cache alone; a tick that finds
+    /// none of the stack's containers sends nothing. Ends only if the sampler's cache is gone.
+    fn ticks(usage: UsageFeed) -> impl Stream<Item = String> + Send + 'static {
+        let changes = usage.changes();
+        stream::unfold((usage, changes), |(usage, mut changes)| async move {
+            changes.changed().await.ok()?;
+            let partials = usage.partials();
+            Some((partials, (usage, changes)))
+        })
+        .filter_map(std::future::ready)
     }
 
     /// Waits for the next event of the stack (or at most [`Self::REFRESH`]), then takes the

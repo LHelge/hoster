@@ -1,0 +1,3 @@
+<span class="usage-figure">{% if let Some(value) = value %}<span class="usage-value">{{ value }}</span>{% else %}<span class="usage-value muted">—</span>{% endif %}{% if let Some(limit) = limit %} <span class="usage-limit">/ {{ limit }}</span>{% endif %}</span>
+{%- if let Some(meter) = meter %}{{ meter }}{% endif %}
+{%- if let Some(spark) = spark %}{{ spark }}{% endif %}

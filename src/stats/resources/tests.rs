@@ -154,8 +154,12 @@ async fn cpu_is_the_rate_between_two_readings_and_unknown_at_first() {
 
     let usage = &h.usage.stack("site")[&web];
     assert_eq!(
-        (usage.stack.as_str(), usage.service.as_str()),
-        ("site", "web")
+        (
+            usage.stack.as_str(),
+            usage.service.as_str(),
+            usage.generation
+        ),
+        ("site", "web", Some(1))
     );
     assert_eq!(usage.history.samples().len(), 2);
     assert!(usage.history.samples()[0].at <= usage.history.samples()[1].at);
@@ -337,6 +341,7 @@ fn recorded_samples_reach_the_readers() {
         id: id.clone(),
         stack: "site".into(),
         service: "web".into(),
+        generation: Some(3),
         sample: ContainerSample {
             at,
             cpu: Some(12.5),

@@ -1025,7 +1025,7 @@ mod updates;
 use apply::{ApplyFailed, ApplyPage, Attempt, BaseRevision, LiveCheck, PreviewView, ReresolveView};
 pub use deployments::DeploymentView;
 pub(super) use list::{Ago, Condition, LastDeploy, RowTraffic, TrafficLine};
-pub(super) use overview::StackView;
+pub(super) use overview::{StackView, UsageFeed};
 use updates::UpdatesCard;
 
 #[cfg(test)]

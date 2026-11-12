@@ -45,11 +45,9 @@ use crate::store::{
 pub use self::history::{Range, ScopeHistory, TrafficHistory, TrafficTotals};
 pub use self::latency::Histogram;
 pub use self::recorder::TrafficRecorder;
-#[allow(
-    unused_imports,
-    reason = "named by the stack overview's usage columns (task rap)"
-)]
-pub use self::resources::{ContainerReading, ContainerSample, ContainerUsage};
+#[cfg(test)]
+pub use self::resources::ContainerReading;
+pub use self::resources::{ContainerSample, ContainerUsage};
 pub use self::resources::{History, HostSample, ResourceSampler, ResourceUsage, Usage};
 pub use self::traffic::{
     InFlight, RequestOutcome, StatusClass, StatusCounts, TrackedRequest, Traffic, TrafficDelta,
