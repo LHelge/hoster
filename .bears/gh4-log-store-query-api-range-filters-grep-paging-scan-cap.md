@@ -1,16 +1,17 @@
 ---
 id: gh4
 title: "Log store: query API (range, filters, grep, paging, scan cap)"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:33:20.364893266Z"
-updated: "2026-11-12T19:33:20.364893266Z"
+updated: "2026-11-12T20:57:43.571575927Z"
 tags:
   - store
   - observability
 depends_on:
   - "7ne"
 parent: f8z
+attempts: 1
 ---
 
 ## Summary
@@ -39,6 +40,14 @@ The read side of the log store that the logs UI (epic `psq`) builds on (ADR-0067
 ## Testing
 - Seeded-store tests: each filter alone and combined, ordering, paging both ways, scan cap and the early-stop signal, regex errors, histogram buckets
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, tests pass
+
+**Changed while implementing (2026-11-12):** `count_by_level` narrows with the `(stack, time)`
+or `(time)` index and reads each row's `level` from the table (no message scan, no Rust
+filtering); neither index covers `level`, and adding it would break the `(time, id)` order the
+pages read without a sort, so the schema is unchanged. Text matches the message or a flattened
+field written as `key=value`. The cursor is a `RecordKey` (time and id, `<time>.<id>`), not a
+bare id, because times are podman's stamps and do not follow id order across containers.
+`LogStore` gained a read-only pool for all reads (`head()` included).
 
 ## References
 - ADR-0067 (§4, §8), ADR-0068

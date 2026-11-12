@@ -24,6 +24,12 @@ impl Timestamp {
         self.0
     }
 
+    /// The time `millis` milliseconds after the Unix epoch, as [`Timestamp::as_millis`] gives
+    /// it: for text that carries one, such as a page cursor.
+    pub const fn from_millis(millis: i64) -> Self {
+        Self(millis)
+    }
+
     /// The start of the `unit`-long period since the epoch that holds this time: the time
     /// itself when it is a multiple of `unit`. A zero `unit` leaves the time as it is.
     pub fn floor(self, unit: Duration) -> Timestamp {

@@ -16,6 +16,7 @@
     reason = "written by the recorder and read by the logs UI as they land (epic f8z)"
 )]
 
+mod query;
 mod types;
 
 #[cfg(test)]
@@ -31,6 +32,10 @@ use sqlx::sqlite::{
 };
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 
+pub use query::{
+    InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, PageAt, RecordKey,
+    TextFilter,
+};
 pub use types::{
     Level, LogBatch, LogCursor, LogHead, LogRecord, RequestId, RequestRow, Stream, UnknownLogText,
 };
@@ -41,10 +46,15 @@ use super::{Result, Store, StoreError};
 /// tests enforce it for both.
 pub(super) static LOG_MIGRATOR: Migrator = sqlx::migrate!("./migrations_logs");
 
-/// Handle to the log store. Cheap to clone; clones share the pool.
+/// Handle to the log store. Cheap to clone; clones share the pools.
+///
+/// Writes (the recorder, retention) go through one pool and reads (the logs pages) through a
+/// second, read-only one, so a page never queues behind a commit for a connection; in WAL mode
+/// it reads the last committed state while the recorder writes.
 #[derive(Debug, Clone)]
 pub struct LogStore {
     pool: SqlitePool,
+    reads: SqlitePool,
     path: PathBuf,
 }
 
@@ -53,8 +63,10 @@ impl LogStore {
     pub const FILE_NAME: &str = "logs.db";
     /// How long a connection waits for a lock held by another one before failing.
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-    /// One writer (the recorder) and readers for the logs pages.
-    const MAX_CONNECTIONS: u32 = 4;
+    /// The recorder, and retention when it runs.
+    const WRITE_CONNECTIONS: u32 = 2;
+    /// Concurrent logs pages.
+    const READ_CONNECTIONS: u32 = 4;
     /// Rows per multi-row `INSERT`: at 14 columns, far under SQLite's 32766 bound parameters.
     const ROWS_PER_INSERT: usize = 500;
 
@@ -75,7 +87,7 @@ impl LogStore {
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(Self::BUSY_TIMEOUT);
         let pool = SqlitePoolOptions::new()
-            .max_connections(Self::MAX_CONNECTIONS)
+            .max_connections(Self::WRITE_CONNECTIONS)
             .connect_with(options)
             .await
             .map_err(|source| StoreError::Open {
@@ -83,16 +95,30 @@ impl LogStore {
                 source,
             })?;
 
-        let store = Self { pool, path };
-        Store::quick_check(&store.pool, &store.path).await?;
+        Store::quick_check(&pool, &path).await?;
         LOG_MIGRATOR
-            .run(&store.pool)
+            .run(&pool)
             .await
             .map_err(|source| StoreError::Migrate {
-                path: store.path.clone(),
+                path: path.clone(),
                 source,
             })?;
-        Ok(store)
+
+        // Opened once the file is in WAL mode and migrated: a read-only connection can neither
+        // change the journal mode nor create tables.
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .read_only(true)
+            .busy_timeout(Self::BUSY_TIMEOUT);
+        let reads = SqlitePoolOptions::new()
+            .max_connections(Self::READ_CONNECTIONS)
+            .connect_with(options)
+            .await
+            .map_err(|source| StoreError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(Self { pool, reads, path })
     }
 
     /// Path of the database file.
@@ -163,7 +189,7 @@ impl LogStore {
 
     /// The newest committed ids.
     pub async fn head(&self) -> Result<LogHead> {
-        let mut conn = self.pool.acquire().await?;
+        let mut conn = self.reads.acquire().await?;
         Self::head_in(&mut conn).await
     }
 
@@ -201,6 +227,7 @@ impl LogStore {
 
     /// Closes every connection, checkpointing the WAL.
     pub async fn close(&self) {
+        self.reads.close().await;
         self.pool.close().await;
     }
 }
