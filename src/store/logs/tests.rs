@@ -607,3 +607,249 @@ mod queries {
         }
     }
 }
+
+mod retention {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::store::Timestamp;
+
+    const HOUR: Duration = Duration::from_secs(60 * 60);
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// A fixed "now", half past an hour, so whole hours lie before it.
+    fn now() -> Timestamp {
+        Timestamp::from_millis(1_800_000_000_000).floor(HOUR) + HOUR / 2
+    }
+
+    fn record(time: Timestamp, bytes: usize) -> LogRecord {
+        LogRecord {
+            time,
+            stack: Some("notes".to_owned()),
+            service: "api".to_owned(),
+            generation: Some(1),
+            stream: Stream::Stdout,
+            level: None,
+            message: "x".repeat(bytes),
+            fields: None,
+            cut: false,
+            marker: false,
+        }
+    }
+
+    fn request(time: Timestamp, bytes: usize) -> RequestRow {
+        RequestRow {
+            time,
+            host: "notes.example.com".to_owned(),
+            prefix: "/".to_owned(),
+            stack: "notes".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            path: "/".repeat(bytes.max(1)),
+            status: 200,
+            to_header: None,
+            total: Duration::from_millis(3),
+            bytes: 10,
+            client: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            upstream_failed: false,
+            request_id: RequestId::from([1; 16]),
+        }
+    }
+
+    /// Appends `records` and `requests` rows of `bytes` each at `time`.
+    async fn seed(
+        store: &LogStore,
+        time: Timestamp,
+        records: usize,
+        requests: usize,
+        bytes: usize,
+    ) {
+        store
+            .append(&LogBatch {
+                records: (0..records).map(|_| record(time, bytes)).collect(),
+                requests: (0..requests).map(|_| request(time, bytes)).collect(),
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The times of the stored records and request rows, oldest first.
+    async fn times(store: &LogStore) -> (Vec<i64>, Vec<i64>) {
+        let records = sqlx::query_scalar("SELECT time FROM log_records ORDER BY time, id")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        let requests = sqlx::query_scalar("SELECT time FROM requests ORDER BY time, id")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        (records, requests)
+    }
+
+    async fn used_bytes(store: &LogStore) -> u64 {
+        store.file_size().await.unwrap().used()
+    }
+
+    fn ms(time: Timestamp) -> i64 {
+        time.as_millis()
+    }
+
+    #[tokio::test]
+    async fn rows_older_than_the_age_go_from_both_tables() {
+        let (_dir, store) = open().await;
+        let old = now() - 8 * DAY;
+        let recent = now() - DAY;
+        seed(&store, old, 3, 2, 10).await;
+        seed(&store, recent, 1, 1, 10).await;
+
+        let report = store
+            .sweep(now(), Retention::default())
+            .finish()
+            .await
+            .unwrap();
+        assert_eq!(report.started, now());
+        assert_eq!(
+            report.expired,
+            Removed {
+                records: 3,
+                requests: 2
+            }
+        );
+        assert_eq!(report.capped, Removed::default());
+        assert!(report.file_bytes > 0);
+        assert_eq!(times(&store).await, (vec![ms(recent)], vec![ms(recent)]));
+    }
+
+    #[tokio::test]
+    async fn the_newest_row_of_each_table_stays_however_old() {
+        let (_dir, store) = open().await;
+        seed(&store, now() - 30 * DAY, 2, 2, 10).await;
+        let head = store.head().await.unwrap();
+
+        let tiny = Retention::new(DAY, 1, 100);
+        let report = store.sweep(now(), tiny).finish().await.unwrap();
+        assert_eq!(
+            report.expired,
+            Removed {
+                records: 1,
+                requests: 1
+            }
+        );
+        assert_eq!(report.capped, Removed::default());
+        let old = ms(now() - 30 * DAY);
+        assert_eq!(times(&store).await, (vec![old], vec![old]));
+        // The next id is not one handed out before.
+        assert_eq!(store.head().await.unwrap(), head);
+    }
+
+    #[tokio::test]
+    async fn deletes_go_in_bounded_batches() {
+        let (_dir, store) = open().await;
+        seed(&store, now() - 8 * DAY, 5, 0, 10).await;
+        seed(&store, now(), 1, 0, 10).await;
+
+        let mut sweep = store.sweep(now(), Retention::new(Retention::MAX_AGE, u64::MAX, 2));
+        assert_eq!(sweep.step().await.unwrap(), None);
+        assert_eq!(times(&store).await.0.len(), 4);
+        assert_eq!(sweep.step().await.unwrap(), None);
+        assert_eq!(times(&store).await.0.len(), 2);
+        let report = sweep.finish().await.unwrap();
+        assert_eq!(report.expired.records, 5);
+        assert_eq!(times(&store).await.0, [ms(now())]);
+    }
+
+    #[tokio::test]
+    async fn over_the_cap_whole_hours_go_oldest_first_across_both_tables() {
+        let (_dir, store) = open().await;
+        let first = now().floor(HOUR) - 3 * HOUR;
+        let second = first + HOUR;
+        // The hour's records and requests at its start and end.
+        seed(&store, first, 20, 0, 8_000).await;
+        seed(
+            &store,
+            first + HOUR - Duration::from_millis(1),
+            0,
+            20,
+            8_000,
+        )
+        .await;
+        seed(&store, second, 20, 20, 8_000).await;
+        seed(&store, now(), 1, 1, 10).await;
+        let used = used_bytes(&store).await;
+
+        // Room for a little more than one of the hours.
+        let cap = used * 3 / 5;
+        let report = store
+            .sweep(now(), Retention::new(Retention::MAX_AGE, cap, 7))
+            .finish()
+            .await
+            .unwrap();
+        assert_eq!(report.expired, Removed::default());
+        assert_eq!(
+            report.capped,
+            Removed {
+                records: 20,
+                requests: 20
+            }
+        );
+        let (records, requests) = times(&store).await;
+        assert!(records.iter().chain(&requests).all(|&t| t >= ms(second)));
+        assert_eq!((records.len(), requests.len()), (21, 21));
+        assert!(used_bytes(&store).await <= cap);
+    }
+
+    #[tokio::test]
+    async fn the_hour_in_progress_stays_even_over_the_cap() {
+        let (_dir, store) = open().await;
+        let earlier = now().floor(HOUR) - HOUR;
+        seed(&store, earlier, 5, 5, 4_000).await;
+        // A log storm in the current hour, alone larger than the cap.
+        seed(&store, now().floor(HOUR), 50, 50, 4_000).await;
+
+        let report = store
+            .sweep(now(), Retention::new(Retention::MAX_AGE, 1, 100))
+            .finish()
+            .await
+            .unwrap();
+        assert_eq!(
+            report.capped,
+            Removed {
+                records: 5,
+                requests: 5
+            }
+        );
+        let (records, requests) = times(&store).await;
+        assert_eq!((records.len(), requests.len()), (50, 50));
+    }
+
+    #[tokio::test]
+    async fn the_vacuum_shrinks_the_file_on_disk() {
+        let (_dir, store) = open().await;
+        seed(&store, now() - 8 * DAY, 500, 500, 4_000).await;
+        seed(&store, now(), 1, 1, 10).await;
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let before = fs::metadata(store.path()).unwrap().len();
+
+        let report = store
+            .sweep(now(), Retention::default())
+            .finish()
+            .await
+            .unwrap();
+        assert_eq!(
+            report.expired,
+            Removed {
+                records: 500,
+                requests: 500
+            }
+        );
+        let after = fs::metadata(store.path()).unwrap().len();
+        assert!(after < before / 10, "{after} is not much below {before}");
+        assert_eq!(report.file_bytes, after);
+        assert_eq!(store.file_size().await.unwrap().free, 0);
+    }
+}

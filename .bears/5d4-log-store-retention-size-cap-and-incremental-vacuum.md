@@ -1,16 +1,17 @@
 ---
 id: "5d4"
 title: "Log store: retention, size cap and incremental vacuum"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:34:02.717558746Z"
-updated: "2026-11-12T19:34:02.717558746Z"
+updated: "2026-11-12T21:40:25.621826198Z"
 tags:
   - store
   - observability
 depends_on:
   - r8w
 parent: f8z
+attempts: 1
 ---
 
 ## Summary

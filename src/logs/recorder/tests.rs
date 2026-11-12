@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use tempfile::TempDir;
 
 use super::*;
-use crate::store::{Level, RequestId, Timestamp};
+use crate::store::{Level, LogBatch, RequestId, Retention, Timestamp};
 
 const SHORT: Duration = Duration::from_millis(20);
 const NEVER: Duration = Duration::from_secs(3600);
@@ -319,6 +319,52 @@ async fn a_failed_commit_loses_its_batch_counted_and_the_recorder_keeps_going() 
             ..Drops::default()
         }
     );
+    stop.cancel();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_retention_pass_runs_at_startup_between_commits_and_is_announced() {
+    let (_dir, store) = store().await;
+    let mut old = record(Stream::Stdout, "old");
+    old.time = Timestamp::now() - Duration::from_secs(8 * 24 * 60 * 60);
+    let mut old_request = request("/old");
+    old_request.time = old.time;
+    store
+        .append(&LogBatch {
+            records: vec![old.clone(), old.clone(), old.clone()],
+            requests: vec![old_request.clone(), old_request],
+            ..LogBatch::default()
+        })
+        .await
+        .unwrap();
+    let (recorder, sink) = LogRecorder::new(store.clone()).await.unwrap();
+    assert_eq!(*sink.sweeps().borrow(), None);
+    // One row per step, so the pass takes several turns of the loop.
+    let retention = Retention::new(Retention::MAX_AGE, u64::MAX, 1);
+    let stop = CancellationToken::new();
+    let task = tokio::spawn(
+        recorder
+            .with_interval(SHORT)
+            .with_retention(retention)
+            .run(stop.clone()),
+    );
+    assert!(sink.try_record(record(Stream::Hoster, "new")));
+    assert!(sink.try_request(request("/new")));
+
+    let mut sweeps = sink.sweeps();
+    let report = tokio::time::timeout(WAIT, sweeps.wait_for(Option::is_some))
+        .await
+        .expect("the recorder sweeps at startup")
+        .unwrap()
+        .unwrap();
+    head_reaches(&sink, |head| head.record == 4 && head.request == 3).await;
+    // Every old row goes once newer ones are committed; whichever was newest when its table
+    // was swept stays.
+    let removed = report.expired.records + report.expired.requests;
+    assert!((3..=5).contains(&removed), "{report:?}");
+    assert!(report.file_bytes > 0);
+
     stop.cancel();
     task.await.unwrap();
 }
