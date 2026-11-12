@@ -37,8 +37,8 @@ use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 
 pub use health::{LogFileFacts, RowCounts};
 pub use query::{
-    InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, PageAt, RecordKey,
-    TextFilter,
+    InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, Page, PageAt, RecordKey,
+    RequestCounts, RequestEntry, RequestQuery, StatusFilter, TextFilter,
 };
 pub use retention::{Removed, Retention, Sweep, SweepReport};
 pub use types::{
@@ -362,7 +362,7 @@ impl LogStore {
     }
 
     /// A duration as whole milliseconds, saturating.
-    fn millis(duration: Duration) -> i64 {
+    pub(super) fn millis(duration: Duration) -> i64 {
         i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
     }
 

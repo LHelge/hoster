@@ -1,7 +1,11 @@
-//! The read side of the log store (ADR-0067 §8): [`LogQuery`] narrows by time, scope, service,
-//! level and stream in SQL, with the `(stack, time)` or `(time)` index, and matches text, a
-//! regular expression and field filters in Rust, a chunk of rows at a time, until the page is
-//! full or [`LogQuery::SCAN_CAP`] rows have been visited.
+//! The read side of the log store (ADR-0067 §8): [`LogStore::records`] reads a page of
+//! `log_records` for a [`LogQuery`], and [`LogStore::requests`] a page of `requests` for a
+//! [`RequestQuery`]. Both narrow by time and scope in SQL, with the `(stack, time)` or `(time)`
+//! index, and by whatever else SQL can compare; text, regular expressions and field filters are
+//! matched in Rust, a chunk of rows at a time, until the page is full or [`SCAN_CAP`] rows have
+//! been visited. The two share that scan, the [`PageAt`] cursor and the [`Page`] they return.
+
+mod requests;
 
 use std::fmt;
 use std::ops::Range;
@@ -9,10 +13,17 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use regex::{Regex, RegexBuilder};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Sqlite};
 
 use super::{Level, LogRecord, LogStore, Stream, UnknownLogText};
 use crate::store::{Result, StoreError, Timestamp};
+
+pub use requests::{RequestCounts, RequestEntry, RequestQuery, StatusFilter};
+
+/// The most rows one query visits. A query that reaches it before its page is full stops and
+/// says where ([`Page::scan_stopped`]).
+pub const SCAN_CAP: u32 = 50_000;
 
 /// Whose records a query reads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -75,7 +86,7 @@ impl TextFilter {
             .map_err(InvalidPattern)
     }
 
-    fn is_match(&self, haystack: &str) -> bool {
+    pub(super) fn is_match(&self, haystack: &str) -> bool {
         match self {
             TextFilter::Substring(needle) => haystack.to_lowercase().contains(needle.as_str()),
             TextFilter::Regex(regex) => regex.is_match(haystack),
@@ -150,11 +161,8 @@ impl LogQuery {
     pub const DEFAULT_LIMIT: u32 = 200;
     /// The most records a page holds.
     pub const MAX_LIMIT: u32 = 1000;
-    /// The most rows one query visits. A query that reaches it before its page is full stops
-    /// and says where ([`LogPage::scan_stopped`]).
-    pub const SCAN_CAP: u32 = 50_000;
-    /// Rows fetched per round trip while filtering in Rust.
-    const CHUNK: u32 = 1000;
+    /// The most rows one query visits: [`SCAN_CAP`].
+    pub const SCAN_CAP: u32 = SCAN_CAP;
 
     /// The newest page of every record in `range` and `scope`, unfiltered.
     pub fn new(range: Range<Timestamp>, scope: LogScope) -> Self {
@@ -171,20 +179,8 @@ impl LogQuery {
         }
     }
 
-    fn limit(&self) -> u32 {
-        self.limit.clamp(1, Self::MAX_LIMIT)
-    }
-
-    /// Whether some rows SQL returns may still not match.
-    fn filters_in_rust(&self) -> bool {
-        self.text.is_some() || !self.fields.is_empty()
-    }
-
     /// The filters SQL cannot apply.
-    fn matches(&self, record: &LogRecord) -> bool {
-        if !self.filters_in_rust() {
-            return true;
-        }
+    fn matches_record(&self, record: &LogRecord) -> bool {
         let flat = record.flat_fields();
         let fields_hold = self
             .fields
@@ -199,7 +195,7 @@ impl LogQuery {
             })
     }
 
-    /// The narrowing SQL does, for both reads.
+    /// The narrowing by range and scope that every read of either table starts with.
     fn push_where(sql: &mut QueryBuilder<Sqlite>, range: &Range<Timestamp>, scope: &LogScope) {
         sql.push(" WHERE time >= ")
             .push_bind(range.start)
@@ -208,6 +204,7 @@ impl LogQuery {
         scope.push_sql(sql);
     }
 
+    /// `AND <column> IN (…)`, or nothing for no values.
     fn push_in<T>(
         sql: &mut QueryBuilder<Sqlite>,
         column: &'static str,
@@ -226,9 +223,25 @@ impl LogQuery {
         }
         sql.push(")");
     }
+}
 
-    /// One chunk's `SELECT`: up to `rows` rows past `from` (exclusive), towards older ones or newer.
-    fn chunk_sql(&self, from: Option<RecordKey>, older: bool, rows: u32) -> QueryBuilder<Sqlite> {
+impl Paged for LogQuery {
+    type Row = EntryRow;
+    type Item = LogEntry;
+
+    fn page(&self) -> PageAt {
+        self.page
+    }
+
+    fn limit(&self) -> u32 {
+        self.limit.clamp(1, Self::MAX_LIMIT)
+    }
+
+    fn filters_in_rust(&self) -> bool {
+        self.text.is_some() || !self.fields.is_empty()
+    }
+
+    fn select(&self) -> QueryBuilder<Sqlite> {
         let mut sql = QueryBuilder::new(
             "SELECT id, time, stack, service, generation, stream, level, message, fields, cut, \
              marker FROM log_records",
@@ -237,6 +250,49 @@ impl LogQuery {
         Self::push_in(&mut sql, "service", self.services.clone());
         Self::push_in(&mut sql, "level", self.levels.iter().map(|l| l.as_str()));
         Self::push_in(&mut sql, "stream", self.streams.iter().map(|s| s.as_str()));
+        sql
+    }
+
+    fn decode(row: EntryRow) -> Result<LogEntry, UnknownLogText> {
+        LogEntry::try_from(row)
+    }
+
+    fn key(entry: &LogEntry) -> RecordKey {
+        entry.key()
+    }
+
+    fn matches(&self, entry: &LogEntry) -> bool {
+        self.matches_record(&entry.record)
+    }
+}
+
+/// A query the shared scan pages through one table with, by `(time, id)`.
+trait Paged {
+    /// A row as SQL returns it.
+    type Row: for<'r> sqlx::FromRow<'r, SqliteRow> + Send + Unpin;
+    /// A row as the page holds it.
+    type Item;
+
+    fn page(&self) -> PageAt;
+    /// The page size, clamped.
+    fn limit(&self) -> u32;
+    /// Whether some rows SQL returns may still not match.
+    fn filters_in_rust(&self) -> bool;
+    /// `SELECT <columns> FROM <table> WHERE …` with every filter SQL applies, starting with
+    /// [`LogQuery::push_where`]; the scan adds the cursor, the order and the limit.
+    fn select(&self) -> QueryBuilder<Sqlite>;
+    fn decode(row: Self::Row) -> Result<Self::Item, UnknownLogText>;
+    fn key(item: &Self::Item) -> RecordKey;
+    /// The filters SQL cannot apply; only asked when [`Paged::filters_in_rust`].
+    fn matches(&self, item: &Self::Item) -> bool;
+
+    /// Rows fetched per round trip while filtering in Rust.
+    const CHUNK: u32 = 1000;
+
+    /// One chunk's `SELECT`: up to `rows` rows past `from` (exclusive), towards older ones or
+    /// newer.
+    fn chunk_sql(&self, from: Option<RecordKey>, older: bool, rows: u32) -> QueryBuilder<Sqlite> {
+        let mut sql = self.select();
         if let Some(key) = from {
             // The plain `time` bound lets the index narrow; the row value breaks ties by id.
             let (cmp, bound) = if older { ("<", "<=") } else { (">", ">=") };
@@ -313,21 +369,35 @@ impl TryFrom<EntryRow> for LogEntry {
     }
 }
 
-/// One page of records, oldest first.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LogPage {
+/// One page of records or request rows, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page<T> {
     /// Ordered by time, then id.
-    pub entries: Vec<LogEntry>,
+    pub entries: Vec<T>,
     /// There may be matching records older than the page. Always true for a page read
     /// [`After`](PageAt::After) a key.
     pub older: bool,
     /// There may be matching records newer than the page. Always true for a page read
     /// [`Before`](PageAt::Before) a key, false for the [`Newest`](PageAt::Newest).
     pub newer: bool,
-    /// The scan hit [`LogQuery::SCAN_CAP`] before the page was full: the last row it visited,
-    /// so the UI can offer to search on from there (`Before` or `After` it).
+    /// The scan hit [`SCAN_CAP`] before the page was full: the last row it visited, so the UI
+    /// can offer to search on from there (`Before` or `After` it).
     pub scan_stopped: Option<RecordKey>,
 }
+
+impl<T> Default for Page<T> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            older: false,
+            newer: false,
+            scan_stopped: None,
+        }
+    }
+}
+
+/// A page of `log_records`.
+pub type LogPage = Page<LogEntry>;
 
 /// How many records of each level one time bucket holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,9 +426,14 @@ impl LevelCounts {
 impl LogStore {
     /// One page of the records `query` matches. Reads the read pool only, so it never waits
     /// for the recorder.
-    pub async fn query(&self, query: &LogQuery) -> Result<LogPage> {
+    pub async fn records(&self, query: &LogQuery) -> Result<LogPage> {
+        self.page(query).await
+    }
+
+    /// One page of what `query` matches, with the shared scan.
+    async fn page<Q: Paged>(&self, query: &Q) -> Result<Page<Q::Item>> {
         let limit = query.limit();
-        let (mut from, older) = match query.page {
+        let (mut from, older) = match query.page() {
             PageAt::Newest => (None, true),
             PageAt::Before(key) => (Some(key), true),
             PageAt::After(key) => (Some(key), false),
@@ -368,15 +443,16 @@ impl LogStore {
         let mut found = Vec::with_capacity(wanted);
         let mut scanned = 0;
         let mut exhausted = false;
-        while found.len() < wanted && scanned < LogQuery::SCAN_CAP {
-            let rows = if query.filters_in_rust() {
-                LogQuery::CHUNK.min(LogQuery::SCAN_CAP - scanned)
+        let in_rust = query.filters_in_rust();
+        while found.len() < wanted && scanned < SCAN_CAP {
+            let rows = if in_rust {
+                Q::CHUNK.min(SCAN_CAP - scanned)
             } else {
                 u32::try_from(wanted - found.len())
                     .unwrap_or(u32::MAX)
-                    .min(LogQuery::SCAN_CAP - scanned)
+                    .min(SCAN_CAP - scanned)
             };
-            let chunk: Vec<EntryRow> = query
+            let chunk: Vec<Q::Row> = query
                 .chunk_sql(from, older, rows)
                 .build_query_as()
                 .fetch_all(&self.reads)
@@ -384,10 +460,10 @@ impl LogStore {
             let fetched = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
             scanned += fetched;
             for row in chunk {
-                let entry = LogEntry::try_from(row)
+                let entry = Q::decode(row)
                     .map_err(|e| StoreError::Database(sqlx::Error::Decode(Box::new(e))))?;
-                from = Some(entry.key());
-                if query.matches(&entry.record) {
+                from = Some(Q::key(&entry));
+                if !in_rust || query.matches(&entry) {
                     found.push(entry);
                     if found.len() == wanted {
                         break;
@@ -406,11 +482,11 @@ impl LogStore {
         if older {
             found.reverse();
         }
-        Ok(LogPage {
+        Ok(Page {
             entries: found,
             older: if older { beyond } else { true },
             newer: if older {
-                query.page != PageAt::Newest
+                query.page() != PageAt::Newest
             } else {
                 beyond
             },
