@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
@@ -170,6 +170,15 @@ pub trait ContainerRuntime: Send + Sync + 'static {
         options: LogOptions,
     ) -> BoxStream<'static, Result<LogLine, RuntimeError>>;
 
+    /// One reading of a running container's resource counters (ADR-0066), from podman's
+    /// compat stats endpoint without streaming. `None` when the container is gone or not
+    /// running (created, stopped, exited): there is nothing to read, and that is not a failure.
+    /// A paused container is read as usual.
+    fn stats(
+        &self,
+        id: &ContainerId,
+    ) -> impl Future<Output = Result<Option<ContainerStats>, RuntimeError>> + Send;
+
     /// What the engine behind the socket says about itself, for the System page.
     fn engine(&self) -> impl Future<Output = Result<EngineInfo, RuntimeError>> + Send;
 
@@ -282,6 +291,28 @@ pub struct EngineInfo {
     pub cgroup_version: Option<String>,
     /// The cgroup manager (`systemd`, `cgroupfs`).
     pub cgroup_driver: Option<String>,
+    /// Where the engine keeps its images, containers and (by default) named volumes: compat
+    /// `/info`'s `DockerRootDir`, which podman fills with its storage `graphRoot`
+    /// (`~/.local/share/containers/storage` rootless). The disk meter reads its filesystem
+    /// (ADR-0066 §5).
+    pub storage_root: Option<PathBuf>,
+}
+
+/// One reading of a container's resource counters, as podman's compat stats endpoint reports
+/// them (ADR-0066 §2–4, architecture §1). Both are raw readings: a CPU rate needs two of them,
+/// and is the sampler's to compute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContainerStats {
+    /// Cumulative CPU time the container's cgroup has used since it started, user and system
+    /// together (`cpu_stats.cpu_usage.total_usage`, the cgroup's `cpu.stat` `usage_usec`, to the
+    /// nanosecond). It starts again from zero when the container restarts (a new cgroup).
+    pub cpu_time: Duration,
+    /// Memory in use, in bytes: podman's `memory_stats.usage`, which is the cgroup's
+    /// `memory.current` minus its inactive page cache (`inactive_file`), as `podman stats`
+    /// shows it (ADR-0066 §3). It counts anonymous memory, tmpfs and shm, and active page
+    /// cache. Podman reports no cache breakdown (no `stats` map), so `memory.current` itself
+    /// cannot be recovered from the reading.
+    pub memory: u64,
 }
 
 /// A podman container ID.
@@ -813,6 +844,7 @@ pub enum Operation {
     ListManaged,
     Logs,
     Engine,
+    Stats,
     Exec,
 }
 
@@ -837,6 +869,7 @@ impl fmt::Display for Operation {
             Self::ListManaged => "list containers",
             Self::Logs => "read logs",
             Self::Engine => "read engine info",
+            Self::Stats => "read container stats",
             Self::Exec => "exec in container",
         })
     }

@@ -15,9 +15,9 @@ use tokio::sync::{Semaphore, mpsc};
 
 use super::exec::Argv;
 use super::{
-    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, EngineInfo,
-    ExecOutcome, ExecOutput, LogLine, LogOptions, NetworkSpec, ObjectKind, Operation, RuntimeError,
-    VolumeSpec,
+    ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, ContainerState, ContainerStats,
+    EngineInfo, ExecOutcome, ExecOutput, LogLine, LogOptions, NetworkSpec, ObjectKind, Operation,
+    RuntimeError, VolumeSpec,
 };
 use crate::stack::PinnedImage;
 
@@ -101,6 +101,8 @@ struct FakeContainer {
     /// Whether the OOM killer hit its cgroup: sticky for the container's lifetime, as podman's
     /// `State.OOMKilled` (architecture §1.8).
     oom_killed: bool,
+    /// What [`ContainerRuntime::stats`] reads while it runs ([`FakeRuntime::set_stats`]).
+    stats: ContainerStats,
     logs: Vec<LogLine>,
     /// The streams following the log; each gets every line pushed from now on. They end when
     /// the container stops running, as podman's followed logs do.
@@ -330,6 +332,13 @@ impl FakeRuntime {
         }
     }
 
+    /// Sets the counters a container's stats read while it runs; a new container reads zero.
+    pub fn set_stats(&self, id: &ContainerId, stats: ContainerStats) {
+        if let Some(container) = self.lock().containers.get_mut(id) {
+            container.stats = stats;
+        }
+    }
+
     /// Appends a line to a container's log, and sends it to the streams following it.
     pub fn push_log(&self, id: &ContainerId, line: LogLine) {
         if let Some(container) = self.lock().containers.get_mut(id) {
@@ -518,6 +527,7 @@ impl ContainerRuntime for FakeRuntime {
                 state: ContainerState::Created,
                 started_at: None,
                 oom_killed: false,
+                stats: ContainerStats::default(),
                 logs: Vec::new(),
                 followers: Vec::new(),
             },
@@ -582,6 +592,18 @@ impl ContainerRuntime for FakeRuntime {
         Ok(state.container(id)?.info(id))
     }
 
+    /// The counters set with [`FakeRuntime::set_stats`] (zero until then) while the container
+    /// runs; `None` when it does not or is gone, as podman.
+    async fn stats(&self, id: &ContainerId) -> Result<Option<ContainerStats>, RuntimeError> {
+        let mut state = self.lock();
+        state.enter(Operation::Stats)?;
+        Ok(state
+            .containers
+            .get(id)
+            .filter(|container| container.state.is_running())
+            .map(|container| container.stats))
+    }
+
     /// Runs nothing: the argv must not be empty and the container must exist and be running,
     /// and the result is the next one scripted for it (exit 0 without a script).
     async fn exec(
@@ -628,7 +650,7 @@ impl ContainerRuntime for FakeRuntime {
     }
 
     /// podman 5.4.2 unless [`FakeRuntime::set_version`] says otherwise, rootless, on cgroups
-    /// v2 with systemd.
+    /// v2 with systemd, with its storage in the hoster user's home.
     async fn engine(&self) -> Result<EngineInfo, RuntimeError> {
         let mut state = self.lock();
         state.enter(Operation::Engine)?;
@@ -642,6 +664,7 @@ impl ContainerRuntime for FakeRuntime {
             rootless: Some(true),
             cgroup_version: Some("2".into()),
             cgroup_driver: Some("systemd".into()),
+            storage_root: Some("/home/hoster/.local/share/containers/storage".into()),
         })
     }
 
@@ -925,6 +948,35 @@ mod tests {
         assert_eq!(crashed.state, ContainerState::Exited(Some(137)));
         assert_eq!(crashed.started_at, started, "the last start is kept");
         assert_eq!(runtime.spec(&id), Some(spec("a")));
+    }
+
+    #[tokio::test]
+    async fn stats_are_read_while_running() {
+        let runtime = ready().await;
+        let id = runtime.create_container(&spec("a")).await.unwrap();
+        assert_eq!(runtime.stats(&id).await.unwrap(), None, "created");
+        runtime.start(&id).await.unwrap();
+        assert_eq!(
+            runtime.stats(&id).await.unwrap(),
+            Some(ContainerStats::default())
+        );
+        let stats = ContainerStats {
+            cpu_time: Duration::from_millis(1500),
+            memory: 64 << 20,
+        };
+        runtime.set_stats(&id, stats);
+        assert_eq!(runtime.stats(&id).await.unwrap(), Some(stats));
+        runtime.set_state(&id, ContainerState::Exited(Some(0)));
+        assert_eq!(runtime.stats(&id).await.unwrap(), None, "exited");
+        runtime.remove(&id).await.unwrap();
+        assert_eq!(runtime.stats(&id).await.unwrap(), None, "gone");
+        runtime.fail_next(
+            Operation::Stats,
+            RuntimeError::Unsupported {
+                operation: Operation::Stats,
+            },
+        );
+        assert!(runtime.stats(&id).await.is_err());
     }
 
     #[tokio::test]
