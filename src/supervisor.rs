@@ -25,6 +25,7 @@ use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap, DnsCheck, Pub
 use crate::config::{Config, ProxyConfig};
 use crate::installation::Version;
 use crate::instance::Instance;
+use crate::logs::{LogRecorder, LogSink};
 use crate::machine::Machine;
 use crate::notify::Notifier;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
@@ -192,15 +193,19 @@ enum ShutdownPhase {
     JoinProxy,
     /// 5. Flush the traffic recorder once more, now that no request is counted any more.
     FlushTraffic,
+    /// 6. Stop the log recorder, which commits what its producers (the proxy, the container
+    ///    log followers, hoster's own events) left in its channel (ADR-0067 §6).
+    FlushLogs,
 }
 
 impl ShutdownPhase {
-    const ALL: [ShutdownPhase; 5] = [
+    const ALL: [ShutdownPhase; 6] = [
         ShutdownPhase::StopIntake,
         ShutdownPhase::SettleDeploys,
         ShutdownPhase::StopProxy,
         ShutdownPhase::JoinProxy,
         ShutdownPhase::FlushTraffic,
+        ShutdownPhase::FlushLogs,
     ];
 }
 
@@ -212,6 +217,7 @@ impl fmt::Display for ShutdownPhase {
             ShutdownPhase::StopProxy => "stop proxy",
             ShutdownPhase::JoinProxy => "join proxy thread",
             ShutdownPhase::FlushTraffic => "flush traffic history",
+            ShutdownPhase::FlushLogs => "flush the log store",
         })
     }
 }
@@ -411,10 +417,13 @@ impl Systemd {
     }
 }
 
-/// The traffic recorder's task (ADR-0062) and its own stop token. It is not a child of the
-/// root token: the recorder must keep running until the proxy has stopped counting requests,
-/// and is stopped in shutdown step 5, which waits for its last flush.
+/// A recorder's task, the traffic recorder (ADR-0062) or the log recorder (ADR-0067), and its
+/// own stop token. It is not a child of the root token: a recorder must keep running until its
+/// producers have stopped, and is stopped in its own shutdown step, which waits for its last
+/// flush.
 struct RecorderHandle {
+    /// What it records, for the timeout message.
+    name: &'static str,
     stop: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -423,10 +432,13 @@ impl RecorderHandle {
     /// How long a fast shutdown waits for the last flush.
     const FAST_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
-    fn spawn(recorder: TrafficRecorder) -> Self {
+    fn spawn<F>(name: &'static str, run: impl FnOnce(CancellationToken) -> F) -> Self
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let stop = CancellationToken::new();
-        let task = tokio::spawn(recorder.run(stop.clone()));
-        RecorderHandle { stop, task }
+        let task = tokio::spawn(run(stop.clone()));
+        RecorderHandle { name, stop, task }
     }
 
     /// Stops the recorder and waits for its last flush; in fast mode for at most
@@ -437,7 +449,9 @@ impl RecorderHandle {
             ShutdownMode::Graceful => (&mut self.task).await?,
             ShutdownMode::Fast => tokio::time::timeout(Self::FAST_FLUSH_TIMEOUT, &mut self.task)
                 .await
-                .context("the traffic recorder did not finish its last flush in time")??,
+                .with_context(|| {
+                    format!("the {} did not finish its last flush in time", self.name)
+                })??,
         }
         Ok(())
     }
@@ -451,11 +465,15 @@ pub struct Supervisor {
     /// The log store (ADR-0067), opened with the state store; `None` when `logs.db` cannot be
     /// opened, which leaves hoster running without persisted logs (the live container log page
     /// of ADR-0044 reads podman directly).
+    #[allow(dead_code, reason = "read by the logs UI as it lands (epic psq)")]
+    logs: Option<LogStore>,
+    /// Where producers offer log records and request rows: the log recorder's channel, or a
+    /// disconnected sink that drops and counts when there is no log store.
     #[allow(
         dead_code,
-        reason = "handed to the log recorder and the logs UI as they land (epic f8z)"
+        reason = "handed to the followers, the proxy and hoster's own layer as they land (epic f8z)"
     )]
-    logs: Option<LogStore>,
+    log_sink: LogSink,
     /// The secret store (ADR-0029), opened with the state store; its key is generated on the
     /// first start.
     secrets: Option<SecretStore>,
@@ -492,6 +510,7 @@ impl Supervisor {
             config,
             store: None,
             logs: None,
+            log_sink: LogSink::disconnected(),
             secrets: None,
             registry: None,
             certs: None,
@@ -556,6 +575,8 @@ struct Teardown {
     proxy: ProxyHandle,
     /// The traffic recorder, started in phase 8.
     recorder: Option<RecorderHandle>,
+    /// The log recorder (ADR-0067), started with the log store in phase 2.
+    log_recorder: Option<RecorderHandle>,
 }
 
 impl Teardown {
@@ -635,6 +656,44 @@ impl Teardown {
                 }
                 None => Ok(()),
             },
+            // Every producer has stopped: the proxy in step 4, the followers and hoster's own
+            // events with the root token.
+            ShutdownPhase::FlushLogs => match self.log_recorder.as_mut() {
+                Some(recorder) => {
+                    let flushed = recorder.flush(mode).await;
+                    self.log_recorder = None;
+                    flushed
+                }
+                None => Ok(()),
+            },
+        }
+    }
+}
+
+impl Supervisor {
+    /// Opens `logs.db` and starts its recorder (ADR-0067). Either failing is logged and leaves
+    /// hoster running without persisted logs: the sink stays disconnected, and the live container
+    /// log page reads podman directly (ADR-0067 §10).
+    async fn open_log_store(&mut self) {
+        let opened = match LogStore::open(&self.config.state_dir).await {
+            Ok(logs) => LogRecorder::new(logs.clone())
+                .await
+                .map(|(recorder, sink)| (logs, recorder, sink)),
+            Err(err) => Err(err),
+        };
+        match opened {
+            Ok((logs, recorder, sink)) => {
+                tracing::info!(path = %logs.path().display(), "log store ready");
+                self.teardown.log_recorder = Some(RecorderHandle::spawn("log recorder", |stop| {
+                    recorder.run(stop)
+                }));
+                self.log_sink = sink;
+                self.logs = Some(logs);
+            }
+            Err(err) => tracing::error!(
+                error = format!("{:#}", anyhow::Error::from(err)),
+                "cannot open the log store; logs are not persisted"
+            ),
         }
     }
 }
@@ -693,19 +752,7 @@ impl Startup for Supervisor {
                 });
                 self.secrets = Some(secrets);
                 self.store = Some(store);
-                self.logs = match LogStore::open(&self.config.state_dir).await {
-                    Ok(logs) => {
-                        tracing::info!(path = %logs.path().display(), "log store ready");
-                        Some(logs)
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            error = format!("{:#}", anyhow::Error::from(err)),
-                            "cannot open the log store; logs are not persisted"
-                        );
-                        None
-                    }
-                };
+                self.open_log_store().await;
                 Ok(())
             }
             Phase::Podman => {
@@ -865,10 +912,10 @@ impl Startup for Supervisor {
                     .context("the orchestrator is connected to the ACME task in step 5")?;
                 // The traffic history (ADR-0062): swept now, flushed every minute and once more
                 // after the proxy has stopped (shutdown step 5).
-                self.teardown.recorder = Some(RecorderHandle::spawn(TrafficRecorder::new(
-                    self.traffic.clone(),
-                    store.clone(),
-                )));
+                let recorder = TrafficRecorder::new(self.traffic.clone(), store.clone());
+                self.teardown.recorder = Some(RecorderHandle::spawn("traffic recorder", |stop| {
+                    recorder.run(stop)
+                }));
                 let (events_tx, events_rx) = mpsc::channel(ACME_EVENTS_CAPACITY);
                 tokio::spawn(Arc::clone(&orchestrator).run_acme_events(events_rx));
                 // The resource sampler (ADR-0066): container and host usage every 10 s, in
@@ -1105,11 +1152,11 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let traffic = Traffic::default();
+        let recorder = TrafficRecorder::new(traffic.clone(), store.clone());
         let mut teardown = Teardown {
-            recorder: Some(RecorderHandle::spawn(TrafficRecorder::new(
-                traffic.clone(),
-                store.clone(),
-            ))),
+            recorder: Some(RecorderHandle::spawn("traffic recorder", |stop| {
+                recorder.run(stop)
+            })),
             ..Teardown::default()
         };
         // A stand-in proxy that finishes one last request while it drains.
@@ -1143,6 +1190,59 @@ mod tests {
             panic!("{buckets:?}");
         };
         assert_eq!(bucket.counts.s4xx, 1);
+    }
+
+    #[tokio::test]
+    async fn the_log_recorder_commits_what_the_proxy_offered_while_it_drained() {
+        use std::net::{IpAddr, Ipv6Addr};
+
+        use crate::store::{LogHead, RequestId, RequestRow};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let logs = LogStore::open(dir.path()).await.unwrap();
+        let (recorder, sink) = LogRecorder::new(logs.clone()).await.unwrap();
+        let mut teardown = Teardown {
+            log_recorder: Some(RecorderHandle::spawn("log recorder", |stop| {
+                recorder.run(stop)
+            })),
+            ..Teardown::default()
+        };
+        // A stand-in proxy that finishes one last request while it drains.
+        let rx = teardown.proxy.shutdown_tx.subscribe();
+        teardown.proxy.thread = Some(std::thread::spawn(move || {
+            while rx.borrow().is_none() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(sink.try_request(RequestRow {
+                time: crate::store::Timestamp::now(),
+                host: "notes.example.com".to_owned(),
+                prefix: "/".to_owned(),
+                stack: "notes".to_owned(),
+                service: "api".to_owned(),
+                method: "GET".to_owned(),
+                path: "/last".to_owned(),
+                status: 200,
+                to_header: None,
+                total: Duration::from_millis(3),
+                bytes: 0,
+                client: IpAddr::V6(Ipv6Addr::LOCALHOST),
+                upstream_failed: false,
+                request_id: RequestId::from([1; 16]),
+            }));
+        }));
+
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        teardown
+            .run(ShutdownMode::Graceful, &mut Scripted(rx))
+            .await;
+        assert!(teardown.log_recorder.is_none());
+        assert_eq!(
+            logs.head().await.unwrap(),
+            LogHead {
+                record: 0,
+                request: 1
+            }
+        );
     }
 
     #[tokio::test]

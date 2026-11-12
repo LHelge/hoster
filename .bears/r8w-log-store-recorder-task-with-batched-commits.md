@@ -1,16 +1,17 @@
 ---
 id: r8w
 title: "Log store: recorder task with batched commits"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:33:20.354361353Z"
-updated: "2026-11-12T19:33:20.354361353Z"
+updated: "2026-11-12T20:32:13.029831661Z"
 tags:
   - store
   - observability
 depends_on:
   - "7ne"
 parent: f8z
+attempts: 1
 ---
 
 ## Summary

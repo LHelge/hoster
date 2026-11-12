@@ -47,7 +47,10 @@ use thiserror::Error;
     unused_imports,
     reason = "the record types are written by the log store's recorder as it lands"
 )]
-pub use logs::{Level, LogRecord, LogStore, RequestId, RequestRow, Stream, UnknownLogText};
+pub use logs::{
+    Level, LogBatch, LogCursor, LogHead, LogRecord, LogStore, RequestId, RequestRow, Stream,
+    UnknownLogText,
+};
 pub use notifications::{
     DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,
 };
