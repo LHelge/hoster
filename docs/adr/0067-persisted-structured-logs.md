@@ -1,6 +1,6 @@
 # ADR-0067: Container logs and the proxy's requests are parsed and persisted in a separate SQLite file for 7 days
 
-- Status: Accepted (resolves OQ-41; amends ADR-0044 and ADR-0045)
+- Status: Accepted (resolves OQ-41; amends ADR-0044 and ADR-0045; amended by ADR-0068, which records hoster's own events at info and above)
 - Date: 2026-11-12
 
 ## Context
