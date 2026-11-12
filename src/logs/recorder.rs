@@ -215,6 +215,26 @@ impl Tap {
         }
     }
 
+    /// The next request row; `None` once every sink is gone. Records are skipped.
+    pub async fn next_request(&mut self) -> Option<RequestRow> {
+        loop {
+            if let Entry::Request(request) = self.0.recv().await? {
+                return Some(request);
+            }
+        }
+    }
+
+    /// The request rows offered so far, without waiting. Records are skipped.
+    pub fn drain_requests(&mut self) -> Vec<RequestRow> {
+        let mut requests = Vec::new();
+        while let Ok(entry) = self.0.try_recv() {
+            if let Entry::Request(request) = entry {
+                requests.push(request);
+            }
+        }
+        requests
+    }
+
     /// The records offered so far, without waiting.
     pub fn drain(&mut self) -> Vec<(LogRecord, Option<LogCursor>)> {
         let mut records = Vec::new();

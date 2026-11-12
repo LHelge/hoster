@@ -1,16 +1,17 @@
 ---
 id: z7r
 title: "Edge request log: one row per finished request in logs.db"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:34:37.120468119Z"
-updated: "2026-11-12T19:34:37.120468119Z"
+updated: "2026-11-12T22:45:55.981066069Z"
 tags:
   - proxy
   - observability
 depends_on:
   - r8w
 parent: usf
+attempts: 1
 ---
 
 ## Summary

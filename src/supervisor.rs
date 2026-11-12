@@ -798,6 +798,7 @@ impl Startup for Supervisor {
                     challenges: self.challenges.clone(),
                     traffic: self.traffic.clone(),
                     admission: self.admission.clone(),
+                    logs: self.log_sink.clone(),
                 };
                 self.teardown.proxy.start(&self.config.proxy, state).await
             }

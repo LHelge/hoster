@@ -34,6 +34,7 @@ use tokio_rustls::client::TlsStream;
 use super::{Admission, DownstreamLimits, Proxy, ProxyError, ProxyState, ProxyThread};
 use crate::acme::{CertMap, ChallengeMap};
 use crate::config::{ProxyConfig, Timeouts};
+use crate::logs::{LogSink, Tap};
 use crate::routing::{
     DesiredStack, DesiredState, DrainOutcome, Reserved, RouteTable, Target, UnixUpstream, Upstream,
 };
@@ -42,6 +43,7 @@ use crate::stack::{
     Stack, UpdateStrategy,
 };
 use crate::stats::{Histogram, StatusClass, StatusCounts, Traffic};
+use crate::store::RequestRow;
 use crate::web::{Listen, TestApp, WebServer};
 
 const CHUNK: usize = 64 * 1024;
@@ -215,6 +217,10 @@ struct Harness {
     traffic: Traffic,
     /// The connection cap on both listeners.
     admission: Admission,
+    /// The sink the proxy offers request rows to.
+    logs: LogSink,
+    /// What the proxy offered to `logs`.
+    tap: tokio::sync::Mutex<Tap>,
     desired: DesiredState,
     reserved: Reserved,
     state: AppState,
@@ -312,6 +318,16 @@ impl Harness {
         defaults: Timeouts,
         limits: DownstreamLimits,
         admission: Admission,
+    ) -> Self {
+        Self::start_logging(defaults, limits, admission, 1024).await
+    }
+
+    /// The harness with a log sink whose channel holds `log_capacity` request rows.
+    async fn start_logging(
+        defaults: Timeouts,
+        limits: DownstreamLimits,
+        admission: Admission,
+        log_capacity: usize,
     ) -> Self {
         let state = AppState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -492,12 +508,14 @@ impl Harness {
         let challenges = ChallengeMap::default();
         let routes = Arc::new(ArcSwap::from_pointee(table));
         let traffic = Traffic::default();
+        let (logs, tap) = LogSink::tapped(log_capacity);
         let proxy_state = ProxyState {
             routes: Arc::clone(&routes),
             certs: certs.clone(),
             challenges: challenges.clone(),
             traffic: traffic.clone(),
             admission: admission.clone(),
+            logs: logs.clone(),
         };
         let (shutdown, rx) = watch::channel(None);
         // A port free a moment ago can be taken by another test's outgoing connection before
@@ -538,6 +556,8 @@ impl Harness {
             routes,
             traffic,
             admission,
+            logs,
+            tap: tokio::sync::Mutex::new(tap),
             desired,
             reserved,
             state,
@@ -550,6 +570,16 @@ impl Harness {
             _admin_server: admin_server,
             _socket_dir: socket_dir,
         }
+    }
+
+    /// The next request row the proxy offered to the log store, waiting up to five seconds for
+    /// Pingora's `logging` hook, which runs after the response went out.
+    async fn next_request(&self) -> RequestRow {
+        let mut tap = self.tap.lock().await;
+        tokio::time::timeout(Duration::from_secs(5), tap.next_request())
+            .await
+            .expect("a request row within five seconds")
+            .expect("the harness holds a sink")
     }
 
     /// Publishes a table in which `web` runs on `upstream` instead, as a deploy's swap does.
@@ -2319,7 +2349,7 @@ async fn every_request_that_matched_a_route_gets_an_access_log_line() {
     assert_eq!(reply.status, 200);
     let line = access_line("/access/proxied").await;
     assert_eq!(line["target"], "hoster::access");
-    assert_eq!(line["level"], "INFO");
+    assert_eq!(line["level"], "DEBUG");
     assert_eq!(line["message"], "request");
     assert_eq!(line["host"], "app.example.com");
     assert_eq!(line["method"], "GET");
@@ -2364,6 +2394,152 @@ async fn every_request_that_matched_a_route_gets_an_access_log_line() {
             .is_some_and(|u| u.starts_with("unix:") && u.ends_with("admin.sock")),
         "{line}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Request rows in the log store (ADR-0067 §5)
+
+/// A routed request's row: the route's host spelling, the path as the client sent it without
+/// the query, both timings, and an id with the shape of a W3C trace id, new per request.
+#[tokio::test]
+async fn a_routed_request_is_offered_as_a_request_row() {
+    let h = Harness::start().await;
+    let before = crate::store::Timestamp::now();
+    let reply = h.get("App.Example.com", "/api/rows?token=secret").await;
+    assert_eq!(reply.status, 200);
+    let row = h.next_request().await;
+    assert!(row.time >= before && row.time <= crate::store::Timestamp::now());
+    assert_eq!(row.host, "app.example.com");
+    assert_eq!(row.prefix, "/api");
+    assert_eq!(row.stack, "site");
+    assert_eq!(row.service, "web");
+    assert_eq!(row.method, "GET");
+    assert_eq!(row.path, "/api/rows", "the query is never stored");
+    assert_eq!(row.status, 200);
+    let to_header = row.to_header.expect("the upstream answered");
+    assert!(to_header <= row.total, "{row:?}");
+    assert_eq!(row.bytes, reply.body.len() as u64);
+    assert_eq!(row.client, std::net::IpAddr::from([127, 0, 0, 1]));
+    assert!(!row.upstream_failed);
+    let id = row.request_id.to_string();
+    assert_eq!(id.len(), 32);
+    assert!(
+        id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{id}"
+    );
+
+    assert_eq!(h.get("app.example.com", "/again").await.status, 200);
+    let again = h.next_request().await;
+    assert_eq!(again.prefix, "/");
+    assert_ne!(again.request_id, row.request_id, "one id per request");
+}
+
+/// A request whose upstream cannot be reached: the status the client got, no response header
+/// from the upstream, marked as an upstream failure. A service in its stop-first gap is the
+/// stack's too, answered by hoster without an upstream failure.
+#[tokio::test]
+async fn failed_and_gapped_requests_are_rows_of_their_stack() {
+    let h = Harness::start().await;
+    assert_eq!(h.get("down.example.com", "/rows/down").await.status, 502);
+    let row = h.next_request().await;
+    assert_eq!(row.service, "down");
+    assert_eq!(row.path, "/rows/down");
+    assert_eq!(row.status, 502);
+    assert_eq!(row.to_header, None);
+    assert!(row.upstream_failed);
+
+    assert_eq!(h.get("gap.example.com", "/rows/gap").await.status, 503);
+    let row = h.next_request().await;
+    assert_eq!(row.service, "gapped");
+    assert_eq!(row.status, 503);
+    assert_eq!(row.to_header, None);
+    assert!(!row.upstream_failed);
+}
+
+/// What hoster answers without a stack is not stored: an unknown host, an unknown prefix, a
+/// host that is not the SNI name, and hoster's own reserved hosts.
+#[tokio::test]
+async fn requests_without_a_stack_are_not_stored() {
+    let h = Harness::start().await;
+    assert_eq!(h.get("noroute.example.com", "/").await.status, 404);
+    assert_eq!(h.get("api.example.com", "/other").await.status, 404);
+    let head = "GET / HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n";
+    assert_eq!(
+        h.request_with_sni("app.example.com", head).await.status,
+        421
+    );
+    assert_eq!(h.get("admin.example.com", "/").await.status, 200);
+
+    // The hook offers a row before it counts the request, so once all four are counted any
+    // row would have been offered.
+    let drained = Drained::until(&h.traffic, |d| {
+        d.routes.values().map(|r| r.statuses.total()).sum::<u64>() >= 4
+    })
+    .await;
+    let counted: u64 = drained.routes.values().map(|r| r.statuses.total()).sum();
+    assert_eq!(counted, 4, "{drained:?}");
+    assert_eq!(h.tap.lock().await.drain_requests(), Vec::new());
+    assert_eq!(h.logs.drops().requests, 0);
+}
+
+/// A WebSocket is one row, written when the connection closes: status 101, and its total is
+/// the connection's lifetime.
+#[tokio::test]
+async fn a_websocket_is_one_row_when_it_closes() {
+    let h = Harness::start().await;
+    let mut client = h.connect("app.example.com").await;
+    client
+        .write(
+            b"GET /api/ws HTTP/1.1\r\nHost: app.example.com\r\nUpgrade: websocket\r\n\
+              Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await;
+    let (status, _) = client.head().await;
+    assert_eq!(status, 101);
+    let held = Duration::from_millis(300);
+    tokio::time::sleep(held).await;
+    assert_eq!(
+        h.tap.lock().await.drain_requests(),
+        Vec::new(),
+        "still open"
+    );
+    drop(client);
+
+    let row = h.next_request().await;
+    assert_eq!(row.status, 101);
+    assert_eq!(row.path, "/api/ws");
+    assert!(row.total >= held, "{row:?}");
+    assert!(row.to_header.is_some_and(|header| header < held), "{row:?}");
+}
+
+/// The proxy never waits for the store: with the recorder's channel full, requests are
+/// answered as ever and their rows are dropped and counted.
+#[tokio::test]
+async fn a_full_log_channel_drops_rows_without_holding_requests() {
+    let h = Harness::start_logging(
+        Timeouts::default(),
+        DownstreamLimits::default(),
+        Admission::default(),
+        1,
+    )
+    .await;
+    for n in 0..3 {
+        let started = Instant::now();
+        assert_eq!(
+            h.get("app.example.com", &format!("/full/{n}")).await.status,
+            200
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+    Drained::until(&h.traffic, |d| {
+        d.routes.values().map(|r| r.statuses.total()).sum::<u64>() >= 3
+    })
+    .await;
+    assert_eq!(h.logs.drops().requests, 2);
+    let rows = h.tap.lock().await.drain_requests();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, "/full/0");
 }
 
 mod limits;
@@ -2417,7 +2593,7 @@ async fn requests_that_matched_no_route_are_not_logged_at_info() {
     }
     let line = access_line("/.well-known/acme-challenge/quiet-token").await;
     assert_eq!(line["target"], "hoster::access");
-    assert_eq!(line["level"], "INFO");
+    assert_eq!(line["level"], "DEBUG");
     assert_eq!(line["status"], 200);
 
     let noise: Vec<Value> = log

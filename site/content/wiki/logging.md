@@ -95,13 +95,32 @@ line before it is stored and works when the store is unavailable.
 starts with empty logs ([[backup]]). `hoster rollback` undoes the log store's schema too
 ([[install#updates-and-rollback|Updates and rollback]]).
 
+# The proxy's requests
+
+hoster's proxy stores one row per request it routed to a stack in the same file, under the same
+retention: when the request arrived, the host and the matched route's prefix, the stack and
+service, the method, the path, the status sent to the client, the time until the app's response
+header and in total, the response body bytes, the client's address and whether the app could
+not be reached or timed out. The path is stored without its query string, which can hold
+tokens. A WebSocket or another upgraded connection is one row with status 101, written when it
+closes, so its total is how long it was open.
+
+Each request gets a request id, 32 hex digits, made when it arrives.
+
+Requests that never reach an app are not stored: an unknown host or path (404), a host that is
+not the TLS connection's name (421), everything on port 80 (redirects and ACME challenges) and
+the admin UI's own host. That is what scanners send, and it has no stack to belong to.
+
+The proxy never waits for the store. If the store falls behind, rows are dropped, and the
+System page's **Log store** card counts them.
+
 # Privacy
 
 Whatever an app prints is on disk for 7 days in `logs.db`, secrets included. The file sits in
 the state directory beside `hoster.db` with the same permissions (`0600`, the `hoster` user),
 and podman already kept the same text. Do not log tokens, passwords or request bodies you would
-not want on disk. Once the proxy's access log is stored there as well, client addresses and
-request paths are kept for 7 days too.
+not want on disk. The proxy's requests are kept there for 7 days too, with client addresses and
+request paths (without the query string).
 
 # Examples
 

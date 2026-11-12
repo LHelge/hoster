@@ -184,6 +184,18 @@ impl LogRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RequestId([u8; 16]);
 
+impl RequestId {
+    /// A new id from the operating system's random number generator, which is all zeros (an
+    /// invalid trace id) only if that generator fails.
+    pub fn random() -> Self {
+        let mut bytes = [0; 16];
+        if getrandom::fill(&mut bytes).is_err() {
+            bytes = [0; 16];
+        }
+        Self(bytes)
+    }
+}
+
 impl From<[u8; 16]> for RequestId {
     fn from(bytes: [u8; 16]) -> Self {
         Self(bytes)

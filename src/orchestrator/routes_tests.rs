@@ -567,6 +567,7 @@ port = 9000
         challenges: ChallengeMap::default(),
         traffic: Default::default(),
         admission: Default::default(),
+        logs: crate::logs::LogSink::disconnected(),
     };
     let mut proxy = Proxy::new(&config, state).spawn(rx).unwrap();
     proxy.events.ready(Duration::from_secs(10)).await.unwrap();
