@@ -1,6 +1,6 @@
 # ADR-0044: Container logs stay in podman and are streamed into the web UI
 
-- Status: Accepted (resolves OQ-04)
+- Status: Accepted (resolves OQ-04; amended by ADR-0067, which persists parsed logs in a separate database)
 - Date: 2026-11-07
 
 ## Decision
