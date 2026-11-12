@@ -94,6 +94,13 @@ cargo sqlx prepare -- --all-targets
 While `DATABASE_URL` is set the macros check against that database instead of `.sqlx/`; CI runs
 `cargo sqlx prepare --check -- --all-targets`.
 
+The log store (`src/store/logs/`, `logs.db`, ADR-0067) is a second database with its own
+migrations in `migrations_logs/`; create them with
+`sqlx migrate add -r --sequential --source migrations_logs <name>`. The store tests hold them to
+the same rules. Its queries are runtime-checked (`sqlx::query`, not `query!`), because the
+macros check against one database, `hoster.db`'s, so they need no `.sqlx/` entries and every one
+is covered by a test instead.
+
 ### Cutting a release
 
 `main` is protected, so a release goes through a PR and the tag is pushed after it is merged

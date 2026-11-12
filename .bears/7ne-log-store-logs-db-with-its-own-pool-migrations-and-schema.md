@@ -1,14 +1,15 @@
 ---
 id: "7ne"
 title: "Log store: logs.db with its own pool, migrations and schema"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:32:58.233864454Z"
-updated: "2026-11-12T19:32:58.233864454Z"
+updated: "2026-11-12T20:09:41.779758001Z"
 tags:
   - store
   - observability
 parent: f8z
+attempts: 1
 ---
 
 ## Summary

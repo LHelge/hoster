@@ -1953,11 +1953,17 @@ mod traffic {
 }
 
 /// Every migration is reversible and every down script restores its predecessor's schema exactly
-/// (ADR-0052): what lets a newer binary roll the database back for an older one.
+/// (ADR-0052): what lets a newer binary roll the database back for an older one. The structural
+/// checks run for both databases, `hoster.db` and the log store's `logs.db` (ADR-0067).
 mod migrations {
-    use sqlx::migrate::MigrationType;
+    use sqlx::migrate::{MigrationType, Migrator};
 
     use super::*;
+    use crate::store::logs::LOG_MIGRATOR;
+
+    /// Every migrator, named for the failure messages.
+    const MIGRATORS: [(&str, &Migrator); 2] =
+        [("hoster.db", &MIGRATOR), ("logs.db", &LOG_MIGRATOR)];
 
     /// One row of `sqlite_schema`, without `rootpage` (which depends on the file's history).
     type SchemaRow = (String, String, String, Option<String>);
@@ -1981,15 +1987,20 @@ mod migrations {
             .unwrap()
     }
 
-    /// The schema of a fresh database migrated up to `version`.
-    async fn schema_at(version: i64) -> Vec<SchemaRow> {
+    /// The schema of a fresh database migrated up to `version` by `migrator`.
+    async fn schema_at(migrator: &Migrator, version: i64) -> Vec<SchemaRow> {
         let pool = fresh().await;
-        MIGRATOR.run_to(version, &pool).await.unwrap();
+        migrator.run_to(version, &pool).await.unwrap();
         schema(&pool).await
     }
 
+    /// The state store's migration versions, oldest first.
     fn versions() -> Vec<i64> {
-        let mut versions: Vec<i64> = MIGRATOR
+        versions_of(&MIGRATOR)
+    }
+
+    fn versions_of(migrator: &Migrator) -> Vec<i64> {
+        let mut versions: Vec<i64> = migrator
             .iter()
             .filter(|m| m.migration_type.is_up_migration())
             .map(|m| m.version)
@@ -2000,49 +2011,60 @@ mod migrations {
 
     #[test]
     fn every_up_migration_has_a_down() {
-        assert!(!versions().is_empty());
-        for migration in MIGRATOR.iter() {
-            assert_ne!(
-                migration.migration_type,
-                MigrationType::Simple,
-                "migration {} ({}) is not reversible; create migrations with `sqlx migrate add -r`",
-                migration.version,
-                migration.description,
+        for (name, migrator) in MIGRATORS {
+            assert!(!versions_of(migrator).is_empty(), "{name}");
+            for migration in migrator.iter() {
+                assert_ne!(
+                    migration.migration_type,
+                    MigrationType::Simple,
+                    "{name} migration {} ({}) is not reversible; create migrations with \
+                     `sqlx migrate add -r`",
+                    migration.version,
+                    migration.description,
+                );
+            }
+            let downs: BTreeSet<i64> = migrator
+                .iter()
+                .filter(|m| m.migration_type == MigrationType::ReversibleDown)
+                .map(|m| m.version)
+                .collect();
+            let ups: BTreeSet<i64> = versions_of(migrator).into_iter().collect();
+            assert_eq!(
+                ups, downs,
+                "{name}: up and down migrations must pair by version"
             );
         }
-        let downs: BTreeSet<i64> = MIGRATOR
-            .iter()
-            .filter(|m| m.migration_type == MigrationType::ReversibleDown)
-            .map(|m| m.version)
-            .collect();
-        let ups: BTreeSet<i64> = versions().into_iter().collect();
-        assert_eq!(ups, downs, "up and down migrations must pair by version");
     }
 
     #[tokio::test]
     async fn undoing_everything_and_migrating_again_round_trips() {
-        let pool = fresh().await;
-        MIGRATOR.run(&pool).await.unwrap();
-        let migrated = schema(&pool).await;
-        MIGRATOR.undo(&pool, 0).await.unwrap();
-        assert_eq!(schema(&pool).await, schema_at(0).await);
-        MIGRATOR.run(&pool).await.unwrap();
-        assert_eq!(schema(&pool).await, migrated);
+        for (name, migrator) in MIGRATORS {
+            let pool = fresh().await;
+            migrator.run(&pool).await.unwrap();
+            let migrated = schema(&pool).await;
+            migrator.undo(&pool, 0).await.unwrap();
+            assert_eq!(schema(&pool).await, schema_at(migrator, 0).await, "{name}");
+            migrator.run(&pool).await.unwrap();
+            assert_eq!(schema(&pool).await, migrated, "{name}");
+        }
     }
 
     #[tokio::test]
     async fn each_down_restores_its_predecessor_exactly() {
-        let versions = versions();
-        for (i, &version) in versions.iter().enumerate() {
-            let previous = if i == 0 { 0 } else { versions[i - 1] };
-            let pool = fresh().await;
-            MIGRATOR.run(&pool).await.unwrap();
-            MIGRATOR.undo(&pool, previous).await.unwrap();
-            assert_eq!(
-                schema(&pool).await,
-                schema_at(previous).await,
-                "undoing down to {previous} (through {version}) does not restore its schema"
-            );
+        for (name, migrator) in MIGRATORS {
+            let versions = versions_of(migrator);
+            for (i, &version) in versions.iter().enumerate() {
+                let previous = if i == 0 { 0 } else { versions[i - 1] };
+                let pool = fresh().await;
+                migrator.run(&pool).await.unwrap();
+                migrator.undo(&pool, previous).await.unwrap();
+                assert_eq!(
+                    schema(&pool).await,
+                    schema_at(migrator, previous).await,
+                    "{name}: undoing down to {previous} (through {version}) does not restore \
+                     its schema"
+                );
+            }
         }
     }
 

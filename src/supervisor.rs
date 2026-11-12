@@ -35,7 +35,7 @@ use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
 use crate::stats::{HostStats, ResourceSampler, Stats, Traffic, TrafficRecorder};
-use crate::store::Store;
+use crate::store::{LogStore, Store};
 use crate::web::{Listen, RegistryAccess, WebApp, WebServer};
 
 /// One step of the startup sequence, in order (architecture §4 steps 1–9).
@@ -448,6 +448,14 @@ pub struct Supervisor {
     config: Config,
     /// The state store, opened in startup step 2.
     store: Option<Store>,
+    /// The log store (ADR-0067), opened with the state store; `None` when `logs.db` cannot be
+    /// opened, which leaves hoster running without persisted logs (the live container log page
+    /// of ADR-0044 reads podman directly).
+    #[allow(
+        dead_code,
+        reason = "handed to the log recorder and the logs UI as they land (epic f8z)"
+    )]
+    logs: Option<LogStore>,
     /// The secret store (ADR-0029), opened with the state store; its key is generated on the
     /// first start.
     secrets: Option<SecretStore>,
@@ -483,6 +491,7 @@ impl Supervisor {
         Supervisor {
             config,
             store: None,
+            logs: None,
             secrets: None,
             registry: None,
             certs: None,
@@ -684,6 +693,19 @@ impl Startup for Supervisor {
                 });
                 self.secrets = Some(secrets);
                 self.store = Some(store);
+                self.logs = match LogStore::open(&self.config.state_dir).await {
+                    Ok(logs) => {
+                        tracing::info!(path = %logs.path().display(), "log store ready");
+                        Some(logs)
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = format!("{:#}", anyhow::Error::from(err)),
+                            "cannot open the log store; logs are not persisted"
+                        );
+                        None
+                    }
+                };
                 Ok(())
             }
             Phase::Podman => {
