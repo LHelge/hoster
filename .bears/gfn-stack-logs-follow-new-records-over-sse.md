@@ -16,6 +16,8 @@ parent: psq
 ## Summary
 The **follow** switch of the stack logs tab streams new records of the stack into the page as the recorder commits them (about once a second, ADR-0067 §6), for all services at once and with the tab's filters applied.
 
+**Scope (2026-11-12).** The owner chose one log view with two scopes: the stack tab and the Telemetry page's Logs tab (`ckc`) are the same view, the stack tab with its stack fixed. Follow is mounted on the stack tab only; the Telemetry mockup has none.
+
 ## Acceptance Criteria
 - [ ] With `follow=on` and the newest page shown, the tab opens an SSE stream (HTMX SSE extension, as the container log page does) that appends records newer than the last one rendered, by record id, with no duplicates and no gaps
 - [ ] The stream applies the same service, level and grep filters as the page (shared query type); it works unfiltered if the filter task has not landed

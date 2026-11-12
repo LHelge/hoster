@@ -11,12 +11,13 @@ tags:
   - proxy
 depends_on:
   - cb6
-  - usf
+  - z7r
+  - qr7
 parent: psq
 ---
 
 ## Summary
-The **access log** entry of the stack logs tab's source switch: the proxy's stored request rows (ADR-0067 §5, written by epic `usf`) for the stack's routes over the chosen time range. This is where per-path questions are answered that traffic history (per route and minute, ADR-0062) cannot: which paths 404, which requests were slow.
+The **access log** entry of the stack logs tab's source switch: the proxy's stored request rows (ADR-0067 §5, written by task `z7r` of epic `usf`, read through `qr7`) for the stack's routes over the chosen time range. This is where per-path questions are answered that traffic history (per route and minute, ADR-0062) cannot: which paths 404, which requests were slow.
 
 ## Acceptance Criteria
 - [ ] `?source=access` lists the stack's request rows in time order: time, service, method, path, status (toned by class as the traffic charts are), total duration, response bytes, client address
