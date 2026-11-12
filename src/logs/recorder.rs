@@ -7,6 +7,11 @@
 //! received in one transaction about once a second, or as soon as a batch reaches its cap, and
 //! announces the newest committed ids ([`LogHead`]) for pages and follow streams.
 //!
+//! The recorder also keeps the store within its retention (ADR-0067 §7): it starts a pass at
+//! startup and hourly and advances it one bounded step at a time between its commits, so the
+//! one writer stays the one writer and a big sweep never delays the commits for long. What the
+//! last pass removed is announced like the head ([`LogSink::sweeps`]).
+//!
 //! The supervisor stops the producers first and then the recorder, which commits what is left
 //! in the channel before it returns (docs/architecture.md §4, shutdown step 6).
 //!
@@ -23,7 +28,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::store::{
-    LogBatch, LogCursor, LogHead, LogRecord, LogStore, RequestRow, StoreError, Stream,
+    LogBatch, LogCursor, LogHead, LogRecord, LogStore, RequestRow, Retention, StoreError, Stream,
+    Sweep, SweepReport, Timestamp,
 };
 
 /// One item on its way to the recorder.
@@ -94,6 +100,7 @@ pub struct LogSink {
     entries: mpsc::Sender<Entry>,
     counters: Arc<Counters>,
     head: watch::Receiver<LogHead>,
+    sweeps: watch::Receiver<Option<SweepReport>>,
 }
 
 impl LogSink {
@@ -102,10 +109,12 @@ impl LogSink {
     pub fn disconnected() -> Self {
         let (entries, _) = mpsc::channel(1);
         let (_, head) = watch::channel(LogHead::default());
+        let (_, sweeps) = watch::channel(None);
         Self {
             entries,
             counters: Arc::default(),
             head,
+            sweeps,
         }
     }
 
@@ -149,16 +158,24 @@ impl LogSink {
         self.head.clone()
     }
 
+    /// What the last finished retention pass removed and how large it left the file; `None`
+    /// until the first one since hoster started has finished. Not persisted.
+    pub fn sweeps(&self) -> watch::Receiver<Option<SweepReport>> {
+        self.sweeps.clone()
+    }
+
     /// A sink whose records a test reads straight off its channel of `capacity`, with no
     /// recorder behind it.
     #[cfg(test)]
     pub fn tapped(capacity: usize) -> (Self, Tap) {
         let (entries, rx) = mpsc::channel(capacity);
         let (_, head) = watch::channel(LogHead::default());
+        let (_, sweeps) = watch::channel(None);
         let sink = Self {
             entries,
             counters: Arc::default(),
             head,
+            sweeps,
         };
         (sink, Tap(rx))
     }
@@ -217,8 +234,11 @@ pub struct LogRecorder {
     entries: mpsc::Receiver<Entry>,
     counters: Arc<Counters>,
     head: watch::Sender<LogHead>,
+    sweeps: watch::Sender<Option<SweepReport>>,
     /// [`Self::COMMIT_INTERVAL`], shorter in tests.
     interval: Duration,
+    /// ADR-0067 §7's limits, smaller in tests.
+    retention: Retention,
 }
 
 impl LogRecorder {
@@ -230,6 +250,8 @@ impl LogRecorder {
     /// Records plus request rows that are committed at once, without waiting for the interval,
     /// so a burst never builds one huge transaction.
     pub const BATCH_CAP: usize = 4_096;
+    /// How often a retention pass starts after the one at startup.
+    pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
     /// A recorder writing to `store`, and the sink producers offer it items through. The head
     /// starts at what `store` already holds.
@@ -237,18 +259,22 @@ impl LogRecorder {
         let head = store.head().await?;
         let (entries_tx, entries) = mpsc::channel(Self::CHANNEL_CAPACITY);
         let (head_tx, head_rx) = watch::channel(head);
+        let (sweeps_tx, sweeps_rx) = watch::channel(None);
         let counters = Arc::<Counters>::default();
         let sink = LogSink {
             entries: entries_tx,
             counters: Arc::clone(&counters),
             head: head_rx,
+            sweeps: sweeps_rx,
         };
         let recorder = Self {
             store,
             entries,
             counters,
             head: head_tx,
+            sweeps: sweeps_tx,
             interval: Self::COMMIT_INTERVAL,
+            retention: Retention::default(),
         };
         Ok((recorder, sink))
     }
@@ -260,11 +286,23 @@ impl LogRecorder {
         self
     }
 
+    /// The same recorder sweeping to `retention` instead.
+    #[cfg(test)]
+    pub(crate) fn with_retention(mut self, retention: Retention) -> Self {
+        self.retention = retention;
+        self
+    }
+
     /// Commits what arrives until `stop` fires, then commits what is left in the channel and
-    /// returns. Failed commits are logged and counted and never end the loop.
+    /// returns. Failed commits are logged and counted and never end the loop. Retention passes
+    /// run at startup and every [`Self::SWEEP_INTERVAL`], one step per turn of the loop; a
+    /// failed one is logged and tried again at the next interval, and one still running at
+    /// shutdown is left for the next start.
     pub async fn run(mut self, stop: CancellationToken) {
         let mut batch = Batch::default();
         let mut deadline: Option<Instant> = None;
+        let mut sweep: Option<Sweep> = None;
+        let mut next_sweep = Instant::now();
         loop {
             tokio::select! {
                 () = stop.cancelled() => break,
@@ -284,6 +322,27 @@ impl LogRecorder {
                     self.commit(&mut batch).await;
                     deadline = None;
                 }
+                () = tokio::time::sleep_until(next_sweep), if sweep.is_none() => {
+                    sweep = Some(self.store.sweep(Timestamp::now(), self.retention));
+                    next_sweep = Instant::now() + Self::SWEEP_INTERVAL;
+                }
+                stepped = Self::step(&mut sweep), if sweep.is_some() => {
+                    match stepped {
+                        Ok(None) => {}
+                        Ok(Some(report)) => {
+                            sweep = None;
+                            Self::log_sweep(&report);
+                            self.sweeps.send_replace(Some(report));
+                        }
+                        Err(err) => {
+                            sweep = None;
+                            tracing::warn!(
+                                error = format!("{:#}", anyhow::Error::from(err)),
+                                "cannot sweep the log store to its retention; trying again in an hour"
+                            );
+                        }
+                    }
+                }
             }
         }
         // Every producer has stopped (or is dropped from here on): what is queued is all.
@@ -296,6 +355,25 @@ impl LogRecorder {
         }
         self.commit(&mut batch).await;
         tracing::debug!("log recorder stopped");
+    }
+
+    /// The next step of `sweep`; pending forever when there is none.
+    async fn step(sweep: &mut Option<Sweep>) -> Result<Option<SweepReport>, StoreError> {
+        match sweep {
+            Some(sweep) => sweep.step().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn log_sweep(report: &SweepReport) {
+        tracing::debug!(
+            expired_records = report.expired.records,
+            expired_requests = report.expired.requests,
+            capped_records = report.capped.records,
+            capped_requests = report.capped.requests,
+            file_bytes = report.file_bytes,
+            "swept the log store to its retention"
+        );
     }
 
     /// Writes `batch` and empties it. A failure loses the batch, counted.

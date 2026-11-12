@@ -49,8 +49,8 @@ use thiserror::Error;
 )]
 pub use logs::{
     InvalidPattern, Level, LevelCounts, LogBatch, LogCursor, LogEntry, LogHead, LogPage, LogQuery,
-    LogRecord, LogScope, LogStore, PageAt, RecordKey, RequestId, RequestRow, Stream, TextFilter,
-    UnknownLogText,
+    LogRecord, LogScope, LogStore, PageAt, RecordKey, Removed, RequestId, RequestRow, Retention,
+    Stream, Sweep, SweepReport, TextFilter, UnknownLogText,
 };
 pub use notifications::{
     DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,

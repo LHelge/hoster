@@ -17,6 +17,7 @@
 )]
 
 mod query;
+mod retention;
 mod types;
 
 #[cfg(test)]
@@ -36,6 +37,7 @@ pub use query::{
     InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, PageAt, RecordKey,
     TextFilter,
 };
+pub use retention::{Removed, Retention, Sweep, SweepReport};
 pub use types::{
     Level, LogBatch, LogCursor, LogHead, LogRecord, RequestId, RequestRow, Stream, UnknownLogText,
 };
