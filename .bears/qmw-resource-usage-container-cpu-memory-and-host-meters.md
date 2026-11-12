@@ -13,7 +13,14 @@ tags:
   - web
 ---
 
-Stub from the design pass (epic 8bf). Break down when picked up.
+From the design pass (epic 8bf). Broken down on 2026-11-12: ADR-0066 (3vg), runtime stats (bny), host readings (76n), the sampler (bqt), the sidebar meters (hzc) and the stack overview columns (rap).
+
+## Decided by the owner (2026-11-12)
+
+- A background sampler every 10 s; pages read its cache only.
+- Short in-memory history (about an hour) for sparklines; nothing persisted.
+- The disk meter shows the filesystem of podman's storage root.
+- Live updates: the stack overview columns over the page's existing SSE stream, the sidebar meters by an HTMX poll of a small fragment.
 
 ## What
 
@@ -29,7 +36,7 @@ Medium. A background sampler that caches the latest values (the sidebar renders 
 
 ## Open points
 
-The sampling interval and cost on a small VPS; whether to keep a short history (that would tie into the traffic-history epic).
+None left; see the decisions above. Persisted history would be a later proposal tied to traffic history (ADR-0062).
 
 ## Note from r3r (epic 9q5, ADR-0059)
 
