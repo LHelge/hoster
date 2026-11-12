@@ -6,6 +6,7 @@
 //! is recorded. Execs succeed unless scripted otherwise ([`FakeRuntime::script_exec`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -54,6 +55,8 @@ struct State {
     version: Option<String>,
     /// The volumes declared by images whose reference contains the pattern.
     image_volumes: Vec<(String, Vec<String>)>,
+    /// The storage root reported; [`FakeRuntime::DEFAULT_STORAGE_ROOT`] unless set.
+    storage_root: Option<PathBuf>,
 }
 
 /// One scripted exec result.
@@ -168,6 +171,8 @@ impl State {
 impl FakeRuntime {
     /// The podman version a new fake reports: the oldest one with every feature.
     pub const DEFAULT_VERSION: &str = "5.4.2";
+    /// The storage root a new fake reports: rootless podman's in the hoster user's home.
+    pub const DEFAULT_STORAGE_ROOT: &str = "/home/hoster/.local/share/containers/storage";
 
     pub fn new() -> Self {
         Self::default()
@@ -191,6 +196,12 @@ impl FakeRuntime {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Sets the storage root the engine info reports, e.g. a directory that exists, so its
+    /// filesystem can be read.
+    pub fn set_storage_root(&self, path: impl Into<PathBuf>) {
+        self.lock().storage_root = Some(path.into());
     }
 
     /// Makes the next call of `operation` fail with `error` (queued after earlier ones).
@@ -650,7 +661,8 @@ impl ContainerRuntime for FakeRuntime {
     }
 
     /// podman 5.4.2 unless [`FakeRuntime::set_version`] says otherwise, rootless, on cgroups
-    /// v2 with systemd, with its storage in the hoster user's home.
+    /// v2 with systemd, with its storage in the hoster user's home unless
+    /// [`FakeRuntime::set_storage_root`] says otherwise.
     async fn engine(&self) -> Result<EngineInfo, RuntimeError> {
         let mut state = self.lock();
         state.enter(Operation::Engine)?;
@@ -664,7 +676,12 @@ impl ContainerRuntime for FakeRuntime {
             rootless: Some(true),
             cgroup_version: Some("2".into()),
             cgroup_driver: Some("systemd".into()),
-            storage_root: Some("/home/hoster/.local/share/containers/storage".into()),
+            storage_root: Some(
+                state
+                    .storage_root
+                    .clone()
+                    .unwrap_or_else(|| Self::DEFAULT_STORAGE_ROOT.into()),
+            ),
         })
     }
 
