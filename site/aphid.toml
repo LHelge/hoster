@@ -1,5 +1,5 @@
 # The documentation site at https://docs.hoster.lhelge.se, built with aphid
-# (https://aphid.lhelge.se) and released as an nginx image by .github/workflows/release.yml.
+# (https://aphid.lhelge.se) and released as an aphid-server image by .github/workflows/release.yml.
 # `aphid` in this directory serves it on :3000 with live reload; `aphid build` renders dist/.
 title = "hoster"
 base_url = "https://docs.hoster.lhelge.se"

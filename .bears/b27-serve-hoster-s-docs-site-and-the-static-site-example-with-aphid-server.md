@@ -1,13 +1,14 @@
 ---
 id: b27
 title: Serve hoster's docs site and the static-site example with aphid-server
-status: open
+status: done
 priority: P2
 created: "2026-11-12T13:14:07.297564618Z"
-updated: "2026-11-12T13:14:07.297564618Z"
+updated: "2026-11-12T22:41:27.784571069Z"
 tags:
   - docs
   - site
+attempts: 1
 ---
 
 ## Summary

@@ -1,10 +1,11 @@
-# The documentation site as an nginx image, built and pushed by .github/workflows/release.yml
-# after aphid has rendered the site into site/dist/. The same setup as examples/static-site/
-# (nginx-unprivileged, port 8080, /healthz for hoster's default probe).
-FROM docker.io/nginxinc/nginx-unprivileged:stable-alpine
+# The documentation site, served by aphid-server: built and pushed by .github/workflows/release.yml
+# after aphid has rendered the site into site/dist/. The same setup as examples/static-site/.
+# aphid-server listens on $PORT (8080), answers /healthz for hoster's default probe and serves
+# 404.html for missing pages. Keep the tag equal to APHID_VERSION in release.yml (its `site` job
+# checks it), so the server matches the aphid that built the site.
+FROM ghcr.io/lhelge/aphid-server:0.4.1
 
-COPY default.conf /etc/nginx/conf.d/default.conf
-COPY dist/ /usr/share/nginx/html/
+COPY dist /site
 # The stack file JSON Schema at the URL stack files name in `#:schema` (aphid copies static/ to
 # dist/static/; `hoster stack schema` regenerates it).
-COPY dist/static/stack.schema.json /usr/share/nginx/html/stack.schema.json
+COPY dist/static/stack.schema.json /site/stack.schema.json

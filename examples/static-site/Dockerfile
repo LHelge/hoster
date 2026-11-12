@@ -1,10 +1,6 @@
-# Serves a prebuilt static site with nginx. The site is built before `docker build` runs (by the
-# aphid action in release.yml, or any other generator) into `dist/`.
-#
-# nginx-unprivileged runs as a non-root user and listens on 8080, which suits rootless podman.
-# Pin a specific tag (e.g. `1.x.y-alpine`) if you want the base image to change only when you
-# change it.
-FROM docker.io/nginxinc/nginx-unprivileged:stable-alpine
-
-COPY default.conf /etc/nginx/conf.d/default.conf
-COPY dist/ /usr/share/nginx/html/
+# Serves a prebuilt static site with aphid-server (https://aphid.lhelge.se/wiki/aphid-server/).
+# The site is built into `dist/` before `docker build` runs (by the aphid action in release.yml,
+# or any other generator). The image runs as non-root, listens on $PORT (8080 by default, which
+# hoster injects), answers /healthz and serves 404.html for missing pages.
+FROM ghcr.io/lhelge/aphid-server:0.4.1
+COPY dist /site
