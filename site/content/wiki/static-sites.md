@@ -4,10 +4,14 @@ category: Guides
 ---
 
 hoster has no special type for static sites ([ADR-0018](https://github.com/LHelge/hoster/blob/main/docs/adr/0018-no-app-specific-features.md)). A site built by a static site generator
-is packed into a small nginx image in CI and deployed like any other service ([ADR-0003](https://github.com/LHelge/hoster/blob/main/docs/adr/0003-images-built-in-ci-pushed-to-ghcr.md)). It gets
-everything other services get: private repositories and packages, deploys by digest,
-zero-downtime swaps, rollback to earlier images and logs in the UI. An idle nginx container uses
-a few megabytes of memory.
+is packed into a small image with a static-file server in CI and deployed like any other service
+([ADR-0003](https://github.com/LHelge/hoster/blob/main/docs/adr/0003-images-built-in-ci-pushed-to-ghcr.md)). It gets everything other services get: private repositories and packages, deploys by
+digest, zero-downtime swaps, rollback to earlier images and logs in the UI.
+
+The example uses [aphid-server](https://aphid.lhelge.se/wiki/aphid-server/), a static-file server
+made for sites built with aphid and run behind a proxy like hoster's. Any static server works:
+`nginx-unprivileged` with a `default.conf` that listens on 8080 and answers `/healthz` is the
+usual alternative.
 
 This documentation is deployed this way: its source, `Dockerfile` and stack file are in
 [`site/`](https://github.com/LHelge/hoster/tree/main/site), and the `site` and `docs` jobs of
@@ -19,8 +23,7 @@ Files to copy into the site's repository are in
 
 | File | What it does |
 |---|---|
-| [`Dockerfile`](https://github.com/LHelge/hoster/blob/main/examples/static-site/Dockerfile) | Copies the built site from `dist/` into `nginx-unprivileged`, which runs as non-root and listens on 8080. |
-| [`default.conf`](https://github.com/LHelge/hoster/blob/main/examples/static-site/default.conf) | Serves the site, answers `/healthz`, serves `404.html` for missing pages and turns off absolute redirects. |
+| [`Dockerfile`](https://github.com/LHelge/hoster/blob/main/examples/static-site/Dockerfile) | Two lines: `FROM ghcr.io/lhelge/aphid-server`, then copies the built site from `dist/` to `/site`. The server runs as non-root, answers `/healthz` and serves `404.html` for missing pages. |
 | [`release.yml`](https://github.com/LHelge/hoster/blob/main/examples/static-site/release.yml) | On every push to `main`: builds the site with [aphid](https://github.com/LHelge/aphid), builds and pushes the image, posts the digest to hoster. |
 
 # 1. The stack file
@@ -32,9 +35,12 @@ name = "blog"
 [services.web]
 image = "ghcr.io/acme/blog"        # pushed by release.yml, no tag
 
+[services.web.env]
+APHID_LOG_FORMAT = "json"          # access logs with levels and fields in the UI
+
 [[services.web.routes]]
 host = "blog.example.com"
-port = 8080                        # the container port nginx listens on
+port = 8080
 
 [deploy]
 repository_id = 123456789          # gh api repos/acme/blog --jq .id
@@ -43,8 +49,9 @@ environment = "production"
 ```
 
 No `health` table is needed: the default probe is `GET /healthz` on the route's port
-([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)), and `default.conf` answers it. hoster also injects `PORT=8080`, which nginx ignores;
-the `listen` line in `default.conf` and the route's `port` must agree.
+([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)), and aphid-server answers it. hoster also injects `PORT` set to the route's port,
+and aphid-server listens on it, so the route's `port` is the only place the port is named. (A
+server that ignores `PORT`, such as nginx, must listen on the route's port itself.)
 
 For a private package, enter a PAT with `read:packages` under **Settings → Registries**
 ([ADR-0025](https://github.com/LHelge/hoster/blob/main/docs/adr/0025-registry-credentials-and-image-references.md)). Setting up the `[deploy]` rule and the `production` environment is the same as for
@@ -58,16 +65,17 @@ with two changes: it runs on pushes to `main` instead of `v*` tags, and it build
 building the image. The build step is aphid's GitHub Action:
 
 ```yaml
-- uses: LHelge/aphid@v0.3.0
+- uses: LHelge/aphid@v0.4.1
   with:
-    version: v0.3.0     # the aphid binary; defaults to the latest release
+    version: v0.4.1     # the aphid binary; defaults to the latest release
     config: aphid.toml
     output: dist
 ```
 
 Any other generator works the same way, as long as its output ends up in `dist/` before
-`docker/build-push-action` runs. Building outside the Dockerfile keeps the image to nginx plus
-the site, and lets the generator use the runner's caches.
+`docker/build-push-action` runs. Building outside the Dockerfile keeps the image to the server
+plus the site, and lets the generator use the runner's caches. Keep the `aphid-server` tag in the
+Dockerfile at the same version as the action.
 
 ## Without the webhook
 
@@ -80,18 +88,24 @@ log and a failed deploy to fail the run.
 
 # 3. Things to know
 
-- **Redirects:** nginx redirects a directory without a trailing slash (`/posts` → `/posts/`).
-  With `absolute_redirect off` the `Location` is relative, so it stays on `https://` and the
-  public host instead of pointing at `http://<host>:8080`.
-- **`www` → apex:** hoster has no host redirects in v1 ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). Either route both hosts to
-  the service, or add a `server` block for `www` in `default.conf` that returns
-  `301 https://example.com$request_uri` and route `www.example.com` to the same port.
+- **Redirects:** aphid-server redirects a directory without a trailing slash (`/posts` →
+  `/posts/`) with a relative `Location`, so it stays on `https://` and the public host instead of
+  pointing at `http://<host>:8080`. With nginx, set `absolute_redirect off` for the same result.
+- **Clean URLs:** aphid writes every page as `<page>/index.html`, so `/wiki/install/` needs no
+  rewrite. aphid-server does not map `/page` to `page.html`; a generator that writes `page.html`
+  files needs a server that does (nginx's `try_files $uri $uri/ $uri.html`).
+- **`www` → apex:** hoster has no host redirects in v1 ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)), and aphid-server has none
+  either. Route both hosts to the service, or run a second small service for `www` that only
+  redirects (an nginx `server` block returning `301 https://example.com$request_uri`) and route
+  `www.example.com` to it.
+- **Compression:** neither aphid-server nor hoster's proxy compresses responses. For a
+  documentation-sized site this costs little; if it matters, use a server that does (nginx's
+  `gzip on`).
 - **Under a prefix:** the prefix is preserved by default ([ADR-0010](https://github.com/LHelge/hoster/blob/main/docs/adr/0010-prefix-preservation-and-forwarded-headers.md)), so a site routed at
   `/docs` must be built with that base path (aphid's, Hugo's or Zola's base URL setting).
   Alternatively, set `strip_prefix = true` on the route, but links in the site must then still
   include the prefix.
-- **Caching:** `default.conf` sets no `Cache-Control`, so browsers revalidate with
-  `Last-Modified`/`ETag`. If the generator fingerprints asset file names, a
-  `location ~* \.(css|js|woff2)$ { expires 1y; }` block is safe to add.
-- **Architecture:** build for the VPS's architecture (`platforms:` in the workflow). The nginx
-  base image is multi-arch.
+- **Caching:** aphid-server sets no `Cache-Control`, so browsers revalidate with
+  `Last-Modified`/`ETag` and get `304 Not Modified` for unchanged files.
+- **Architecture:** build for the VPS's architecture (`platforms:` in the workflow). The
+  aphid-server image is multi-arch.
