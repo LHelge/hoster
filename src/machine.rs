@@ -57,7 +57,6 @@ impl Machine {
     }
 
     /// `MemTotal` and `MemAvailable` from `/proc/meminfo`; `None` when either cannot be read.
-    #[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
     pub fn memory_usage(&self) -> Option<MemoryUsage> {
         let text = self.file("proc/meminfo")?;
         let info = MemInfo(&text);
@@ -69,14 +68,12 @@ impl Machine {
 
     /// The CPU time the host has spent since boot, from the aggregate `cpu` line of
     /// `/proc/stat`.
-    #[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
     pub fn cpu_times(&self) -> Option<CpuTimes> {
         self.file("proc/stat")?.parse().ok()
     }
 
     /// The size of the filesystem holding `path`, and what of it an unprivileged user may
     /// still write, from `statvfs`. `path` is a real absolute path, not one under the root.
-    #[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
     pub fn filesystem(&self, path: &Path) -> Option<FilesystemUsage> {
         rustix::fs::statvfs(path).ok()?.try_into().ok()
     }
@@ -191,7 +188,6 @@ impl MemInfo<'_> {
 
 /// The host's memory, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
 pub struct MemoryUsage {
     /// `MemTotal`.
     pub total: u64,
@@ -199,7 +195,6 @@ pub struct MemoryUsage {
     pub available: u64,
 }
 
-#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
 impl MemoryUsage {
     /// The memory in use: `MemTotal` − `MemAvailable` (ADR-0066).
     pub fn used(&self) -> u64 {
@@ -209,7 +204,6 @@ impl MemoryUsage {
 
 /// The host's CPU time since boot, in jiffies (`USER_HZ`), summed over every CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
 pub struct CpuTimes {
     /// Everything but idle and iowait.
     pub busy: u64,
@@ -218,7 +212,6 @@ pub struct CpuTimes {
     pub total: u64,
 }
 
-#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
 impl CpuTimes {
     /// The fraction of CPU time that was busy between `earlier` and this reading, from 0 to 1;
     /// `None` when no time passed or a counter went backwards.
@@ -233,7 +226,6 @@ impl CpuTimes {
 /// `/proc/stat` is not a kernel CPU statistics file with an aggregate `cpu` line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("no aggregate `cpu` line in /proc/stat")]
-#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
 pub struct NoCpuLine;
 
 /// Parses `/proc/stat`'s text, of which only the aggregate `cpu` line is read: `cpu  user nice
@@ -270,7 +262,6 @@ impl std::str::FromStr for CpuTimes {
 
 /// A filesystem's size, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
 pub struct FilesystemUsage {
     /// The filesystem's size.
     pub total: u64,
@@ -282,7 +273,6 @@ pub struct FilesystemUsage {
 /// `statvfs` reported sizes that overflow a byte count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("statvfs sizes overflow a byte count")]
-#[allow(dead_code, reason = "consumed by the resource sampler (ADR-0066)")]
 pub struct Overflow;
 
 impl TryFrom<rustix::fs::StatVfs> for FilesystemUsage {

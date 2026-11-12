@@ -1286,8 +1286,12 @@ whole state is in memory.
   id with its stack and service, and one for the host. A ring is dropped once its container is
   no longer listed. A figure is unknown (`—`) before the first tick, on a container's first
   reading (CPU), after a counter went backwards, and when podman or `/proc` did not answer.
-  Runtime failures are logged once per change of state.
-- **Readers.** A cheap clonable handle in the web app's state. After each tick it bumps a
-  `watch` counter. The stack overview's `StackFeed` stream wakes on it and sends `<hx-partial>`s
+  A running container whose stats call failed or ran out of time keeps its earlier reading
+  as the base of its next CPU figure; one that stopped starts over. Runtime failures are
+  logged once per change of state.
+- **Readers.** `ResourceSampler` (`src/stats/resources.rs`) records into a cheap clonable
+  `ResourceUsage`, which reaches the web app inside `Stats` (`Stats::resources`): the host's
+  history and, per stack, each container's by id, the newest sample last. After each tick it
+  bumps a `watch` counter (`ResourceUsage::changes`). The stack overview's `StackFeed` stream wakes on it and sends `<hx-partial>`s
   for the stack's usage cells, rendered from the cache alone. The sidebar card polls its own
   fragment endpoint every 10 s with HTMX. Nothing is persisted and there is no migration.

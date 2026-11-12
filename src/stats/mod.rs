@@ -17,6 +17,8 @@
 //!
 //! - **Deployments**: outcome counts and durations per stack, read from SQLite on demand.
 //! - **Certificates**: the `not_after` of every certificate the proxy serves.
+//! - **Resource usage** ([`ResourceUsage`], ADR-0066): container and host CPU, memory and disk,
+//!   sampled every 10 s by the [`ResourceSampler`] and kept in memory for an hour.
 //!
 //! Restarts and crash loops (ADR-0028) are not kept here: pages read them from the stacks'
 //! status. Everything but the live counters comes from a [`StatsSource`]; [`HostStats`] is the
@@ -25,6 +27,7 @@
 mod history;
 mod latency;
 mod recorder;
+mod resources;
 mod traffic;
 
 use std::fmt;
@@ -42,6 +45,14 @@ use crate::store::{
 pub use self::history::{Range, ScopeHistory, TrafficHistory, TrafficTotals};
 pub use self::latency::Histogram;
 pub use self::recorder::TrafficRecorder;
+#[allow(
+    unused_imports,
+    reason = "named by the sidebar host meters and the stack overview (tasks hzc, rap)"
+)]
+pub use self::resources::{
+    ContainerReading, ContainerSample, ContainerUsage, History, HostSample, Usage,
+};
+pub use self::resources::{ResourceSampler, ResourceUsage};
 pub use self::traffic::{
     InFlight, RequestOutcome, StatusClass, StatusCounts, TrackedRequest, Traffic, TrafficDelta,
 };
@@ -70,6 +81,7 @@ pub trait StatsSource: Send + Sync + 'static {
 pub struct Stats {
     traffic: Traffic,
     source: Arc<dyn StatsSource>,
+    resources: ResourceUsage,
 }
 
 impl fmt::Debug for Stats {
@@ -82,9 +94,28 @@ impl Stats {
     /// How far back the deployment statistics look.
     pub const DEPLOY_HISTORY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-    /// Statistics over `traffic` (the proxy's counters) and `source`.
+    /// Statistics over `traffic` (the proxy's counters) and `source`, with no resource usage
+    /// (every figure unknown) until [`Self::with_resources`].
     pub fn new(traffic: Traffic, source: Arc<dyn StatsSource>) -> Self {
-        Self { traffic, source }
+        Self {
+            traffic,
+            source,
+            resources: ResourceUsage::default(),
+        }
+    }
+
+    /// These statistics with the resource sampler's cache (ADR-0066).
+    pub fn with_resources(self, resources: ResourceUsage) -> Self {
+        Self { resources, ..self }
+    }
+
+    /// The resource sampler's cache: host and container CPU, memory and disk (ADR-0066).
+    #[allow(
+        dead_code,
+        reason = "read by the sidebar host meters and the stack overview (tasks hzc, rap)"
+    )]
+    pub fn resources(&self) -> &ResourceUsage {
+        &self.resources
     }
 
     /// The certificates served now, soonest expiry first.

@@ -1,10 +1,10 @@
 ---
 id: bqt
 title: "Resource sampler: 10 s background task with latest values and an hour of history"
-status: open
+status: done
 priority: P1
 created: "2026-11-12T00:07:55.945321791Z"
-updated: "2026-11-12T00:07:55.945321791Z"
+updated: "2026-11-12T00:40:55.576251238Z"
 tags:
   - observability
   - runtime
@@ -13,6 +13,7 @@ depends_on:
   - bny
   - "76n"
 parent: qmw
+attempts: 1
 ---
 
 ## Summary

@@ -25,6 +25,7 @@ use crate::acme::{AcmeCommand, AcmeService, CertMap, ChallengeMap, DnsCheck, Pub
 use crate::config::{Config, ProxyConfig};
 use crate::installation::Version;
 use crate::instance::Instance;
+use crate::machine::Machine;
 use crate::notify::Notifier;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
 use crate::ports::PortAllocator;
@@ -33,7 +34,7 @@ use crate::registry::{Poller, RegistryClient, StoredCredentials, UpdateChecker};
 use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
 use crate::secrets::SecretStore;
-use crate::stats::{HostStats, Stats, Traffic, TrafficRecorder};
+use crate::stats::{HostStats, ResourceSampler, Stats, Traffic, TrafficRecorder};
 use crate::store::Store;
 use crate::web::{Listen, RegistryAccess, WebApp, WebServer};
 
@@ -848,13 +849,19 @@ impl Startup for Supervisor {
                 )));
                 let (events_tx, events_rx) = mpsc::channel(ACME_EVENTS_CAPACITY);
                 tokio::spawn(Arc::clone(&orchestrator).run_acme_events(events_rx));
+                // The resource sampler (ADR-0066): container and host usage every 10 s, in
+                // memory only, for the sidebar and the stack overview.
+                let sampler = ResourceSampler::new(Arc::clone(&runtime), Machine::local());
+                let resources = sampler.usage();
+                tokio::spawn(sampler.run(self.teardown.token.child_token()));
                 let stats = Stats::new(
                     self.traffic.clone(),
                     Arc::new(HostStats {
                         store: store.clone(),
                         certs: certs.clone(),
                     }),
-                );
+                )
+                .with_resources(resources);
                 // One DNS check, so the certificates page shows the addresses the task compares
                 // against (ADR-0051 #2).
                 let dns = DnsCheck::from(PublicAddresses::from(&self.config));
