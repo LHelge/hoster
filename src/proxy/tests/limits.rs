@@ -617,6 +617,13 @@ async fn a_slot_is_freed_however_the_connection_ends() {
 
 /// Stopping the proxy, gracefully or fast, gives back every slot, also of connections that
 /// are idle, mid-request or mid-handshake then.
+///
+/// A graceful stop waits for Pingora's runtimes to drop their tasks, so the slots are back when
+/// the proxy thread has exited. A fast stop shuts the runtimes down with a zero timeout
+/// (pingora-core 0.9.1 `Server::run`, tokio `Runtime::shutdown_timeout`), which returns while
+/// the worker threads are still dropping connections, so a slot can come back just after the
+/// thread exits. Nothing reads the count then (hoster exits after stopping the proxy), so the
+/// fast case waits for it to settle.
 #[tokio::test]
 async fn stopping_the_proxy_frees_every_slot() {
     for signal in [
@@ -624,6 +631,7 @@ async fn stopping_the_proxy_frees_every_slot() {
         ShutdownSignal::FastShutdown,
     ] {
         let name = format!("{signal:?}");
+        let fast = matches!(signal, ShutdownSignal::FastShutdown);
         let mut h = Harness::start().await;
         slots_settle(&h, LOCALHOST, 0).await;
         let mut kept = h.connect("app.example.com").await;
@@ -646,6 +654,9 @@ async fn stopping_the_proxy_frees_every_slot() {
             .await
             .unwrap()
             .expect("the proxy thread exits");
+        if fast {
+            slots_settle(&h, LOCALHOST, 0).await;
+        }
         assert_eq!(h.admission.open_from_ip(LOCALHOST), 0, "{name}");
         assert_eq!(h.admission.clients(), 0, "{name}");
         drop((kept, busy, idle, plain, stalled));
