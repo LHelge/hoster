@@ -7,6 +7,7 @@
 
 mod requests;
 mod spans;
+mod traces;
 
 use std::fmt;
 use std::ops::Range;
@@ -22,6 +23,9 @@ use crate::store::{Result, StoreError, Timestamp};
 
 pub use requests::{RequestCounts, RequestEntry, RequestQuery, StatusFilter};
 pub use spans::RootQuery;
+pub use traces::{
+    TracePage, TracePoint, TracePoints, TraceQuery, TraceSort, TraceStatus, TraceSummary,
+};
 
 /// The most rows one query visits. A query that reaches it before its page is full stops and
 /// says where ([`Page::scan_stopped`]).

@@ -34,12 +34,12 @@ impl RootQuery {
     }
 }
 
-const COLUMNS: &str = "SELECT trace_id, span_id, parent_span_id, stack, service, name, kind, \
+pub(super) const COLUMNS: &str = "SELECT trace_id, span_id, parent_span_id, stack, service, name, kind, \
                        start, duration, status, status_message, attributes, resource, events, \
                        received FROM spans";
 
 /// Text that does not decode, as sqlx reports a column it cannot read.
-fn decode<T, E>(parsed: std::result::Result<T, E>) -> sqlx::Result<T>
+pub(super) fn decode<T, E>(parsed: std::result::Result<T, E>) -> sqlx::Result<T>
 where
     E: std::error::Error + Send + Sync + 'static,
 {

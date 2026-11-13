@@ -54,7 +54,8 @@ pub use logs::{
     LogHead, LogPage, LogQuery, LogRecord, LogScope, LogStore, LogTail, MicroTimestamp, Page,
     PageAt, RecordKey, Removed, RequestCounts, RequestEntry, RequestId, RequestQuery, RequestRow,
     Retention, RootQuery, RowCounts, ServiceSeen, Span, SpanId, SpanKind, SpanStatus, StatusFilter,
-    Stream, Sweep, SweepReport, Tail, TextFilter, TraceId, UnknownLogText,
+    Stream, Sweep, SweepReport, Tail, TextFilter, Trace, TraceId, TracePage, TracePoint,
+    TracePoints, TraceQuery, TraceSort, TraceSpan, TraceStatus, TraceSummary, UnknownLogText,
 };
 pub use notifications::{
     DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,

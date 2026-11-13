@@ -1,16 +1,17 @@
 ---
 id: txt
 title: "Traces: store queries for the trace list and for one trace"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:36:58.371075490Z"
-updated: "2026-11-12T19:37:56.294166195Z"
+updated: "2026-11-13T21:40:44.671827567Z"
 tags:
   - store
   - observability
 depends_on:
   - aqy
 parent: qnh
+attempts: 1
 ---
 
 ## Summary

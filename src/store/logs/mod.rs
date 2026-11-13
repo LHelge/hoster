@@ -19,6 +19,7 @@
 mod health;
 mod query;
 mod retention;
+mod trace;
 mod types;
 
 #[cfg(test)]
@@ -40,9 +41,11 @@ pub use health::{LogFileFacts, RowCounts};
 pub use query::{
     InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, LogTail, Page, PageAt,
     RecordKey, RequestCounts, RequestEntry, RequestQuery, RootQuery, ServiceSeen, StatusFilter,
-    Tail, TextFilter,
+    Tail, TextFilter, TracePage, TracePoint, TracePoints, TraceQuery, TraceSort, TraceStatus,
+    TraceSummary,
 };
 pub use retention::{Removed, Retention, Sweep, SweepReport};
+pub use trace::{Trace, TraceSpan};
 pub use types::{
     HexId, Level, LogBatch, LogCursor, LogHead, LogRecord, MicroTimestamp, RequestId, RequestRow,
     Span, SpanId, SpanKind, SpanStatus, Stream, TraceId, UnknownLogText,

@@ -1963,3 +1963,512 @@ mod spans {
         store.close().await;
     }
 }
+
+mod traces {
+    use std::net::IpAddr;
+    use std::ops::Range;
+
+    use super::*;
+
+    fn at(millis: i64) -> Timestamp {
+        Timestamp::from_millis(millis)
+    }
+
+    fn everything() -> Range<Timestamp> {
+        at(0)..at(1_000_000_000)
+    }
+
+    fn trace(n: u8) -> TraceId {
+        TraceId::from([n; 16])
+    }
+
+    fn span_id(n: u8) -> SpanId {
+        SpanId::from([n; 8])
+    }
+
+    /// A request routed at `time` ms that took `total` ms, with the proxy's span ids
+    /// `0xa<n>` (server) and `0xc<n>` (client, upstream start 0.5 ms in).
+    fn request(
+        n: u8,
+        time: i64,
+        stack: &str,
+        service: &str,
+        status: u16,
+        total: u64,
+    ) -> RequestRow {
+        RequestRow {
+            time: at(time),
+            host: format!("{stack}.example.com"),
+            prefix: "/".into(),
+            stack: stack.into(),
+            service: service.into(),
+            method: "GET".into(),
+            path: format!("/{n}"),
+            status,
+            to_header: Some(Duration::from_millis(1)),
+            total: Duration::from_millis(total),
+            bytes: 1,
+            client: IpAddr::from([203, 0, 113, 7]),
+            upstream_failed: false,
+            request_id: trace(n),
+            server_span: Some(span_id(0xa0 + n)),
+            client_span: Some(span_id(0xc0 + n)),
+            upstream_start: Some(MicroTimestamp::from(at(time)) + Duration::from_micros(500)),
+        }
+    }
+
+    /// A span of `trace` started at `start_us` µs that took `ms` milliseconds.
+    #[allow(clippy::too_many_arguments)]
+    fn span(
+        trace: TraceId,
+        id: u8,
+        parent: Option<u8>,
+        stack: &str,
+        service: &str,
+        start_us: i64,
+        ms: u64,
+        status: SpanStatus,
+    ) -> Span {
+        Span {
+            trace_id: trace,
+            span_id: span_id(id),
+            parent: parent.map(span_id),
+            stack: stack.into(),
+            service: service.into(),
+            name: format!("span {id}"),
+            kind: SpanKind::Internal,
+            start: MicroTimestamp::from_micros(start_us),
+            duration: Duration::from_millis(ms),
+            status,
+            status_message: None,
+            attributes: None,
+            resource: None,
+            events: None,
+            received: at(900_000),
+        }
+    }
+
+    fn record(time: i64, trace: TraceId, span: Option<SpanId>, message: &str) -> LogRecord {
+        LogRecord {
+            time: at(time),
+            stack: Some("notes".into()),
+            service: "web".into(),
+            generation: Some(1),
+            stream: Stream::Otlp,
+            level: Some(Level::Info),
+            message: message.into(),
+            fields: None,
+            cut: false,
+            marker: false,
+            trace_id: Some(trace),
+            span_id: span,
+            received: Some(at(time)),
+        }
+    }
+
+    /// - 1: a request to `notes/web` (50 ms) whose app sent a root, a child in error and a
+    ///   span whose parent was lost;
+    /// - 2: a request to `notes/api` (900 ms), app not instrumented;
+    /// - 3: a request to `blog/app` that hoster answered 502 itself (5 ms): no client span;
+    /// - 4: a request row from before span ids were stored: no trace;
+    /// - 5: a background job of `notes/worker` (300 ms) with two roots and a child;
+    /// - 6: a request to `notes/web` (20 ms) whose app started a trace of its own id anyway.
+    async fn sample() -> (TempDir, LogStore) {
+        use SpanStatus::{Error, Unset};
+        let (dir, store) = open().await;
+        let mut three = request(3, 3_000, "blog", "app", 502, 5);
+        three.upstream_failed = true;
+        (three.client_span, three.upstream_start) = (None, None);
+        let mut four = request(4, 4_000, "notes", "web", 200, 10);
+        (four.server_span, four.client_span, four.upstream_start) = (None, None, None);
+        let batch = LogBatch {
+            requests: vec![
+                request(1, 1_000, "notes", "web", 200, 50),
+                request(2, 2_000, "notes", "api", 200, 900),
+                three,
+                four,
+                request(6, 6_000, "notes", "web", 200, 20),
+            ],
+            spans: vec![
+                span(
+                    trace(1),
+                    0x11,
+                    Some(0xc1),
+                    "notes",
+                    "web",
+                    1_001_000,
+                    40,
+                    Unset,
+                ),
+                span(
+                    trace(1),
+                    0x12,
+                    Some(0x11),
+                    "notes",
+                    "web",
+                    1_002_000,
+                    10,
+                    Error,
+                ),
+                span(
+                    trace(1),
+                    0x13,
+                    Some(0xee),
+                    "notes",
+                    "web",
+                    1_030_000,
+                    1,
+                    Unset,
+                ),
+                span(
+                    trace(5),
+                    0x51,
+                    None,
+                    "notes",
+                    "worker",
+                    5_000_000,
+                    300,
+                    Unset,
+                ),
+                span(
+                    trace(5),
+                    0x52,
+                    Some(0x51),
+                    "notes",
+                    "worker",
+                    5_001_000,
+                    10,
+                    Unset,
+                ),
+                span(trace(5), 0x53, None, "notes", "worker", 5_400_000, 1, Unset),
+                span(trace(6), 0x61, None, "notes", "web", 6_001_000, 5, Unset),
+            ],
+            records: vec![
+                record(1_003, trace(1), Some(span_id(0x11)), "second"),
+                record(1_002, trace(1), Some(span_id(0x11)), "first"),
+                record(1_001, trace(1), Some(span_id(0xa1)), "proxy"),
+                record(1_004, trace(1), None, "no span"),
+                record(2_001, trace(2), Some(span_id(0x11)), "another trace"),
+            ],
+            ..LogBatch::default()
+        };
+        store.append(&batch).await.unwrap();
+        (dir, store)
+    }
+
+    fn numbers(page: &TracePage) -> Vec<u8> {
+        page.traces.iter().map(|t| t.trace_id.as_ref()[0]).collect()
+    }
+
+    async fn list(store: &LogStore, query: &TraceQuery) -> Vec<u8> {
+        numbers(&store.traces(query).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn the_list_has_a_row_per_trace_from_request_rows_and_stored_roots() {
+        let (_dir, store) = sample().await;
+        let page = store
+            .traces(&TraceQuery::new(everything(), LogScope::All))
+            .await
+            .unwrap();
+        assert_eq!(numbers(&page), [6, 5, 3, 2, 1]);
+        assert_eq!((page.matched, page.total, page.more), (5, 5, false));
+
+        let row = |n: u8| page.traces.iter().find(|t| t.trace_id == trace(n)).unwrap();
+        let one = row(1);
+        assert_eq!(one.name, "GET /1");
+        assert_eq!(one.stack, "notes");
+        assert_eq!(one.services, ["hoster", "web"]);
+        assert_eq!(one.spans, 5);
+        assert_eq!(one.duration, Duration::from_millis(50));
+        assert_eq!(one.start, MicroTimestamp::from(at(1_000)));
+        assert_eq!(one.status, TraceStatus::Error, "a child span is in error");
+        assert!(!one.proxy_only);
+
+        let two = row(2);
+        assert!(two.proxy_only, "app not instrumented");
+        assert_eq!(
+            (two.services.as_slice(), two.spans),
+            (&["hoster".to_owned()][..], 2)
+        );
+        assert_eq!(two.status, TraceStatus::Ok);
+
+        let three = row(3);
+        assert!(three.proxy_only);
+        assert_eq!((three.spans, three.status), (1, TraceStatus::Error));
+
+        let five = row(5);
+        assert_eq!(five.name, "span 81", "the earliest of its two roots");
+        assert_eq!(
+            (five.services.as_slice(), five.spans),
+            (&["worker".to_owned()][..], 3)
+        );
+        assert_eq!(five.duration, Duration::from_millis(300));
+        assert!(!five.proxy_only);
+
+        let six = row(6);
+        assert_eq!(
+            six.name, "GET /6",
+            "the request row is the root, listed once"
+        );
+        assert_eq!(six.services, ["hoster", "web"]);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_list_sorts_and_filters() {
+        let (_dir, store) = sample().await;
+        let all = || TraceQuery::new(everything(), LogScope::All);
+
+        let mut q = all();
+        q.sort = TraceSort::Slowest;
+        assert_eq!(list(&store, &q).await, [2, 5, 1, 6, 3]);
+        q.sort = TraceSort::ErrorsFirst;
+        assert_eq!(list(&store, &q).await, [3, 1, 6, 5, 2]);
+
+        let mut q = all();
+        q.status = Some(TraceStatus::Error);
+        assert_eq!(list(&store, &q).await, [3, 1]);
+        q.status = Some(TraceStatus::Ok);
+        assert_eq!(list(&store, &q).await, [6, 5, 2]);
+
+        let mut q = all();
+        q.min_duration = Some(Duration::from_millis(300));
+        assert_eq!(list(&store, &q).await, [5, 2]);
+
+        let mut q = all();
+        q.scope = LogScope::Stack("blog".into());
+        assert_eq!(list(&store, &q).await, [3]);
+        q.scope = LogScope::Hoster;
+        assert!(list(&store, &q).await.is_empty());
+
+        let mut q = all();
+        q.services = vec!["worker".into()];
+        assert_eq!(list(&store, &q).await, [5]);
+        q.services = vec!["api".into()];
+        assert_eq!(
+            list(&store, &q).await,
+            [2],
+            "the service a request was routed to"
+        );
+        q.services = vec!["web".into(), "worker".into()];
+        assert_eq!(list(&store, &q).await, [6, 5, 1]);
+        q.services = vec![Span::PROXY_SERVICE.into()];
+        assert_eq!(list(&store, &q).await, [6, 3, 2, 1]);
+
+        // The range is in milliseconds, its end exclusive.
+        let q = TraceQuery::new(at(2_000)..at(5_000), LogScope::All);
+        let page = store.traces(&q).await.unwrap();
+        assert_eq!((numbers(&page), page.total), (vec![3, 2], 2));
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_list_pages_and_counts_matches_apart_from_the_total() {
+        let (_dir, store) = sample().await;
+        let mut q = TraceQuery::new(everything(), LogScope::All);
+        q.limit = 2;
+        q.page = 1;
+        let page = store.traces(&q).await.unwrap();
+        assert_eq!(numbers(&page), [3, 2]);
+        assert_eq!((page.matched, page.total, page.more), (5, 5, true));
+        q.page = 2;
+        let page = store.traces(&q).await.unwrap();
+        assert_eq!((numbers(&page), page.more), (vec![1], false));
+        q.page = 9;
+        let page = store.traces(&q).await.unwrap();
+        assert!(page.traces.is_empty());
+        assert_eq!((page.matched, page.total), (5, 5));
+
+        q.page = 0;
+        q.status = Some(TraceStatus::Error);
+        let page = store.traces(&q).await.unwrap();
+        assert_eq!((page.matched, page.total), (2, 5));
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_scatter_has_every_root_by_start() {
+        let (_dir, store) = sample().await;
+        let points = store
+            .trace_points(&TraceQuery::new(everything(), LogScope::All))
+            .await
+            .unwrap();
+        let got: Vec<(u8, Duration, TraceStatus)> = points
+            .points
+            .iter()
+            .map(|p| (p.trace_id.as_ref()[0], p.duration, p.status))
+            .collect();
+        let ms = Duration::from_millis;
+        assert_eq!(
+            got,
+            [
+                (1, ms(50), TraceStatus::Error),
+                (2, ms(900), TraceStatus::Ok),
+                (3, ms(5), TraceStatus::Error),
+                (5, ms(300), TraceStatus::Ok),
+                (6, ms(20), TraceStatus::Ok),
+            ]
+        );
+        assert_eq!(points.matched, 5);
+        assert!(!points.is_sampled());
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_scatter_samples_evenly_over_its_cap() {
+        let (_dir, store) = open().await;
+        let n = 2_500;
+        let requests = (0..n)
+            .map(|i| {
+                let mut row = request(1, 1_000 + i, "notes", "web", 200, 5);
+                let mut id = [0; 16];
+                id[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+                row.request_id = TraceId::from(id);
+                row
+            })
+            .collect();
+        store
+            .append(&LogBatch {
+                requests,
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        let points = store
+            .trace_points(&TraceQuery::new(everything(), LogScope::All))
+            .await
+            .unwrap();
+        assert_eq!(points.points.len(), TraceQuery::MAX_POINTS as usize);
+        assert_eq!(points.matched, n as u64);
+        assert!(points.is_sampled());
+        // Every 2.5th root: the gaps are 2 or 3 ms, never more.
+        let starts: Vec<i64> = points.points.iter().map(|p| p.start.as_micros()).collect();
+        assert_eq!(starts[0], MicroTimestamp::from(at(1_000)).as_micros());
+        assert!(
+            starts
+                .windows(2)
+                .all(|w| matches!(w[1] - w[0], 2_000 | 3_000))
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn one_trace_is_its_proxy_and_stored_spans_as_a_tree() {
+        let (_dir, store) = sample().await;
+        let trace_one = store.load_trace(trace(1)).await.unwrap().unwrap();
+        let ids: Vec<SpanId> = trace_one.spans().iter().map(|s| s.span.span_id).collect();
+        assert_eq!(
+            ids,
+            [
+                span_id(0xa1),
+                span_id(0xc1),
+                span_id(0x11),
+                span_id(0x12),
+                span_id(0x13)
+            ]
+        );
+        let depths: Vec<usize> = trace_one.spans().iter().map(|s| s.depth).collect();
+        assert_eq!(depths, [0, 1, 2, 3, 1]);
+        let lost = trace_one.span(span_id(0x13)).unwrap();
+        assert!(
+            lost.parent_missing,
+            "its parent was lost: shown under the root"
+        );
+        assert_eq!(trace_one.total_spans(), 5);
+        assert!(!trace_one.is_truncated());
+        assert_eq!(trace_one.services(), ["hoster", "web"]);
+        let server = &trace_one.spans()[0].span;
+        assert_eq!(
+            (server.kind, server.service.as_str()),
+            (SpanKind::Server, "hoster")
+        );
+        assert_eq!(server.duration, Duration::from_millis(50));
+
+        // Log records: per span, and the trace's own count includes those without a span.
+        assert_eq!(trace_one.log_records(), 4);
+        let counts: Vec<u64> = trace_one.spans().iter().map(|s| s.log_records).collect();
+        assert_eq!(counts, [1, 0, 2, 0, 0]);
+        let records = store
+            .span_records(trace(1), span_id(0x11), 100)
+            .await
+            .unwrap();
+        let messages: Vec<&str> = records.iter().map(|r| r.record.message.as_str()).collect();
+        assert_eq!(messages, ["first", "second"]);
+
+        let proxy_only = store.load_trace(trace(3)).await.unwrap().unwrap();
+        assert_eq!(proxy_only.spans().len(), 1);
+        let job = store.load_trace(trace(5)).await.unwrap().unwrap();
+        let roots: Vec<u8> = job
+            .spans()
+            .iter()
+            .filter(|s| s.depth == 0)
+            .map(|s| s.span.span_id.as_ref()[0])
+            .collect();
+        assert_eq!(roots, [0x51, 0x53], "both roots, by start");
+
+        assert!(
+            store.load_trace(trace(4)).await.unwrap().is_none(),
+            "an older row has no spans"
+        );
+        assert!(store.load_trace(trace(99)).await.unwrap().is_none());
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_trace_is_read_up_to_its_span_cap_with_the_true_count() {
+        let (_dir, store) = open().await;
+        let over = Trace::MAX_SPANS + 5;
+        let spans = (0..over)
+            .map(|i| {
+                let mut s = span(
+                    trace(7),
+                    0,
+                    None,
+                    "notes",
+                    "web",
+                    i as i64,
+                    1,
+                    SpanStatus::Unset,
+                );
+                s.span_id = SpanId::from((i as u64 + 1).to_be_bytes());
+                s.parent = (i > 0).then(|| SpanId::from(1u64.to_be_bytes()));
+                s
+            })
+            .collect();
+        let mut row = request(7, 0, "notes", "web", 200, 5);
+        row.request_id = trace(7);
+        store
+            .append(&LogBatch {
+                spans,
+                requests: vec![row],
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        let loaded = store.load_trace(trace(7)).await.unwrap().unwrap();
+        assert_eq!(loaded.spans().len(), Trace::MAX_SPANS);
+        assert_eq!(loaded.total_spans(), over as u64 + 2);
+        assert!(loaded.is_truncated());
+        assert!(
+            loaded.span(span_id(0xa7)).is_some() && loaded.span(span_id(0xc7)).is_some(),
+            "the proxy's spans are always kept"
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_traces_log_records_are_read_with_their_index() {
+        let (_dir, store) = open().await;
+        let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT span_id, count(*) FROM log_records \
+             WHERE trace_id = 'x' GROUP BY span_id",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        let plan = rows.into_iter().map(|r| r.3).collect::<Vec<_>>().join("; ");
+        assert!(plan.contains("log_records_by_trace"), "{plan}");
+        store.close().await;
+    }
+}
