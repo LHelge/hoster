@@ -16,6 +16,14 @@
       <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
       {%- endfor %}
     </nav>
+    {%- if !view.fields.is_empty() %}
+    <nav class="log-choices log-field-filters" aria-label="Field filters">
+      <span class="log-label">fields</span>
+      {%- for chip in view.fields %}
+      <a class="log-chip log-field-chip" href="{{ chip.remove }}" title="Remove this filter">{{ chip.label }} <span aria-hidden="true">×</span><span class="visually-hidden">(remove)</span></a>
+      {%- endfor %}
+    </nav>
+    {%- endif %}
     {%- if let Some(follow) = view.follow %}
     <nav class="log-choices log-follow" aria-label="Follow new records">
       <span class="log-label">follow</span>

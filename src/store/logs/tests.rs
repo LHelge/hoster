@@ -817,10 +817,24 @@ mod queries {
                 ("text", "a \"b\""),
             ]
         );
+        // Keys with dots or `=` stay as they are; a long or multi-line string is its text.
+        r.fields = Some(r#"{"a.b":{"c=d":"x\ny"},"long":"{\"nested\":\"json\"}"}"#.into());
+        assert_eq!(
+            r.parsed_fields(),
+            Some(Ok(vec![
+                ("a.b.c=d".to_owned(), "x\ny".to_owned()),
+                ("long".to_owned(), r#"{"nested":"json"}"#.to_owned()),
+            ]))
+        );
+        // Fields that are not an object are kept raw for showing, and match nothing.
         r.fields = Some("[1, 2]".into());
         assert!(r.flat_fields().is_empty());
+        assert_eq!(r.parsed_fields(), Some(Err("[1, 2]")));
+        r.fields = Some("{\"cut".into());
+        assert_eq!(r.parsed_fields(), Some(Err("{\"cut")));
         r.fields = None;
         assert!(r.flat_fields().is_empty());
+        assert_eq!(r.parsed_fields(), None);
     }
 
     #[test]

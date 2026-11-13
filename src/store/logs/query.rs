@@ -86,7 +86,8 @@ impl TextFilter {
             .map_err(InvalidPattern)
     }
 
-    pub(super) fn is_match(&self, haystack: &str) -> bool {
+    /// Whether it matches anywhere in `haystack`.
+    pub fn is_match(&self, haystack: &str) -> bool {
         match self {
             TextFilter::Substring(needle) => haystack.to_lowercase().contains(needle.as_str()),
             TextFilter::Regex(regex) => regex.is_match(haystack),

@@ -10,7 +10,8 @@
 //!
 //! Every option is a plain GET parameter ([`LogParams`]): `service`, `since` (a preset, a
 //! duration or a UTC time; 1h by default), `level` ([`LevelFilter`]), `q` and `regex=on` (grep:
-//! a substring ignoring case, or a regular expression, of the message and the fields) and the
+//! a substring ignoring case, or a regular expression, of the message and the fields), `field`
+//! (repeatable, [`FieldFilter`]: `<key>=<value>`, an exact match on a flattened field) and the
 //! page cursor `before`/`after`, a record's `<time>.<id>` key. Every link keeps the other
 //! options, and the form keeps them as hidden fields. A page holds at most
 //! [`LogsView::PAGE_SIZE`] records; "older" and "newer" page by record key, never by offset, so
@@ -21,6 +22,13 @@
 //! searched and links "search older" from there. Grep matches are marked in the message. A
 //! level filter hides the records without a level (text lines), and the toolbar says how many.
 //! A pattern that does not compile is shown beside the field, with no records.
+//!
+//! A record with fields (a JSON line's other keys, ADR-0067 §3) opens in place, a `<details>`
+//! with no script, on its fields flattened to dotted keys and what the row leaves out: the full
+//! time, the stream, the generation and whether the line was cut. Each value links the view
+//! with that value as a field filter; active ones are removable chips in the toolbar, and all
+//! must match. The store runs them in the same scan as grep, under the same cap. A record whose
+//! fields grep matched opens by itself, and `tracing`'s `target` is shown in the row.
 //!
 //! A mount with a stream ([`LogMount::stream`], the stack tab) follows on the newest end of the
 //! range: the record list connects to [`LogFollow`], which appends what the recorder commits
@@ -56,8 +64,8 @@ use super::containers::{LogEntry as LiveLine, LogSince, SinceLink};
 use super::system::LogStoreState;
 use super::ui::Count;
 use crate::store::{
-    self, Level, LogEntry, LogHead, LogPage, LogQuery, LogStore, PageAt, RecordKey, ServiceSeen,
-    Stream, TextFilter, Timestamp,
+    self, Level, LogEntry, LogHead, LogPage, LogQuery, LogRecord, LogStore, PageAt, RecordKey,
+    ServiceSeen, Stream, TextFilter, Timestamp,
 };
 
 /// Whose records the view shows.
@@ -311,8 +319,79 @@ impl FromStr for LevelFilter {
     }
 }
 
+/// A field filter: records whose [flattened fields](crate::store::LogRecord::flat_fields)
+/// hold `value` under `key` exactly.
+///
+/// As a `field` parameter it is `<key>=<value>`, split on the first `=` that is not encoded:
+/// the key is written with `%` and `=` encoded (`%25`, `%3D`), so a key holding `=` round
+/// trips, and the value is written as it is. A typed `user.id=42` is the key `user.id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldFilter {
+    pub key: String,
+    pub value: String,
+}
+
+impl FieldFilter {
+    /// `key` with `%` and `=` encoded.
+    fn encode(key: &str) -> String {
+        key.replace('%', "%25").replace('=', "%3D")
+    }
+
+    /// The inverse of [`FieldFilter::encode`]; any other `%` is kept as it is.
+    fn decode(key: &str) -> String {
+        let mut decoded = String::with_capacity(key.len());
+        let mut rest = key;
+        while let Some(at) = rest.find('%') {
+            decoded.push_str(&rest[..at]);
+            rest = &rest[at..];
+            let escape = rest.get(..3);
+            if escape == Some("%25") {
+                decoded.push('%');
+                rest = &rest[3..];
+            } else if escape.is_some_and(|e| e.eq_ignore_ascii_case("%3D")) {
+                decoded.push('=');
+                rest = &rest[3..];
+            } else {
+                decoded.push('%');
+                rest = &rest[1..];
+            }
+        }
+        decoded.push_str(rest);
+        decoded
+    }
+}
+
+impl fmt::Display for FieldFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}={}", Self::encode(&self.key), self.value)
+    }
+}
+
+impl FromStr for FieldFilter {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (key, value) = s.split_once('=').ok_or_else(|| {
+            format!("`{s}` is not a field filter (`key=value`); showing every record.")
+        })?;
+        Ok(Self {
+            key: Self::decode(key),
+            value: value.to_owned(),
+        })
+    }
+}
+
+impl From<FieldFilter> for (String, String) {
+    fn from(filter: FieldFilter) -> Self {
+        (filter.key, filter.value)
+    }
+}
+
 /// The options of the view, as GET parameters. Every field is text, as an HTML form sends it.
+/// Read from the query's pairs in order ([`From`]), so `field` can repeat; of any other
+/// parameter given twice, the first counts.
 #[derive(Debug, Default, Clone, Deserialize)]
+#[serde(from = "Vec<(String, String)>")]
 pub struct LogParams {
     /// Only this service; every service when absent or empty.
     service: Option<String>,
@@ -332,6 +411,34 @@ pub struct LogParams {
     follow: Option<String>,
     /// The follow stream's cursor: the newest record id the page has seen.
     from: Option<String>,
+    /// Field filters ([`FieldFilter`]), as given.
+    field: Vec<String>,
+}
+
+impl From<Vec<(String, String)>> for LogParams {
+    fn from(pairs: Vec<(String, String)>) -> Self {
+        let mut params = Self::default();
+        for (key, value) in pairs {
+            let slot = match key.as_str() {
+                "service" => &mut params.service,
+                "since" => &mut params.since,
+                "before" => &mut params.before,
+                "after" => &mut params.after,
+                "level" => &mut params.level,
+                "q" => &mut params.q,
+                "regex" => &mut params.regex,
+                "follow" => &mut params.follow,
+                "from" => &mut params.from,
+                "field" => {
+                    params.field.push(value);
+                    continue;
+                }
+                _ => continue,
+            };
+            slot.get_or_insert(value);
+        }
+        params
+    }
 }
 
 impl LogParams {
@@ -427,25 +534,51 @@ impl LogParams {
         Self::text(&self.from).and_then(|id| id.parse().ok())
     }
 
+    /// The field filters, each once, in the order given; those that do not parse are left out,
+    /// with why.
+    fn fields(&self) -> (Vec<FieldFilter>, Option<String>) {
+        let mut fields: Vec<FieldFilter> = Vec::new();
+        let mut problem = None;
+        for given in self.field.iter().filter(|f| !f.is_empty()) {
+            match given.parse::<FieldFilter>() {
+                Ok(filter) if !fields.contains(&filter) => fields.push(filter),
+                Ok(_) => {}
+                Err(message) => {
+                    problem.get_or_insert(message);
+                }
+            }
+        }
+        (fields, problem)
+    }
+
     /// The options every link keeps: all but the page and stream cursors, and only those given.
     fn filters(&self) -> Vec<(&'static str, String)> {
         let level = self.level().0;
-        [
+        let mut filters: Vec<(&'static str, String)> = [
             ("service", self.service()),
             ("since", Self::text(&self.since)),
             ("level", (level != LevelFilter::All).then(|| level.as_str())),
             ("q", self.q()),
             ("regex", self.regex().then_some("on")),
-            ("follow", (!self.follows()).then_some("off")),
         ]
         .into_iter()
         .filter_map(|(key, value)| Some((key, value?.to_owned())))
-        .collect()
+        .collect();
+        filters.extend(
+            self.fields()
+                .0
+                .iter()
+                .map(|field| ("field", field.to_string())),
+        );
+        if !self.follows() {
+            filters.push(("follow", "off".to_owned()));
+        }
+        filters
     }
 
-    /// Whether level or grep narrow the page.
+    /// Whether level, grep or a field filter narrow the page.
     fn filtered(&self) -> bool {
-        self.level().0 != LevelFilter::All || self.q().is_some()
+        self.level().0 != LevelFilter::All || self.q().is_some() || !self.fields().0.is_empty()
     }
 }
 
@@ -480,15 +613,15 @@ impl LiveLink {
 }
 
 /// The links of one view: its path and the options they keep.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Links {
     action: String,
     filters: Vec<(&'static str, String)>,
 }
 
 impl Links {
-    /// The view with `set` replacing those options (`None` drops one), and no page cursor
-    /// unless `set` names one.
+    /// The view with `set` replacing those options (`None` drops one; `field` replaces every
+    /// field filter), and no page cursor unless `set` names one.
     fn to(&self, set: &[(&'static str, Option<&str>)]) -> String {
         let mut pairs: Vec<(&str, &str)> = self
             .filters
@@ -497,6 +630,37 @@ impl Links {
             .map(|(k, v)| (*k, v.as_str()))
             .collect();
         pairs.extend(set.iter().filter_map(|(k, v)| Some((*k, (*v)?))));
+        self.href(pairs)
+    }
+
+    /// The view with the field filter `field` added, and no page cursor.
+    fn with_field(&self, field: &FieldFilter) -> String {
+        let field = field.to_string();
+        let mut pairs = self.pairs();
+        if !pairs.contains(&("field", field.as_str())) {
+            // Beside the other field filters, before the follow switch.
+            let at = pairs
+                .iter()
+                .position(|(k, _)| *k == "follow")
+                .unwrap_or(pairs.len());
+            pairs.insert(at, ("field", &field));
+        }
+        self.href(pairs)
+    }
+
+    /// The view without the field filter `field`, and no page cursor.
+    fn without_field(&self, field: &FieldFilter) -> String {
+        let field = field.to_string();
+        let mut pairs = self.pairs();
+        pairs.retain(|pair| *pair != ("field", field.as_str()));
+        self.href(pairs)
+    }
+
+    fn pairs(&self) -> Vec<(&str, &str)> {
+        self.filters.iter().map(|(k, v)| (*k, v.as_str())).collect()
+    }
+
+    fn href(&self, pairs: Vec<(&str, &str)>) -> String {
         if pairs.is_empty() {
             return self.action.clone();
         }
@@ -540,41 +704,97 @@ pub struct LogRow {
     pub cut: bool,
     /// A notice about lines hoster lost, not a log line.
     pub marker: bool,
+    /// `tracing`'s `target` field, shown dimmed before the message.
+    pub target: Option<String>,
+    /// What the row opens on; `None` for a record without fields, which does not open.
+    pub detail: Option<RecordDetail>,
 }
 
-/// A run of a message's text, marked where grep matched.
+/// What a record with fields shows when opened, beside the time ([`LogRow::time`]) and the cut
+/// mark ([`LogRow::cut`]) its row has.
+#[derive(Debug)]
+pub struct RecordDetail {
+    pub stream: Stream,
+    /// The container's deployment generation, whether or not the row names it.
+    pub generation: Option<u32>,
+    /// The fields flattened, by key.
+    pub fields: Vec<FieldRow>,
+    /// The fields as stored, when they no longer parse as a JSON object.
+    pub raw: Option<String>,
+    /// Grep matched in the fields: the record is shown open.
+    pub open: bool,
+}
+
+/// One flattened field of an opened record.
+#[derive(Debug)]
+pub struct FieldRow {
+    /// The dotted key, printable.
+    pub key: String,
+    /// The value, printable, its line breaks kept.
+    pub value: String,
+    /// Where grep matched in `value`, as byte ranges.
+    pub marks: Vec<Range<usize>>,
+    /// The view with this key and value as a field filter.
+    pub href: String,
+}
+
+impl FieldRow {
+    /// The value in runs, marked and not.
+    pub fn spans(&self) -> Vec<Span<'_>> {
+        Span::runs(&self.value, &self.marks)
+    }
+}
+
+/// A run of a message's or a value's text, marked where grep matched.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Span<'a> {
     pub text: &'a str,
     pub mark: bool,
 }
 
-impl LogRow {
-    /// The message in runs, marked and not, for the template to escape one by one.
-    pub fn spans(&self) -> Vec<Span<'_>> {
+impl<'a> Span<'a> {
+    /// `text` in runs, marked at `marks` (in order, without overlaps) and not, for the
+    /// template to escape one by one.
+    fn runs(text: &'a str, marks: &[Range<usize>]) -> Vec<Self> {
         let mut spans = Vec::new();
         let mut at = 0;
-        for mark in &self.marks {
+        for mark in marks {
             if mark.start > at {
                 spans.push(Span {
-                    text: &self.message[at..mark.start],
+                    text: &text[at..mark.start],
                     mark: false,
                 });
             }
             spans.push(Span {
-                text: &self.message[mark.clone()],
+                text: &text[mark.clone()],
                 mark: true,
             });
             at = mark.end;
         }
-        if at < self.message.len() || spans.is_empty() {
+        if at < text.len() || spans.is_empty() {
             spans.push(Span {
-                text: &self.message[at..],
+                text: &text[at..],
                 mark: false,
             });
         }
         spans
     }
+}
+
+impl LogRow {
+    /// The message in runs, marked and not, for the template to escape one by one.
+    pub fn spans(&self) -> Vec<Span<'_>> {
+        Span::runs(&self.message, &self.marks)
+    }
+}
+
+/// An active field filter's chip in the toolbar.
+#[derive(Debug)]
+pub struct FieldChip {
+    /// `key=value`, printable.
+    pub label: String,
+    /// The view without it.
+    pub remove: String,
 }
 
 /// How records become rows: the same on a page and in its follow stream.
@@ -591,11 +811,16 @@ struct Rows {
     dated: bool,
     /// What grep marks in the messages.
     text: Option<TextFilter>,
+    /// The page's links, which a field value adds its filter to.
+    links: Links,
 }
 
 impl Rows {
-    /// Rows for `services` (in chip order), with the generations in `seen`.
-    fn new(services: Vec<String>, seen: &[ServiceSeen]) -> Self {
+    /// The field that names a `tracing` event's module.
+    const TARGET: &str = "target";
+
+    /// Rows for `services` (in chip order), with the generations in `seen`, linking `links`.
+    fn new(services: Vec<String>, seen: &[ServiceSeen], links: Links) -> Self {
         let generations = seen
             .iter()
             .map(|s| {
@@ -611,6 +836,7 @@ impl Rows {
             stack_column: false,
             dated: false,
             text: None,
+            links,
         }
     }
 
@@ -647,7 +873,7 @@ impl Rows {
             .generations
             .get(&(record.stack.clone(), record.service.clone()))
             .is_some_and(|g| g.len() > 1);
-        LogRow {
+        let mut row = LogRow {
             shown,
             time,
             stack: self
@@ -665,7 +891,67 @@ impl Rows {
             message,
             cut: record.cut,
             marker: record.marker,
+            target: None,
+            detail: None,
+        };
+        if !record.marker {
+            self.detail(record, &mut row);
         }
+        row
+    }
+
+    /// `text` printable, its line breaks kept: a field value may span lines (a stack trace,
+    /// pretty JSON), which an opened record shows as they are.
+    fn lines(text: &str) -> String {
+        text.split('\n')
+            .map(LiveLine::printable)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The target and what `record` opens on, from its fields, parsed once.
+    fn detail(&self, record: &LogRecord, row: &mut LogRow) {
+        let (flat, raw) = match record.parsed_fields() {
+            None => return,
+            Some(Ok(flat)) if flat.is_empty() => return,
+            Some(Ok(flat)) => (flat, None),
+            Some(Err(raw)) => (Vec::new(), Some(Self::lines(raw))),
+        };
+        row.target = flat
+            .iter()
+            .find(|(key, _)| key == Self::TARGET)
+            .map(|(_, value)| LiveLine::printable(value));
+        let open = self.text.as_ref().is_some_and(|text| {
+            flat.iter()
+                .any(|(key, value)| text.is_match(&format!("{key}={value}")))
+        });
+        let fields = flat
+            .into_iter()
+            .map(|(key, value)| {
+                let href = self.links.with_field(&FieldFilter {
+                    key: key.clone(),
+                    value: value.clone(),
+                });
+                let value = Self::lines(&value);
+                FieldRow {
+                    key: LiveLine::printable(&key),
+                    marks: self
+                        .text
+                        .as_ref()
+                        .map(|text| text.find_all(&value))
+                        .unwrap_or_default(),
+                    value,
+                    href,
+                }
+            })
+            .collect();
+        row.detail = Some(RecordDetail {
+            stream: record.stream,
+            generation: record.generation,
+            fields,
+            raw,
+            open,
+        });
     }
 }
 
@@ -733,6 +1019,8 @@ pub struct LogsView {
     pub regex: bool,
     /// Why the grep pattern does not compile.
     pub invalid: Option<String>,
+    /// The active field filters, all of which a record matches.
+    pub fields: Vec<FieldChip>,
     /// What the level filter hides.
     pub unleveled: Option<Unleveled>,
     /// The scan stopped before the page was full.
@@ -809,10 +1097,12 @@ impl LogsView {
         let (start, since_problem) = params.start(now);
         let (page, page_problem) = params.page();
         let (level, level_problem) = params.level();
+        let (fields, field_problem) = params.fields();
         let end = Timestamp::from(now) + Self::END_SLACK;
         let mut query = LogQuery::new(start..end.max(start), scope.store());
         query.services = params.service().map(str::to_owned).into_iter().collect();
         query.levels = level.levels();
+        query.fields = fields.into_iter().map(Into::into).collect();
         let invalid = match params.grep() {
             Ok(text) => {
                 query.text = text;
@@ -824,7 +1114,10 @@ impl LogsView {
         query.limit = Self::PAGE_SIZE;
         Plan {
             query,
-            problem: since_problem.or(page_problem).or(level_problem),
+            problem: since_problem
+                .or(page_problem)
+                .or(level_problem)
+                .or(field_problem),
             invalid,
         }
     }
@@ -859,7 +1152,7 @@ impl LogsView {
                 .iter()
                 .all(|e| Self::utc(e.record.time).starts_with(&today)),
             text: query.text.clone(),
-            ..Rows::new(services.clone(), &read.seen)
+            ..Rows::new(services.clone(), &read.seen, links.clone())
         };
         let mut chips = vec![Chip {
             label: "all".to_owned(),
@@ -917,6 +1210,14 @@ impl LogsView {
                 all: links.to(&[("level", None)]),
             })
             .filter(|note| note.count != Some(0));
+        let (field_filters, _) = params.fields();
+        let fields = field_filters
+            .iter()
+            .map(|field| FieldChip {
+                label: LiveLine::printable(&format!("{}={}", field.key, field.value)),
+                remove: links.without_field(field),
+            })
+            .collect();
         let empty = rendered.is_empty() && !paged && unreadable.is_none() && invalid.is_none();
         let cleared = (empty && params.filtered()).then(|| {
             let mut active = Vec::new();
@@ -927,9 +1228,19 @@ impl LogsView {
                 let kind = if params.regex() { "regex" } else { "grep" };
                 active.push(format!("{kind} “{q}”"));
             }
+            active.extend(
+                field_filters
+                    .iter()
+                    .map(|field| format!("field {}={}", field.key, field.value)),
+            );
             (
                 active.join(" and "),
-                links.to(&[("level", None), ("q", None), ("regex", None)]),
+                links.to(&[
+                    ("level", None),
+                    ("q", None),
+                    ("regex", None),
+                    ("field", None),
+                ]),
             )
         });
         let starts_at = read
@@ -991,6 +1302,7 @@ impl LogsView {
             q: params.q().unwrap_or_default().to_owned(),
             regex: params.regex(),
             invalid,
+            fields,
             unleveled,
             stopped,
             live: mount.live,
@@ -1131,7 +1443,15 @@ impl LogFollow {
             rows: Rows {
                 stack_column: mount.scope.stack_column(),
                 text: query.text.clone(),
-                ..Rows::new(LogsView::services(&mount.services, &seen), &seen)
+                // Field values link the page, as on the page itself.
+                ..Rows::new(
+                    LogsView::services(&mount.services, &seen),
+                    &seen,
+                    Links {
+                        action: mount.action.clone(),
+                        filters: params.filters(),
+                    },
+                )
             },
             query,
             cursor,
