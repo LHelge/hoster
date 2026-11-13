@@ -725,6 +725,9 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
   border-bottom: 1px solid var(--border);
   font: 12px/1.4 var(--mono);
 }
+/* The source switch (stack scope): a segmented group as wide as its sources. */
+.log-sources { align-self: flex-start; }
+.log-svc a { color: inherit; }
 .log-choices, .log-options, .log-since { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .log-options { gap: 8px 16px; }
 .log-label { color: var(--muted); }

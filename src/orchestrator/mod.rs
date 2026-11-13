@@ -96,9 +96,9 @@ use crate::stack::{
     PinnedImage, SecretRef, SecretUse, Service, Stack, StackError,
 };
 use crate::store::{
-    Attempt, Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState,
-    DigestSet, ImageCheck, NewDeployment, NewEvent, Provenance, StackRevision, Store, StoreError,
-    UpdateKind, WebhookRejection,
+    Attempt, Deployment, DeploymentEvent, DeploymentId, DeploymentLogPage, DeploymentLogQuery,
+    DeploymentSource, DeploymentState, DigestSet, ImageCheck, NewDeployment, NewEvent, Provenance,
+    StackRevision, Store, StoreError, UpdateKind, WebhookRejection,
 };
 
 pub use updates::{StackUpdates, UpdateChoice, UpdateOffer};
@@ -2062,6 +2062,12 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             return Err(OrchestratorError::UnknownStack(stack.to_owned()));
         }
         Ok(self.store.deployments(stack, limit).await?)
+    }
+
+    /// One page of a stack's deploy log: its deployment events over a time range, across its
+    /// deployments (the stack logs tab's `deploy` source).
+    pub async fn deployment_log(&self, query: &DeploymentLogQuery) -> Result<DeploymentLogPage> {
+        Ok(self.store.deployment_log(query).await?)
     }
 
     /// The newest deployment of `stack` that went live, the one redeploying its last good

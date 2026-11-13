@@ -36,6 +36,12 @@
 //! switch's links keep it), and paging back into history stops it; "newer" and "newest" turn it
 //! back on.
 //!
+//! The stack scope has a source switch ([`LogSource`], `source`): the containers' records
+//! from the log store (the default, everything here), or another source that pages its own
+//! entries in the shape of the rows ([`SourceEntry`], [`LogsView::listing`], [`SourceFollow`]),
+//! taking only the shared options (the range, grep, paging, following). Switching keeps the
+//! options the new source takes, and the page cursors never.
+//!
 //! hoster's own records that name the stack are listed under the service `hoster`, with a chip
 //! of its own. A JSON line's level is shown; a text line has none (ADR-0067 §3), and a
 //! `stderr` line is set apart as on the live log. The marker record for dropped lines (§7) is
@@ -64,8 +70,8 @@ use super::containers::{LogEntry as LiveLine, LogSince, SinceLink};
 use super::system::LogStoreState;
 use super::ui::Count;
 use crate::store::{
-    self, Level, LogEntry, LogHead, LogPage, LogQuery, LogRecord, LogStore, PageAt, RecordKey,
-    ServiceSeen, Stream, TextFilter, Timestamp,
+    self, Level, LogEntry, LogHead, LogPage, LogQuery, LogRecord, LogStore, Page, PageAt,
+    RecordKey, ServiceSeen, Stream, TextFilter, Timestamp,
 };
 
 /// Whose records the view shows.
@@ -85,6 +91,14 @@ pub enum LogScope {
 }
 
 impl LogScope {
+    /// The sources its switch offers; none (no switch) across stacks.
+    pub fn sources(&self) -> &'static [LogSource] {
+        match self {
+            LogScope::Stack(_) => &LogSource::SWITCH,
+            LogScope::All { .. } => &[],
+        }
+    }
+
     /// The store's scope for this one.
     fn store(&self) -> store::LogScope {
         match self {
@@ -98,6 +112,76 @@ impl LogScope {
     /// Whether rows name their stack: only across stacks.
     fn stack_column(&self) -> bool {
         matches!(self, LogScope::All { stack: None })
+    }
+}
+
+/// Where the records of a view come from (`source`): a switch of the stack scope only. Each
+/// source takes its own of the shared options ([`LogSource::takes`]); switching keeps those the
+/// new one takes and drops the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogSource {
+    /// The log store's records of the containers, and hoster's own.
+    #[default]
+    Containers,
+    /// The stack's deployment events, read from `hoster.db` rather than the log store, so not
+    /// bound by its retention (`web/stacks/logs/deploy.rs`).
+    Deploy,
+}
+
+impl LogSource {
+    /// The switch, in order. The access log (task bq6) slots in between.
+    pub const SWITCH: [LogSource; 2] = [LogSource::Containers, LogSource::Deploy];
+
+    /// The `source` parameter, and what its switch says.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogSource::Containers => "containers",
+            LogSource::Deploy => "deploy",
+        }
+    }
+
+    /// Whether it takes the GET parameter `name`.
+    fn takes(self, name: &str) -> bool {
+        match self {
+            LogSource::Containers => true,
+            LogSource::Deploy => !matches!(name, "service" | "level" | "field"),
+        }
+    }
+
+    /// The grep field's accessible name: what grep matches.
+    pub fn grep_label(self) -> &'static str {
+        match self {
+            LogSource::Containers => "Grep: text in the message or fields",
+            LogSource::Deploy => "Grep: text in the message",
+        }
+    }
+
+    /// When the list grows while following.
+    pub fn follow_note(self) -> &'static str {
+        match self {
+            LogSource::Containers => {
+                "new records are added as hoster stores them, about once a second"
+            }
+            LogSource::Deploy => "new deployment events are added as the deployments log them",
+        }
+    }
+}
+
+impl fmt::Display for LogSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for LogSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let lower = s.to_ascii_lowercase();
+        Self::SWITCH
+            .into_iter()
+            .find(|source| source.as_str() == lower)
+            .ok_or_else(|| format!("`{s}` is not a log source; showing the containers' records."))
     }
 }
 
@@ -229,6 +313,49 @@ impl Plan {
             && self.query.text.is_none()
             && self.query.fields.is_empty()
             && self.invalid.is_none()
+    }
+}
+
+/// What every source reads for a page: the range, grep and where the page starts, from the
+/// shared options; the log store's [`Plan`] adds its own to them, and a source other than the
+/// log store reads them as they are ([`LogsView::listing`]).
+#[derive(Debug)]
+pub struct SourcePlan {
+    /// Entries stamped at or after the start and before the end.
+    pub range: std::ops::Range<Timestamp>,
+    pub text: Option<TextFilter>,
+    pub page: PageAt,
+    /// At most this many entries: [`LogsView::PAGE_SIZE`].
+    pub limit: u32,
+    /// An option that did not parse and was replaced by its default.
+    problem: Option<String>,
+    /// Why the grep pattern does not compile; nothing is read then.
+    invalid: Option<String>,
+}
+
+impl SourcePlan {
+    /// What `params` ask for at `now`.
+    pub fn new(params: &LogParams, now: SystemTime) -> Self {
+        let (start, since_problem) = params.start(now);
+        let (page, page_problem) = params.page();
+        let end = Timestamp::from(now) + LogsView::END_SLACK;
+        let (text, invalid) = match params.grep() {
+            Ok(text) => (text, None),
+            Err(message) => (None, Some(message)),
+        };
+        Self {
+            range: start..end.max(start),
+            text,
+            page,
+            limit: LogsView::PAGE_SIZE,
+            problem: since_problem.or(page_problem),
+            invalid,
+        }
+    }
+
+    /// Whether the page reads its source: not when the grep pattern does not compile.
+    pub fn reads(&self) -> bool {
+        self.invalid.is_none()
     }
 }
 
@@ -393,6 +520,8 @@ impl From<FieldFilter> for (String, String) {
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(from = "Vec<(String, String)>")]
 pub struct LogParams {
+    /// Where the records come from: a [`LogSource`]; the containers when absent.
+    source: Option<String>,
     /// Only this service; every service when absent or empty.
     service: Option<String>,
     /// Where the range starts: a preset, a duration ago (`2h`) or a UTC time.
@@ -420,6 +549,7 @@ impl From<Vec<(String, String)>> for LogParams {
         let mut params = Self::default();
         for (key, value) in pairs {
             let slot = match key.as_str() {
+                "source" => &mut params.source,
                 "service" => &mut params.service,
                 "since" => &mut params.since,
                 "before" => &mut params.before,
@@ -458,6 +588,18 @@ impl LogParams {
     /// The *since* in effect, as typed.
     fn since(&self) -> &str {
         Self::text(&self.since).unwrap_or(Self::DEFAULT_SINCE)
+    }
+
+    /// The source in effect in `scope`; the containers when `source` is absent, not one of the
+    /// scope's (no switch) or does not parse, with why for the last.
+    pub fn source(&self, scope: &LogScope) -> (LogSource, Option<String>) {
+        let sources = scope.sources();
+        match Self::text(&self.source).map(str::parse::<LogSource>) {
+            None => (LogSource::default(), None),
+            Some(Ok(source)) if sources.contains(&source) => (source, None),
+            Some(Ok(_)) => (LogSource::default(), None),
+            Some(Err(message)) => (LogSource::default(), Some(message)),
+        }
     }
 
     /// The start of the range at `now`; the default's when `since` does not parse, with why.
@@ -551,10 +693,15 @@ impl LogParams {
         (fields, problem)
     }
 
-    /// The options every link keeps: all but the page and stream cursors, and only those given.
-    fn filters(&self) -> Vec<(&'static str, String)> {
+    /// The options every link of `source` keeps: all but the page and stream cursors, only
+    /// those given and those the source takes.
+    fn filters(&self, source: LogSource) -> Vec<(&'static str, String)> {
         let level = self.level().0;
         let mut filters: Vec<(&'static str, String)> = [
+            (
+                "source",
+                (source != LogSource::default()).then(|| source.as_str()),
+            ),
             ("service", self.service()),
             ("since", Self::text(&self.since)),
             ("level", (level != LevelFilter::All).then(|| level.as_str())),
@@ -573,6 +720,7 @@ impl LogParams {
         if !self.follows() {
             filters.push(("follow", "off".to_owned()));
         }
+        filters.retain(|(key, _)| source.takes(key));
         filters
     }
 
@@ -692,6 +840,8 @@ pub struct LogRow {
     /// Across stacks only; `—` for hoster's own records without one.
     pub stack: Option<String>,
     pub service: String,
+    /// Where the service column links: a deployment's page, for the deploy source.
+    pub href: Option<String>,
     /// The deployment generation, when the service has more than one in the range.
     pub generation: Option<u32>,
     pub class: &'static str,
@@ -704,7 +854,8 @@ pub struct LogRow {
     pub cut: bool,
     /// A notice about lines hoster lost, not a log line.
     pub marker: bool,
-    /// `tracing`'s `target` field, shown dimmed before the message.
+    /// Shown dimmed before the message: `tracing`'s `target` field, or a deployment event's
+    /// transition or step.
     pub target: Option<String>,
     /// What the row opens on; `None` for a record without fields, which does not open.
     pub detail: Option<RecordDetail>,
@@ -880,6 +1031,7 @@ impl Rows {
                 .stack_column
                 .then(|| record.stack.clone().unwrap_or_else(|| "—".to_owned())),
             service: record.service.clone(),
+            href: None,
             generation: record.generation.filter(|_| several),
             class: self.class(&record.service),
             stderr: record.stream == Stream::Stderr,
@@ -898,6 +1050,38 @@ impl Rows {
             self.detail(record, &mut row);
         }
         row
+    }
+
+    /// The row of `entry`, from a source other than the log store.
+    fn source_row(&self, entry: &SourceEntry) -> LogRow {
+        let message = LiveLine::printable(&entry.message);
+        let time = LogsView::utc(entry.key.time);
+        let shown = if self.dated {
+            time[5..23].replacen('T', " ", 1)
+        } else {
+            time[11..23].to_owned()
+        };
+        LogRow {
+            shown,
+            time,
+            stack: self.stack_column.then(|| "—".to_owned()),
+            service: LiveLine::printable(&entry.label),
+            href: entry.href.clone(),
+            generation: None,
+            class: LogsView::PALETTE[entry.tone % LogsView::PALETTE.len()],
+            stderr: false,
+            level: entry.level,
+            marks: self
+                .text
+                .as_ref()
+                .map(|text| text.find_all(&message))
+                .unwrap_or_default(),
+            message,
+            cut: false,
+            marker: false,
+            target: entry.step.as_deref().map(LiveLine::printable),
+            detail: None,
+        }
     }
 
     /// `text` printable, its line breaks kept: a field value may span lines (a stack trace,
@@ -955,6 +1139,117 @@ impl Rows {
     }
 }
 
+/// How a page pages: its "older", "newer" and "newest" links, where a capped scan stopped, and
+/// whether it is the newest end of the range, which follows.
+#[derive(Debug)]
+struct Paging {
+    older: Option<String>,
+    newer: Option<String>,
+    /// Back to the newest page, from an older or newer one.
+    newest: Option<String>,
+    stopped: Option<Stopped>,
+    at_newest: bool,
+}
+
+impl Paging {
+    /// The paging of `page`, read at `at`, its entries in order by `key`.
+    fn new<T>(links: &Links, at: PageAt, page: &Page<T>, key: impl Fn(&T) -> RecordKey) -> Self {
+        let first = page.entries.first().map(|e| key(e).to_string());
+        let last = page.entries.last().map(|e| key(e).to_string());
+        let reading_older = !matches!(at, PageAt::After(_));
+        let stopped = page.scan_stopped.map(|key| {
+            let cursor = key.to_string();
+            Stopped {
+                at: humantime::format_rfc3339_seconds(key.time.into()).to_string(),
+                href: links.to(&[(
+                    if reading_older { "before" } else { "after" },
+                    Some(&cursor),
+                )]),
+                older: reading_older,
+            }
+        });
+        // Where the scan stopped, "search older" (or newer) replaces paging from the last row.
+        let older = first
+            .filter(|_| page.older && !(stopped.is_some() && reading_older))
+            .map(|key| links.to(&[("before", Some(&key))]));
+        // Paging towards the newest page turns following back on.
+        let newer = last
+            .filter(|_| page.newer && !(stopped.is_some() && !reading_older))
+            .map(|key| links.to(&[("after", Some(&key)), ("follow", None)]));
+        let at_newest = match at {
+            PageAt::Newest => true,
+            PageAt::After(_) => !page.newer && stopped.is_none(),
+            PageAt::Before(_) => false,
+        };
+        Self {
+            older,
+            newer,
+            newest: (at != PageAt::Newest).then(|| links.to(&[("follow", None)])),
+            stopped,
+            at_newest,
+        }
+    }
+
+    /// The follow switch, where the mount has a `stream` and the page is the newest end of a
+    /// `readable` range, its stream starting after `cursor`.
+    fn follow(
+        &mut self,
+        stream: Option<&String>,
+        links: &Links,
+        params: &LogParams,
+        readable: bool,
+        cursor: impl FnOnce() -> String,
+    ) -> Option<Follow> {
+        let follow = stream.filter(|_| self.at_newest && readable).map(|stream| {
+            let cursor = cursor();
+            let stream = Links {
+                action: stream.clone(),
+                filters: links.filters.clone(),
+            };
+            Follow {
+                stream: params
+                    .follows()
+                    .then(|| stream.to(&[("from", Some(&cursor))])),
+                on: links.to(&[("follow", None)]),
+                off: links.to(&[("follow", Some("off"))]),
+            }
+        });
+        // While following, the list drops its oldest rows, which "older" would skip: the view
+        // switched off (the newest page again) has it.
+        if follow.as_ref().is_some_and(Follow::following) {
+            self.older = None;
+        }
+        follow
+    }
+}
+
+/// An entry of a source other than the log store (the deploy source), in the shape of the
+/// view's rows ([`LogRow`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceEntry {
+    /// Its place in page order, and the follow stream's cursor.
+    pub key: RecordKey,
+    /// The service column: what the entry belongs to.
+    pub label: String,
+    /// Where the label links.
+    pub href: Option<String>,
+    /// Picks the label's colour from the service palette.
+    pub tone: usize,
+    pub level: Option<Level>,
+    /// The step the entry is about, shown dimmed before the message.
+    pub step: Option<String>,
+    pub message: String,
+}
+
+/// What a source other than the log store shows for an empty range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmptyNote {
+    pub text: String,
+    /// The link after the text: what it says, and where it goes.
+    pub link: String,
+    pub href: String,
+}
+
 /// The scan stopped at its cap before the page was full.
 #[derive(Debug)]
 pub struct Stopped {
@@ -1005,6 +1300,10 @@ impl Unleveled {
 /// What `logs_view.html` renders.
 #[derive(Debug)]
 pub struct LogsView {
+    /// Where the records come from.
+    pub source: LogSource,
+    /// The source switch, current one marked; empty without one.
+    pub sources: Vec<Chip>,
     pub action: String,
     /// The options the form keeps as hidden fields (all but those it edits).
     pub keep: Vec<(&'static str, String)>,
@@ -1042,6 +1341,8 @@ pub struct LogsView {
     pub empty: bool,
     /// For an empty page under level or grep: what they are, and the view without them.
     pub cleared: Option<(String, String)>,
+    /// What an empty range says, for a source other than the log store.
+    pub empty_note: Option<EmptyNote>,
     /// The follow switch, at the newest end of the range of a view that follows.
     pub follow: Option<Follow>,
 }
@@ -1094,28 +1395,28 @@ impl LogsView {
 
     /// The store query `params` ask for at `now`, and what was wrong with them.
     fn plan(scope: &LogScope, params: &LogParams, now: SystemTime) -> Plan {
-        let (start, since_problem) = params.start(now);
-        let (page, page_problem) = params.page();
+        let SourcePlan {
+            range,
+            text,
+            page,
+            limit,
+            problem,
+            invalid,
+        } = SourcePlan::new(params, now);
+        let (_, source_problem) = params.source(scope);
         let (level, level_problem) = params.level();
         let (fields, field_problem) = params.fields();
-        let end = Timestamp::from(now) + Self::END_SLACK;
-        let mut query = LogQuery::new(start..end.max(start), scope.store());
+        let mut query = LogQuery::new(range, scope.store());
         query.services = params.service().map(str::to_owned).into_iter().collect();
         query.levels = level.levels();
         query.fields = fields.into_iter().map(Into::into).collect();
-        let invalid = match params.grep() {
-            Ok(text) => {
-                query.text = text;
-                None
-            }
-            Err(message) => Some(message),
-        };
+        query.text = text;
         query.page = page;
-        query.limit = Self::PAGE_SIZE;
+        query.limit = limit;
         Plan {
             query,
-            problem: since_problem
-                .or(page_problem)
+            problem: source_problem
+                .or(problem)
                 .or(level_problem)
                 .or(field_problem),
             invalid,
@@ -1136,7 +1437,7 @@ impl LogsView {
         } = plan;
         let links = Links {
             action: mount.action.clone(),
-            filters: params.filters(),
+            filters: params.filters(LogSource::Containers),
         };
         let (read, unreadable) = match read {
             Ok(read) => (read, None),
@@ -1171,28 +1472,7 @@ impl LogsView {
         let rendered: Vec<LogRow> = read.page.entries.iter().map(|e| rows.row(e)).collect();
 
         let page = &read.page;
-        let first = page.entries.first().map(|e| e.key().to_string());
-        let last = page.entries.last().map(|e| e.key().to_string());
-        let reading_older = !matches!(query.page, PageAt::After(_));
-        let stopped = page.scan_stopped.map(|key| {
-            let cursor = key.to_string();
-            Stopped {
-                at: humantime::format_rfc3339_seconds(key.time.into()).to_string(),
-                href: links.to(&[(
-                    if reading_older { "before" } else { "after" },
-                    Some(&cursor),
-                )]),
-                older: reading_older,
-            }
-        });
-        // Where the scan stopped, "search older" (or newer) replaces paging from the last row.
-        let older = first
-            .filter(|_| page.older && !(stopped.is_some() && reading_older))
-            .map(|key| links.to(&[("before", Some(&key))]));
-        // Paging towards the newest page turns following back on.
-        let newer = last
-            .filter(|_| page.newer && !(stopped.is_some() && !reading_older))
-            .map(|key| links.to(&[("after", Some(&key)), ("follow", None)]));
+        let mut paging = Paging::new(&links, query.page, page, LogEntry::key);
         let paged = query.page != PageAt::Newest;
         let (level, _) = params.level();
         let levels = LevelFilter::CHIPS
@@ -1247,47 +1527,29 @@ impl LogsView {
             .oldest
             .filter(|oldest| *oldest > query.range.start)
             .map(|oldest| humantime::format_rfc3339_seconds(oldest.into()).to_string());
-        let since = LogParams::text(&params.since)
-            .unwrap_or_default()
-            .to_owned();
-        let presets = LogParams::SINCE_PRESETS
-            .into_iter()
-            .map(|label| SinceLink {
-                label,
-                href: links.to(&[("since", Some(label))]),
-                current: params.since() == label,
-            })
-            .collect();
-        // The newest end of the range follows new records, where the mount has a stream.
-        let at_newest = match query.page {
-            PageAt::Newest => true,
-            PageAt::After(_) => !page.newer && stopped.is_none(),
-            PageAt::Before(_) => false,
-        };
-        let follow = mount
-            .stream
-            .as_ref()
-            .filter(|_| at_newest && unreadable.is_none() && invalid.is_none())
-            .map(|stream| {
+        let (since, presets) = Self::since(params, &links);
+        let follow = paging.follow(
+            mount.stream.as_ref(),
+            &links,
+            params,
+            unreadable.is_none() && invalid.is_none(),
+            || {
                 // Past every record on the page, and every one committed before it was read.
                 let newest = page.entries.iter().map(|e| e.id).max().unwrap_or(0);
-                let cursor = newest.max(read.head).to_string();
-                let stream = Links {
-                    action: stream.clone(),
-                    filters: links.filters.clone(),
-                };
-                Follow {
-                    stream: params
-                        .follows()
-                        .then(|| stream.to(&[("from", Some(&cursor))])),
-                    on: links.to(&[("follow", None)]),
-                    off: links.to(&[("follow", Some("off"))]),
-                }
-            });
-        // While following, the list drops its oldest rows, which "older" would skip: the view
-        // switched off (the newest page again) has it.
-        let older = older.filter(|_| follow.as_ref().is_none_or(|f| !f.following()));
+                newest.max(read.head).to_string()
+            },
+        );
+        let Paging {
+            older,
+            newer,
+            newest,
+            stopped,
+            ..
+        } = paging;
         Self {
+            source: LogSource::Containers,
+            sources: Self::sources(&mount.scope, params, &mount.action, LogSource::Containers),
+            empty_note: None,
             keep: links
                 .filters
                 .iter()
@@ -1313,9 +1575,160 @@ impl LogsView {
             rows: rendered,
             older,
             newer,
-            newest: paged.then(|| links.to(&[("follow", None)])),
+            newest,
             starts_at,
             problem,
+            unreadable,
+        }
+    }
+
+    /// The source switch of `scope` at `action`, `current` marked: each source's view with the
+    /// options of `current` it takes as well. Empty where the scope has no switch.
+    fn sources(
+        scope: &LogScope,
+        params: &LogParams,
+        action: &str,
+        current: LogSource,
+    ) -> Vec<Chip> {
+        scope
+            .sources()
+            .iter()
+            .map(|&source| {
+                let mut filters = params.filters(current);
+                filters.retain(|(key, _)| *key != "source" && source.takes(key));
+                if source != LogSource::default() {
+                    filters.insert(0, ("source", source.as_str().to_owned()));
+                }
+                Chip {
+                    label: source.as_str().to_owned(),
+                    href: Links {
+                        action: action.to_owned(),
+                        filters,
+                    }
+                    .to(&[]),
+                    current: source == current,
+                    class: Self::ALL_CLASS,
+                }
+            })
+            .collect()
+    }
+
+    /// The *since* field as typed and its presets, linking `links`.
+    fn since(params: &LogParams, links: &Links) -> (String, Vec<SinceLink>) {
+        let since = LogParams::text(&params.since)
+            .unwrap_or_default()
+            .to_owned();
+        let presets = LogParams::SINCE_PRESETS
+            .into_iter()
+            .map(|label| SinceLink {
+                label,
+                href: links.to(&[("since", Some(label))]),
+                current: params.since() == label,
+            })
+            .collect();
+        (since, presets)
+    }
+
+    /// The view of `mount` for `source`, a source other than the log store, with the options
+    /// of `params` planned at `now` (`plan`) and the page that source `read` for them; `empty`
+    /// is what an empty range says. Only the shared options apply: the range, grep, paging and
+    /// following, which starts after the newest entry on the page.
+    pub fn listing(
+        mount: LogMount,
+        params: &LogParams,
+        now: SystemTime,
+        source: LogSource,
+        plan: SourcePlan,
+        read: Result<Page<SourceEntry>, String>,
+        empty: EmptyNote,
+    ) -> Self {
+        let links = Links {
+            action: mount.action.clone(),
+            filters: params.filters(source),
+        };
+        let (page, unreadable) = match read {
+            Ok(page) => (page, None),
+            Err(error) => (Page::default(), Some(error)),
+        };
+        let today = Self::utc(now.into())[..10].to_owned();
+        let rows = Rows {
+            stack_column: mount.scope.stack_column(),
+            dated: !page
+                .entries
+                .iter()
+                .all(|e| Self::utc(e.key.time).starts_with(&today)),
+            text: plan.text.clone(),
+            ..Rows::new(Vec::new(), &[], links.clone())
+        };
+        let rendered: Vec<LogRow> = page.entries.iter().map(|e| rows.source_row(e)).collect();
+        let mut paging = Paging::new(&links, plan.page, &page, |e| e.key);
+        let invalid = plan.invalid;
+        let follow = paging.follow(
+            mount.stream.as_ref(),
+            &links,
+            params,
+            unreadable.is_none() && invalid.is_none(),
+            || {
+                // Past every entry on the page: from the start of the range when it has none.
+                page.entries
+                    .last()
+                    .map(|e| e.key)
+                    .unwrap_or(RecordKey {
+                        time: plan.range.start,
+                        id: 0,
+                    })
+                    .to_string()
+            },
+        );
+        let paged = plan.page != PageAt::Newest;
+        let empty_page = rendered.is_empty() && !paged && unreadable.is_none() && invalid.is_none();
+        let cleared = params.q().filter(|_| empty_page).map(|q| {
+            let kind = if params.regex() { "regex" } else { "grep" };
+            (
+                format!("{kind} “{q}”"),
+                links.to(&[("q", None), ("regex", None)]),
+            )
+        });
+        let (since, presets) = Self::since(params, &links);
+        let Paging {
+            older,
+            newer,
+            newest,
+            stopped,
+            ..
+        } = paging;
+        Self {
+            source,
+            sources: Self::sources(&mount.scope, params, &mount.action, source),
+            keep: links
+                .filters
+                .iter()
+                .filter(|(key, _)| !Self::EDITED.contains(key))
+                .cloned()
+                .collect(),
+            action: mount.action,
+            since,
+            presets,
+            chips: Vec::new(),
+            levels: Vec::new(),
+            q: params.q().unwrap_or_default().to_owned(),
+            regex: params.regex(),
+            invalid,
+            fields: Vec::new(),
+            unleveled: None,
+            stopped,
+            live: mount.live,
+            stack_column: rows.stack_column,
+            empty: empty_page,
+            cleared,
+            empty_note: Some(empty),
+            follow,
+            rows: rendered,
+            older,
+            newer,
+            newest,
+            starts_at: None,
+            problem: plan.problem,
             unreadable,
         }
     }
@@ -1449,7 +1862,7 @@ impl LogFollow {
                     &seen,
                     Links {
                         action: mount.action.clone(),
-                        filters: params.filters(),
+                        filters: params.filters(LogSource::Containers),
                     },
                 )
             },
@@ -1540,7 +1953,147 @@ impl LogFollow {
                     stack_column: follow.rows.stack_column,
                     notice: None,
                 };
-                let event = chunk.event(Some(follow.cursor));
+                let event = chunk.event(Some(follow.cursor.to_string()));
+                return Some((event.into_iter().collect(), Some((follow, ends, more))));
+            }
+        })
+        .flat_map(stream::iter)
+        .map(Ok)
+    }
+}
+
+/// What the follow stream of a source other than the log store reads ([`SourceFollow`]).
+#[async_trait::async_trait]
+pub trait SourceTail: Send + 'static {
+    /// Waits until the source may have entries past what was read; `false` once it never
+    /// will.
+    async fn changed(&mut self) -> bool;
+
+    /// The entries after `cursor` the page's options match, in page order, at most `limit`.
+    async fn after(&mut self, cursor: RecordKey, limit: u32) -> Result<SourceRead, String>;
+}
+
+/// What one read of a [`SourceTail`] found.
+#[derive(Debug, Default)]
+pub struct SourceRead {
+    pub entries: Vec<SourceEntry>,
+    /// Where to read on from at once, when the read stopped at its limit or its scan cap.
+    pub more: Option<RecordKey>,
+}
+
+/// The follow stream of the newest page of a source other than the log store: what its
+/// [`SourceTail`] reads after the page's newest entry, by [`RecordKey`], each time it says the
+/// source changed, as [`LogFollow`] sends the log store's (the same messages, the key as the
+/// event ID). It reads once at the start, for what changed before the stream was opened, and
+/// ends as [`LogFollow`] does.
+pub struct SourceFollow<T> {
+    tail: T,
+    closing: CancellationToken,
+    rows: Rows,
+    cursor: RecordKey,
+}
+
+impl<T: SourceTail> SourceFollow<T> {
+    /// The stream of `mount` for `source` with the options of `params`, read from `tail`,
+    /// after the key `last_event_id` (a reconnect), else the `from` the page gave, else now.
+    pub fn open(
+        reader: &LogReader,
+        mount: &LogMount,
+        params: &LogParams,
+        source: LogSource,
+        last_event_id: Option<&str>,
+        tail: T,
+    ) -> Result<Self, String> {
+        let now = SystemTime::now();
+        let plan = SourcePlan::new(params, now);
+        if let Some(invalid) = plan.invalid {
+            return Err(invalid);
+        }
+        let cursor = last_event_id
+            .and_then(|id| id.trim().parse().ok())
+            .or_else(|| LogParams::text(&params.from).and_then(|key| key.parse().ok()))
+            .unwrap_or(RecordKey {
+                time: Timestamp::from(now),
+                id: 0,
+            });
+        Ok(Self {
+            tail,
+            closing: reader.closing.clone(),
+            rows: Rows {
+                stack_column: mount.scope.stack_column(),
+                text: plan.text,
+                ..Rows::new(
+                    Vec::new(),
+                    &[],
+                    Links {
+                        action: mount.action.clone(),
+                        filters: params.filters(source),
+                    },
+                )
+            },
+            cursor,
+        })
+    }
+
+    /// The response for `opened`, as [`LogFollow::respond`].
+    pub fn respond(
+        opened: Result<Self, String>,
+        ends: impl Future<Output = String> + Send + 'static,
+    ) -> Response {
+        let events = match opened {
+            Ok(follow) => follow.stream(ends).boxed(),
+            Err(error) => stream::iter(LogFollow::closing(&error)).map(Ok).boxed(),
+        };
+        Sse::new(events)
+            .keep_alive(KeepAlive::new().interval(LogFollow::KEEP_ALIVE))
+            .into_response()
+    }
+
+    fn stream(
+        self,
+        ends: impl Future<Output = String> + Send + 'static,
+    ) -> impl futures_util::Stream<Item = Result<Event, Infallible>> + Send + 'static {
+        let ends: Pin<Box<dyn Future<Output = String> + Send>> = Box::pin(ends);
+        // `more`: read without waiting, at the start and after a full read.
+        stream::unfold(Some((self, ends, true)), |state| async move {
+            let (mut follow, mut ends, mut more) = state?;
+            loop {
+                if !more {
+                    let notice = tokio::select! {
+                        changed = follow.tail.changed() => (!changed).then(|| {
+                            "hoster stopped reporting changes: reload the page to follow again."
+                                .to_owned()
+                        }),
+                        notice = &mut ends => Some(notice),
+                        () = follow.closing.cancelled() => {
+                            Some("hoster is shutting down: reload the page once it is back.".to_owned())
+                        }
+                    };
+                    if let Some(notice) = notice {
+                        return Some((LogFollow::closing(&notice), None));
+                    }
+                }
+                let read = match follow.tail.after(follow.cursor, LogFollow::CHUNK).await {
+                    Ok(read) => read,
+                    Err(notice) => return Some((LogFollow::closing(&notice), None)),
+                };
+                let entries = read.entries;
+                if let Some(last) = entries.last() {
+                    follow.cursor = follow.cursor.max(last.key);
+                }
+                if let Some(on) = read.more {
+                    follow.cursor = follow.cursor.max(on);
+                }
+                more = read.more.is_some();
+                if entries.is_empty() {
+                    continue;
+                }
+                let chunk = LogRecords {
+                    rows: entries.iter().map(|e| follow.rows.source_row(e)).collect(),
+                    stack_column: follow.rows.stack_column,
+                    notice: None,
+                };
+                let event = chunk.event(Some(follow.cursor.to_string()));
                 return Some((event.into_iter().collect(), Some((follow, ends, more))));
             }
         })
@@ -1582,7 +2135,7 @@ impl LogRecords {
     }
 
     /// The message as an unnamed SSE event with `id`, or `None` when it cannot be rendered.
-    fn event(&self, id: Option<i64>) -> Option<Event> {
+    fn event(&self, id: Option<String>) -> Option<Event> {
         let html = match self.render() {
             Ok(html) => html,
             Err(err) => {
@@ -1592,7 +2145,7 @@ impl LogRecords {
         };
         let event = Event::default().data(html);
         Some(match id {
-            Some(id) => event.id(id.to_string()),
+            Some(id) => event.id(id),
             None => event,
         })
     }

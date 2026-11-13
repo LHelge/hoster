@@ -17,6 +17,13 @@
 //! before the recorder has committed it, and it is what is left when the store cannot be read
 //! (ADR-0067 §10). An unknown stack is a 404, even when the store still holds records under
 //! its name.
+//!
+//! A source switch above the toolbar picks where the records come from (`source`,
+//! [`LogSource`]): the containers (the default, everything above) or the stack's deployment
+//! events ([`deploy`]), which take the range, grep, paging and following but no service, level
+//! or field filters, and link no live logs.
+
+mod deploy;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,8 +42,12 @@ use crate::orchestrator::{StackStatus, UiEvent};
 use crate::store::EventKind;
 use crate::web::auth::{Auth, Session};
 use crate::web::containers::Containers;
-use crate::web::logs::{LiveLink, LogFollow, LogMount, LogParams, LogReader, LogScope, LogsView};
+use crate::web::logs::{
+    LiveLink, LogFollow, LogMount, LogParams, LogReader, LogScope, LogSource, LogsView,
+    SourceFollow,
+};
 use crate::web::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
+use deploy::DeployLog;
 
 impl Stacks {
     /// `GET /stacks/{name}/logs[?service=…&since=…&before=…|after=…]`: the logs tab; an
@@ -54,6 +65,24 @@ impl Stacks {
             Ok(status) => status,
             Err(outcome) => return outcome.page(layout),
         };
+        if let (LogSource::Deploy, _) = params.source(&LogScope::Stack(name.clone())) {
+            let mount = Self::log_mount(&status, Vec::new());
+            let view = DeployLog::new(stacks.clone(), name)
+                .view(mount, &params)
+                .await;
+            if let Some(message) = view.problem.clone().or(view.unreadable.clone()) {
+                layout = layout.with_flash(Flash {
+                    kind: FlashKind::Error,
+                    message,
+                });
+            }
+            return Page(StackLogsPage {
+                layout,
+                header: stacks.header(&status, Tab::Logs).await,
+                view,
+            })
+            .into_response();
+        }
         let (live, listing) = match containers.of_stack(&name).await {
             Ok(list) => (
                 StackContainers::from(list)
@@ -105,13 +134,10 @@ impl Stacks {
             Err(outcome) => return outcome.into_response(),
         };
         let last = headers.get("last-event-id").and_then(|id| id.to_str().ok());
-        let opened = LogFollow::open(
-            &reader,
-            &Self::log_mount(&status, Vec::new()),
-            &params,
-            last,
-        )
-        .await;
+        let mount = Self::log_mount(&status, Vec::new());
+        let (source, _) = params.source(&mount.scope);
+        let tail = DeployLog::new(stacks.clone(), status.name.clone());
+        let deploy_events = stacks.subscribe();
         let ends = async move {
             tokio::select! {
                 ended = auth.session_ended(&session, Self::SESSION_CHECK) => match ended {
@@ -124,7 +150,17 @@ impl Stacks {
                 () = stacks.removal(events, name) => "The stack was removed.".to_owned(),
             }
         };
-        LogFollow::respond(opened, ends)
+        match source {
+            LogSource::Containers => {
+                let opened = LogFollow::open(&reader, &mount, &params, last).await;
+                LogFollow::respond(opened, ends)
+            }
+            LogSource::Deploy => {
+                let tail = tail.tail(&params, deploy_events);
+                let opened = SourceFollow::open(&reader, &mount, &params, source, last, tail);
+                SourceFollow::respond(opened, ends)
+            }
+        }
     }
 
     /// How often a follow stream checks that its session is still signed in.

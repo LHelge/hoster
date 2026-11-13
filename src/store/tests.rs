@@ -2337,3 +2337,136 @@ async fn deploy_events_are_written_with_their_transition_and_commit_or_not_at_al
     let page = store.event_page(&EventQuery::default()).await.unwrap();
     assert_eq!(page.events, [committed, recorded]);
 }
+
+#[tokio::test]
+async fn the_deploy_log_lists_a_stacks_events_in_time_order_across_deployments() {
+    let (_dir, store) = open().await;
+    store.add_revision("blog", "x").await.unwrap();
+    store.add_revision("shop", "x").await.unwrap();
+    let now = Timestamp::now();
+    let mins = |m: u64| now - Duration::from_secs(m * 60);
+    // A deployment of `stack` received `created` minutes ago, its later events `step`
+    // minutes apart, finished with the last unless `running`.
+    let seed =
+        async |stack: &str, created: u64, step: u64, to: &[DeploymentState], running: bool| {
+            let d = deployment(&store, stack).await;
+            for state in to {
+                store.transition(d.id, *state, Some("why")).await.unwrap();
+            }
+            let ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM deployment_events WHERE deployment_id = ? ORDER BY id",
+            )
+            .bind(d.id)
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+            for (n, id) in ids.iter().enumerate() {
+                sqlx::query("UPDATE deployment_events SET at = ? WHERE id = ?")
+                    .bind(mins(created) + Duration::from_secs(n as u64 * step * 60))
+                    .bind(id)
+                    .execute(&store.pool)
+                    .await
+                    .unwrap();
+            }
+            let last = mins(created) + Duration::from_secs((ids.len() as u64 - 1) * step * 60);
+            sqlx::query("UPDATE deployments SET created_at = ?, finished_at = ? WHERE id = ?")
+                .bind(mins(created))
+                .bind((!running).then_some(last))
+                .bind(d.id)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            (d.id, ids)
+        };
+    use DeploymentState::{Failed, Live, Pulling, Validating};
+    // Ten days ago: older than the log store keeps.
+    let (old, old_events) = seed("blog", 14_400, 1, &[Validating, Failed], false).await;
+    // Started before the range below, still running into it.
+    let (long, long_events) = seed("blog", 90, 40, &[Validating, Pulling], true).await;
+    let (new, new_events) = seed("blog", 30, 5, &[Validating, Live], false).await;
+    seed("shop", 20, 1, &[Validating, Live], false).await;
+
+    let query = |since: u64, page: PageAt, limit: u32| DeploymentLogQuery {
+        stack: "blog".into(),
+        range: mins(since)..now + Duration::from_secs(1),
+        text: None,
+        page,
+        limit,
+    };
+    let keys = |page: &DeploymentLogPage| -> Vec<(DeploymentId, i64)> {
+        page.entries.iter().map(|e| (e.deployment, e.id)).collect()
+    };
+    let all = store
+        .deployment_log(&query(20_000, PageAt::Newest, 100))
+        .await
+        .unwrap();
+    // In time order: `long`'s events are 40 minutes apart, so they bracket `new`'s.
+    assert_eq!(
+        keys(&all),
+        [
+            (old, old_events[0]),
+            (old, old_events[1]),
+            (old, old_events[2]),
+            (long, long_events[0]),
+            (long, long_events[1]),
+            (new, new_events[0]),
+            (new, new_events[1]),
+            (new, new_events[2]),
+            (long, long_events[2]),
+        ]
+    );
+    assert!(!all.older && !all.newer);
+    assert_eq!(all.entries[2].event.to, Failed);
+    assert_eq!(all.entries[2].event.message.as_deref(), Some("why"));
+
+    // The last hour: only the events in it, `long`'s included.
+    let hour = store
+        .deployment_log(&query(60, PageAt::Newest, 100))
+        .await
+        .unwrap();
+    assert_eq!(
+        keys(&hour),
+        [
+            (long, long_events[1]),
+            (new, new_events[0]),
+            (new, new_events[1]),
+            (new, new_events[2]),
+            (long, long_events[2]),
+        ]
+    );
+
+    // Paging by key, both ways.
+    let newest = store
+        .deployment_log(&query(20_000, PageAt::Newest, 4))
+        .await
+        .unwrap();
+    assert_eq!(keys(&newest), keys(&all)[5..]);
+    assert!(newest.older && !newest.newer);
+    let older = store
+        .deployment_log(&query(20_000, PageAt::Before(newest.entries[0].key()), 4))
+        .await
+        .unwrap();
+    assert_eq!(keys(&older), keys(&all)[1..5]);
+    assert!(older.older && older.newer);
+    let newer = store
+        .deployment_log(&query(20_000, PageAt::After(older.entries[3].key()), 4))
+        .await
+        .unwrap();
+    assert_eq!(keys(&newer), keys(&all)[5..]);
+    assert!(newer.older && !newer.newer);
+
+    // Grep matches the message.
+    let mut grep = query(20_000, PageAt::Newest, 100);
+    grep.text = Some(TextFilter::substring("WHY"));
+    let matched = store.deployment_log(&grep).await.unwrap();
+    assert_eq!(matched.entries.len(), 6);
+    grep.text = Some(TextFilter::substring("nothing"));
+    assert!(
+        store
+            .deployment_log(&grep)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+}

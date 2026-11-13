@@ -772,7 +772,7 @@ fn the_footer_counts_errors_and_warnings_shown() {
 fn links(query: &str) -> Links {
     Links {
         action: "/stacks/notes/logs".into(),
-        filters: params(query).filters(),
+        filters: params(query).filters(LogSource::Containers),
     }
 }
 
@@ -822,7 +822,7 @@ proptest::proptest! {
         proptest::prop_assert_eq!(odd.to_string().parse::<FieldFilter>(), Ok(odd.clone()));
         // Added to a link and read back from it, beside an option and another filter.
         let href = links("level=error").with_field(&odd);
-        let href = Links { action: "/".into(), filters: params(href.split_once('?').unwrap().1).filters() }
+        let href = Links { action: "/".into(), filters: params(href.split_once('?').unwrap().1).filters(LogSource::Containers) }
             .with_field(&filter);
         let (fields, problem) = params(href.split_once('?').unwrap().1).fields();
         proptest::prop_assert_eq!(problem, None);
@@ -1077,5 +1077,40 @@ fn opened_records_render_escaped_with_no_inline_style() {
     assert!(
         html.contains(r#"<span class="log-msg">line 3</span></li>"#),
         "{html}"
+    );
+}
+
+#[test]
+fn the_source_switch_is_the_stack_scopes_and_each_source_keeps_its_own_options() {
+    let stack = LogScope::Stack("notes".into());
+    let all = LogScope::All { stack: None };
+    assert_eq!(params("").source(&stack), (LogSource::Containers, None));
+    assert_eq!(
+        params("source=Deploy").source(&stack),
+        (LogSource::Deploy, None)
+    );
+    // Across stacks there is no switch.
+    assert_eq!(
+        params("source=deploy").source(&all),
+        (LogSource::Containers, None)
+    );
+    let (source, problem) = params("source=nope").source(&stack);
+    assert_eq!(source, LogSource::Containers);
+    assert!(problem.unwrap().contains("`nope` is not a log source"));
+    assert!(plan("source=nope").problem.unwrap().contains("`nope`"));
+
+    let given = params("source=deploy&service=api&level=warn&field=a%3Db&since=6h&q=x&follow=off");
+    assert_eq!(
+        given.filters(LogSource::Deploy),
+        [
+            ("source", "deploy".to_owned()),
+            ("since", "6h".to_owned()),
+            ("q", "x".to_owned()),
+            ("follow", "off".to_owned()),
+        ]
+    );
+    assert_eq!(
+        given.filters(LogSource::Containers)[0],
+        ("service", "api".to_owned())
     );
 }
