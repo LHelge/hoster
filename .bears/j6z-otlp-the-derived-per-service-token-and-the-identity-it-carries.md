@@ -1,10 +1,10 @@
 ---
 id: j6z
 title: "OTLP: the derived per-service token and the identity it carries"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:36:02.174497613Z"
-updated: "2026-11-13T17:01:54.520485061Z"
+updated: "2026-11-13T17:33:07.599382753Z"
 tags:
   - observability
   - secrets
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - yjp
 parent: xv9
+attempts: 1
 ---
 
 ## Summary

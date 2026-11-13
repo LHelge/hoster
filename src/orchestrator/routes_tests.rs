@@ -226,6 +226,36 @@ async fn a_removed_stack_loses_its_routes_and_the_others_keep_theirs() {
 }
 
 #[tokio::test]
+async fn a_service_token_verifies_while_its_stack_is_committed_and_not_after_removal() {
+    use crate::secrets::{KnownServices as _, SecretKey, TokenError, TokenKey};
+
+    let name = |s: &str| s.parse::<Name>().unwrap();
+    let key = TokenKey::from(&SecretKey::generate());
+    let h = harness().await;
+    h.two_stacks().await;
+    let known = &*h.orchestrator;
+    assert!(known.contains(&name("notes"), &name("storage")));
+    assert!(known.contains(&name("blog"), &name("web")));
+    assert!(!known.contains(&name("blog"), &name("api")));
+    assert!(!known.contains(&name("gone"), &name("web")));
+
+    let token = key.token(&name("notes"), &name("web")).to_string();
+    let verified = token.parse::<crate::secrets::ServiceToken>().unwrap();
+    assert_eq!(verified.verify(&key, known).unwrap().stack, name("notes"));
+
+    h.orchestrator
+        .remove(RemoveStack::keeping_volumes("notes"))
+        .await
+        .unwrap();
+    let presented = token.parse::<crate::secrets::ServiceToken>().unwrap();
+    assert!(matches!(
+        presented.verify(&key, known),
+        Err(TokenError::Unknown { .. })
+    ));
+    assert!(known.contains(&name("blog"), &name("web")));
+}
+
+#[tokio::test]
 async fn a_route_stays_owned_until_the_deployment_dropping_it_commits() {
     let h = harness().await;
     h.two_stacks().await;
