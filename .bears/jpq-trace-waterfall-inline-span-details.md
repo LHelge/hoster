@@ -1,16 +1,17 @@
 ---
 id: jpq
 title: "Trace waterfall: inline span details"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:37:41.668951477Z"
-updated: "2026-11-12T19:37:41.668951477Z"
+updated: "2026-11-13T23:00:22.078447489Z"
 tags:
   - web
   - observability
 depends_on:
   - aum
 parent: qnh
+attempts: 1
 ---
 
 ## Summary

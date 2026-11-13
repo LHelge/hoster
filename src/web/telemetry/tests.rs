@@ -754,7 +754,7 @@ mod traces {
             "{picked}"
         );
         assert!(picked.contains(r#"<svg class="wf-minimap""#), "{picked}");
-        assert_eq!(picked.matches(r#"<div class="wf-row">"#).count(), 3);
+        assert_eq!(picked.matches(r#"<div class="wf-row"#).count(), 3);
         // Rows in depth-first order: the proxy's two, then the app's span in error.
         let server = picked
             .find("wf-text\" title=\"GET /api/documents\"")
@@ -769,9 +769,10 @@ mod traces {
             )),
             "{picked}"
         );
+        // Without a span, the deepest span in error is selected, and its link closes it.
         assert!(
             picked.contains(&format!(
-                r##"<a class="wf-pick" href="/telemetry/traces?sort=slowest&#38;trace={id}&#38;span={span}#span-{span}">"##
+                r##"<a class="wf-pick" href="/telemetry/traces?sort=slowest&#38;trace={id}&#38;span=none#span-{span}" aria-current="true">"##
             )),
             "{picked}"
         );
@@ -780,7 +781,8 @@ mod traces {
             "{picked}"
         );
         assert!(picked.contains(r#"<rect class="wf-ring""#), "{picked}");
-        assert!(!picked.contains("aria-current"), "no span selected");
+        assert_eq!(picked.matches("aria-current").count(), 1, "{picked}");
+        assert_eq!(picked.matches(r#"<section class="sd""#).count(), 1);
         assert!(
             picked
                 .contains(r#"<a class="wf-close" href="/telemetry/traces?sort=slowest">close</a>"#),
@@ -788,8 +790,9 @@ mod traces {
         );
         assert!(!html.contains("style="), "no inline styles");
 
-        // A span selected: its row marked, linking to clear it; picking another trace or
-        // closing drops it, a filter keeps it.
+        // A span selected: its row marked, linking to clear it with `span=none`; picking
+        // another trace or closing drops it, a filter keeps it.
+        let span = SpanId::from([1; 8]);
         let html = page(
             &app,
             &browser.cookie,
@@ -798,7 +801,7 @@ mod traces {
         .await;
         assert!(
             html.contains(&format!(
-                r##"<a class="wf-pick" href="/telemetry/traces?sort=slowest&#38;trace={id}#span-{span}" aria-current="true">"##
+                r##"<a class="wf-pick" href="/telemetry/traces?sort=slowest&#38;trace={id}&#38;span=none#span-{span}" aria-current="true">"##
             )),
             "{html}"
         );
@@ -843,6 +846,23 @@ mod traces {
             "{html}"
         );
 
+        // A trace without errors opens on its root.
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/telemetry/traces?trace={}", trace(2)),
+        )
+        .await;
+        let root = SpanId::from([2; 8]);
+        assert!(
+            span_row(&html, root).contains(r#"<div class="wf-row wf-current">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<h3 class="sd-name" id="sd-title">GET /healthz</h3>"#),
+            "{html}"
+        );
+
         // One that is not there any more.
         let gone = trace(9).to_string();
         let html = page(
@@ -868,10 +888,14 @@ mod traces {
     }
 
     /// The mockup's `t1` (`docs/design/Telemetry.dc.html`) as trace 7: the proxy's request
-    /// row (s0, s1) and the app's spans under its upstream span, s2 the app's server span.
+    /// row (s0, s1) and the app's spans under its upstream span, s2 the app's server span. As
+    /// in the mockup, the request failed with a 500 and s2, s6 and s9 are in error; s9 has
+    /// attributes, an exception event and a log record, s12 a log record too, and the app's
+    /// spans a resource. Some values hold markup, which must come out escaped.
     async fn seeded_t1() -> (TestApp, Vec<(&'static str, SpanId)>) {
         let app = TestApp::new().await;
-        let row = request(7, 90, "notes", "/api/documents.info", 1_912);
+        let mut row = request(7, 90, "notes", "/api/documents.info", 1_912);
+        row.status = 500;
         let at = MicroTimestamp::from(row.time);
         let ids: Vec<(&str, SpanId)> = [
             ("s0", [7; 8]),
@@ -901,7 +925,7 @@ mod traces {
             status: SpanStatus::Unset,
             ..app_span(7, name, SpanStatus::Unset)
         };
-        let spans = vec![
+        let mut spans = vec![
             span("s2", "s1", SpanKind::Server, 3_800, 1_905_200),
             span("s3", "s2", SpanKind::Internal, 5_100, 17_600),
             span("s4", "s3", SpanKind::Client, 6_900, 1_800),
@@ -913,8 +937,59 @@ mod traces {
             span("s9", "s6", SpanKind::Client, 51_700, 1_800_400),
             span("s10", "s6", SpanKind::Client, 1_853_600, 2_700),
         ];
+        let resource = r#"{"service.name":"outline-app","service.version":"0.82.0","telemetry.sdk.language":"nodejs","service.namespace":"notes","hoster.generation":"3","host.name":"srv-01"}"#;
+        for span in &mut spans {
+            span.resource = Some(resource.into());
+            if ["s2", "s6", "s9"].contains(&span.name.as_str()) {
+                span.status = SpanStatus::Error;
+                span.status_message = Some("QueryCanceledError".into());
+            }
+        }
+        let s9 = spans.iter_mut().find(|s| s.name == "s9").unwrap();
+        s9.name = "SELECT revisions".into();
+        s9.status_message = Some("canceling statement due to <b>timeout</b>".into());
+        s9.attributes = Some(
+            serde_json::json!({
+                "db.system": "postgresql",
+                "db.query.text": "SELECT * FROM revisions WHERE \"documentId\" = $1 <script>alert(1)</script>",
+                "error.type": "SequelizeDatabaseError",
+                "http.response.status_code": 503,
+                "server.port": 5432,
+            })
+            .to_string(),
+        );
+        let event_at = at.as_micros() + 1_852_100;
+        s9.events = Some(
+            serde_json::json!([{
+                "name": "exception",
+                "time_us": event_at,
+                "attributes": {
+                    "exception.type": "SequelizeDatabaseError",
+                    "exception.message": "canceling statement due to statement timeout",
+                    "exception.stacktrace": "SequelizeDatabaseError: canceling\n    at Query.formatError (<anonymous>)",
+                },
+            }])
+            .to_string(),
+        );
+        let record = |name: &str, millis: u64, level: Level, message: &str| LogRecord {
+            time: row.time + Duration::from_millis(millis),
+            level: Some(level),
+            trace_id: Some(trace(7)),
+            span_id: Some(id(name)),
+            ..super::record(0, Some("notes"), "api", message)
+        };
+        let records = vec![
+            record("s12", 25, Level::Debug, "cache miss doc:4f1a93c2"),
+            record(
+                "s9",
+                1_852,
+                Level::Error,
+                "SequelizeDatabaseError: <script>alert(1)</script>",
+            ),
+        ];
         app.logs
             .append(&LogBatch {
+                records,
                 requests: vec![row],
                 spans,
                 ..LogBatch::default()
@@ -922,6 +997,227 @@ mod traces {
             .await
             .unwrap();
         (app, ids)
+    }
+
+    /// The span details of `html`.
+    fn details(html: &str) -> &str {
+        let at = html.find(r#"<section class="sd""#).unwrap();
+        let end = at + html[at..].find("</section>").unwrap();
+        &html[at..end]
+    }
+
+    #[tokio::test]
+    async fn the_selected_span_opens_its_details_below_its_row() {
+        let (app, ids) = seeded_t1().await;
+        let id = |name: &str| ids.iter().find(|(n, _)| *n == name).unwrap().1;
+        let browser = app.sign_in().await;
+        let trace = trace(7);
+        let base = format!("/telemetry/traces?trace={trace}");
+
+        // Without a span, the deepest span in error is selected: s9, not its parents in error.
+        let html = page(&app, &browser.cookie, &base).await;
+        assert!(!html.contains("style="), "no inline styles");
+        assert_eq!(html.matches(r#"<section class="sd""#).count(), 1);
+        let s9 = span_row(&html, id("s9"));
+        assert!(s9.contains(r#"<div class="wf-row wf-current">"#), "{s9}");
+        assert!(s9.contains(r#"<section class="sd""#), "below its row: {s9}");
+        let d = details(&html);
+
+        // The title line: name, service, kind, status, and a close link to span=none.
+        assert!(
+            d.contains(r#"<h3 class="sd-name" id="sd-title">SELECT revisions</h3>"#),
+            "{d}"
+        );
+        assert!(d.contains(r#"<span class="sd-service">api</span>"#), "{d}");
+        assert!(d.contains(r#"<span class="sd-pill">client</span>"#), "{d}");
+        assert!(
+            d.contains(r#"<span class="sd-pill sd-status-error">error</span>"#),
+            "{d}"
+        );
+        let s9_id = id("s9");
+        assert!(
+            d.contains(&format!(
+                r##"<a class="sd-close" href="/telemetry/traces?trace={trace}&#38;span=none#span-{s9_id}" aria-label="Close span details">close</a>"##
+            )),
+            "{d}"
+        );
+
+        // Timing and ids.
+        assert!(d.contains("<dt>Start</dt><dd>+51 ms</dd>"), "{d}");
+        assert!(
+            d.contains(
+                r#"<dt>Duration</dt><dd>1.8 s <span class="muted">· 94.2% of trace</span></dd>"#
+            ),
+            "{d}"
+        );
+        assert!(d.contains("<dt>Self time</dt><dd>1.8 s</dd>"), "{d}");
+        assert!(
+            d.contains(&format!("<dt>Span id</dt><dd>{s9_id}</dd>")),
+            "{d}"
+        );
+        assert!(
+            d.contains(&format!(
+                r#"<dt>Parent</dt><dd class="sd-parent">{}</dd>"#,
+                id("s6")
+            )),
+            "{d}"
+        );
+
+        // The status message, escaped.
+        assert!(
+            d.contains(r#"<p class="sd-message">status: ERROR · canceling statement due to &#60;b&#62;timeout&#60;/b&#62;</p>"#),
+            "{d}"
+        );
+
+        // Attributes by key, error.type and a 5xx status in red, values escaped.
+        assert!(
+            d.contains(
+                r#"<div><dt>error.type</dt><dd class="sd-alert">SequelizeDatabaseError</dd></div>"#
+            ),
+            "{d}"
+        );
+        assert!(
+            d.contains(
+                r#"<div><dt>http.response.status_code</dt><dd class="sd-alert">503</dd></div>"#
+            ),
+            "{d}"
+        );
+        assert!(
+            d.contains(r#"<div><dt>server.port</dt><dd>5432</dd></div>"#),
+            "{d}"
+        );
+        assert!(
+            d.contains("&#60;script&#62;alert(1)&#60;/script&#62;"),
+            "{d}"
+        );
+        assert!(!html.contains("<script>alert"), "escaped");
+        assert!(!html.contains("<b>timeout"), "escaped");
+
+        // The resource as chips: what sent the span and hoster's stack and generation.
+        let chips: Vec<&str> = d
+            .split(r#"<li><span class="muted">"#)
+            .skip(1)
+            .map(|chip| chip.split("</li>").next().unwrap())
+            .collect();
+        assert_eq!(
+            chips,
+            [
+                "service.name=</span>outline-app",
+                "service.version=</span>0.82.0",
+                "telemetry.sdk.language=</span>nodejs",
+                "service.namespace=</span>notes",
+                "hoster.generation=</span>3",
+            ]
+        );
+
+        // The exception event: its name, when, its attributes and its stack trace.
+        assert!(d.contains(r#"<div class="sd-event sd-exception">"#), "{d}");
+        assert!(
+            d.contains(r#"<span class="sd-event-name">exception</span><span class="sd-event-at">@ 1.9 s (+1.8 s in span)</span>"#),
+            "{d}"
+        );
+        assert!(
+            d.contains("<div><dt>exception.type</dt><dd>SequelizeDatabaseError</dd></div>"),
+            "{d}"
+        );
+        assert!(!d.contains("<dt>exception.stacktrace"), "{d}");
+        assert!(
+            d.contains("<pre class=\"sd-stack\">SequelizeDatabaseError: canceling\n    at Query.formatError (&#60;anonymous&#62;)</pre>"),
+            "{d}"
+        );
+        assert!(!d.contains("no events on this span"), "{d}");
+
+        // Its log record, linking to the Logs tab from that record on; s12's is not listed.
+        assert!(
+            d.contains("SequelizeDatabaseError: &#60;script&#62;"),
+            "{d}"
+        );
+        assert!(!d.contains("cache miss"), "{d}");
+        assert!(!d.contains("none emitted"), "{d}");
+        assert!(
+            d.contains(r#"<span class="sd-log-level">error</span>"#),
+            "{d}"
+        );
+        let href = d
+            .split(r#"<a class="sd-log sd-log-error" href=""#)
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .replace("&#38;", "&");
+        assert!(
+            href.starts_with("/telemetry/logs?stack=notes&since="),
+            "{href}"
+        );
+        let logs = page(&app, &browser.cookie, &href).await;
+        assert_eq!(
+            messages(&logs).first().copied(),
+            Some("SequelizeDatabaseError: &#60;script&#62;alert(1)&#60;/script&#62;"),
+            "the Logs tab starts at the record: {logs}"
+        );
+
+        // Self time of a span with children, the root's parent, and a span without events,
+        // attributes or records.
+        let html = page(&app, &browser.cookie, &format!("{base}&span={}", id("s6"))).await;
+        let d = details(&html);
+        // 1880.3 − (0.9 + 14.1 + 8.3 + 1800.4 + 2.7)
+        assert!(d.contains("<dt>Self time</dt><dd>53 ms</dd>"), "{d}");
+        assert!(d.contains(r#"<p class="sd-none">no attributes</p>"#), "{d}");
+        assert!(
+            d.contains(r#"<p class="sd-none">no events on this span</p>"#),
+            "{d}"
+        );
+        assert!(d.contains(r#"<p class="sd-none">none emitted</p>"#), "{d}");
+        let html = page(&app, &browser.cookie, &format!("{base}&span={}", id("s0"))).await;
+        let d = details(&html);
+        assert!(
+            d.contains(r#"<dt>Parent</dt><dd class="sd-parent">— (root)</dd>"#),
+            "{d}"
+        );
+        assert!(
+            d.contains(r#"<p class="sd-message">status: ERROR · responded 500</p>"#),
+            "{d}"
+        );
+        assert!(
+            d.contains(r#"<li><span class="muted">service.name=</span>hoster</li>"#),
+            "{d}"
+        );
+        // A span not in error shows no message.
+        let html = page(&app, &browser.cookie, &format!("{base}&span={}", id("s12"))).await;
+        let d = details(&html);
+        assert!(!d.contains("sd-message"), "{d}");
+        assert!(d.contains("cache miss doc:4f1a93c2"), "{d}");
+
+        // Closed: no span selected, and nothing selected again by default.
+        let html = page(&app, &browser.cookie, &format!("{base}&span=none")).await;
+        assert!(!html.contains(r#"<section class="sd""#), "{html}");
+        let picked = &html[html.find(r#"<section class="card trace-picked""#).unwrap()..];
+        assert!(!picked.contains("aria-current"), "{picked}");
+        assert!(
+            html.contains(r#"<input type="hidden" name="span" value="none">"#),
+            "a filter keeps it closed: {html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r##"href="/telemetry/traces?trace={trace}&#38;span=none&#38;collapsed=services#trace-title">collapse to services"##
+            )),
+            "{html}"
+        );
+
+        // A selected span inside a collapsed subtree stays selected but shows no details;
+        // expanding its ancestor keeps the selection, so they open again.
+        let html = page(&app, &browser.cookie, &format!("{base}&collapsed=services")).await;
+        assert!(!html.contains(r#"<section class="sd""#), "{html}");
+        let s2 = span_row(&html, id("s2"));
+        assert!(
+            s2.contains(&format!(
+                r#"href="/telemetry/traces?trace={trace}&#38;collapsed=services%2C{}#span-{}""#,
+                id("s2"),
+                id("s2")
+            )),
+            "{s2}"
+        );
     }
 
     /// The span names of the waterfall's rows, in order.

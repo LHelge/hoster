@@ -5,10 +5,11 @@
 //! Every option is a GET parameter ([`TraceParams`]): `stack`, `since` (a preset from 5m to
 //! 24h, or anything the Logs tab takes: spans are kept 3 days), `q` (grep on span names; no
 //! query language, OQ-43), `sort`, `status`, `slower` (the root's minimum duration), `page`
-//! (from 1), `trace`, and of that trace's waterfall `span` (the span selected), `collapsed` (the
-//! spans collapsed, a [`Collapse`]) and `crit` (`on` highlights the critical path where CSS
-//! cannot). A link changes some and keeps the rest; a new filter starts at the first page,
-//! picking a trace keeps the page and drops the span and the collapsed spans.
+//! (from 1), `trace`, and of that trace's waterfall `span` (the span selected, or `none`; without
+//! it the trace's focus is), `collapsed` (the spans collapsed, a [`Collapse`]) and `crit` (`on`
+//! highlights the critical path where CSS cannot). A link changes some and keeps the rest; a new
+//! filter starts at the first page, picking a trace keeps the page and drops the span (so the new
+//! trace opens on its focus) and the collapsed spans.
 //!
 //! Services are coloured by class from the categorical palette (`docs/design/README.md`):
 //! hoster's proxy its own, the others in turn by name over everything the page shows, so a
@@ -27,14 +28,16 @@ use super::super::logs::{LogScope, LogsView, StackOption};
 use super::super::ui::{Count, Meter, Tone};
 use crate::stats::Elapsed;
 use crate::store::{
-    Collapse, LogStore, Retention, Span, SpanId, StoreError, Timestamp, Trace, TraceId, TracePage,
-    TracePoints, TraceQuery, TraceSort, TraceStatus, TraceSummary,
+    Collapse, LogEntry, LogStore, Retention, Span, SpanId, StoreError, Timestamp, Trace, TraceId,
+    TracePage, TracePoints, TraceQuery, TraceSort, TraceStatus, TraceSummary,
 };
 
+use self::details::SpanDetails;
 pub use self::scatter::Scatter;
 pub use self::waterfall::Waterfall;
-use self::waterfall::WaterfallState;
+use self::waterfall::{Selection, WaterfallState};
 
+mod details;
 mod scatter;
 mod waterfall;
 
@@ -59,7 +62,8 @@ pub struct TraceParams {
     page: Option<String>,
     /// The trace picked, shown below the list.
     trace: Option<String>,
-    /// The span of the trace picked that is selected in its waterfall.
+    /// The span of the trace picked that is selected in its waterfall, or `none` (a
+    /// [`Selection`]); without one, the trace's focus is.
     span: Option<String>,
     /// The spans of the trace picked that are collapsed in its waterfall: a [`Collapse`].
     collapsed: Option<String>,
@@ -210,9 +214,10 @@ impl TraceParams {
         }
     }
 
-    /// The span selected; none when `span` is not a span id, with why.
-    fn span(&self) -> (Option<SpanId>, Option<String>) {
-        match Self::text(&self.span).map(|s| (s, s.parse::<SpanId>())) {
+    /// The span selected, `none` or none given; none given when `span` is neither a span id
+    /// nor `none`, with why.
+    fn span(&self) -> (Option<Selection>, Option<String>) {
+        match Self::text(&self.span).map(|s| (s, s.parse::<Selection>())) {
             None => (None, None),
             Some((_, Ok(id))) => (Some(id), None),
             Some((given, Err(_))) => (
@@ -276,7 +281,7 @@ impl TraceParams {
         let trace = self.trace().0;
         keep("trace", trace.map(|id| id.to_string()));
         let span = trace.and(self.span().0);
-        keep("span", span.map(|id| id.to_string()));
+        keep("span", span.map(|selection| selection.to_string()));
         let collapse = trace.map(|_| self.collapse().0).filter(|c| !c.is_empty());
         keep("collapsed", collapse.map(|c| c.to_string()));
         let critical = trace.is_some() && self.critical();
@@ -330,9 +335,11 @@ impl Links {
             .at_page(self.page)
     }
 
-    /// The same list, page and trace with `span` selected, or none.
+    /// The same list, page and trace with `span` selected, or none (`span=none`, so the
+    /// trace's focus is not selected again).
     fn selecting(&self, span: Option<SpanId>) -> String {
-        self.with("span", span.map(|id| id.to_string()))
+        let selection = Selection::from(span);
+        self.with("span", Some(selection.to_string()))
             .at_page(self.page)
     }
 
@@ -459,8 +466,9 @@ impl TraceRow {
     }
 }
 
-/// The trace `?trace=` asks for, and the store's trace of that id if it has one.
-type Requested = (TraceId, Option<Trace>);
+/// The trace `?trace=` asks for, and the store's trace of that id if it has one, with the log
+/// records of the span whose details open.
+type Requested = (TraceId, Option<(Trace, Vec<LogEntry>)>);
 
 /// The trace `?trace=` picks.
 #[derive(Debug)]
@@ -538,13 +546,24 @@ impl TracesView {
         let (picked_id, trace_problem) = params.trace();
         let span_problem = picked_id.and(params.span().1);
         let collapse_problem = picked_id.and(params.collapse().1);
+        let state = params.waterfall();
         let read = match store {
             Ok(store) => {
                 let picked = async {
-                    match picked_id {
-                        Some(id) => store.load_trace(id).await.map(|t| Some((id, t))),
-                        None => Ok(None),
-                    }
+                    let Some(id) = picked_id else {
+                        return Ok(None);
+                    };
+                    let Some(trace) = store.load_trace(id).await? else {
+                        return Ok(Some((id, None)));
+                    };
+                    let records = match state.detailed(&trace) {
+                        Some(span) if span.log_records > 0 => {
+                            let span = span.span.span_id;
+                            store.span_records(id, span, SpanDetails::MAX_LOGS).await?
+                        }
+                        _ => Vec::new(),
+                    };
+                    Ok(Some((id, Some((trace, records)))))
                 };
                 // The scatter follows the range and stack only, not the list's filters.
                 let roots = TraceQuery::new(query.range.clone(), query.scope.clone());
@@ -618,17 +637,18 @@ impl TracesView {
             .iter()
             .flat_map(|t| t.services.iter().map(String::as_str))
             .collect();
-        if let Some((_, Some(trace))) = &picked {
+        if let Some((_, Some((trace, _)))) = &picked {
             services.extend(trace.services());
         }
         // The picked trace's services too, so its waterfall colours them alike.
         let palette = ServicePalette::of(services);
         let picked = picked.map(|(id, trace)| match trace {
-            Some(trace) => Picked::Found(Box::new(Waterfall::new(
+            Some((trace, records)) => Picked::Found(Box::new(Waterfall::new(
                 &trace,
                 &palette,
                 &links,
                 &params.waterfall(),
+                records,
             ))),
             None => Picked::Missing(id),
         });

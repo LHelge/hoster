@@ -177,6 +177,88 @@
             </span>
             {{- row.bar -}}
           </div>
+          {%- if let Some(d) = row.details %}
+          {#- The span selected (traces/details.rs, SpanDetails). Every value but the timing is
+              the app's: escaped, and wrapped by CSS. #}
+          <section class="sd" aria-labelledby="sd-title">
+            <div class="sd-head">
+              <span class="wf-swatch" aria-hidden="true"></span>
+              <h3 class="sd-name" id="sd-title">{{ d.name }}</h3>
+              <span class="sd-service">{{ d.service.name }}</span>
+              <span class="sd-pill">{{ d.kind }}</span>
+              <span class="sd-pill {{ d.status_class() }}">{{ d.status }}</span>
+              <a class="sd-close" href="{{ d.close }}#span-{{ d.id }}" aria-label="Close span details">close</a>
+            </div>
+            <dl class="sd-figures">
+              <div><dt>Start</dt><dd>{{ d.start }}</dd></div>
+              <div><dt>Duration</dt><dd>{{ d.duration }} <span class="muted">· {{ d.share }} of trace</span></dd></div>
+              <div><dt>Self time</dt><dd>{{ d.self_time }}</dd></div>
+              <div><dt>Span id</dt><dd>{{ d.id }}</dd></div>
+              <div><dt>Parent</dt><dd class="sd-parent">{% if let Some(parent) = d.parent %}{{ parent }}{% if d.parent_missing %} <span class="muted">(not in this trace)</span>{% endif %}{% else %}— (root){% endif %}</dd></div>
+            </dl>
+            {%- if let Some(message) = d.message %}
+            <p class="sd-message">status: ERROR · {{ message }}</p>
+            {%- endif %}
+            <div class="sd-columns">
+              <div class="sd-column sd-wide">
+                <h4 class="sd-caps">Attributes</h4>
+                {%- if d.attributes.is_empty() %}
+                <p class="sd-none">no attributes</p>
+                {%- else %}
+                <dl class="sd-attributes">
+                  {%- for a in d.attributes %}
+                  <div><dt>{{ a.key }}</dt><dd{% if a.alert %} class="sd-alert"{% endif %}>{{ a.value }}</dd></div>
+                  {%- endfor %}
+                </dl>
+                {%- endif %}
+                <h4 class="sd-caps">Resource</h4>
+                {%- if d.resource.is_empty() %}
+                <p class="sd-none">no resource attributes</p>
+                {%- else %}
+                <ul class="sd-chips">
+                  {%- for r in d.resource %}
+                  <li><span class="muted">{{ r.key }}=</span>{{ r.value }}</li>
+                  {%- endfor %}
+                </ul>
+                {%- endif %}
+              </div>
+              <div class="sd-column">
+                <h4 class="sd-caps">Events</h4>
+                {%- if d.events.is_empty() %}
+                <p class="sd-none">no events on this span</p>
+                {%- endif %}
+                {%- for e in d.events %}
+                <div class="sd-event{% if e.exception %} sd-exception{% endif %}">
+                  <div class="sd-event-head"><span class="sd-event-name">{{ e.name }}</span><span class="sd-event-at">{{ e.at }}</span></div>
+                  {%- if !e.attributes.is_empty() %}
+                  <dl class="sd-event-lines">
+                    {%- for l in e.attributes %}
+                    <div><dt>{{ l.key }}</dt><dd>{{ l.value }}</dd></div>
+                    {%- endfor %}
+                  </dl>
+                  {%- endif %}
+                  {%- if let Some(stack) = e.stacktrace %}
+                  <pre class="sd-stack">{{ stack }}</pre>
+                  {%- endif %}
+                </div>
+                {%- endfor %}
+                <h4 class="sd-caps">Logs for this span</h4>
+                {%- if d.logs.is_empty() %}
+                <p class="sd-none">none emitted</p>
+                {%- else %}
+                <ol class="sd-logs">
+                  {%- for l in d.logs %}
+                  <li><a class="sd-log {{ l.level_class() }}" href="{{ l.href }}"><time datetime="{{ l.time }}">{{ l.shown }}</time><span class="sd-log-level">{% if let Some(level) = l.level %}{{ level }}{% else %}—{% endif %}</span><span class="sd-log-msg">{{ l.message }}</span></a></li>
+                  {%- endfor %}
+                </ol>
+                {%- if let Some(more) = d.more_logs %}
+                <p class="sd-none">{{ more }} more made in this span</p>
+                {%- endif %}
+                {%- endif %}
+              </div>
+            </div>
+          </section>
+          {%- endif %}
         </li>
         {%- endfor %}
       </ol>

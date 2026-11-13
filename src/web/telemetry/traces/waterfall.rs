@@ -14,15 +14,20 @@
 //! collapses or expands it (`?collapsed=`, which the trace resolves, [`Trace::collapsed`]),
 //! "expand all" and "collapse to services" set it, and the critical-path switch is a checkbox
 //! that CSS `:has()` follows on the page, with a `?crit=on` link where `:has()` is missing.
+//!
+//! The span selected (`?span=`, a [`Selection`]; without one the trace's [focus](Trace::focus))
+//! opens its [`SpanDetails`] (`traces/details.rs`) below its row, when its row is shown.
 
 use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
 
+use super::details::SpanDetails;
 use super::{Links, ServiceChip, ServicePalette, TracesView};
 use crate::stats::Elapsed;
-use crate::store::{Collapse, Span, SpanId, Trace, TraceId, TraceSpan};
+use crate::store::{Collapse, LogEntry, Span, SpanId, Trace, TraceId, TraceSpan, UnknownLogText};
 use crate::web::charts::Num;
 use crate::web::ui::{Count, Escaped};
 
@@ -94,6 +99,8 @@ pub struct SpanRow {
     pub critical: bool,
     /// Collapses or expands the span; `None` for a span without children.
     pub toggle: Option<Toggle>,
+    /// The span's details, below its row: for the span selected only.
+    pub details: Option<Box<SpanDetails>>,
 }
 
 /// The toggle of a span with children.
@@ -113,9 +120,76 @@ pub struct Toggle {
 /// critical path is highlighted.
 #[derive(Debug, Clone, Default)]
 pub(super) struct WaterfallState {
-    pub selected: Option<SpanId>,
+    /// `None` without a `span`: the trace's [focus](Trace::focus) is selected.
+    pub selected: Option<Selection>,
     pub collapse: Collapse,
     pub critical: bool,
+}
+
+impl WaterfallState {
+    /// The id of the span selected in `trace`: the one given, or without one the trace's
+    /// focus; `None` when the details are closed.
+    fn selected(&self, trace: &Trace) -> Option<SpanId> {
+        match self.selected {
+            None => trace.focus().map(|s| s.span.span_id),
+            Some(Selection::Closed) => None,
+            Some(Selection::Span(id)) => Some(id),
+        }
+    }
+
+    /// The span whose details open in `trace`: the one selected, when the trace holds it and
+    /// its row is shown. A span inside a collapsed subtree stays selected (expanding it opens
+    /// its details again) but shows none.
+    pub fn detailed<'a>(&self, trace: &'a Trace) -> Option<&'a TraceSpan> {
+        let id = self.selected(trace)?;
+        let collapsed = trace.collapsed(&self.collapse);
+        let shown = trace
+            .shown(&collapsed)
+            .any(|(span, _)| span.span.span_id == id);
+        trace.span(id).filter(|_| shown)
+    }
+}
+
+/// The `span` parameter: a span selected, or `none` for none, which a link writes when it
+/// closes the details so the trace's [focus](Trace::focus), which a missing `span` selects,
+/// does not open again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    /// `none`: no span selected.
+    Closed,
+    Span(SpanId),
+}
+
+impl Selection {
+    /// The value of `span` that selects none.
+    const CLOSED: &str = "none";
+}
+
+impl From<Option<SpanId>> for Selection {
+    fn from(span: Option<SpanId>) -> Self {
+        span.map_or(Selection::Closed, Selection::Span)
+    }
+}
+
+impl FromStr for Selection {
+    type Err = UnknownLogText;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == Self::CLOSED {
+            Ok(Selection::Closed)
+        } else {
+            s.parse().map(Selection::Span)
+        }
+    }
+}
+
+impl fmt::Display for Selection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Selection::Closed => f.write_str(Self::CLOSED),
+            Selection::Span(id) => id.fmt(f),
+        }
+    }
 }
 
 impl Waterfall {
@@ -124,14 +198,17 @@ impl Waterfall {
 
     /// The waterfall of `trace`, its services coloured by `palette`, its rows linking to the
     /// tab of `links` with their span selected; `state` says which is, which are collapsed and
-    /// whether the critical path is highlighted.
+    /// whether the critical path is highlighted. `records` are the log records of the span
+    /// whose details open ([`WaterfallState::detailed`]), the first of them by time.
     pub(super) fn new(
         trace: &Trace,
         palette: &ServicePalette,
         links: &Links,
         state: &WaterfallState,
+        records: Vec<LogEntry>,
     ) -> Self {
-        let selected = state.selected;
+        let selected = state.selected(trace);
+        let mut records = Some(records);
         // The links write the collapse as the trace resolves it.
         let collapse = trace.canonical(&state.collapse);
         let collapsed = trace.collapsed(&collapse);
@@ -177,6 +254,18 @@ impl Waterfall {
                     ),
                     hidden: Count(span.descendants as u64),
                 });
+                // Shown rows only: a selected span under a collapsed one has no details.
+                let details = current.then(|| {
+                    let records = records.take().unwrap_or_default();
+                    let close = links.selecting(None);
+                    Box::new(SpanDetails::new(
+                        trace,
+                        span,
+                        chip(&span.span.service),
+                        close,
+                        records,
+                    ))
+                });
                 SpanRow {
                     id,
                     name: span.span.name.clone(),
@@ -191,6 +280,7 @@ impl Waterfall {
                     bar: Bar::new(&axis, span),
                     critical: span.critical,
                     toggle,
+                    details,
                 }
             })
             .collect();
@@ -593,7 +683,7 @@ mod tests {
 
     fn waterfall(trace: &Trace, selected: Option<&str>) -> Waterfall {
         let state = WaterfallState {
-            selected: selected.map(id),
+            selected: selected.map(|name| Selection::Span(id(name))),
             ..WaterfallState::default()
         };
         shown(trace, &state)
@@ -601,7 +691,7 @@ mod tests {
 
     fn shown(trace: &Trace, state: &WaterfallState) -> Waterfall {
         let palette = ServicePalette::of(trace.services());
-        Waterfall::new(trace, &palette, &links(), state)
+        Waterfall::new(trace, &palette, &links(), state, Vec::new())
     }
 
     fn row<'a>(w: &'a Waterfall, name: &str) -> &'a SpanRow {
@@ -793,7 +883,7 @@ mod tests {
         assert!(s9.current);
         assert_eq!(
             s9.href,
-            format!("/telemetry/traces?sort=slowest&trace={trace}")
+            format!("/telemetry/traces?sort=slowest&trace={trace}&span=none")
         );
         let s4 = row(&w, "s4");
         assert!(!s4.current);
@@ -805,6 +895,57 @@ mod tests {
             )
         );
         assert_eq!(w.rows.iter().filter(|r| r.current).count(), 1);
+    }
+
+    #[test]
+    fn without_a_span_the_focus_is_selected_and_none_selects_none() {
+        let trace = t1();
+        let w = shown(&trace, &WaterfallState::default());
+        let current: Vec<&str> = w
+            .rows
+            .iter()
+            .filter(|r| r.current)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(current, ["s9"]);
+        assert!(row(&w, "s9").details.is_some());
+        let closed = WaterfallState {
+            selected: Some(Selection::Closed),
+            ..WaterfallState::default()
+        };
+        let w = shown(&trace, &closed);
+        assert!(w.rows.iter().all(|r| !r.current && r.details.is_none()));
+        // A span hidden by a collapse stays selected, without details.
+        let hidden = WaterfallState {
+            collapse: Collapse::default().toggle(id("s6")),
+            ..WaterfallState::default()
+        };
+        assert!(hidden.detailed(&trace).is_none());
+        assert!(
+            shown(&trace, &hidden)
+                .rows
+                .iter()
+                .all(|r| r.details.is_none())
+        );
+        assert_eq!(
+            WaterfallState::default()
+                .detailed(&trace)
+                .map(|s| s.span.span_id),
+            Some(id("s9"))
+        );
+    }
+
+    #[test]
+    fn a_selection_is_a_span_id_or_none() {
+        assert_eq!("none".parse::<Selection>().unwrap(), Selection::Closed);
+        let s9 = id("s9");
+        assert_eq!(
+            s9.to_string().parse::<Selection>().unwrap(),
+            Selection::Span(s9)
+        );
+        assert!("nope".parse::<Selection>().is_err());
+        assert_eq!(Selection::from(None).to_string(), "none");
+        assert_eq!(Selection::from(Some(s9)).to_string(), s9.to_string());
     }
 
     #[test]

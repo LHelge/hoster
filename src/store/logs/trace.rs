@@ -261,6 +261,16 @@ impl Trace {
         self.spans.iter().any(|s| s.span.is_error())
     }
 
+    /// The span the waterfall opens on when none is selected (the mockup's rule): the deepest
+    /// span in error, the first in depth-first order of those as deep, so the error's cause
+    /// rather than its echoes up the tree; the first root otherwise.
+    pub fn focus(&self) -> Option<&TraceSpan> {
+        let errors = self.spans.iter().filter(|s| s.span.is_error());
+        // `max_by_key` keeps the last of equals: reversed, that is the first.
+        let deepest = errors.rev().max_by_key(|s| s.depth);
+        deepest.or(self.spans.first())
+    }
+
     /// The spans on the critical path, in depth-first order.
     pub fn critical_path(&self) -> impl Iterator<Item = &TraceSpan> {
         self.spans.iter().filter(|s| s.critical)
@@ -768,6 +778,27 @@ mod tests {
         let trace = Trace::new(TraceId::from([1; 16]), spans, 4);
         // Covered: 2–6 and 8–10 (z cut at the parent's end).
         assert_eq!(of(&trace, "p").self_time, Duration::from_millis(4));
+    }
+
+    #[test]
+    fn the_focus_is_the_deepest_span_in_error_or_the_root() {
+        let trace = Trace::new(TraceId::from([0x4b; 16]), t1(), 12);
+        assert_eq!(trace.focus().unwrap().span.name, "s9");
+        // Two errors as deep: the first in depth-first order.
+        let mut spans = t1();
+        spans[4].status = SpanStatus::Error; // s4, as deep as s9 and before it
+        let trace = Trace::new(TraceId::from([0x4b; 16]), spans, 12);
+        assert_eq!(trace.focus().unwrap().span.name, "s4");
+        // No error: the root.
+        let mut spans = t1();
+        spans.iter_mut().for_each(|s| s.status = SpanStatus::Unset);
+        let trace = Trace::new(TraceId::from([0x4b; 16]), spans, 12);
+        assert_eq!(trace.focus().unwrap().span.name, "s0");
+        assert!(
+            Trace::new(TraceId::from([1; 16]), Vec::new(), 0)
+                .focus()
+                .is_none()
+        );
     }
 
     #[test]
