@@ -147,17 +147,26 @@ impl LogRecord {
     /// A string value is its text, `null` and other scalars their JSON. Empty without fields,
     /// or when they are not a JSON object.
     pub fn flat_fields(&self) -> Vec<(String, String)> {
-        let mut flat = Vec::new();
-        if let Some(serde_json::Value::Object(object)) = self
-            .fields
-            .as_deref()
-            .and_then(|fields| serde_json::from_str(fields).ok())
-        {
-            for (key, value) in object {
-                Self::flatten(key, value, &mut flat);
+        self.parsed_fields()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+    }
+
+    /// The fields as [`LogRecord::flat_fields`] pairs, parsed once: `None` without fields, and
+    /// their text as stored when it is not a JSON object (it was one when stored, so this is
+    /// for showing it raw rather than losing it).
+    pub fn parsed_fields(&self) -> Option<Result<Vec<(String, String)>, &str>> {
+        let text = self.fields.as_deref()?;
+        match serde_json::from_str(text) {
+            Ok(serde_json::Value::Object(object)) => {
+                let mut flat = Vec::new();
+                for (key, value) in object {
+                    Self::flatten(key, value, &mut flat);
+                }
+                Some(Ok(flat))
             }
+            _ => Some(Err(text)),
         }
-        flat
     }
 
     fn flatten(key: String, value: serde_json::Value, flat: &mut Vec<(String, String)>) {

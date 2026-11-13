@@ -749,6 +749,8 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 }
 .log-chip-detail { color: var(--text-2); white-space: nowrap; }
 .log-containers .log-chip { flex-wrap: wrap; gap: 0 6px; min-height: 28px; padding-block: 3px; overflow-wrap: anywhere; }
+/* An active field filter: drawn as a current chip; following it removes the filter. */
+.log-field-chip { border-color: var(--accent); background: var(--hover); color: var(--text); overflow-wrap: anywhere; }
 /* The service palette, assigned by service order; hoster's own records and "all" are neutral. */
 .dot.svc-0 { background: var(--accent); }
 .dot.svc-1 { background: var(--progress); }
@@ -876,16 +878,38 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .log-panel:has(.log-notice) .log-ended { display: inline; }
 .log-empty { margin: 0; padding: 24px 12px; color: var(--muted); }
 
-/* The stored records: time, service, level and message in columns, the message wrapping. */
+/* The stored records: time, service, level and message in columns, the message wrapping. A
+   record with fields is a <details> whose summary has the same columns (--log-cols). */
 .log-records { list-style: none; white-space: normal; }
 .log-record {
+  --log-cols: max-content 12ch 5ch minmax(0, 1fr);
   display: grid;
-  grid-template-columns: max-content 12ch 5ch minmax(0, 1fr);
+  grid-template-columns: var(--log-cols);
   gap: 0 14px;
   padding: 0 12px 0 9px;
   border-left: 3px solid transparent;
 }
-.log-stacks .log-record { grid-template-columns: max-content 12ch 12ch 5ch minmax(0, 1fr); }
+.log-stacks .log-record { --log-cols: max-content 12ch 12ch 5ch minmax(0, 1fr); }
+.log-record.log-fielded { display: block; }
+.log-fielded > details > summary {
+  display: grid;
+  grid-template-columns: var(--log-cols);
+  gap: 0 14px;
+  list-style: none;
+  cursor: pointer;
+}
+.log-fielded > details > summary::-webkit-details-marker { display: none; }
+.log-fielded > details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Closed, the row ends in a sign that it opens on fields. */
+.log-fielded > details:not([open]) > summary .log-msg::after { content: " {…}"; color: var(--muted); }
+.log-target { color: var(--muted); }
+.log-expanded { margin: 2px 0 8px; padding: 4px 0 4px 12px; border-left: 1px solid var(--divider); }
+.log-meta, .log-fields-raw { margin: 0; color: var(--muted); }
+.log-fields-raw { color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-fields { display: grid; grid-template-columns: minmax(6ch, max-content) minmax(0, 1fr); gap: 0 14px; margin: 4px 0 0; }
+.log-fields dt { color: var(--muted); overflow-wrap: anywhere; }
+.log-fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-fields a { color: var(--text); }
 .log-record:hover { background: var(--hover); }
 .log-record time, .log-gen { color: var(--muted); }
 .log-svc, .log-stack { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -908,7 +932,9 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
   .log-regex input { min-height: 0; }
   .log-pages a { display: inline-flex; align-items: center; min-height: 44px; }
   /* The message gets its own line under time, service and level. */
-  .log-record, .log-stacks .log-record { grid-template-columns: max-content max-content max-content; }
+  .log-record, .log-stacks .log-record { --log-cols: max-content max-content max-content; }
+  .log-fields { grid-template-columns: minmax(0, 1fr); }
+  .log-fields dd { margin-bottom: 4px; }
   .log-record .log-msg { grid-column: 1 / -1; }
 }
 

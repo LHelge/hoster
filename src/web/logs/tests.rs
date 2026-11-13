@@ -383,7 +383,7 @@ fn followed_rows_render_as_the_page_does() {
         stack_column: false,
         dated: false,
         text: Some(TextFilter::substring("line")),
-        ..Rows::new(vec!["api".into()], &[seen("api", &[1])])
+        ..Rows::new(vec!["api".into()], &[seen("api", &[1])], links(""))
     };
     let mut rows = rows;
     let first = entry(1, Duration::from_secs(1), "api", 1);
@@ -766,4 +766,316 @@ fn the_footer_counts_errors_and_warnings_shown() {
         }),
     );
     assert_eq!((view.count(), view.errors(), view.warnings()), (3, 1, 1));
+}
+
+/// The links of the stack view with the options of `query`.
+fn links(query: &str) -> Links {
+    Links {
+        action: "/stacks/notes/logs".into(),
+        filters: params(query).filters(),
+    }
+}
+
+fn field(key: &str, value: &str) -> FieldFilter {
+    FieldFilter {
+        key: key.into(),
+        value: value.into(),
+    }
+}
+
+#[test]
+fn a_field_filter_splits_on_the_first_unencoded_equals() {
+    assert_eq!("user.id=42".parse(), Ok(field("user.id", "42")));
+    assert_eq!(
+        "q=a=b".parse(),
+        Ok(field("q", "a=b")),
+        "the value keeps its `=`"
+    );
+    assert_eq!("a%3Db=c".parse(), Ok(field("a=b", "c")));
+    assert_eq!("a%3db=c".parse(), Ok(field("a=b", "c")));
+    assert_eq!("100%25=x".parse(), Ok(field("100%", "x")));
+    assert_eq!(
+        "50%off=x".parse(),
+        Ok(field("50%off", "x")),
+        "a stray % is kept"
+    );
+    assert_eq!("k=".parse(), Ok(field("k", "")));
+    assert_eq!(field("a=b%", "c=d").to_string(), "a%3Db%25=c=d");
+    assert!(
+        "nothing"
+            .parse::<FieldFilter>()
+            .unwrap_err()
+            .contains("`nothing` is not a field filter")
+    );
+}
+
+proptest::proptest! {
+    #[test]
+    fn field_filters_round_trip_through_their_text_and_a_link(
+        key in "[a-z.=%&+ #\u{e9}]{0,12}",
+        value in "[a-z.=%&+ #\n\u{e9}]{0,12}",
+        other in proptest::prelude::any::<String>(),
+    ) {
+        let filter = field(&key, &value);
+        proptest::prop_assert_eq!(filter.to_string().parse::<FieldFilter>(), Ok(filter.clone()));
+        let odd = field(&other, &other);
+        proptest::prop_assert_eq!(odd.to_string().parse::<FieldFilter>(), Ok(odd.clone()));
+        // Added to a link and read back from it, beside an option and another filter.
+        let href = links("level=error").with_field(&odd);
+        let href = Links { action: "/".into(), filters: params(href.split_once('?').unwrap().1).filters() }
+            .with_field(&filter);
+        let (fields, problem) = params(href.split_once('?').unwrap().1).fields();
+        proptest::prop_assert_eq!(problem, None);
+        let mut expected = vec![odd];
+        if !expected.contains(&filter) {
+            expected.push(filter);
+        }
+        proptest::prop_assert_eq!(fields, expected);
+    }
+}
+
+#[test]
+fn field_filters_repeat_narrow_the_query_and_every_link_keeps_them() {
+    let query = "field=user.id%3D42&level=error&field=span.name%3Dserve&field=user.id%3D42\
+                 &field=broken&field=&follow=off";
+    let planned = plan(query);
+    assert_eq!(
+        planned.query.fields,
+        [
+            ("user.id".to_owned(), "42".to_owned()),
+            ("span.name".to_owned(), "serve".to_owned()),
+        ],
+        "each once, in order"
+    );
+    assert!(
+        planned
+            .problem
+            .as_deref()
+            .unwrap()
+            .contains("`broken` is not a field filter")
+    );
+    assert!(!planned.counts_unleveled(), "a field filter scans");
+    let view = view(LogScope::Stack("notes".into()), query, Ok(Read::default()));
+    let fields = "field=user.id%3D42&field=span.name%3Dserve";
+    assert_eq!(
+        view.chips[0].href,
+        format!("/stacks/notes/logs?level=error&{fields}&follow=off")
+    );
+    // The form keeps them as hidden fields.
+    assert_eq!(
+        view.keep,
+        [
+            ("level", "error".to_owned()),
+            ("field", "user.id=42".to_owned()),
+            ("field", "span.name=serve".to_owned()),
+            ("follow", "off".to_owned()),
+        ]
+    );
+    // A chip per filter, which removes that one.
+    let chips: Vec<_> = view
+        .fields
+        .iter()
+        .map(|c| (c.label.as_str(), c.remove.as_str()))
+        .collect();
+    assert_eq!(
+        chips,
+        [
+            (
+                "user.id=42",
+                "/stacks/notes/logs?level=error&field=span.name%3Dserve&follow=off"
+            ),
+            (
+                "span.name=serve",
+                "/stacks/notes/logs?level=error&field=user.id%3D42&follow=off"
+            ),
+        ]
+    );
+    // Empty, the page names them and clears them with the other filters.
+    let (active, clear) = view.cleared.unwrap();
+    assert_eq!(
+        active,
+        "level error and field user.id=42 and field span.name=serve"
+    );
+    assert_eq!(clear, "/stacks/notes/logs?follow=off");
+    // The follow stream applies them too.
+    let view = super::LogsView::new(
+        mount(LogScope::Stack("notes".into())),
+        &params("field=k%3Dv"),
+        noon(),
+        plan("field=k%3Dv"),
+        read_of(&[1], 1, false),
+    );
+    assert_eq!(
+        view.stream(),
+        Some("/stacks/notes/logs/stream?field=k%3Dv&from=1")
+    );
+}
+
+#[test]
+fn a_record_with_fields_opens_on_them_flattened_and_linked() {
+    let mut json = entry(1, Duration::from_secs(60), "api", 2);
+    json.record.level = Some(Level::Info);
+    json.record.stream = Stream::Stderr;
+    json.record.fields = Some(
+        r#"{"target":"api::serve","span":{"name":"serve"},"spans":[{"id":7}],"a=b":"x y"}"#.into(),
+    );
+    let mut empty = entry(2, Duration::from_secs(50), "api", 2);
+    empty.record.fields = Some("{}".into());
+    let mut raw = entry(3, Duration::from_secs(40), "api", 2);
+    raw.record.fields = Some("{\"cut".into());
+    let mut marker = entry(4, Duration::from_secs(30), "api", 2);
+    marker.record.marker = true;
+    marker.record.fields = Some(r#"{"lost":3}"#.into());
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "level=info&follow=off&before=1.1",
+        Ok(Read {
+            page: LogPage {
+                entries: vec![json, empty, raw, marker, entry(5, Duration::ZERO, "api", 2)],
+                ..LogPage::default()
+            },
+            ..Read::default()
+        }),
+    );
+    let row = &view.rows[0];
+    assert_eq!(row.target.as_deref(), Some("api::serve"));
+    let detail = row.detail.as_ref().expect("it has fields");
+    assert_eq!(detail.stream, Stream::Stderr);
+    assert_eq!(
+        detail.generation,
+        Some(2),
+        "named even when the row does not"
+    );
+    assert!(!detail.open);
+    let fields: Vec<_> = detail
+        .fields
+        .iter()
+        .map(|f| (f.key.as_str(), f.value.as_str(), f.href.as_str()))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            (
+                "a=b",
+                "x y",
+                "/stacks/notes/logs?level=info&field=a%253Db%3Dx+y&follow=off"
+            ),
+            (
+                "span.name",
+                "serve",
+                "/stacks/notes/logs?level=info&field=span.name%3Dserve&follow=off"
+            ),
+            (
+                "spans.0.id",
+                "7",
+                "/stacks/notes/logs?level=info&field=spans.0.id%3D7&follow=off"
+            ),
+            (
+                "target",
+                "api::serve",
+                "/stacks/notes/logs?level=info&field=target%3Dapi%3A%3Aserve&follow=off"
+            ),
+        ]
+    );
+    assert!(view.rows[1].detail.is_none(), "no fields, no expander");
+    let raw = view.rows[2].detail.as_ref().unwrap();
+    assert_eq!(raw.raw.as_deref(), Some("{\"cut"));
+    assert!(raw.fields.is_empty());
+    assert!(view.rows[3].detail.is_none(), "a notice does not open");
+    assert!(view.rows[4].detail.is_none());
+    assert_eq!(view.rows[4].target, None);
+}
+
+#[test]
+fn grep_in_the_fields_opens_the_record_and_marks_the_value() {
+    let mut json = entry(1, Duration::from_secs(60), "api", 1);
+    json.record.fields = Some(r#"{"user":{"id":"u-42"},"path":"/x"}"#.into());
+    let mut message_only = entry(2, Duration::from_secs(50), "api", 1);
+    message_only.record.message = "user u-42 logged in".into();
+    message_only.record.fields = Some(r#"{"path":"/x"}"#.into());
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "q=U-4",
+        Ok(Read {
+            page: LogPage {
+                entries: vec![json, message_only],
+                ..LogPage::default()
+            },
+            ..Read::default()
+        }),
+    );
+    let detail = view.rows[0].detail.as_ref().unwrap();
+    assert!(detail.open);
+    let user = detail.fields.iter().find(|f| f.key == "user.id").unwrap();
+    assert_eq!(
+        user.spans()
+            .into_iter()
+            .map(|s| (s.text, s.mark))
+            .collect::<Vec<_>>(),
+        [("u-4", true), ("2", false)]
+    );
+    assert!(
+        !view.rows[1].detail.as_ref().unwrap().open,
+        "matched in the message"
+    );
+}
+
+#[test]
+fn opened_records_render_escaped_with_no_inline_style() {
+    let mut json = entry(1, Duration::from_secs(60), "api", 1);
+    json.record.fields =
+        Some(r#"{"target":"<b>t</b>","<k>":"<script>\"x\"&amp;</script>","n":"a\nb"}"#.into());
+    json.record.cut = true;
+    let mut raw = entry(2, Duration::from_secs(50), "api", 1);
+    raw.record.fields = Some("<i>not json".into());
+    let rows = Rows {
+        text: Some(TextFilter::substring("\"")),
+        ..Rows::new(vec!["api".into()], &[seen("api", &[1])], links("q=%22"))
+    };
+    let html = LogRecords {
+        rows: vec![
+            rows.row(&json),
+            rows.row(&raw),
+            rows.row(&entry(3, Duration::ZERO, "api", 1)),
+        ],
+        stack_column: false,
+        notice: None,
+    }
+    .render()
+    .unwrap();
+    assert!(!html.contains("<script>"), "{html}");
+    assert!(
+        !html.contains("<k>") && !html.contains("<b>") && !html.contains("<i>"),
+        "{html}"
+    );
+    assert!(!html.contains("style="), "{html}");
+    assert_eq!(html.matches("<details").count(), 2, "{html}");
+    assert!(
+        html.contains(r#"<span class="log-target">&#60;b&#62;t&#60;/b&#62;</span> line 1"#),
+        "{html}"
+    );
+    assert!(html.contains("<dt>&#60;k&#62;</dt>"), "{html}");
+    assert!(
+        html.contains(
+            r#"href="/stacks/notes/logs?q=%22&#38;field=%3Ck%3E%3D%3Cscript%3E%22x%22%26amp%3B%3C%2Fscript%3E""#
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            "&#60;script&#62;<mark>&#34;</mark>x<mark>&#34;</mark>&#38;amp;&#60;/script&#62;"
+        ),
+        "{html}"
+    );
+    assert!(html.contains("<dd><a href=\"/stacks/notes/logs?q=%22&#38;field=n%3Da%0Ab\" title=\"Only records with this value\">a\nb</a></dd>"), "{html}");
+    assert!(
+        html.contains(" · stdout · generation 1 · cut at the line length cap</p>"),
+        "{html}"
+    );
+    assert!(html.contains("&#60;i&#62;not json</p>"), "{html}");
+    // The record without fields is a plain row.
+    assert!(
+        html.contains(r#"<span class="log-msg">line 3</span></li>"#),
+        "{html}"
+    );
 }

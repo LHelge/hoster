@@ -1,16 +1,17 @@
 ---
 id: qs4
 title: "Stack logs: structured fields and filtering by a field"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T13:26:21.008380610Z"
-updated: "2026-11-12T13:26:21.008380610Z"
+updated: "2026-11-13T09:33:56.984137999Z"
 tags:
   - web
   - observability
 depends_on:
   - yn7
 parent: psq
+attempts: 1
 ---
 
 ## Summary
@@ -45,4 +46,6 @@ A record that came from a JSON line carries its remaining keys as fields (ADR-00
 
 ## References
 - ADR-0067 (§3, §4, §8), ADR-0054
-- `src/web/stacks/logs.rs`, `docs/design/StackLogs.dc.html`
+- `src/web/logs.rs` (the shared view: `LogParams`, `Links`, `Rows`), `src/web/logs/tests.rs`, `templates/log_record.html`, `templates/logs_view.html`
+- `src/store/logs/types.rs` (`LogRecord::flat_fields`), `src/store/logs/query.rs` (`LogQuery::fields`, already in the scan)
+- `src/web/stacks/logs.rs` (the stack mount), `src/web/stacks/tests.rs` (`stored_logs` handler tests), `docs/design/StackLogs.dc.html`

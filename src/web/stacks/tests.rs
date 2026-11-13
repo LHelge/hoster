@@ -2870,7 +2870,14 @@ mod stored_logs {
         html.split(r#"<span class="log-msg">"#)
             .skip(1)
             .map(|rest| {
-                let text = rest.split("</span></li>").next().unwrap();
+                // A row ends with its item, or with the summary of a record with fields.
+                let text = rest
+                    .split("</span></li>")
+                    .next()
+                    .unwrap()
+                    .split("</span></summary>")
+                    .next()
+                    .unwrap();
                 text.replace(r#"<span class="visually-hidden">stderr: </span>"#, "")
             })
             .collect()
@@ -3139,6 +3146,105 @@ mod stored_logs {
     }
 
     #[tokio::test]
+    async fn records_with_fields_open_on_them_and_a_value_filters_the_tab() {
+        let app = TestApp::new().await;
+        let browser = app.sign_in().await;
+        let mut first = record(240, "api", Some(1), "GET /notes");
+        first.level = Some(Level::Info);
+        first.fields = Some(
+            r#"{"target":"notes::http","span":{"request_id":"r-1"},"<odd key>":"<b>&</b>"}"#.into(),
+        );
+        let mut second = record(180, "api", Some(1), "query took 3ms");
+        second.level = Some(Level::Debug);
+        second.fields = Some(r#"{"target":"notes::db","span":{"request_id":"r-1"}}"#.into());
+        let mut other = record(120, "api", Some(1), "GET /other");
+        other.fields = Some(r#"{"target":"notes::http","span":{"request_id":"r-2"}}"#.into());
+        seed(
+            &app,
+            vec![
+                first,
+                second,
+                other,
+                record(60, "web", Some(1), "plain text"),
+            ],
+        )
+        .await;
+        let get = |uri: &'static str| {
+            let app = &app;
+            let cookie = browser.cookie.clone();
+            async move {
+                let response = app.get(uri, Some(&cookie)).await;
+                assert_eq!(response.status(), StatusCode::OK, "{uri}");
+                body(response).await
+            }
+        };
+
+        let html = get("/stacks/notes/logs").await;
+        assert_eq!(html.matches("<details>").count(), 3, "{html}");
+        // The target is in the row; the text line has no expander.
+        assert!(
+            html.contains(r#"<span class="log-msg"><span class="log-target">notes::http</span> GET /notes</span></summary>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="log-msg">plain text</span></li>"#),
+            "{html}"
+        );
+        // Keys and values escaped, in the text and in the links.
+        assert!(
+            html.contains(r#"<dt>&#60;odd key&#62;</dt><dd><a href="/stacks/notes/logs?field=%3Codd+key%3E%3D%3Cb%3E%26%3C%2Fb%3E" title="Only records with this value">&#60;b&#62;&#38;&#60;/b&#62;</a></dd>"#),
+            "{html}"
+        );
+        assert!(!html.contains("<b>"), "{html}");
+        assert!(!html.contains("style="), "{html}");
+        let link = r#"href="/stacks/notes/logs?field=span.request_id%3Dr-1""#;
+        assert!(html.contains(link), "{html}");
+
+        // Following a value: every line of that request, and a chip that removes the filter.
+        let html = get("/stacks/notes/logs?field=span.request_id%3Dr-1").await;
+        assert_eq!(
+            messages(&html),
+            [
+                r#"<span class="log-target">notes::http</span> GET /notes"#,
+                r#"<span class="log-target">notes::db</span> query took 3ms"#,
+            ],
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a class="log-chip log-field-chip" href="/stacks/notes/logs" title="Remove this filter">span.request_id=r-1 <span aria-hidden="true">×</span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="hidden" name="field" value="span.request_id=r-1">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"hx-sse:connect="/stacks/notes/logs/stream?field=span.request_id%3Dr-1&#38;from=2""#),
+            "{html}"
+        );
+        // Several filters must all match; a level combines with them.
+        let html =
+            get("/stacks/notes/logs?field=span.request_id%3Dr-1&field=target%3Dnotes%3A%3Adb")
+                .await;
+        assert_eq!(messages(&html).len(), 1, "{html}");
+        assert_eq!(
+            messages(&get("/stacks/notes/logs?field=target%3Dnotes%3A%3Ahttp&level=info").await)
+                .len(),
+            1
+        );
+        // No match: the empty state names it.
+        let html = get("/stacks/notes/logs?field=span.request_id%3Dr-9").await;
+        assert!(
+            html.contains(r#"No records match field span.request_id=r-9 in this range. <a href="/stacks/notes/logs">clear filters</a>"#),
+            "{html}"
+        );
+        // Grep in the fields opens the record and marks the value.
+        let html = get("/stacks/notes/logs?q=r-2").await;
+        assert!(html.contains("<details open>"), "{html}");
+        assert!(html.contains("<mark>r-2</mark></a></dd>"), "{html}");
+    }
+
+    #[tokio::test]
     async fn a_young_store_says_from_when_its_data_starts() {
         let app = TestApp::new().await;
         let browser = app.sign_in().await;
@@ -3400,6 +3506,33 @@ mod stored_logs {
             assert_eq!(
                 rows(&text),
                 ["<mark>boom</mark>: disk full", "<mark>BOOM</mark> again"]
+            );
+        }
+
+        #[tokio::test]
+        async fn the_stream_applies_field_filters() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut stream = open(&app, &browser, "field=span.id%3D7&from=0").await;
+            let mut wanted = record(2, "api", Some(1), "wanted");
+            wanted.fields = Some(r#"{"span":{"id":7}}"#.into());
+            let mut other = record(1, "api", Some(1), "other span");
+            other.fields = Some(r#"{"span":{"id":8}}"#.into());
+            commit(
+                &app,
+                vec![wanted, other, record(0, "api", Some(1), "no fields")],
+            )
+            .await;
+            let mut last = record(0, "api", Some(1), "wanted again");
+            last.fields = Some(r#"{"span":{"id":7}}"#.into());
+            commit(&app, vec![last]).await;
+            let mut text = String::new();
+            read_until(&mut stream, &mut text, "id: 4").await;
+            assert_eq!(rows(&text), ["wanted", "wanted again"]);
+            // Values in streamed rows link the page, not the stream.
+            assert!(
+                text.contains(r#"href="/stacks/notes/logs?field=span.id%3D7""#),
+                "{text}"
             );
         }
 
