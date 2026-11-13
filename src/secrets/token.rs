@@ -15,11 +15,6 @@
 //! stack and service exist now; only then does it hand out the [`ServiceIdentity`] that decides
 //! where data is stored.
 
-#![allow(
-    dead_code,
-    reason = "consumed by the OTLP receiver and container create (tasks m7x, 5up)"
-)]
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -71,6 +66,7 @@ impl From<&SecretKey> for TokenKey {
 
 impl TokenKey {
     /// The token of `service` in `stack`.
+    #[allow(dead_code, reason = "injected into containers by task 5up")]
     pub fn token(&self, stack: &Name, service: &Name) -> ServiceToken {
         let mac = self.mac(stack, service).finalize().into_bytes().into();
         ServiceToken {
@@ -119,7 +115,7 @@ impl ServiceToken {
     pub fn verify(
         self,
         key: &TokenKey,
-        known: &impl KnownServices,
+        known: &(impl KnownServices + ?Sized),
     ) -> Result<ServiceIdentity, TokenError> {
         key.mac(&self.stack, &self.service)
             .verify_slice(&self.mac)

@@ -38,9 +38,10 @@ mod token;
 
 #[allow(
     unused_imports,
-    reason = "consumed by the OTLP receiver and container create (tasks m7x, 5up)"
+    reason = "named by tests only; the OTLP receiver handles it through `verify`'s result"
 )]
-pub use token::{KnownServices, ServiceIdentity, ServiceToken, TokenError, TokenKey};
+pub use token::TokenError;
+pub use token::{KnownServices, ServiceIdentity, ServiceToken, TokenKey};
 
 /// The systemd credential that supplies the key instead of the key file (ADR-0029).
 pub const KEY_CREDENTIAL: &str = "secret_key";
@@ -366,7 +367,7 @@ impl SecretStore {
     /// The key of the services' OTLP tokens (ADR-0069 §4), derived from the store's key.
     #[allow(
         dead_code,
-        reason = "consumed by the OTLP receiver and container create"
+        reason = "wired into the OTLP receiver and container create by task 5up"
     )]
     pub fn token_key(&self) -> &TokenKey {
         &self.tokens
