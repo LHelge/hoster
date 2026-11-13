@@ -19,15 +19,22 @@
 //!    waits for the store. What the sink drops (its channel is full) and spans with invalid ids
 //!    are answered as OTLP `partial_success` with the rejected count, so SDKs do not retry them.
 //!
+//! Each service is held to its [`OtlpLimits`] (ADR-0069 §7): once its token is verified, a
+//! request beyond [`OtlpLimits::MAX_IN_FLIGHT`] of its own is `429` with `Retry-After`, and
+//! what its token buckets have no room for is dropped between the mapping and the sink,
+//! reported in `partial_success` and marked by one record per gap.
+//!
 //! Errors carry a `google.rpc.Status` body, as the OTLP/HTTP specification asks, with a fixed
 //! message that never echoes the request. `/v1/metrics` is `404` (ADR-0069 §2).
 
+mod limits;
 mod map;
 #[cfg(test)]
 mod tests;
 
 use std::io::Read as _;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -43,10 +50,14 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use prost::Message;
+use tokio::time::Instant;
 
+use self::limits::{Busy, InFlight, Signal};
+pub use self::limits::{Capped, OtlpLimits};
 use self::map::{InvalidSpan, Origin};
 use crate::logs::LogSink;
 use crate::secrets::{KnownServices, ServiceIdentity, ServiceToken, TokenKey};
+use crate::store::{LogRecord, MicroTimestamp};
 
 /// The OTLP receiver's collaborators. Cheap to clone.
 #[derive(Clone)]
@@ -59,6 +70,8 @@ struct Inner {
     known: Arc<dyn KnownServices + Send + Sync>,
     /// Where records and spans go.
     sink: LogSink,
+    /// The per-service rate and concurrency caps.
+    limits: OtlpLimits,
 }
 
 impl OtlpReceiver {
@@ -69,10 +82,20 @@ impl OtlpReceiver {
     /// The only content type accepted: OTLP/HTTP's binary protobuf encoding.
     const PROTOBUF: &str = "application/x-protobuf";
 
-    /// A receiver verifying tokens with `key` against the services `known` has, and offering
-    /// what it receives to `sink`.
-    pub fn new(key: TokenKey, known: Arc<dyn KnownServices + Send + Sync>, sink: LogSink) -> Self {
-        Self(Arc::new(Inner { key, known, sink }))
+    /// A receiver verifying tokens with `key` against the services `known` has, holding each
+    /// service to `limits`, and offering what it receives to `sink`.
+    pub fn new(
+        key: TokenKey,
+        known: Arc<dyn KnownServices + Send + Sync>,
+        sink: LogSink,
+        limits: OtlpLimits,
+    ) -> Self {
+        Self(Arc::new(Inner {
+            key,
+            known,
+            sink,
+            limits,
+        }))
     }
 
     /// The receiver's routes: `POST /v1/logs`, `POST /v1/traces`, and `/v1/metrics` as `404`.
@@ -87,33 +110,50 @@ impl OtlpReceiver {
 
     /// `POST /v1/logs`.
     async fn logs(State(receiver): State<Self>, request: Request) -> Response {
-        let (identity, export) = match receiver.accept::<ExportLogsServiceRequest>(request).await {
+        let accepted = match receiver.accept::<ExportLogsServiceRequest>(request).await {
             Ok(accepted) => accepted,
             Err(refusal) => return refusal.into_response(),
         };
-        let origin = Origin::from(identity);
-        let delivery = receiver.deliver(origin.records(export).map(Ok), LogSink::try_record);
+        let received = SystemTime::now();
+        let origin = Origin::received_at(accepted.identity.clone(), MicroTimestamp::from(received));
+        let delivery = receiver.deliver(
+            &accepted.identity,
+            Signal::Records,
+            received,
+            origin.records(accepted.export).map(Ok),
+            LogSink::try_record,
+        );
         Protobuf(ExportLogsServiceResponse::from(delivery)).into_response()
     }
 
     /// `POST /v1/traces`.
     async fn traces(State(receiver): State<Self>, request: Request) -> Response {
-        let (identity, export) = match receiver.accept::<ExportTraceServiceRequest>(request).await {
+        let accepted = match receiver.accept::<ExportTraceServiceRequest>(request).await {
             Ok(accepted) => accepted,
             Err(refusal) => return refusal.into_response(),
         };
-        let origin = Origin::from(identity);
-        let delivery = receiver.deliver(origin.spans(export), LogSink::try_span);
+        let received = SystemTime::now();
+        let origin = Origin::received_at(accepted.identity.clone(), MicroTimestamp::from(received));
+        let delivery = receiver.deliver(
+            &accepted.identity,
+            Signal::Spans,
+            received,
+            origin.spans(accepted.export),
+            LogSink::try_span,
+        );
         Protobuf(ExportTraceServiceResponse::from(delivery)).into_response()
     }
 
-    /// Authenticates the request, then reads and decodes its body as `M`. The token is checked
-    /// before a byte of the body is read.
-    async fn accept<M: Message + Default>(
-        &self,
-        request: Request,
-    ) -> Result<(ServiceIdentity, M), Refusal> {
+    /// Authenticates the request, counts it against its service's concurrency cap, then reads
+    /// and decodes its body as `M`. The token is checked, and the cap, before a byte of the
+    /// body is read.
+    async fn accept<M: Message + Default>(&self, request: Request) -> Result<Accepted<M>, Refusal> {
         let identity = self.authenticate(request.headers())?;
+        let in_flight = self
+            .0
+            .limits
+            .enter(&identity, Instant::now())
+            .map_err(|Busy| Refusal::Busy)?;
         let encoding = Encoding::try_from(request.headers())?;
         let body = Bytes::from_request(request, &())
             .await
@@ -126,7 +166,11 @@ impl OtlpReceiver {
             })?;
         let body = encoding.decode(body)?;
         let export = M::decode(body).map_err(|_| Refusal::Malformed)?;
-        Ok((identity, export))
+        Ok(Accepted {
+            identity,
+            export,
+            _in_flight: in_flight,
+        })
     }
 
     /// The service the bearer token names, if it verifies. Why it did not is logged at debug
@@ -149,27 +193,49 @@ impl OtlpReceiver {
             })
     }
 
-    /// Offers each mapped item to the sink with `offer`, counting what was rejected: items
-    /// that did not map and items the sink dropped. A per-service cap goes here, between the
-    /// mapping and the sink, so what it drops is reported the same way.
+    /// Offers the mapped items of `signal` that `identity` sent, received at `received`, to
+    /// the sink with `offer`, counting what was rejected: items that did not map, items over
+    /// the service's rate cap, and items the sink dropped. The markers of gaps that ended, the
+    /// service's own and those a sweep ended, go to the sink first.
     fn deliver<T>(
         &self,
+        identity: &ServiceIdentity,
+        signal: Signal,
+        received: SystemTime,
         items: impl Iterator<Item = Result<T, InvalidSpan>>,
         offer: fn(&LogSink, T) -> bool,
     ) -> Delivery {
-        let mut delivery = Delivery::default();
-        for item in items {
-            match item {
-                Ok(item) => {
-                    if !offer(&self.0.sink, item) {
-                        delivery.dropped += 1;
-                    }
-                }
-                Err(_) => delivery.invalid += 1,
+        let mut delivery = Delivery {
+            per_second: signal.per_second(),
+            ..Delivery::default()
+        };
+        let items: Vec<T> = items
+            .filter_map(|item| item.map_err(|_| delivery.invalid += 1).ok())
+            .collect();
+        let now = Instant::now();
+        let limits = &self.0.limits;
+        let mut markers = limits.sweep(now, &*self.0.known);
+        let admission = limits.admit(identity, signal, items.len(), now, received);
+        markers.extend(admission.markers);
+        for marker in markers {
+            self.0.sink.try_record(LogRecord::from(marker));
+        }
+        delivery.capped = i64::try_from(items.len() - admission.kept).unwrap_or(i64::MAX);
+        for item in items.into_iter().take(admission.kept) {
+            if !offer(&self.0.sink, item) {
+                delivery.dropped += 1;
             }
         }
         delivery
     }
+}
+
+/// A request that passed the checks before delivery, counted against its service's
+/// concurrency cap until it is dropped.
+struct Accepted<M> {
+    identity: ServiceIdentity,
+    export: M,
+    _in_flight: InFlight,
 }
 
 /// How the request body is encoded, from `Content-Type` and `Content-Encoding`.
@@ -235,16 +301,26 @@ struct Delivery {
     dropped: i64,
     /// Items that could not be mapped: spans without a valid trace or span id.
     invalid: i64,
+    /// Items over the service's rate cap ([`OtlpLimits`]).
+    capped: i64,
+    /// That cap, per second.
+    per_second: u64,
 }
 
 impl Delivery {
     fn rejected(self) -> i64 {
-        self.dropped + self.invalid
+        self.dropped + self.invalid + self.capped
     }
 
     /// The partial success's message: what was rejected and why, without the payload.
     fn message(self) -> String {
         let mut reasons = Vec::new();
+        if self.capped > 0 {
+            reasons.push(format!(
+                "{} dropped: over this service's rate cap of {} a second",
+                self.capped, self.per_second
+            ));
+        }
         if self.dropped > 0 {
             reasons.push(format!("{} dropped: the log store is busy", self.dropped));
         }
@@ -306,6 +382,8 @@ enum Refusal {
     Malformed,
     /// A signal hoster does not receive (metrics).
     NotFound,
+    /// The service has [`OtlpLimits::MAX_IN_FLIGHT`] requests being served already.
+    Busy,
 }
 
 impl Refusal {
@@ -316,6 +394,7 @@ impl Refusal {
             Refusal::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Refusal::Malformed => StatusCode::BAD_REQUEST,
             Refusal::NotFound => StatusCode::NOT_FOUND,
+            Refusal::Busy => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 }
@@ -338,6 +417,10 @@ impl From<Refusal> for RpcStatus {
                 RpcStatus::UNIMPLEMENTED,
                 "only logs and traces are received",
             ),
+            Refusal::Busy => (
+                RpcStatus::UNAVAILABLE,
+                "too many exports from this service at once; retry later",
+            ),
         };
         Self {
             code,
@@ -347,8 +430,16 @@ impl From<Refusal> for RpcStatus {
 }
 
 impl IntoResponse for Refusal {
+    /// A `429` says when to retry, as OTLP/HTTP asks; SDKs honour `Retry-After`.
     fn into_response(self) -> Response {
-        (self.status(), Protobuf(RpcStatus::from(self))).into_response()
+        let mut response = (self.status(), Protobuf(RpcStatus::from(self))).into_response();
+        if self == Refusal::Busy {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                HeaderValue::from(OtlpLimits::RETRY_AFTER.as_secs()),
+            );
+        }
+        response
     }
 }
 
@@ -365,5 +456,6 @@ impl RpcStatus {
     const INVALID_ARGUMENT: i32 = 3;
     const RESOURCE_EXHAUSTED: i32 = 8;
     const UNIMPLEMENTED: i32 = 12;
+    const UNAVAILABLE: i32 = 14;
     const UNAUTHENTICATED: i32 = 16;
 }

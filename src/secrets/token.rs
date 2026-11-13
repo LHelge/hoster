@@ -182,7 +182,7 @@ impl fmt::Debug for ServiceToken {
 
 /// The stack and service a verified token names: where the receiver stores what it sent,
 /// whatever the payload claims.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ServiceIdentity {
     pub stack: Name,
     pub service: Name,

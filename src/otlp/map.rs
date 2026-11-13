@@ -7,7 +7,7 @@
 //! hoster received the export becomes the time received: retention deletes by these times, so
 //! a time in the future would keep a row past it.
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -31,13 +31,6 @@ pub(super) struct Origin {
     stack: String,
     service: String,
     received: MicroTimestamp,
-}
-
-impl From<ServiceIdentity> for Origin {
-    /// Received now.
-    fn from(identity: ServiceIdentity) -> Self {
-        Self::received_at(identity, MicroTimestamp::from(SystemTime::now()))
-    }
 }
 
 impl Origin {
