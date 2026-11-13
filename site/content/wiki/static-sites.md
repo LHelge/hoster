@@ -65,11 +65,12 @@ with two changes: it runs on pushes to `main` instead of `v*` tags, and it build
 building the image. The build step is aphid's GitHub Action:
 
 ```yaml
-- uses: LHelge/aphid@v0.4.1
+- uses: LHelge/aphid@v0.5.0
   with:
-    version: v0.4.1     # the aphid binary; defaults to the latest release
+    version: v0.5.0     # the aphid binary; defaults to the latest release
     config: aphid.toml
     output: dist
+    precompress: true   # also write .br and .gz siblings for aphid-server
 ```
 
 Any other generator works the same way, as long as its output ends up in `dist/` before
@@ -98,9 +99,10 @@ log and a failed deploy to fail the run.
   either. Route both hosts to the service, or run a second small service for `www` that only
   redirects (an nginx `server` block returning `301 https://example.com$request_uri`) and route
   `www.example.com` to it.
-- **Compression:** neither aphid-server nor hoster's proxy compresses responses. For a
-  documentation-sized site this costs little; if it matters, use a server that does (nginx's
-  `gzip on`).
+- **Compression:** hoster's proxy does not compress, so the server must. aphid-server sends text
+  responses with brotli or gzip, as the client's `Accept-Encoding` prefers. With
+  `precompress: true` the build writes `.br` and `.gz` siblings, which are sent as they are.
+  Anything without a sibling is compressed on every request. With nginx, set `gzip on`.
 - **Under a prefix:** the prefix is preserved by default ([ADR-0010](https://github.com/LHelge/hoster/blob/main/docs/adr/0010-prefix-preservation-and-forwarded-headers.md)), so a site routed at
   `/docs` must be built with that base path (aphid's, Hugo's or Zola's base URL setting).
   Alternatively, set `strip_prefix = true` on the route, but links in the site must then still
