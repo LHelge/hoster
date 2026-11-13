@@ -5,9 +5,10 @@
 //! Every option is a GET parameter ([`TraceParams`]): `stack`, `since` (a preset from 5m to
 //! 24h, or anything the Logs tab takes: spans are kept 3 days), `q` (grep on span names; no
 //! query language, OQ-43), `sort`, `status`, `slower` (the root's minimum duration), `page`
-//! (from 1), `trace` and `span` (a span of that trace, selected in its waterfall). A link changes
-//! some and keeps the rest; a new filter starts at the first page, picking a trace keeps the page
-//! and drops the span.
+//! (from 1), `trace`, and of that trace's waterfall `span` (the span selected), `collapsed` (the
+//! spans collapsed, a [`Collapse`]) and `crit` (`on` highlights the critical path where CSS
+//! cannot). A link changes some and keeps the rest; a new filter starts at the first page,
+//! picking a trace keeps the page and drops the span and the collapsed spans.
 //!
 //! Services are coloured by class from the categorical palette (`docs/design/README.md`):
 //! hoster's proxy its own, the others in turn by name over everything the page shows, so a
@@ -26,12 +27,13 @@ use super::super::logs::{LogScope, LogsView, StackOption};
 use super::super::ui::{Count, Meter, Tone};
 use crate::stats::Elapsed;
 use crate::store::{
-    LogStore, Retention, Span, SpanId, StoreError, Timestamp, Trace, TraceId, TracePage,
+    Collapse, LogStore, Retention, Span, SpanId, StoreError, Timestamp, Trace, TraceId, TracePage,
     TracePoints, TraceQuery, TraceSort, TraceStatus, TraceSummary,
 };
 
 pub use self::scatter::Scatter;
 pub use self::waterfall::Waterfall;
+use self::waterfall::WaterfallState;
 
 mod scatter;
 mod waterfall;
@@ -59,6 +61,10 @@ pub struct TraceParams {
     trace: Option<String>,
     /// The span of the trace picked that is selected in its waterfall.
     span: Option<String>,
+    /// The spans of the trace picked that are collapsed in its waterfall: a [`Collapse`].
+    collapsed: Option<String>,
+    /// `on` to highlight the critical path of the trace picked without CSS `:has()`.
+    crit: Option<String>,
 }
 
 impl From<Vec<(String, String)>> for TraceParams {
@@ -75,6 +81,8 @@ impl From<Vec<(String, String)>> for TraceParams {
                 "page" => &mut params.page,
                 "trace" => &mut params.trace,
                 "span" => &mut params.span,
+                "collapsed" => &mut params.collapsed,
+                "crit" => &mut params.crit,
                 _ => continue,
             };
             slot.get_or_insert(value);
@@ -216,6 +224,38 @@ impl TraceParams {
         }
     }
 
+    /// The spans collapsed; none when `collapsed` is not a [`Collapse`], with why.
+    fn collapse(&self) -> (Collapse, Option<String>) {
+        match Self::text(&self.collapsed).map(|c| c.parse::<Collapse>()) {
+            None => (Collapse::default(), None),
+            Some(Ok(collapse)) => (collapse, None),
+            Some(Err(err)) => (
+                Collapse::default(),
+                Some(format!(
+                    "{err}: collapse `{}` or span ids of 16 hexadecimal digits; nothing is collapsed.",
+                    Collapse::SERVICES
+                )),
+            ),
+        }
+    }
+
+    /// Whether `crit=on` asks for the critical path highlighted.
+    fn critical(&self) -> bool {
+        Self::text(&self.crit) == Some(Self::ON)
+    }
+
+    /// The value of `crit` that turns the highlight on.
+    const ON: &str = "on";
+
+    /// What the URL asks of the waterfall of the trace picked.
+    fn waterfall(&self) -> WaterfallState {
+        WaterfallState {
+            selected: self.span().0,
+            collapse: self.collapse().0,
+            critical: self.critical(),
+        }
+    }
+
     /// The options in effect as they are written, in a fixed order, for links: those given
     /// and valid, without the page.
     fn pairs(&self) -> Vec<(&'static str, String)> {
@@ -237,6 +277,10 @@ impl TraceParams {
         keep("trace", trace.map(|id| id.to_string()));
         let span = trace.and(self.span().0);
         keep("span", span.map(|id| id.to_string()));
+        let collapse = trace.map(|_| self.collapse().0).filter(|c| !c.is_empty());
+        keep("collapsed", collapse.map(|c| c.to_string()));
+        let critical = trace.is_some() && self.critical();
+        keep("crit", critical.then(|| Self::ON.to_owned()));
         pairs
     }
 }
@@ -278,9 +322,10 @@ impl Links {
         Self::href(self.action, pairs)
     }
 
-    /// The same list and page with `trace` picked, or none, and no span selected.
+    /// The same list and page with `trace` picked, or none, and no span selected or collapsed.
     fn picking(&self, trace: Option<TraceId>) -> String {
         self.with("span", None)
+            .with("collapsed", None)
             .with("trace", trace.map(|id| id.to_string()))
             .at_page(self.page)
     }
@@ -289,6 +334,18 @@ impl Links {
     fn selecting(&self, span: Option<SpanId>) -> String {
         self.with("span", span.map(|id| id.to_string()))
             .at_page(self.page)
+    }
+
+    /// The same list, page, trace and span with the spans of `collapse` collapsed.
+    fn collapsing(&self, collapse: &Collapse) -> String {
+        let value = (!collapse.is_empty()).then(|| collapse.to_string());
+        self.with("collapsed", value).at_page(self.page)
+    }
+
+    /// The same list, page, trace and span with the critical path highlighted or not.
+    fn highlighting(&self, critical: bool) -> String {
+        let value = critical.then(|| TraceParams::ON.to_owned());
+        self.with("crit", value).at_page(self.page)
     }
 
     /// These links with `key` set to `value` (last), or dropped.
@@ -480,6 +537,7 @@ impl TracesView {
         let (query, problem) = Self::query(params, now);
         let (picked_id, trace_problem) = params.trace();
         let span_problem = picked_id.and(params.span().1);
+        let collapse_problem = picked_id.and(params.collapse().1);
         let read = match store {
             Ok(store) => {
                 let picked = async {
@@ -499,7 +557,10 @@ impl TracesView {
             }
             Err(error) => Err(error),
         };
-        let problem = problem.or(trace_problem).or(span_problem);
+        let problem = problem
+            .or(trace_problem)
+            .or(span_problem)
+            .or(collapse_problem);
         Self::new(params, query, read, known, problem, now)
     }
 
@@ -567,7 +628,7 @@ impl TracesView {
                 &trace,
                 &palette,
                 &links,
-                params.span().0,
+                &params.waterfall(),
             ))),
             None => Picked::Missing(id),
         });

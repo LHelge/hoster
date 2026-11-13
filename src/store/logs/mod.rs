@@ -45,7 +45,7 @@ pub use query::{
     TraceSummary,
 };
 pub use retention::{Removed, Retention, Sweep, SweepReport};
-pub use trace::{Trace, TraceSpan};
+pub use trace::{Collapse, Trace, TraceSpan};
 pub use types::{
     HexId, Level, LogBatch, LogCursor, LogHead, LogRecord, MicroTimestamp, RequestId, RequestRow,
     Span, SpanId, SpanKind, SpanStatus, Stream, TraceId, UnknownLogText,

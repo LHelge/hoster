@@ -1,14 +1,18 @@
 //! One trace as the waterfall shows it (ADR-0069 §6, §9): its spans, stored and built from the
 //! proxy's request row alike, arranged as a tree in depth-first order, with what the waterfall
-//! derives from them (depth, the critical path, self time) computed here rather than in
-//! templates.
+//! derives from them (depth, the critical path, self time, which spans a [`Collapse`] hides)
+//! computed here rather than in templates.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use serde_json::json;
 
-use super::{MicroTimestamp, RequestRow, Span, SpanId, SpanKind, SpanStatus, TraceId};
+use super::{
+    MicroTimestamp, RequestRow, Span, SpanId, SpanKind, SpanStatus, TraceId, UnknownLogText,
+};
 
 impl Span {
     /// The service the proxy's two spans of a request are listed under: hoster's, as its own
@@ -261,6 +265,144 @@ impl Trace {
     pub fn critical_path(&self) -> impl Iterator<Item = &TraceSpan> {
         self.spans.iter().filter(|s| s.critical)
     }
+
+    /// The spans "collapse to services" collapses, in depth-first order: every server span
+    /// with children and a parent, i.e. where a request enters a service below the first, so
+    /// the waterfall keeps the hops between services and hides the work inside them.
+    pub fn service_entries(&self) -> impl Iterator<Item = &TraceSpan> {
+        self.spans.iter().filter(|s| {
+            s.span.kind == SpanKind::Server && s.children > 0 && s.span.parent.is_some()
+        })
+    }
+
+    /// The spans `collapse` collapses: of those with children, the service entries when it
+    /// starts from them, with its toggled spans flipped.
+    pub fn collapsed(&self, collapse: &Collapse) -> HashSet<SpanId> {
+        let mut collapsed: HashSet<SpanId> = if collapse.services {
+            self.service_entries().map(|s| s.span.span_id).collect()
+        } else {
+            HashSet::new()
+        };
+        for id in &collapse.toggled {
+            if self.span(*id).is_some_and(|s| s.children > 0) && !collapsed.remove(id) {
+                collapsed.insert(*id);
+            }
+        }
+        collapsed
+    }
+
+    /// `collapse` as this trace's links write it: only toggles of its spans with children,
+    /// each once, in depth-first order.
+    pub fn canonical(&self, collapse: &Collapse) -> Collapse {
+        let toggled = self
+            .spans
+            .iter()
+            .filter(|s| s.children > 0 && collapse.toggled.contains(&s.span.span_id))
+            .map(|s| s.span.span_id)
+            .collect();
+        Collapse {
+            services: collapse.services,
+            toggled,
+        }
+    }
+
+    /// The spans the waterfall shows with `collapsed` collapsed, in depth-first order: none
+    /// under a collapsed span. Each comes with whether it is collapsed itself.
+    pub fn shown<'a>(
+        &'a self,
+        collapsed: &'a HashSet<SpanId>,
+    ) -> impl Iterator<Item = (&'a TraceSpan, bool)> + 'a {
+        let mut skip = 0;
+        self.spans.iter().filter_map(move |span| {
+            if skip > 0 {
+                skip -= 1;
+                return None;
+            }
+            let folded = span.children > 0 && collapsed.contains(&span.span.span_id);
+            if folded {
+                skip = span.descendants;
+            }
+            Some((span, folded))
+        })
+    }
+}
+
+/// Which spans of a trace's waterfall are collapsed, as the `?collapsed=` parameter writes it:
+/// `services` when it starts from "collapse to services" ([`Trace::service_entries`]), then the
+/// ids of the spans toggled from there, comma-separated. Starting from a rule rather than
+/// listing every span keeps the URL short; [`Trace::collapsed`] resolves it against a trace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Collapse {
+    services: bool,
+    toggled: Vec<SpanId>,
+}
+
+impl Collapse {
+    /// The word for "collapse to services".
+    pub const SERVICES: &str = "services";
+
+    /// "Collapse to services", no span toggled.
+    pub fn services() -> Self {
+        Self {
+            services: true,
+            toggled: Vec::new(),
+        }
+    }
+
+    /// Nothing collapsed: "expand all".
+    pub fn is_empty(&self) -> bool {
+        !self.services && self.toggled.is_empty()
+    }
+
+    /// This with `id` toggled: collapsed if it was expanded, and the other way round.
+    pub fn toggle(&self, id: SpanId) -> Self {
+        let mut toggled = self.toggled.clone();
+        match toggled.iter().position(|t| *t == id) {
+            Some(at) => {
+                toggled.remove(at);
+            }
+            None => toggled.push(id),
+        }
+        Self {
+            services: self.services,
+            toggled,
+        }
+    }
+}
+
+impl FromStr for Collapse {
+    type Err = UnknownLogText;
+
+    /// Of a span id given twice, the first counts; empty items are skipped. At most
+    /// [`Trace::MAX_SPANS`] ids are read, as a trace has no more spans.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut collapse = Self::default();
+        for item in s.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+            if item == Self::SERVICES {
+                collapse.services = true;
+            } else {
+                let id = item.parse::<SpanId>()?;
+                if !collapse.toggled.contains(&id) && collapse.toggled.len() < Trace::MAX_SPANS {
+                    collapse.toggled.push(id);
+                }
+            }
+        }
+        Ok(collapse)
+    }
+}
+
+impl fmt::Display for Collapse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut items = self
+            .services
+            .then_some(Self::SERVICES.to_owned())
+            .into_iter()
+            .chain(self.toggled.iter().map(SpanId::to_string));
+        if let Some(first) = items.next() {
+            f.write_str(&first)?;
+        }
+        items.try_for_each(|item| write!(f, ",{item}"))
+    }
 }
 
 /// The tree of a trace's spans, computed over their indices in start order.
@@ -472,6 +614,18 @@ mod tests {
         for error in [0, 1, 2, 6, 10] {
             spans[error].status = SpanStatus::Error;
         }
+        // The mockup's kinds: the proxy's server and client spans, the app's server span, its
+        // two handlers, and the calls to redis and postgres.
+        for (at, kind) in [
+            (0, SpanKind::Server),
+            (1, SpanKind::Client),
+            (2, SpanKind::Server),
+        ] {
+            spans[at].kind = kind;
+        }
+        for client in [4, 5, 7, 8, 9, 10, 11] {
+            spans[client].kind = SpanKind::Client;
+        }
         spans
     }
 
@@ -519,6 +673,74 @@ mod tests {
             names(&trace.critical_path().cloned().collect::<Vec<_>>()),
             ["s0", "s1", "s2", "s6", "s10"]
         );
+    }
+
+    #[test]
+    fn collapse_to_services_collapses_the_server_spans_with_children_and_a_parent() {
+        let trace = Trace::new(TraceId::from([0x4b; 16]), t1(), 12);
+        // s0 is a server span without a parent; s2, the app's, is the only one below it.
+        assert_eq!(
+            names(&trace.service_entries().cloned().collect::<Vec<_>>()),
+            ["s2"]
+        );
+        let collapsed = trace.collapsed(&Collapse::services());
+        assert_eq!(collapsed, HashSet::from([id("s2")]));
+        let shown: Vec<(&str, bool)> = trace
+            .shown(&collapsed)
+            .map(|(s, folded)| (s.span.name.as_str(), folded))
+            .collect();
+        assert_eq!(shown, [("s0", false), ("s1", false), ("s2", true)]);
+        assert_eq!(of(&trace, "s2").descendants, 9, "the +N of s2");
+    }
+
+    #[test]
+    fn toggled_spans_flip_the_rule_and_hide_their_subtrees() {
+        let trace = Trace::new(TraceId::from([0x4b; 16]), t1(), 12);
+        let collapse = Collapse::default().toggle(id("s6")).toggle(id("s3"));
+        let collapsed = trace.collapsed(&collapse);
+        assert_eq!(collapsed, HashSet::from([id("s3"), id("s6")]));
+        let shown: Vec<&str> = trace
+            .shown(&collapsed)
+            .map(|(s, _)| s.span.name.as_str())
+            .collect();
+        assert_eq!(shown, ["s0", "s1", "s2", "s3", "s6"]);
+        // From the rule, s2 toggled open again and s6 collapsed under it.
+        let collapse = Collapse::services().toggle(id("s2")).toggle(id("s6"));
+        assert_eq!(
+            trace.collapsed(&collapse),
+            HashSet::from([id("s6")]),
+            "s2 is expanded"
+        );
+        // A collapsed span inside a collapsed one stays collapsed, hidden.
+        let collapse = Collapse::services().toggle(id("s6"));
+        let collapsed = trace.collapsed(&collapse);
+        assert_eq!(trace.shown(&collapsed).count(), 3);
+        // Toggling twice is no toggle; a leaf or a span of another trace collapses nothing.
+        assert!(collapse.toggle(id("s6")).toggle(id("s6")) == collapse);
+        let stray = Collapse::default().toggle(id("s4")).toggle(id("nope"));
+        assert!(trace.collapsed(&stray).is_empty());
+        assert_eq!(trace.shown(&trace.collapsed(&stray)).count(), 12);
+    }
+
+    #[test]
+    fn a_collapse_is_written_as_the_rule_and_its_toggles() {
+        let trace = Trace::new(TraceId::from([0x4b; 16]), t1(), 12);
+        let collapse = Collapse::services().toggle(id("s6")).toggle(id("s3"));
+        let text = collapse.to_string();
+        assert_eq!(text, format!("services,{},{}", id("s6"), id("s3")));
+        assert_eq!(text.parse::<Collapse>().unwrap(), collapse);
+        assert_eq!(Collapse::default().to_string(), "");
+        assert!("".parse::<Collapse>().unwrap().is_empty());
+        assert!(!Collapse::services().is_empty());
+        // Canonical: the spans with children, each once, in depth-first order.
+        let messy: Collapse = format!("{0},,{1}, {0},{2}", id("s6"), id("s4"), id("s3"))
+            .parse()
+            .unwrap();
+        assert_eq!(
+            trace.canonical(&messy).to_string(),
+            format!("{},{}", id("s3"), id("s6"))
+        );
+        assert!("services,nope".parse::<Collapse>().is_err());
     }
 
     #[test]

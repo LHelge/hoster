@@ -1,16 +1,17 @@
 ---
 id: zg4
 title: "Trace waterfall: collapse, critical path and expand controls without script"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T19:37:41.658293029Z"
-updated: "2026-11-12T19:37:41.658293029Z"
+updated: "2026-11-13T22:41:26.370828855Z"
 tags:
   - web
   - observability
 depends_on:
   - aum
 parent: qnh
+attempts: 1
 ---
 
 ## Summary

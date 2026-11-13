@@ -137,8 +137,17 @@
       <li class="{{ entry.service.class }}"><span class="wf-swatch" aria-hidden="true"></span>{{ entry.service.name }} <span class="muted">{{ entry.spans }}</span></li>
       {%- endfor %}
     </ul>
+    {#- The controls are links that work without script. The critical-path switch is a
+        checkbox CSS follows with :has(), and a ?crit=on link where :has() is missing; CSS shows
+        one of the two. #}
+    <div class="wf-controls">
+      <label class="switch wf-crit-box"><input type="checkbox" role="switch" class="wf-crit-input"{% if w.critical %} checked{% endif %}><span class="switch-track" aria-hidden="true"></span>critical path</label>
+      <a class="switch wf-crit-link" role="switch" aria-checked="{{ w.critical }}" href="{{ w.critical_href }}#trace-title"><span class="switch-track" aria-hidden="true"></span>critical path</a>
+      <a class="button wf-control" href="{{ w.expand_all }}#trace-title">expand all</a>
+      <a class="button wf-control" href="{{ w.to_services }}#trace-title">collapse to services</a>
+    </div>
   </div>
-  <div class="waterfall">
+  <div class="waterfall{% if w.critical %} wf-crit-on{% endif %}">
     <div class="wf-map">{{ w.minimap }}</div>
     <div class="wf-scroll">
       <div class="wf-grid-head" aria-hidden="true">
@@ -147,17 +156,27 @@
       </div>
       <ol class="wf-rows" aria-label="Spans">
         {%- for row in w.rows %}
-        <li id="span-{{ row.id }}" class="{{ row.service.class }}{% if row.error %} wf-error{% endif %}">
-          <a class="wf-row" href="{{ row.href }}#span-{{ row.id }}"{% if row.current %} aria-current="true"{% endif %}>
+        {#- A row is two links side by side: the toggle, and the span's name, which selects it
+            and whose ::after covers the row so the bar is clicked too. #}
+        <li id="span-{{ row.id }}" class="{{ row.service.class }}{% if row.error %} wf-error{% endif %}{% if row.critical %} wf-critical{% endif %}">
+          <div class="wf-row{% if row.current %} wf-current{% endif %}">
             <span class="wf-name wf-d{{ row.indent }}">
-              {%- if row.error %}<span class="wf-badge" aria-hidden="true">!</span><span class="visually-hidden">Error: </span>{% endif -%}
-              <span class="wf-text" title="{{ row.name }}">{{ row.name }}</span>
-              {%- if let Some(tag) = row.tag %}<span class="wf-tag">{{ tag }}</span>{% endif %}
-              {%- if row.parent_missing %}<span class="wf-orphan" title="Its parent span is not in this trace: lost, late, or past the span cap. It is shown under the root.">no parent</span>{% endif -%}
-              <span class="visually-hidden">, {{ row.service.name }}, {{ row.duration }}</span>
+              {%- if let Some(toggle) = row.toggle %}
+              <a class="wf-toggle" href="{{ toggle.href }}#span-{{ row.id }}" aria-expanded="{{ toggle.expanded }}" aria-label="{{ toggle.label }}">{{ crate::web::Icon::Disclosure }}</a>
+              {%- else %}
+              <span class="wf-toggle-gap" aria-hidden="true"></span>
+              {%- endif %}
+              <a class="wf-pick" href="{{ row.href }}#span-{{ row.id }}"{% if row.current %} aria-current="true"{% endif %}>
+                {%- if row.error %}<span class="wf-badge" aria-hidden="true">!</span><span class="visually-hidden">Error: </span>{% endif -%}
+                <span class="wf-text" title="{{ row.name }}">{{ row.name }}</span>
+                {%- if let Some(tag) = row.tag %}<span class="wf-tag">{{ tag }}</span>{% endif %}
+                {%- if row.parent_missing %}<span class="wf-orphan" title="Its parent span is not in this trace: lost, late, or past the span cap. It is shown under the root.">no parent</span>{% endif %}
+                {%- if let Some(toggle) = row.toggle %}{% if !toggle.expanded %}<span class="wf-hidden">+{{ toggle.hidden }}<span class="visually-hidden"> spans hidden</span></span>{% endif %}{% endif -%}
+                <span class="visually-hidden">, {{ row.service.name }}, {{ row.duration }}</span>
+              </a>
             </span>
             {{- row.bar -}}
-          </a>
+          </div>
         </li>
         {%- endfor %}
       </ol>

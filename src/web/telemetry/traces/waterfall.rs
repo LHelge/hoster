@@ -9,6 +9,11 @@
 //! the duration label and the error ring keep their pixel sizes; the minimap is one `<svg>` with
 //! a `viewBox` of 0–1000 that stretches. [`Bar`] and [`Minimap`] hold the numbers, tested
 //! without templates.
+//!
+//! The controls are links too ([`WaterfallState`]): a span with children has a toggle that
+//! collapses or expands it (`?collapsed=`, which the trace resolves, [`Trace::collapsed`]),
+//! "expand all" and "collapse to services" set it, and the critical-path switch is a checkbox
+//! that CSS `:has()` follows on the page, with a `?crit=on` link where `:has()` is missing.
 
 use std::fmt;
 use std::time::Duration;
@@ -17,7 +22,7 @@ use serde_json::{Map, Value};
 
 use super::{Links, ServiceChip, ServicePalette, TracesView};
 use crate::stats::Elapsed;
-use crate::store::{Span, SpanId, Trace, TraceId, TraceSpan};
+use crate::store::{Collapse, Span, SpanId, Trace, TraceId, TraceSpan};
 use crate::web::charts::Num;
 use crate::web::ui::{Count, Escaped};
 
@@ -44,7 +49,16 @@ pub struct Waterfall {
     /// The time axis: five labels from the trace's start to its end.
     pub ticks: Vec<String>,
     pub minimap: Minimap,
+    /// The spans shown: none under a collapsed span.
     pub rows: Vec<SpanRow>,
+    /// The critical path is highlighted (`?crit=on`): the switch starts on.
+    pub critical: bool,
+    /// The waterfall with the highlight flipped: the switch where CSS has no `:has()`.
+    pub critical_href: String,
+    /// The waterfall with nothing collapsed.
+    pub expand_all: String,
+    /// The waterfall with "collapse to services" ([`Trace::service_entries`]).
+    pub to_services: String,
     /// The spans past the span cap ([`Trace::MAX_SPANS`]), when any were left out.
     pub more: Option<Count>,
 }
@@ -76,6 +90,32 @@ pub struct SpanRow {
     pub parent_missing: bool,
     pub duration: String,
     pub bar: Bar,
+    /// On the critical path: not dimmed when it is highlighted.
+    pub critical: bool,
+    /// Collapses or expands the span; `None` for a span without children.
+    pub toggle: Option<Toggle>,
+}
+
+/// The toggle of a span with children.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Toggle {
+    /// The waterfall with the span flipped, the rest as they are.
+    pub href: String,
+    /// The span's children are shown.
+    pub expanded: bool,
+    /// `Collapse documents.info`, `Expand documents.info`.
+    pub label: String,
+    /// What collapsing it hides: every span under it.
+    pub hidden: Count,
+}
+
+/// What the URL asks of the waterfall: the span selected, the spans collapsed and whether the
+/// critical path is highlighted.
+#[derive(Debug, Clone, Default)]
+pub(super) struct WaterfallState {
+    pub selected: Option<SpanId>,
+    pub collapse: Collapse,
+    pub critical: bool,
 }
 
 impl Waterfall {
@@ -83,13 +123,22 @@ impl Waterfall {
     pub const DEPTH_CAP: usize = 10;
 
     /// The waterfall of `trace`, its services coloured by `palette`, its rows linking to the
-    /// tab of `links` with their span selected; `selected` is marked.
+    /// tab of `links` with their span selected; `state` says which is, which are collapsed and
+    /// whether the critical path is highlighted.
     pub(super) fn new(
         trace: &Trace,
         palette: &ServicePalette,
         links: &Links,
-        selected: Option<SpanId>,
+        state: &WaterfallState,
     ) -> Self {
+        let selected = state.selected;
+        // The links write the collapse as the trace resolves it.
+        let collapse = trace.canonical(&state.collapse);
+        let collapsed = trace.collapsed(&collapse);
+        let links = &links.with(
+            "collapsed",
+            (!collapse.is_empty()).then(|| collapse.to_string()),
+        );
         let axis = Axis::of(trace);
         let spans = trace.spans();
         let chip = |name: &str| ServiceChip {
@@ -113,11 +162,21 @@ impl Waterfall {
                 }
             })
             .collect();
-        let rows = spans
-            .iter()
-            .map(|span| {
+        let rows = trace
+            .shown(&collapsed)
+            .map(|(span, folded)| {
                 let id = span.span.span_id;
                 let current = selected == Some(id);
+                let toggle = (span.children > 0).then(|| Toggle {
+                    href: links.collapsing(&trace.canonical(&collapse.toggle(id))),
+                    expanded: !folded,
+                    label: format!(
+                        "{} {}",
+                        if folded { "Expand" } else { "Collapse" },
+                        span.span.name
+                    ),
+                    hidden: Count(span.descendants as u64),
+                });
                 SpanRow {
                     id,
                     name: span.span.name.clone(),
@@ -130,6 +189,8 @@ impl Waterfall {
                     parent_missing: span.parent_missing,
                     duration: Elapsed(span.span.duration).to_string(),
                     bar: Bar::new(&axis, span),
+                    critical: span.critical,
+                    toggle,
                 }
             })
             .collect();
@@ -148,6 +209,10 @@ impl Waterfall {
             ticks: axis.ticks(),
             minimap: Minimap::new(&axis, palette, spans),
             rows,
+            critical: state.critical,
+            critical_href: links.highlighting(!state.critical),
+            expand_all: links.collapsing(&Collapse::default()),
+            to_services: links.collapsing(&Collapse::services()),
             more: trace
                 .is_truncated()
                 .then(|| Count(trace.total_spans() - shown)),
@@ -527,8 +592,16 @@ mod tests {
     }
 
     fn waterfall(trace: &Trace, selected: Option<&str>) -> Waterfall {
+        let state = WaterfallState {
+            selected: selected.map(id),
+            ..WaterfallState::default()
+        };
+        shown(trace, &state)
+    }
+
+    fn shown(trace: &Trace, state: &WaterfallState) -> Waterfall {
         let palette = ServicePalette::of(trace.services());
-        Waterfall::new(trace, &palette, &links(), selected.map(id))
+        Waterfall::new(trace, &palette, &links(), state)
     }
 
     fn row<'a>(w: &'a Waterfall, name: &str) -> &'a SpanRow {

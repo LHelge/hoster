@@ -754,7 +754,7 @@ mod traces {
             "{picked}"
         );
         assert!(picked.contains(r#"<svg class="wf-minimap""#), "{picked}");
-        assert_eq!(picked.matches(r#"<a class="wf-row""#).count(), 3);
+        assert_eq!(picked.matches(r#"<div class="wf-row">"#).count(), 3);
         // Rows in depth-first order: the proxy's two, then the app's span in error.
         let server = picked
             .find("wf-text\" title=\"GET /api/documents\"")
@@ -764,12 +764,14 @@ mod traces {
         assert!(server < client && client < app_span, "{picked}");
         let span = SpanId::from([51; 8]);
         assert!(
-            picked.contains(&format!(r#"<li id="span-{span}" class="svc-0 wf-error">"#)),
+            picked.contains(&format!(
+                r#"<li id="span-{span}" class="svc-0 wf-error wf-critical">"#
+            )),
             "{picked}"
         );
         assert!(
             picked.contains(&format!(
-                r##"<a class="wf-row" href="/telemetry/traces?sort=slowest&#38;trace={id}&#38;span={span}#span-{span}">"##
+                r##"<a class="wf-pick" href="/telemetry/traces?sort=slowest&#38;trace={id}&#38;span={span}#span-{span}">"##
             )),
             "{picked}"
         );
@@ -796,11 +798,11 @@ mod traces {
         .await;
         assert!(
             html.contains(&format!(
-                r##"<a class="wf-row" href="/telemetry/traces?sort=slowest&#38;trace={id}#span-{span}" aria-current="true">"##
+                r##"<a class="wf-pick" href="/telemetry/traces?sort=slowest&#38;trace={id}#span-{span}" aria-current="true">"##
             )),
             "{html}"
         );
-        assert_eq!(html.matches(r#"class="wf-row" href"#).count(), 3);
+        assert_eq!(html.matches(r#"class="wf-pick" href"#).count(), 3);
         let picked = &html[html.find(r#"<section class="card trace-picked""#).unwrap()..];
         assert_eq!(picked.matches("aria-current").count(), 1, "{picked}");
         assert!(
@@ -863,6 +865,259 @@ mod traces {
         let html = page(&app, &browser.cookie, "/telemetry/traces?trace=nope").await;
         assert!(html.contains("`nope` is not a trace id"), "{html}");
         assert!(!html.contains("trace-picked"), "{html}");
+    }
+
+    /// The mockup's `t1` (`docs/design/Telemetry.dc.html`) as trace 7: the proxy's request
+    /// row (s0, s1) and the app's spans under its upstream span, s2 the app's server span.
+    async fn seeded_t1() -> (TestApp, Vec<(&'static str, SpanId)>) {
+        let app = TestApp::new().await;
+        let row = request(7, 90, "notes", "/api/documents.info", 1_912);
+        let at = MicroTimestamp::from(row.time);
+        let ids: Vec<(&str, SpanId)> = [
+            ("s0", [7; 8]),
+            ("s1", [107; 8]),
+            ("s2", [202; 8]),
+            ("s3", [203; 8]),
+            ("s4", [204; 8]),
+            ("s5", [205; 8]),
+            ("s6", [206; 8]),
+            ("s12", [212; 8]),
+            ("s7", [207; 8]),
+            ("s8", [208; 8]),
+            ("s9", [209; 8]),
+            ("s10", [210; 8]),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name, SpanId::from(bytes)))
+        .collect();
+        let id = |name: &str| ids.iter().find(|(n, _)| *n == name).unwrap().1;
+        let span = |name: &str, parent: &str, kind, start: u64, micros: u64| Span {
+            span_id: id(name),
+            parent: Some(id(parent)),
+            name: name.into(),
+            kind,
+            start: at + Duration::from_micros(start),
+            duration: Duration::from_micros(micros),
+            status: SpanStatus::Unset,
+            ..app_span(7, name, SpanStatus::Unset)
+        };
+        let spans = vec![
+            span("s2", "s1", SpanKind::Server, 3_800, 1_905_200),
+            span("s3", "s2", SpanKind::Internal, 5_100, 17_600),
+            span("s4", "s3", SpanKind::Client, 6_900, 1_800),
+            span("s5", "s3", SpanKind::Client, 10_400, 9_200),
+            span("s6", "s2", SpanKind::Internal, 23_900, 1_880_300),
+            span("s12", "s6", SpanKind::Client, 24_600, 900),
+            span("s7", "s6", SpanKind::Client, 26_200, 14_100),
+            span("s8", "s6", SpanKind::Client, 41_000, 8_300),
+            span("s9", "s6", SpanKind::Client, 51_700, 1_800_400),
+            span("s10", "s6", SpanKind::Client, 1_853_600, 2_700),
+        ];
+        app.logs
+            .append(&LogBatch {
+                requests: vec![row],
+                spans,
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        (app, ids)
+    }
+
+    /// The span names of the waterfall's rows, in order.
+    fn span_rows(html: &str) -> Vec<&str> {
+        html.split(r#"<span class="wf-text" title=""#)
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect()
+    }
+
+    /// The `<li>` of the span `id`.
+    fn span_row(html: &str, id: SpanId) -> &str {
+        let at = html.find(&format!(r#"<li id="span-{id}""#)).unwrap();
+        let end = at + html[at..].find("</li>").unwrap();
+        &html[at..end]
+    }
+
+    #[tokio::test]
+    async fn spans_collapse_and_the_critical_path_is_highlighted_by_links() {
+        let (app, ids) = seeded_t1().await;
+        let id = |name: &str| ids.iter().find(|(n, _)| *n == name).unwrap().1;
+        let browser = app.sign_in().await;
+        let trace = trace(7);
+        let base = format!("/telemetry/traces?trace={trace}");
+        let html = page(&app, &browser.cookie, &base).await;
+        assert!(!html.contains("style="), "no inline styles");
+        assert_eq!(span_rows(&html).len(), 12, "nothing collapsed");
+        // A span with children has a toggle; a leaf a gap.
+        let s6 = span_row(&html, id("s6"));
+        assert!(
+            s6.contains(&format!(
+                r##"<a class="wf-toggle" href="/telemetry/traces?trace={trace}&#38;collapsed={}#span-{}" aria-expanded="true" aria-label="Collapse s6">"##,
+                id("s6"),
+                id("s6")
+            )),
+            "{s6}"
+        );
+        assert!(!s6.contains("wf-hidden"), "{s6}");
+        let s9 = span_row(&html, id("s9"));
+        assert!(
+            !s9.contains("wf-toggle\"") && s9.contains("wf-toggle-gap"),
+            "{s9}"
+        );
+        // The critical path: s0, s1, s2, s6, s10.
+        let critical: Vec<&str> = ids
+            .iter()
+            .filter(|(_, span)| span_row(&html, *span).contains("wf-critical"))
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(critical, ["s0", "s1", "s2", "s6", "s10"]);
+        // The controls.
+        assert!(
+            html.contains(&format!(
+                r##"<a class="button wf-control" href="/telemetry/traces?trace={trace}#trace-title">expand all</a>"##
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r##"<a class="button wf-control" href="/telemetry/traces?trace={trace}&#38;collapsed=services#trace-title">collapse to services</a>"##
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="checkbox" role="switch" class="wf-crit-input">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r##"<a class="switch wf-crit-link" role="switch" aria-checked="false" href="/telemetry/traces?trace={trace}&#38;crit=on#trace-title">"##
+            )),
+            "{html}"
+        );
+        assert!(html.contains(r#"<div class="waterfall">"#), "{html}");
+
+        // Collapse to services: s2 is the only server span with children and a parent.
+        let html = page(&app, &browser.cookie, &format!("{base}&collapsed=services")).await;
+        assert_eq!(
+            span_rows(&html),
+            ["GET /api/documents.info", "upstream api", "s2"]
+        );
+        let s2 = span_row(&html, id("s2"));
+        assert!(
+            s2.contains(r#"aria-expanded="false" aria-label="Expand s2">"#),
+            "{s2}"
+        );
+        assert!(
+            s2.contains(r#"<span class="wf-hidden">+9<span class="visually-hidden"> spans hidden</span></span>"#),
+            "{s2}"
+        );
+        // Expanding s2 again toggles it from the rule; the URL stays short.
+        assert!(
+            s2.contains(&format!(
+                r#"href="/telemetry/traces?trace={trace}&#38;collapsed=services%2C{}#span-{}""#,
+                id("s2"),
+                id("s2")
+            )),
+            "{s2}"
+        );
+        // Selecting a span keeps the collapse; picking another trace and closing drop it.
+        assert!(
+            s2.contains(&format!(
+                r#"<a class="wf-pick" href="/telemetry/traces?trace={trace}&#38;collapsed=services&#38;span={}#span-{}">"#,
+                id("s2"),
+                id("s2")
+            )),
+            "{s2}"
+        );
+        assert!(
+            html.contains(r#"<a class="wf-close" href="/telemetry/traces">close</a>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="hidden" name="collapsed" value="services">"#),
+            "a filter keeps it: {html}"
+        );
+
+        // The round trip: services with s2 expanded and s6 collapsed, given in any order and
+        // with a leaf, comes back canonical.
+        let given = format!(
+            "{base}&collapsed={},services,{},{}",
+            id("s6"),
+            id("s9"),
+            id("s2")
+        );
+        let html = page(&app, &browser.cookie, &given).await;
+        assert_eq!(
+            span_rows(&html),
+            [
+                "GET /api/documents.info",
+                "upstream api",
+                "s2",
+                "s3",
+                "s4",
+                "s5",
+                "s6"
+            ]
+        );
+        let s6 = span_row(&html, id("s6"));
+        assert!(s6.contains(">+5<"), "{s6}");
+        assert!(
+            s6.contains(&format!(
+                r#"href="/telemetry/traces?trace={trace}&#38;collapsed=services%2C{}#span-{}" aria-expanded="false" aria-label="Expand s6">"#,
+                id("s2"),
+                id("s6")
+            )),
+            "{s6}"
+        );
+        let s3 = span_row(&html, id("s3"));
+        assert!(
+            s3.contains(&format!(
+                r#"collapsed=services%2C{}%2C{}%2C{}#span-{}""#,
+                id("s2"),
+                id("s3"),
+                id("s6"),
+                id("s3")
+            )),
+            "{s3}"
+        );
+        assert!(
+            html.contains(&format!(
+                r##"href="/telemetry/traces?trace={trace}#trace-title">expand all</a>"##
+            )),
+            "{html}"
+        );
+        let html = page(&app, &browser.cookie, &format!("{base}&collapsed=bogus")).await;
+        assert!(
+            html.contains(r#"unknown span id &#34;bogus&#34;"#),
+            "{html}"
+        );
+        assert_eq!(span_rows(&html).len(), 12);
+
+        // The critical path highlighted by the server: the class, the switch on, and the link
+        // turning it off.
+        let html = page(&app, &browser.cookie, &format!("{base}&crit=on")).await;
+        assert!(
+            html.contains(r#"<div class="waterfall wf-crit-on">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="checkbox" role="switch" class="wf-crit-input" checked>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r##"role="switch" aria-checked="true" href="/telemetry/traces?trace={trace}#trace-title">"##
+            )),
+            "{html}"
+        );
+        // Collapse links keep it.
+        assert!(
+            html.contains(&format!(
+                r##"href="/telemetry/traces?trace={trace}&#38;crit=on&#38;collapsed=services#trace-title">collapse to services"##
+            )),
+            "{html}"
+        );
     }
 
     #[tokio::test]

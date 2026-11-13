@@ -1500,6 +1500,16 @@ table.traces td { padding-block: 9px; vertical-align: middle; font: 12px/1.4 var
 }
 .wf-legend li { display: inline-flex; align-items: center; gap: 6px; }
 .wf-swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--svc); }
+.wf-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; font: 12px/1.2 var(--mono); }
+.wf-control { min-height: 30px; padding: 0 10px; font: 12px/1.2 var(--mono); }
+/* The critical-path switch: a link (?crit=on) unless CSS has :has(), then a checkbox. */
+.wf-crit-box { display: none; }
+.wf-crit-link { text-decoration: none; }
+.wf-crit-link:hover { text-decoration: none; }
+.wf-crit-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wf-crit-link[aria-checked="true"] { border-color: var(--ok); background: var(--ok-tint); color: var(--ok); }
+.wf-crit-link[aria-checked="true"] .switch-track { background: var(--ok); box-shadow: none; }
+.wf-crit-link[aria-checked="true"] .switch-track::after { left: 14px; background: var(--inset); }
 .wf-map { padding: 10px 18px 8px; border-bottom: 1px solid var(--border); }
 .wf-minimap { display: block; border-radius: 4px; background: var(--inset); }
 .wf-mini { fill: var(--svc); }
@@ -1511,10 +1521,40 @@ table.traces td { padding-block: 9px; vertical-align: middle; font: 12px/1.4 var
 .wf-ticks { display: flex; justify-content: space-between; padding: 8px 18px 8px 0; }
 .wf-rows { margin: 0; padding: 0; list-style: none; }
 .wf-rows > li { border-bottom: 1px solid var(--divider); }
-.wf-row { align-items: stretch; padding-right: 18px; color: var(--text); text-decoration: none; }
-.wf-row:hover { background: var(--hover); text-decoration: none; }
-.wf-row[aria-current] { background: var(--hover); box-shadow: inset 2px 0 var(--accent); }
-.wf-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* A row holds two links: the toggle, and the name (.wf-pick), whose ::after covers the row so
+   a click on the bar selects the span too; the toggle sits above that cover. */
+.wf-row { position: relative; align-items: stretch; padding-right: 18px; color: var(--text); }
+.wf-row:hover { background: var(--hover); }
+.wf-row.wf-current { background: var(--hover); box-shadow: inset 2px 0 var(--accent); }
+.wf-pick {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+.wf-pick:hover { text-decoration: none; }
+.wf-pick::after { content: ""; position: absolute; inset: 0; }
+.wf-pick:focus-visible { outline: none; }
+.wf-pick:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-toggle, .wf-toggle-gap { flex: none; width: 20px; height: 20px; }
+.wf-toggle {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: -3px;
+  border-radius: 4px;
+  color: var(--text-2);
+}
+.wf-toggle:hover { background: var(--border); color: var(--text); }
+.wf-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.wf-toggle .icon { width: 12px; height: 12px; margin: 0; vertical-align: 0; transition: transform 0.12s; }
+.wf-toggle[aria-expanded="true"] .icon { transform: rotate(90deg); }
+.wf-hidden { flex: none; color: var(--text-2); font-size: 10px; }
 .wf-name {
   display: flex;
   align-items: center;
@@ -1561,13 +1601,23 @@ table.traces td { padding-block: 9px; vertical-align: middle; font: 12px/1.4 var
 /* An error span keeps its colour, ringed in red round a gap of the card's background. */
 .wf-error .wf-fill { stroke: var(--surface); stroke-width: 3px; paint-order: stroke; }
 .wf-ring { fill: none; stroke: var(--fail); stroke-width: 6px; }
-.wf-error > .wf-row:hover .wf-fill, .wf-error > .wf-row[aria-current] .wf-fill { stroke: var(--hover); }
+.wf-error > .wf-row:hover .wf-fill, .wf-error > .wf-row.wf-current .wf-fill { stroke: var(--hover); }
 .wf-label { fill: var(--text-2); font: 11px var(--mono); dominant-baseline: central; }
 /* Inside a bar: --on-accent is the dark (Mocha) or white (Latte) text the pastel or darkened
    service colours need. */
 .wf-label-inside { fill: var(--on-accent); font-weight: 600; }
 .wf-label-left { text-anchor: end; }
 .wf-more { margin: 0; padding: 11px 18px; font-size: 12px; }
+/* The critical path highlighted: the bars of the spans off it are dimmed (their labels keep
+   their contrast). By the server's class after a ?crit=on link; where CSS has :has(), by the
+   switch's checkbox alone, so it works without a request. */
+.wf-crit-on .wf-rows > li:not(.wf-critical) :is(.wf-fill, .wf-ring) { opacity: 0.25; }
+@supports selector(:has(*)) {
+  .wf-crit-link { display: none; }
+  .wf-crit-box { display: inline-flex; }
+  .wf-crit-on .wf-rows > li:not(.wf-critical) :is(.wf-fill, .wf-ring) { opacity: 1; }
+  .trace-picked:has(.wf-crit-input:checked) .wf-rows > li:not(.wf-critical) :is(.wf-fill, .wf-ring) { opacity: 0.25; }
+}
 .stack-title h1 { margin: 0; font: 600 26px/1.2 var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .stack-meta {
   display: flex;
