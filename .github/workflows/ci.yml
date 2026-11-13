@@ -74,6 +74,18 @@ jobs:
       - name: actions/deploy
         run: actions/deploy/test.sh
 
+      # check.sh with a fake hoster binary.
+      - name: actions/stack-check
+        run: actions/stack-check/test.sh
+
+      # And for real, downloading a release: the docs site's stack file, against the latest
+      # release because that is what the server runs.
+      - name: Check site/docs.stack.toml
+        uses: ./actions/stack-check
+        with:
+          files: site/docs.stack.toml
+          deny-warnings: true
+
   # The documentation site (site/, published by release.yml). aphid fails the build on a broken
   # [[wiki-link]], so a moved or renamed page breaks the PR rather than the site.
   site:
