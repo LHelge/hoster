@@ -48,6 +48,24 @@
   </form>
 </div>
 
+{%- if let Some(scatter) = view.scatter %}
+{#- The duration scatter (traces/scatter.rs, Scatter): every root of the range and stack, the
+    listed traces on top as links. #}
+<section class="card trace-scatter-card" aria-labelledby="scatter-title">
+  <header class="card-head">
+    <h2 id="scatter-title">Trace duration <span class="card-count">· {{ scatter.note() }}</span></h2>
+  </header>
+  <div class="card-body">
+    {{ scatter }}
+    <ul class="chart-legend ts-legend" aria-label="Legend">
+      <li><span class="chart-key ts-key ts-key-ok" aria-hidden="true"></span>ok</li>
+      <li><span class="chart-key ts-key ts-key-error" aria-hidden="true"></span>error</li>
+      <li><span class="chart-key ts-key ts-key-listed" aria-hidden="true"></span>listed below</li>
+    </ul>
+  </div>
+</section>
+{%- endif %}
+
 <section class="card trace-list" aria-labelledby="traces-title">
   <header class="card-head">
     <h2 id="traces-title">Traces <span class="card-count">· {{ view.heading }}</span></h2>

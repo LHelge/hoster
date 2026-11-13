@@ -2326,6 +2326,7 @@ mod traces {
                 (6, ms(20), TraceStatus::Ok),
             ]
         );
+        assert_eq!(points.points[0].name, "GET /1");
         assert_eq!(points.matched, 5);
         assert!(!points.is_sampled());
         store.close().await;

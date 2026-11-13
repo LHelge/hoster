@@ -1,10 +1,10 @@
 ---
 id: qxa
 title: "Traces: duration scatter of root spans"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T19:37:26.931069730Z"
-updated: "2026-11-12T19:37:26.931069730Z"
+updated: "2026-11-13T22:26:21.918549831Z"
 tags:
   - web
   - observability
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - zyf
 parent: qnh
+attempts: 1
 ---
 
 ## Summary

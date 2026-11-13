@@ -339,9 +339,11 @@ pub struct TracePage {
 }
 
 /// One point of the duration scatter: a trace's root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TracePoint {
     pub trace_id: TraceId,
+    /// The root span's name, for the scatter's label of its slowest error.
+    pub name: String,
     pub start: MicroTimestamp,
     pub duration: Duration,
     pub status: TraceStatus,
@@ -420,10 +422,10 @@ impl LogStore {
     pub async fn trace_points(&self, query: &TraceQuery) -> Result<TracePoints> {
         let cap = i64::from(TraceQuery::MAX_POINTS);
         let mut sql =
-            QueryBuilder::<Sqlite>::new("SELECT trace_id, start, duration, failed, n FROM (");
+            QueryBuilder::<Sqlite>::new("SELECT trace_id, name, start, duration, failed, n FROM (");
         query.push_traces(
             &mut sql,
-            "trace_id, start, duration, failed, \
+            "trace_id, name, start, duration, failed, \
              row_number() OVER (ORDER BY start, trace_id) - 1 AS i, count(*) OVER () AS n",
         );
         // Of n rows, exactly `cap` have (i * cap) mod n below cap: one per stretch of n / cap.
@@ -434,14 +436,15 @@ impl LogStore {
             .push(") % n < ")
             .push_bind(cap)
             .push(" ORDER BY start, trace_id");
-        let rows: Vec<(String, MicroTimestamp, i64, bool, i64)> =
+        let rows: Vec<(String, String, MicroTimestamp, i64, bool, i64)> =
             sql.build_query_as().fetch_all(&self.reads).await?;
-        let matched = rows.first().map_or(0, |row| count(row.4));
+        let matched = rows.first().map_or(0, |row| count(row.5));
         let points = rows
             .into_iter()
-            .map(|(trace_id, start, duration, failed, _)| {
+            .map(|(trace_id, name, start, duration, failed, _)| {
                 Ok(TracePoint {
                     trace_id: trace_id.parse().map_err(decode_error)?,
+                    name,
                     start,
                     duration: micros(duration),
                     status: TraceStatus::from(failed),

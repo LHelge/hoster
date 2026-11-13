@@ -484,6 +484,51 @@ mod traces {
     }
 
     #[tokio::test]
+    async fn the_scatter_plots_the_range_and_stack_and_links_the_listed_traces() {
+        let app = seeded().await;
+        let browser = app.sign_in().await;
+        let html = page(&app, &browser.cookie, "/telemetry/traces?status=error").await;
+        assert!(
+            html.contains(r#"<h2 id="scatter-title">Trace duration <span class="card-count">· root spans · last 15m · log scale</span></h2>"#),
+            "{html}"
+        );
+        // Every root of the range, whatever the list's filters; the error listed on top.
+        assert!(
+            html.contains(r#"aria-label="Trace durations of root spans over the last 15m, on a log scale up to 1 s: 3 traces; slowest error GET /api/documents, 900 ms""#),
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"<circle class="ts-dot ts-ok""#).count(), 2);
+        assert_eq!(
+            html.matches(r#"<circle class="ts-dot ts-error""#).count(),
+            1
+        );
+        assert_eq!(html.matches(r#"<a class="ts-link""#).count(), 1);
+        assert!(
+            html.contains(&format!(
+                r#"<a class="ts-link" href="/telemetry/traces?status=error&#38;trace={}" aria-label="Open trace GET /api/documents, 900 ms">"#,
+                trace(1)
+            )),
+            "{html}"
+        );
+        assert!(html.contains(r#"<ul class="chart-legend ts-legend""#));
+
+        // Picked, it is drawn larger.
+        let uri = format!("/telemetry/traces?status=error&trace={}", trace(1));
+        let html = page(&app, &browser.cookie, &uri).await;
+        assert!(html.contains(r#"aria-current="true"><title>Open trace GET /api/documents, 900 ms</title><circle class="ts-listed ts-error" cx=""#), "{html}");
+        assert!(html.contains(r#"r="7"></circle></a>"#), "{html}");
+
+        // The stack narrows it.
+        let html = page(&app, &browser.cookie, "/telemetry/traces?stack=blog").await;
+        assert!(html.contains(": 1 trace; no errors"), "{html}");
+        assert_eq!(html.matches("<circle ").count(), 2, "{html}");
+
+        // Nothing in the range draws no chart.
+        let html = page(&app, &browser.cookie, "/telemetry/traces?stack=nothing").await;
+        assert!(!html.contains("trace-scatter"), "{html}");
+    }
+
+    #[tokio::test]
     async fn the_list_has_a_row_per_trace_with_its_columns() {
         let app = seeded().await;
         let browser = app.sign_in().await;

@@ -1430,6 +1430,33 @@ table.traces td { padding-block: 9px; vertical-align: middle; font: 12px/1.4 var
 .trace-error .dot { background: var(--fail); }
 .trace-pager { display: flex; gap: 16px; }
 
+/* The duration scatter above the list (src/web/telemetry/traces/scatter.rs): the chart grid of
+   the traffic charts with its own y labels as SVG text (a log axis spaces them unevenly). Dots
+   are circles at cx in percent and cy, r in px, so they stay round as the plot stretches. Roots
+   are muted, or red in error; the listed traces are the latency colour ringed in the accent, the
+   picked one ringed in the text colour. */
+.trace-scatter .ts-y { display: block; overflow: visible; }
+.trace-scatter .ts-y text {
+  fill: var(--muted);
+  font: 10px var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-anchor: end;
+  dominant-baseline: middle;
+}
+.trace-scatter .chart-plot { height: 150px; }
+.ts-dot { fill: var(--muted); fill-opacity: 0.55; }
+.ts-dot.ts-error { fill: var(--fail); fill-opacity: 1; }
+.ts-listed { fill: var(--p50); stroke: var(--accent); stroke-width: 2px; }
+.ts-listed.ts-error { fill: var(--fail); }
+.ts-link[aria-current] .ts-listed { stroke: var(--text); }
+.ts-link:focus { outline: none; }
+.ts-link:hover .ts-listed, .ts-link:focus-visible .ts-listed { stroke: var(--text); stroke-width: 3px; }
+.ts-legend { margin-top: 12px; }
+.ts-key { width: 8px; height: 8px; border-radius: 50%; }
+.ts-key-ok { background: var(--muted); opacity: 0.55; }
+.ts-key-error { background: var(--fail); }
+.ts-key-listed { box-sizing: border-box; width: 10px; height: 10px; border: 2px solid var(--accent); }
+
 /* The waterfall of the trace picked (src/web/telemetry/traces/waterfall.rs). Positions are SVG
    attributes; a row's (or legend entry's, or minimap line's) service class sets --svc, which
    its name's border, its bar and its swatch take. */

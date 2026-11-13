@@ -112,7 +112,7 @@ impl From<Range> for Timeline {
 /// A length of time in its two largest units, as the axes write it: `45m`, `1h 30m`, `24h`,
 /// `7d`. Hours run up to two days, so a day reads `24h`, as in the mockups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Span(Duration);
+pub(super) struct Span(pub(super) Duration);
 
 impl Span {
     /// Its units, largest first, without the zero ones after the first.
@@ -148,7 +148,7 @@ impl fmt::Display for Span {
 
 /// A moment relative to now, as the x axis writes it: `-6h`, `-1h 30m`, `now`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Offset(Duration);
+pub(super) struct Offset(pub(super) Duration);
 
 impl Offset {
     fn is_round(&self) -> bool {
@@ -228,6 +228,71 @@ impl Scale {
     /// The tick values, top first.
     fn ticks(&self) -> impl Iterator<Item = f64> + '_ {
         (0..=Y_INTERVALS).rev().map(|i| self.step * f64::from(i))
+    }
+}
+
+/// A log10 y axis of durations, beside the linear [`Scale`]: the trace scatter's. It runs from
+/// [`LogScale::FLOOR`] (1 ms) at the bottom to a round top (1, 2 or 5 of a power of ten) at or
+/// above the slowest and at least [`LogScale::MIN_TOP`] (1 s), with a tick at each power of ten
+/// between. A duration below the floor sits on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LogScale {
+    top: Duration,
+}
+
+impl LogScale {
+    /// The bottom of the axis.
+    pub(super) const FLOOR: Duration = Duration::from_millis(1);
+    /// The lowest top: an axis reaches at least this far.
+    const MIN_TOP: Duration = Duration::from_secs(1);
+    /// The multipliers of a power of ten the top may be.
+    const NICE: [f64; 3] = [1.0, 2.0, 5.0];
+
+    /// The axis that holds `slowest`.
+    pub(super) fn new(slowest: Duration) -> Self {
+        let max = slowest.max(Self::MIN_TOP).as_secs_f64();
+        let power = 10f64.powf(max.log10().floor());
+        let multiple = Self::NICE
+            .into_iter()
+            .find(|&m| m * power >= max * (1.0 - 1e-9))
+            .unwrap_or(10.0);
+        Self {
+            top: Duration::from_secs_f64(multiple * power),
+        }
+    }
+
+    /// The top of the axis.
+    pub(super) fn top(&self) -> Duration {
+        self.top
+    }
+
+    /// Where `duration` sits, from 0 at the floor (or below it) to 1 at the top.
+    pub(super) fn share(&self, duration: Duration) -> f64 {
+        let log = |d: Duration| d.as_secs_f64().log10();
+        let (bottom, top) = (log(Self::FLOOR), log(self.top));
+        ((log(duration.max(Self::FLOOR)) - bottom) / (top - bottom)).clamp(0.0, 1.0)
+    }
+
+    /// The powers of ten from the floor up to the top, bottom first: `1 ms 10 ms 100 ms 1 s`.
+    pub(super) fn ticks(&self) -> impl Iterator<Item = AxisDuration> + '_ {
+        std::iter::successors(Some(Self::FLOOR), |d| d.checked_mul(10))
+            .take_while(|d| *d <= self.top)
+            .map(AxisDuration)
+    }
+}
+
+/// A round duration of whole milliseconds as the log axis writes it: `1 ms`, `500 ms`, `1 s`,
+/// `20 s` (whole seconds from one second up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AxisDuration(pub(super) Duration);
+
+impl fmt::Display for AxisDuration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 < Duration::from_secs(1) {
+            write!(f, "{} ms", self.0.as_millis())
+        } else {
+            write!(f, "{} s", self.0.as_secs())
+        }
     }
 }
 

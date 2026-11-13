@@ -13,7 +13,8 @@
 //! hoster's proxy its own, the others in turn by name over everything the page shows, so a
 //! service has one colour in every row and in the trace below. Bars are server-drawn SVG
 //! ([`Meter`]) and tones are classes: nothing is an inline style (ADR-0054). The trace picked is
-//! drawn as a [`Waterfall`] (`traces/waterfall.rs`).
+//! drawn as a [`Waterfall`] (`traces/waterfall.rs`); above the list, a [`Scatter`]
+//! (`traces/scatter.rs`) plots the durations of every root in the range and stack.
 
 use std::ops::Range;
 use std::time::{Duration, SystemTime};
@@ -26,11 +27,13 @@ use super::super::ui::{Count, Meter, Tone};
 use crate::stats::Elapsed;
 use crate::store::{
     LogStore, Retention, Span, SpanId, StoreError, Timestamp, Trace, TraceId, TracePage,
-    TraceQuery, TraceSort, TraceStatus, TraceSummary,
+    TracePoints, TraceQuery, TraceSort, TraceStatus, TraceSummary,
 };
 
+pub use self::scatter::Scatter;
 pub use self::waterfall::Waterfall;
 
+mod scatter;
 mod waterfall;
 
 /// The options of the Traces tab, as GET parameters; every field is text, as an HTML form
@@ -439,6 +442,9 @@ pub struct TracesView {
     pub slower: String,
     pub sorts: Vec<Choice>,
     pub statuses: Vec<Chip>,
+    /// The durations of the range's roots, the listed traces on top; `None` when there are
+    /// none or the store could not be read.
+    pub scatter: Option<Scatter>,
     pub rows: Vec<TraceRow>,
     /// `9 of 18,204 · newest first`.
     pub heading: String,
@@ -482,10 +488,14 @@ impl TracesView {
                         None => Ok(None),
                     }
                 };
-                tokio::try_join!(store.traces(&query), picked).map_err(|err: StoreError| {
-                    tracing::error!(error = %err, "reading the trace list failed");
-                    format!("Cannot read the log store: {:#}", anyhow::Error::from(err))
-                })
+                // The scatter follows the range and stack only, not the list's filters.
+                let roots = TraceQuery::new(query.range.clone(), query.scope.clone());
+                tokio::try_join!(store.traces(&query), store.trace_points(&roots), picked).map_err(
+                    |err: StoreError| {
+                        tracing::error!(error = %err, "reading the trace list failed");
+                        format!("Cannot read the log store: {:#}", anyhow::Error::from(err))
+                    },
+                )
             }
             Err(error) => Err(error),
         };
@@ -517,7 +527,7 @@ impl TracesView {
     fn new(
         params: &TraceParams,
         query: TraceQuery,
-        read: Result<(TracePage, Option<Requested>), String>,
+        read: Result<(TracePage, TracePoints, Option<Requested>), String>,
         known: &[String],
         problem: Option<String>,
         now: SystemTime,
@@ -527,14 +537,21 @@ impl TracesView {
             pairs: params.pairs(),
             page: query.page,
         };
-        let (page, picked, unreadable, total) = match read {
-            Ok((page, picked)) => {
+        let (page, points, picked, unreadable, total) = match read {
+            Ok((page, points, picked)) => {
                 let total = Some(page.total);
-                (page, picked, None, total)
+                (page, points, picked, None, total)
             }
-            Err(error) => (TracePage::default(), None, Some(error), None),
+            Err(error) => (
+                TracePage::default(),
+                TracePoints::default(),
+                None,
+                Some(error),
+                None,
+            ),
         };
         let picked_id = picked.as_ref().map(|(id, _)| *id);
+        let scatter = Scatter::new(&points, &page.traces, &links, picked_id, &query.range, now);
         let mut services: Vec<&str> = page
             .traces
             .iter()
@@ -631,6 +648,7 @@ impl TracesView {
                 .to_owned(),
             sorts,
             statuses,
+            scatter,
             rows,
             heading,
             total,
