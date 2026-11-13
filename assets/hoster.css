@@ -705,9 +705,10 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .flash-success { border-left-color: var(--ok); background: var(--ok-tint); }
 .flash-error { border-left-color: var(--fail); background: var(--fail-tint); }
 
-/* ---- Container logs (ADR-0044): the stack's logs tab and a leftover's log page --------------
+/* ---- Logs: the stored logs view (ADR-0067, src/web/logs.rs) and a container's live log
+   (ADR-0044) ------------------------------------------------------------------------------------
    One bordered box: a mono toolbar of chips and GET options, the log one block per line with
-   stderr set apart, and a footer whose line count is a CSS counter over the streamed lines. */
+   stderr set apart, and a footer. The live log counts its streamed lines with a CSS counter. */
 
 .log-view {
   counter-reset: log-line;
@@ -748,10 +749,18 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 }
 .log-chip-detail { color: var(--text-2); white-space: nowrap; }
 .log-containers .log-chip { flex-wrap: wrap; gap: 0 6px; min-height: 28px; padding-block: 3px; overflow-wrap: anywhere; }
-.dot.dot-s0 { background: var(--accent); }
-.dot.dot-s1 { background: var(--progress); }
-.dot.dot-s2 { background: var(--p50); }
-.dot.dot-s3 { background: var(--p95); }
+/* The service palette, assigned by service order; hoster's own records and "all" are neutral. */
+.dot.svc-0 { background: var(--accent); }
+.dot.svc-1 { background: var(--progress); }
+.dot.svc-2 { background: var(--p50); }
+.dot.svc-3 { background: var(--p95); }
+.dot.svc-hoster { background: var(--text-2); }
+.dot.svc-all { background: var(--muted); }
+.svc-0 .log-svc { color: var(--accent); }
+.svc-1 .log-svc { color: var(--progress); }
+.svc-2 .log-svc { color: var(--p50); }
+.svc-3 .log-svc { color: var(--p95); }
+.svc-hoster .log-svc { color: var(--text-2); font-style: italic; }
 .log-toolbar input { min-height: 30px; padding: 4px 8px; font: 12px/1.4 var(--mono); }
 .log-since input[type="text"] { width: 15rem; max-width: 100%; }
 .log-tail input { width: 5.5rem; }
@@ -837,9 +846,40 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .log-panel:has(.log-notice) .log-live { display: none; }
 .log-panel:has(.log-notice) .log-ended { display: inline; }
 .log-empty { margin: 0; padding: 24px 12px; color: var(--muted); }
+
+/* The stored records: time, service, level and message in columns, the message wrapping. */
+.log-records { list-style: none; white-space: normal; }
+.log-record {
+  display: grid;
+  grid-template-columns: max-content 12ch 5ch minmax(0, 1fr);
+  gap: 0 14px;
+  padding: 0 12px 0 9px;
+  border-left: 3px solid transparent;
+}
+.log-stacks .log-record { grid-template-columns: max-content 12ch 12ch 5ch minmax(0, 1fr); }
+.log-record:hover { background: var(--hover); }
+.log-record time, .log-gen { color: var(--muted); }
+.log-svc, .log-stack { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-stack { color: var(--text-2); }
+.log-lvl { color: var(--muted); }
+.log-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-record.log-stderr { border-left-color: var(--fail); background: var(--fail-tint); }
+.log-warn .log-lvl, .log-warn .log-msg { color: var(--warn); }
+.log-error .log-lvl, .log-error .log-msg { color: var(--fail); }
+.log-info .log-lvl { color: var(--text-2); }
+.log-cut { color: var(--muted); font-style: italic; }
+.log-marker { grid-template-columns: max-content minmax(0, 1fr); color: var(--muted); font-style: italic; }
+.log-starts, .log-pages { margin: 0; padding: 6px 12px; color: var(--muted); font: 12px/1.4 var(--mono); }
+.log-starts { border-bottom: 1px solid var(--divider); }
+.log-pages { display: flex; gap: 16px; }
+.log-total { color: var(--text-2); }
 /* At phone width the toolbar's controls are touch targets. */
 @media (max-width: 760px) {
   .log-chip, .log-preset, .log-containers .log-chip, .switch, .log-toolbar input, .log-options button { min-height: 44px; }
+  .log-pages a { display: inline-flex; align-items: center; min-height: 44px; }
+  /* The message gets its own line under time, service and level. */
+  .log-record, .log-stacks .log-record { grid-template-columns: max-content max-content max-content; }
+  .log-record .log-msg { grid-column: 1 / -1; }
 }
 
 /* ---- Stack pages: the apply page, its plan and pre-flight, problems and the diff ------------

@@ -1,14 +1,15 @@
-//! The container logs (ADR-0044): each managed container's log with *tail N*, *since* and
-//! *follow*, streamed into the page over SSE with HTMX's SSE extension. The log is shown on its
-//! stack's logs tab (`/stacks/{name}/logs`, epic 8bf, ADR-0054), which picks the container and
-//! renders the toolbar and log panel this module provides as [`LogView`]. The containers
-//! themselves are listed on their stack's overview, which reads them through
-//! [`Containers::of_stack`]; `GET /containers`, the list they had before, redirects to
+//! The container logs (ADR-0044): each managed container's live log with *tail N*, *since* and
+//! *follow*, streamed into the page over SSE with HTMX's SSE extension, straight from podman.
+//! It is kept beside the stored records of its stack's logs tab (`/stacks/{name}/logs`, see
+//! `web/logs.rs`) because it shows a line before the log recorder has committed it and works
+//! when the log store is unavailable (ADR-0067 §10). The tab links each running container's
+//! page. The containers themselves are listed on their stack's overview, which reads them
+//! through [`Containers::of_stack`]; `GET /containers`, the list they had before, redirects to
 //! `/stacks`, which lists the containers of stacks no longer in the store.
 //!
-//! `GET /containers/{name}/logs` redirects to the logs tab of the container's stack, with the
-//! same options. A container whose stack hoster no longer has (or that has no stack label) has
-//! no tab, so its log is shown on that URL itself, linked from the leftovers on `/stacks`.
+//! `GET /containers/{name}/logs` renders the toolbar and log panel this module provides as
+//! [`LogView`], under a breadcrumb to the container's stack's logs tab, or to the leftovers on
+//! `/stacks` for a container whose stack hoster no longer has (or that has no stack label).
 //!
 //! A log panel connects to `GET /containers/{name}/logs/stream` with the options of the page.
 //! The stream sends the log in batches
@@ -170,8 +171,8 @@ impl Containers {
         Redirect::to("/stacks")
     }
 
-    /// `GET /containers/{name}/logs`: the logs tab of the container's stack, showing it with
-    /// the same options; for a leftover of a removed stack, its log page.
+    /// `GET /containers/{name}/logs`: the container's live log, straight from podman
+    /// (ADR-0067 §10), linked from its stack's logs tab, which shows the stored records.
     pub async fn log_page(
         Extension(containers): Extension<Containers>,
         Extension(stacks): Extension<Stacks>,
@@ -184,16 +185,7 @@ impl Containers {
             Err(err) => return err.into_response(),
         };
         let container = ContainerRow::from(&container);
-        if let Some(url) = container.stack_url(&stacks).await {
-            let mut pairs = Vec::new();
-            if !container.service.is_empty() {
-                pairs.push(("service", container.service.as_str()));
-            }
-            pairs.push(("container", container.name.as_str()));
-            pairs.extend(query.pairs());
-            return Redirect::to(&format!("{url}/logs?{}", LogQuery::encode(&pairs)))
-                .into_response();
-        }
+        let stack_url = container.stack_url(&stacks).await;
         let log = LogView::new(
             Some(&container.name),
             format!("/containers/{}/logs", container.name),
@@ -210,6 +202,7 @@ impl Containers {
         Page(LogPage {
             layout,
             container,
+            stack_url,
             log,
         })
         .into_response()
@@ -284,18 +277,6 @@ impl LogQuery {
         self.is_first_visit() || self.follow.is_some()
     }
 
-    /// The options that were given, as query pairs.
-    fn pairs(&self) -> Vec<(&'static str, &str)> {
-        [
-            ("tail", self.tail.as_deref()),
-            ("since", self.since.as_deref()),
-            ("follow", self.follow.as_deref()),
-        ]
-        .into_iter()
-        .filter_map(|(key, value)| Some((key, value?)))
-        .collect()
-    }
-
     /// `pairs` as a query string.
     fn encode(pairs: &[(&str, &str)]) -> String {
         form_urlencoded::Serializer::new(String::new())
@@ -327,9 +308,9 @@ impl TryFrom<&LogQuery> for LogOptions {
     }
 }
 
-/// Where a log starts, as typed into the form.
+/// Where a log starts, as typed into the form: here and on the stored logs view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogSince {
+pub(in crate::web) enum LogSince {
     /// This long before now.
     Ago(Duration),
     At(SystemTime),
@@ -337,7 +318,7 @@ enum LogSince {
 
 impl LogSince {
     /// The time this means at `now`, never before the Unix epoch.
-    fn resolve(self, now: SystemTime) -> SystemTime {
+    pub(in crate::web) fn resolve(self, now: SystemTime) -> SystemTime {
         let time = match self {
             LogSince::Ago(ago) => now.checked_sub(ago).unwrap_or(UNIX_EPOCH),
             LogSince::At(time) => time,
@@ -516,7 +497,7 @@ impl LogChunk {
 
 /// A log line as the page shows it.
 #[derive(Debug)]
-struct LogEntry {
+pub(in crate::web) struct LogEntry {
     stream: LogStream,
     /// RFC 3339 in UTC, to the millisecond.
     time: Option<String>,
@@ -526,7 +507,7 @@ struct LogEntry {
 impl LogEntry {
     /// `text` without terminal escape sequences (colours, cursor movement) and with any other
     /// control character but a tab shown as U+FFFD. SSE data may not hold a `\r` either.
-    fn printable(text: &str) -> String {
+    pub(in crate::web) fn printable(text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut chars = text.chars().peekable();
         while let Some(c) = chars.next() {
@@ -722,23 +703,16 @@ impl LogView {
             detail: None,
         }
     }
-
-    /// The page at `action` with `keep` instead of this page's own query, and the same options.
-    pub fn link(&self, keep: &[(&str, &str)]) -> String {
-        format!(
-            "{}?{}",
-            self.action,
-            self.form.query(keep, &self.form.since)
-        )
-    }
 }
 
-/// `GET /containers/{name}/logs` of a container whose stack is gone.
+/// `GET /containers/{name}/logs`.
 #[derive(Template)]
 #[template(path = "container_logs.html")]
 struct LogPage {
     layout: Layout,
     container: ContainerRow,
+    /// The page of the container's stack; `None` for a leftover of a removed stack.
+    stack_url: Option<String>,
     log: LogView,
 }
 

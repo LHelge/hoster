@@ -1029,7 +1029,7 @@ impl Startup for Supervisor {
                     ),
                 };
                 let logs = LocalLogs::new(
-                    log_store,
+                    log_store.clone(),
                     self.log_sink.clone(),
                     Arc::new(followers),
                     runtime.clone(),
@@ -1049,6 +1049,7 @@ impl Startup for Supervisor {
                     updates,
                     self.admission.clone(),
                     Arc::new(logs),
+                    log_store,
                 )?
                 .start(listen, self.teardown.token.child_token())
                 .await?;

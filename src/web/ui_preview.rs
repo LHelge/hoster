@@ -972,6 +972,123 @@ impl Fixtures {
     /// previous generation and an internal storage, blog's web with an exited worker, and
     /// shop's storefront with the next generation starting, and one left behind by a removed
     /// `legacy` stack. Routed services publish a loopback port; each has been up for a while.
+    /// A stored hour of notes: api's two generations, storage's stderr, hoster's own records
+    /// and a rate-cap marker (ADR-0067, ADR-0068).
+    async fn logs(app: &TestApp) {
+        use crate::store::{Level, LogBatch, LogRecord, Stream};
+        let now = Timestamp::now();
+        let record =
+            |ago: u64, service: &str, generation: u32, level: Option<Level>, message: &str| {
+                LogRecord {
+                    time: now - Duration::from_millis(ago),
+                    stack: Some("notes".into()),
+                    service: service.into(),
+                    generation: Some(generation),
+                    stream: if service == "hoster" {
+                        Stream::Hoster
+                    } else {
+                        Stream::Stdout
+                    },
+                    level,
+                    message: message.into(),
+                    fields: None,
+                    cut: false,
+                    marker: false,
+                }
+            };
+        let mut records = vec![
+            record(
+                2_400_000,
+                "api",
+                1,
+                Some(Level::Info),
+                "listening on 0.0.0.0:8080",
+            ),
+            record(
+                2_100_000,
+                "storage",
+                2,
+                None,
+                "RustFS 1.0.0 serving on :9000",
+            ),
+            record(
+                1_800_000,
+                "api",
+                1,
+                Some(Level::Info),
+                "GET /notes 200 in 14ms",
+            ),
+            record(
+                1_500_000,
+                "hoster",
+                2,
+                Some(Level::Info),
+                "deploying generation 2 of api",
+            ),
+            record(
+                1_480_000,
+                "api",
+                2,
+                Some(Level::Info),
+                "listening on 0.0.0.0:8080",
+            ),
+            record(
+                1_470_000,
+                "hoster",
+                2,
+                Some(Level::Warn),
+                "health check of api failed once: connection refused",
+            ),
+            record(
+                1_200_000,
+                "api",
+                2,
+                Some(Level::Warn),
+                "slow query: 1204 ms",
+            ),
+            record(900_000, "storage", 2, None, "disk usage 81% on /data"),
+            record(
+                600_000,
+                "api",
+                2,
+                Some(Level::Error),
+                "upstream S3 returned 503",
+            ),
+            record(
+                300_000,
+                "api",
+                2,
+                Some(Level::Debug),
+                "cache miss for note 42",
+            ),
+            record(
+                60_000,
+                "api",
+                2,
+                Some(Level::Info),
+                "GET /notes/42 200 in 9ms",
+            ),
+        ];
+        records[7].stream = Stream::Stderr;
+        let mut marker = record(
+            450_000,
+            "api",
+            2,
+            None,
+            "dropped 312 lines: more than 200 lines a second",
+        );
+        marker.marker = true;
+        records.push(marker);
+        records.sort_by_key(|r| r.time);
+        app.logs
+            .append(&LogBatch {
+                records,
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+    }
+
     async fn containers(app: &TestApp) -> String {
         let runtime = &app.runtime;
         let mut first = None;
@@ -1794,6 +1911,7 @@ async fn ui_preview() {
     Fixtures::registries(&app);
     let container = Fixtures::containers(&app).await;
     Fixtures::resources(&app).await;
+    Fixtures::logs(&app).await;
     let schema: i64 = crate::store::Store::expected_schema_version().into();
     let host = Host::new(&[("0.1.2", schema), ("0.1.3", schema)]).await;
     let mut releases = FakeReleases::default().publish_binary("0.2.0", script("0.2.0", schema));
@@ -1817,7 +1935,7 @@ async fn ui_preview() {
     let browser = app.sign_in().await;
     let session = Session { app: &app, browser };
 
-    let logs = "/stacks/notes/logs?service=api&tail=100&since=&follow=on";
+    let logs = format!("/containers/{container}/logs?tail=100&since=&follow=on");
     for (url, label) in [
         ("/", "Dashboard"),
         ("/stacks", "Stacks"),
@@ -1860,7 +1978,11 @@ async fn ui_preview() {
             "/containers/hoster-legacy-web-g3/logs",
             "Container logs: leftover of a removed stack",
         ),
-        ("/stacks/docs/logs", "Logs of docs: no container yet"),
+        (
+            "/stacks/notes/logs",
+            "Logs of notes: every service, the last hour",
+        ),
+        ("/stacks/docs/logs", "Logs of docs: no records"),
     ] {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("", url), label, &html);
@@ -1896,32 +2018,30 @@ async fn ui_preview() {
         &html,
     );
 
+    // The stored logs of one service over a longer range.
+    let html = session
+        .get("/stacks/notes/logs?service=api&since=6h", StatusCode::OK)
+        .await;
+    preview.write(
+        "states/stack-logs-api.html",
+        "Logs of notes: api over 6 hours",
+        &html,
+    );
+
     // Live parts, with their first content in place.
-    let page = session.get(logs, StatusCode::OK).await;
+    let page = session.get(&logs, StatusCode::OK).await;
     let lines = session
         .stream(&format!("/containers/{container}/logs/stream?tail=100"))
         .await;
     preview.write(
-        &Preview::file_of("", logs),
-        "Logs of notes: following, with a draining generation",
+        &Preview::file_of("", &logs),
+        "Live log of a container: following",
         // Still following: the closing notice has not arrived.
         &Session::inject(
             &page,
             "log",
             lines.split("<span class=\"log-notice\">").next().unwrap(),
         ),
-    );
-    // The draining container chosen, the log not followed, from a preset.
-    let page = session
-        .get(
-            "/stacks/notes/logs?service=api&container=hoster-notes-api-g1&tail=100&since=24h",
-            StatusCode::OK,
-        )
-        .await;
-    preview.write(
-        "states/stack-logs-draining.html",
-        "Logs of notes: draining container, not following",
-        &Session::inject(&page, "log", &lines),
     );
 
     // htmx results, each in the page that asks for it.

@@ -481,56 +481,30 @@ mod containers {
             "{html}"
         );
         assert!(
-            html.contains(
-                r#"href="/stacks/notes/logs?service=web&#38;container=hoster-notes-web-g3""#
-            ),
+            html.contains(r#"href="/containers/hoster-notes-web-g3/logs""#),
             "{html}"
         );
 
-        // The old log URL leads to the stack's logs tab, with the same options.
-        for (url, location) in [
-            (
+        // Its log URL shows the live log, under the stack's logs tab in the breadcrumb
+        // (ADR-0067 §10).
+        let response = app
+            .get(
                 "/containers/hoster-notes-web-g3/logs",
-                "/stacks/notes/logs?service=web&container=hoster-notes-web-g3",
-            ),
-            (
-                "/containers/hoster-notes-web-g3/logs?tail=10&since=1h&follow=on",
-                "/stacks/notes/logs?service=web&container=hoster-notes-web-g3&tail=10&since=1h&follow=on",
-            ),
-        ] {
-            let response = app.get(url, Some(&browser.cookie)).await;
-            assert_eq!(response.status(), StatusCode::SEE_OTHER, "{url}");
-            assert_eq!(response.headers()[header::LOCATION], location, "{url}");
-        }
-
-        // The tab belongs to Stacks and shows the container's log under the stack's header.
-        let html = body(
-            app.get(
-                "/stacks/notes/logs?service=web&container=hoster-notes-web-g3",
                 Some(&browser.cookie),
             )
-            .await,
-        )
-        .await;
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body(response).await;
         assert!(
             html.contains(r#"<li><a href="/stacks" aria-current="page">"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/<a href="/stacks/notes">notes</a>/logs</nav>"#),
+            html.contains(r#"<nav class="crumb" aria-label="Breadcrumb"><a href="/stacks">~/stacks</a>/<a href="/stacks/notes">notes</a>/<a href="/stacks/notes/logs">logs</a>/hoster-notes-web-g3</nav>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<a role="tab" href="/stacks/notes/logs" aria-selected="true" aria-current="page">logs</a>"#),
-            "{html}"
-        );
-        // `web` is not in the active revision, but its container has a chip after the services.
-        assert!(
-            html.contains(r#"<a class="log-chip" href="/stacks/notes/logs?service=web&#38;tail=200&#38;since=&#38;follow=on" aria-current="page"><span class="dot dot-s2" aria-hidden="true"></span>web</a>"#),
-            "{html}"
-        );
-        assert!(
-            html.contains(r#"<input type="hidden" name="container" value="hoster-notes-web-g3">"#),
+            html.contains(r#"<a href="/stacks/notes/logs">Stored logs of notes</a>"#),
             "{html}"
         );
         assert!(
@@ -538,6 +512,13 @@ mod containers {
             "{html}"
         );
         assert!(!html.contains("style="), "{html}");
+
+        // The stack's logs tab links it among the live logs.
+        let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
+        assert!(
+            html.contains(r#"<a class="log-chip" href="/containers/hoster-notes-web-g3/logs">hoster-notes-web-g3 <span class="log-chip-detail">web · g3 · service not in the active revision · running</span></a>"#),
+            "{html}"
+        );
     }
 
     #[tokio::test]
@@ -607,7 +588,7 @@ mod containers {
         let (app, browser, _) = with_container().await;
         let response = app
             .get(
-                "/stacks/notes/logs?service=web&tail=10&since=1h&follow=on",
+                "/containers/hoster-notes-web-g3/logs?tail=10&since=1h&follow=on",
                 Some(&browser.cookie),
             )
             .await;
@@ -623,7 +604,7 @@ mod containers {
         assert!(html.contains(r#"name="tail" min="0" value="10""#), "{html}");
         assert!(html.contains(r#"name="since" value="1h""#), "{html}");
         assert!(
-            html.contains(r#"<a class="log-preset" href="/stacks/notes/logs?service=web&#38;tail=10&#38;since=1h&#38;follow=on" aria-current="true">1h</a>"#),
+            html.contains(r#"<a class="log-preset" href="/containers/hoster-notes-web-g3/logs?tail=10&#38;since=1h&#38;follow=on" aria-current="true">1h</a>"#),
             "{html}"
         );
         assert!(
@@ -631,12 +612,7 @@ mod containers {
             "{html}"
         );
         assert!(html.contains(">following</span>"), "{html}");
-        // The chosen service is kept by the form; no container was named.
-        assert!(
-            html.contains(r#"<input type="hidden" name="service" value="web">"#),
-            "{html}"
-        );
-        assert!(!html.contains(r#"name="container""#), "{html}");
+        assert!(!html.contains(r#"type="hidden""#), "{html}");
         assert!(
             html.contains(&format!(
                 r#"<script src="{}" defer></script>"#,
@@ -649,7 +625,7 @@ mod containers {
     #[tokio::test]
     async fn invalid_log_options_are_reported_without_a_stream() {
         let (app, browser, _) = with_container().await;
-        let page = "/stacks/notes/logs?service=web&tail=lots&since=";
+        let page = "/containers/hoster-notes-web-g3/logs?tail=lots&since=";
         let html = body(app.get(page, Some(&browser.cookie)).await).await;
         assert!(html.contains("flash-error"), "{html}");
         assert!(html.contains("whole number"), "{html}");
