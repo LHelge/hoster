@@ -43,6 +43,15 @@
       <a class="log-chip" href="{{ follow.off }}"{% if !follow.following() %} aria-current="page"{% endif %}><span class="dot follow-off" aria-hidden="true"></span>off</a>
     </nav>
     {%- endif %}
+    {%- if let Some(download) = view.download %}
+    <nav class="log-choices log-download" aria-label="Download" aria-describedby="log-download-hint">
+      <span class="log-label">download</span>
+      {%- for (format, href) in download.links %}
+      <a class="log-chip" href="{{ href }}" download>{{ format.label() }}</a>
+      {%- endfor %}
+      <span class="log-label" id="log-download-hint">every record these filters select in the range, oldest first, at most {{ download.cap() }}</span>
+    </nav>
+    {%- endif %}
     <form class="log-options" method="get" action="{{ view.action }}">
       {%- for (name, value) in view.keep %}
       <input type="hidden" name="{{ name }}" value="{{ value }}">

@@ -65,6 +65,7 @@ impl Telemetry {
             services,
             live: Vec::new(),
             stream: None,
+            download: None,
             stacks: states.into_iter().map(|status| status.name).collect(),
         };
         let view = LogsView::load(&reader, mount, &params).await;

@@ -25,6 +25,7 @@ fn mount(scope: LogScope) -> LogMount {
         services: vec!["api".into(), "storage".into()],
         live: Vec::new(),
         stream: Some("/stacks/notes/logs/stream".into()),
+        download: Some("/stacks/notes/logs/download".into()),
         stacks: Vec::new(),
     }
 }

@@ -323,6 +323,7 @@ impl WebApp {
             .layer(Extension(self.stats.clone()))
             .route("/stacks/{name}/logs", get(Stacks::logs))
             .route("/stacks/{name}/logs/stream", get(Stacks::logs_stream))
+            .route("/stacks/{name}/logs/download", get(Stacks::logs_download))
             .route(Telemetry::PATH, get(Telemetry::index))
             .route(Telemetry::LOGS, get(Telemetry::logs))
             .route("/containers", get(Containers::list))

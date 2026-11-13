@@ -22,6 +22,10 @@
 //! [`LogSource`]): the containers (the default, everything above) or the stack's deployment
 //! events ([`deploy`]), which take the range, grep, paging and following but no service, level
 //! or field filters, and link no live logs.
+//!
+//! The containers' toolbar has a download button (`/stacks/{name}/logs/download`, see
+//! [`LogDownload`]): every record the tab's options select over the whole range, oldest first,
+//! as a text or JSON lines file, up to [`LogDownload::CAP`] records.
 
 mod deploy;
 
@@ -43,8 +47,8 @@ use crate::store::EventKind;
 use crate::web::auth::{Auth, Session};
 use crate::web::containers::Containers;
 use crate::web::logs::{
-    LiveLink, LogFollow, LogMount, LogParams, LogReader, LogScope, LogSource, LogsView,
-    SourceFollow,
+    FormatParam, LiveLink, LogDownload, LogFollow, LogMount, LogParams, LogReader, LogScope,
+    LogSource, LogsView, Refused, SourceFollow,
 };
 use crate::web::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 use deploy::DeployLog;
@@ -163,6 +167,28 @@ impl Stacks {
         }
     }
 
+    /// `GET /stacks/{name}/logs/download?format=text|jsonl&…`: the records the tab's options
+    /// select over the whole range, as a file, streamed. An unknown stack is a 404, an option
+    /// the download cannot take (a pattern that does not compile, an unknown format, the
+    /// deploy source) a 400, an unreadable store a 503.
+    pub async fn logs_download(
+        Extension(stacks): Extension<Stacks>,
+        Extension(reader): Extension<LogReader>,
+        Path(name): Path<String>,
+        Query(params): Query<LogParams>,
+        Query(format): Query<FormatParam>,
+    ) -> Response {
+        let status = match stacks.find(&name).await {
+            Ok(status) => status,
+            Err(outcome) => return outcome.into_response(),
+        };
+        let opened = format
+            .format()
+            .map_err(Refused::Invalid)
+            .and_then(|format| LogDownload::open(&reader, &status.name, &params, format));
+        LogDownload::respond(opened)
+    }
+
     /// How often a follow stream checks that its session is still signed in.
     const SESSION_CHECK: Duration = if cfg!(test) {
         Duration::from_millis(20)
@@ -176,6 +202,7 @@ impl Stacks {
         LogMount {
             scope: LogScope::Stack(status.name.clone()),
             stream: Some(format!("{action}/stream")),
+            download: Some(format!("{action}/download")),
             action,
             services: status.services.iter().map(|s| s.name.clone()).collect(),
             live,

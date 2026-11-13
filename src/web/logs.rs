@@ -50,6 +50,10 @@
 //! a notice row. When the store's oldest record is newer than the start of the range (the
 //! size cap, or a young server), the view says from when its data starts. When the store
 //! cannot be read, it says so and the mount's live log links stay (§10).
+//!
+//! A mount with a download ([`LogMount::download`], the stack tab) offers the records its
+//! options select over the whole range as a file, in each [`LogFormat`]: [`LogDownload`]
+//! (`logs/download.rs`) plans the same store query and reads it page by page.
 
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
@@ -71,6 +75,10 @@ use tokio_util::sync::CancellationToken;
 use super::containers::{LogEntry as LiveLine, LogSince, SinceLink};
 use super::system::LogStoreState;
 use super::ui::Count;
+mod download;
+
+pub use download::{Download, FormatParam, LogDownload, Refused};
+
 use crate::store::{
     self, Level, LogEntry, LogHead, LogPage, LogQuery, LogRecord, LogStore, Page, PageAt,
     RecordKey, ServiceSeen, Stream, TextFilter, Timestamp,
@@ -816,6 +824,9 @@ pub struct LogMount {
     /// Where the newest page's follow stream is ([`LogFollow`]); `None` where the view does
     /// not follow.
     pub stream: Option<String>,
+    /// Where the download of the view's records is ([`LogDownload`]); `None` where it offers
+    /// none.
+    pub download: Option<String>,
     /// Across stacks: the stacks the selector offers even without records in the range, the
     /// current state's.
     pub stacks: Vec<String>,
@@ -1461,6 +1472,8 @@ pub struct LogsView {
     pub empty_note: Option<EmptyNote>,
     /// The follow switch, at the newest end of the range of a view that follows.
     pub follow: Option<Follow>,
+    /// The download button, where the mount has one: the containers' records only.
+    pub download: Option<Download>,
 }
 
 /// The follow switch of the newest page, and its stream while it is on.
@@ -1669,7 +1682,12 @@ impl LogsView {
             stopped,
             ..
         } = paging;
+        let download = mount
+            .download
+            .as_ref()
+            .map(|action| Download::of(action, &links));
         Self {
+            download,
             source: LogSource::Containers,
             sources: Self::sources(&mount.scope, params, &mount.action, LogSource::Containers),
             stacks: Self::stacks(&mount.scope, &mount.stacks, &read.stacks),
@@ -1841,6 +1859,7 @@ impl LogsView {
             ..
         } = paging;
         Self {
+            download: None,
             source,
             sources: Self::sources(&mount.scope, params, &mount.action, source),
             stacks: Self::stacks(&mount.scope, &mount.stacks, &[]),
