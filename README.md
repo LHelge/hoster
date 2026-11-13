@@ -113,6 +113,10 @@ page: `site/content/blog/YYYY-MM-DD_hoster-X-Y-Z.md` with `slug: hoster-X-Y-Z` a
 to know before updating). The docs site is only deployed by a release tag, so merge the post in its own
 `docs:` PR before running `prepare`; the slug is what links the post to its GitHub release.
 
+The tag also releases the composite actions in `actions/`, which app repositories use as
+`LHelge/hoster/actions/deploy@vX.Y.Z`: a change to their inputs or to the webhook belongs in
+the release post.
+
 A RustSec advisory against a shipped dependency (an issue opened by the daily
 `.github/workflows/audit.yml`) means a patch release once the fix is in, unless
 `.cargo/audit.toml` records why it does not affect hoster.
@@ -149,11 +153,15 @@ tag (`cliff.toml`); `chore(release)` commits are left out. See [Installing hoste
 
 The same run builds the documentation site in `site/` with aphid. On a tag it packs the site into
 an aphid-server image (`site/Dockerfile`), pushes `ghcr.io/lhelge/hoster-docs` and deploys it to
-<https://docs.hoster.lhelge.se> through hoster's own deploy webhook. Run `aphid` in `site/` to
-preview it on <http://localhost:3000> with live reload.
+<https://docs.hoster.lhelge.se> with the tag's own `actions/deploy`, the action app repositories
+use. Run `aphid` in `site/` to preview it on <http://localhost:3000> with live reload.
 
 App repositories deploy to hoster from their own release workflows with a GitHub Actions OIDC
-token; see [Deploying from CI](https://docs.hoster.lhelge.se/wiki/deploying-from-ci/) and the example in
+token, using the composite actions in [actions/](actions/): `LHelge/hoster/actions/deploy` posts
+the pushed digest to the deploy webhook and `LHelge/hoster/actions/stack-check` validates stack
+files in CI. They are versioned by hoster's release tags, so a release tag is also the ref app
+repositories pin; `actions/*/test.sh` run in CI. See
+[Deploying from CI](https://docs.hoster.lhelge.se/wiki/deploying-from-ci/) and the example in
 [examples/github-actions/release.yml](examples/github-actions/release.yml).
 Static sites are packed into a small static-file server image and deployed the same way; see
 [Hosting a static site](https://docs.hoster.lhelge.se/wiki/static-sites/).

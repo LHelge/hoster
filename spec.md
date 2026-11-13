@@ -120,8 +120,9 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
    file with the repository's numeric id, plus optional ref/environment restrictions. If you don't
    know the id, the first rejected deploy attempt shows it on the stack page (ADR-0047). No
    secret is stored in CI.
-5. Add a deploy step to the app's GitHub release workflow. It builds and pushes the image, takes
-   the digest from the push step, requests an OIDC token and sends the webhook:
+5. Add a deploy step to the app's GitHub release workflow. It builds and pushes the image, then
+   hands the digest from the push step to hoster's deploy action, which requests an OIDC token and
+   sends the webhook:
 
    ```yaml
    permissions:
@@ -129,19 +130,12 @@ This is the user-facing flow. The decisions behind each step are recorded in [do
      packages: write
      id-token: write        # lets the job request an OIDC token for hoster
    # …
-   - name: Notify hoster
-     env:
-       HOSTER_URL: https://hoster.example.com/hooks/deploy
-       HOSTER_AUDIENCE: https://hoster.example.com
-     run: |
-       token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-         "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$HOSTER_AUDIENCE" | jq -r .value)
-       body=$(jq -nc --arg d "${{ steps.push.outputs.digest }}" --arg t "${{ github.ref_name }}" \
-         '{stack:"notes", images:{api:$d}, tag:$t}')
-       curl -fsS -X POST "$HOSTER_URL" \
-         -H 'Content-Type: application/json' \
-         -H "Authorization: Bearer $token" \
-         --data "$body"
+   - uses: LHelge/hoster/actions/deploy@v0.8.0
+     with:
+       url: https://hoster.example.com
+       stack: notes
+       images: |
+         api=${{ steps.push.outputs.digest }}
    ```
 
    hoster verifies the token (GitHub's signature, issuer, audience, expiry, single-use `jti`) and

@@ -1,9 +1,9 @@
 # Example release workflow for an app repository that deploys to hoster.
 #
-# Copy it to `.github/workflows/release.yml` in the app repository and adjust the `env` block.
-# On every `v*` tag it builds the image, pushes it to ghcr and posts the pushed digest to
-# hoster's deploy webhook, authenticated with the job's GitHub Actions OIDC token. No secret is
-# needed. See https://docs.hoster.lhelge.se/wiki/deploying-from-ci/.
+# Copy it to `.github/workflows/release.yml` in the app repository and adjust `IMAGE` and the
+# deploy step's inputs. On every `v*` tag it builds the image, pushes it to ghcr and deploys the
+# pushed digest with hoster's deploy action, which authenticates with the job's GitHub Actions
+# OIDC token. No secret is needed. See https://docs.hoster.lhelge.se/wiki/deploying-from-ci/.
 #
 # The stack file must allow this repository, e.g.
 #
@@ -12,7 +12,8 @@
 #   refs = ["refs/tags/v*"]
 #   environment = "production"
 #
-# and the service's `image` must be IMAGE below, without a tag.
+# and the service's `image` must be IMAGE below, without a tag. The stack is `notes` and the
+# service `api`, as in the deploy step.
 
 name: Release
 
@@ -26,13 +27,6 @@ permissions:
 env:
   # The repository the stack's service `image` names. ghcr names are lowercase.
   IMAGE: ghcr.io/acme/notes-api
-  # The stack's `name` and the service the image belongs to.
-  STACK: notes
-  SERVICE: api
-  # hoster's admin host; the audience is `https://<admin_host>` unless `[webhook] audience`
-  # is set in hoster.toml.
-  HOSTER_URL: https://hoster.example.com/hooks/deploy
-  HOSTER_AUDIENCE: https://hoster.example.com
 
 jobs:
   release:
@@ -72,35 +66,11 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      - name: Deploy to hoster
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          set -euo pipefail
-
-          # A fresh, single-use token whose `aud` is hoster's audience.
-          audience=$(jq -rn --arg a "$HOSTER_AUDIENCE" '$a|@uri')
-          token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -r .value)
-          echo "::add-mask::$token"
-
-          # {"stack":"notes","images":{"api":"sha256:…"},"tag":"v1.4.2"}
-          body=$(jq -nc --arg s "$STACK" --arg svc "$SERVICE" --arg d "$DIGEST" \
-            --arg t "$GITHUB_REF_NAME" '{stack:$s, images:{($svc):$d}, tag:$t}')
-          echo "request: $body"
-
-          # 202: deployment accepted; 200: already running this digest. Anything else fails
-          # the job with hoster's reason. Don't retry with the same token: it is single-use.
-          status=$(curl -sS -o response.json -w '%{http_code}' -X POST "$HOSTER_URL" \
-            -H 'Content-Type: application/json' \
-            -H "Authorization: Bearer $token" \
-            --data "$body")
-          echo "response ($status): $(cat response.json)"
-          case "$status" in
-            200|202) ;;
-            *) echo "::error::hoster refused the deploy ($status): $(cat response.json)"; exit 1 ;;
-          esac
-
-          id=$(jq -r .deployment_id response.json)
-          echo "Deployment: ${HOSTER_URL%/hooks/deploy}/stacks/$STACK/deployments/$id" \
-            >> "$GITHUB_STEP_SUMMARY"
+      # Use the release tag your hoster runs. `images` takes one `service=digest` per line;
+      # services listed together deploy as one deployment. The step summary links it.
+      - uses: LHelge/hoster/actions/deploy@v0.8.0
+        with:
+          url: https://hoster.example.com   # hoster's admin host
+          stack: notes
+          images: |
+            api=${{ steps.push.outputs.digest }}
