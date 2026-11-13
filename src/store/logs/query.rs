@@ -92,6 +92,47 @@ impl TextFilter {
             TextFilter::Regex(regex) => regex.is_match(haystack),
         }
     }
+
+    /// Where it matches in `haystack`, as byte ranges on character boundaries, in order and
+    /// without overlaps or empty matches: what the logs view marks in a message.
+    pub fn find_all(&self, haystack: &str) -> Vec<Range<usize>> {
+        match self {
+            TextFilter::Regex(regex) => regex
+                .find_iter(haystack)
+                .filter(|m| !m.is_empty())
+                .map(|m| m.range())
+                .collect(),
+            TextFilter::Substring(needle) if needle.is_empty() => Vec::new(),
+            TextFilter::Substring(needle) => {
+                let mut found = Vec::new();
+                let mut from = 0;
+                while let Some(c) = haystack[from..].chars().next() {
+                    match Self::lowercase_prefix(&haystack[from..], needle) {
+                        Some(len) => {
+                            found.push(from..from + len);
+                            from += len;
+                        }
+                        None => from += c.len_utf8(),
+                    }
+                }
+                found
+            }
+        }
+    }
+
+    /// The length in bytes of the start of `text` whose lowercase is `needle`, if it has one.
+    fn lowercase_prefix(text: &str, needle: &str) -> Option<usize> {
+        let mut rest = needle;
+        for (at, c) in text.char_indices() {
+            if rest.is_empty() {
+                return Some(at);
+            }
+            for lower in c.to_lowercase() {
+                rest = rest.strip_prefix(lower)?;
+            }
+        }
+        rest.is_empty().then_some(text.len())
+    }
 }
 
 /// A record's place in the order pages use: its time, then its id for equal times. Written as
@@ -502,6 +543,20 @@ impl LogStore {
             },
             scan_stopped,
         })
+    }
+
+    /// How many records without a level `query` would list if it took every level: what a
+    /// level filter hides (ADR-0067 §3). Narrows by range, scope, services and streams only,
+    /// with the index and no message scan, so its text and field filters and its page are not
+    /// applied.
+    pub async fn count_unleveled(&self, query: &LogQuery) -> Result<u64> {
+        let mut sql = QueryBuilder::<Sqlite>::new("SELECT count(*) FROM log_records");
+        LogQuery::push_where(&mut sql, &query.range, &query.scope);
+        LogQuery::push_in(&mut sql, "service", query.services.clone());
+        LogQuery::push_in(&mut sql, "stream", query.streams.iter().map(|s| s.as_str()));
+        sql.push(" AND level IS NULL");
+        let count: i64 = sql.build_query_scalar().fetch_one(&self.reads).await?;
+        Ok(u64::try_from(count).unwrap_or(0))
     }
 
     /// When the oldest stored record was stamped: where the logs start once the size cap has

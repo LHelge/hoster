@@ -8,10 +8,24 @@
       <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
       {%- endfor %}
     </nav>
+    <nav class="log-choices log-levels" aria-label="Levels">
+      <span class="log-label">level</span>
+      {%- for chip in view.levels %}
+      <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
+      {%- endfor %}
+    </nav>
     <form class="log-options" method="get" action="{{ view.action }}">
       {%- for (name, value) in view.keep %}
       <input type="hidden" name="{{ name }}" value="{{ value }}">
       {%- endfor %}
+      <span class="log-grep" role="group" aria-label="Grep">
+        <span class="log-prompt" aria-hidden="true">&gt;</span>
+        <input type="search" name="q" value="{{ view.q }}" placeholder="grep… (e.g. status=5.. or /api/)" aria-label="Grep: text in the message or fields"{% if view.invalid.is_some() %} aria-invalid="true" aria-describedby="log-grep-error"{% endif %}>
+        <label class="log-regex" title="A regular expression"><input type="checkbox" name="regex" value="on"{% if view.regex %} checked{% endif %}><span aria-hidden="true">.*</span><span class="visually-hidden">regular expression</span></label>
+        {%- if let Some(error) = view.invalid %}
+        <span class="field-error" id="log-grep-error">{{ error }}</span>
+        {%- endif %}
+      </span>
       <span class="log-since" role="group" aria-label="Since">
         <span class="log-label">since</span>
         {%- for preset in view.presets %}
@@ -29,6 +43,9 @@
       {%- endfor %}
     </nav>
     {%- endif %}
+    {%- if let Some(note) = view.unleveled %}
+    <p class="log-hidden">{{ note.says() }} <a href="{{ note.all }}">show all levels</a></p>
+    {%- endif %}
   </div>
   <div class="log-panel">
     {%- if let Some(error) = view.unreadable %}
@@ -37,7 +54,12 @@
     {%- if let Some(at) = view.starts_at %}
     <p class="log-starts">The log store's records start at <time datetime="{{ at }}">{{ at }}</time>, after the start of this range: older ones were removed to keep it under its size cap, or hoster was not recording yet.</p>
     {%- endif %}
-    {%- if view.empty %}
+    {%- if let Some(stopped) = view.stopped %}{% if stopped.older %}
+    <p class="log-pages log-stopped">Searched back to <time datetime="{{ stopped.at }}">{{ stopped.at }}</time>: one search reads at most {{ stopped.cap() }} records. <a href="{{ stopped.href }}">search older</a></p>
+    {%- endif %}{% endif %}
+    {%- if let Some((active, clear)) = view.cleared %}
+    <p class="log-empty">No records match {{ active }} in {% if view.stopped.is_some() %}the records searched{% else %}this range{% endif %}. <a href="{{ clear }}">clear filters</a></p>
+    {%- else if view.empty %}
     <p class="log-empty">No records in this range. Apps that write one JSON object per line get levels and fields; see <a href="https://docs.hoster.lhelge.se/wiki/logging/">logging from an app</a>.</p>
     {%- else %}
     {%- if view.older.is_some() || view.newest.is_some() %}
@@ -55,16 +77,19 @@
         {%- if view.stack_column %}<span class="log-stack">{{ row.stack.as_deref().unwrap_or_default() }}</span>{% endif %}
         <span class="log-svc">{{ row.service }}{% if let Some(generation) = row.generation %} <span class="log-gen">g{{ generation }}</span>{% endif %}</span>
         <span class="log-lvl">{% if let Some(level) = row.level %}{{ level }}{% else %}<span class="visually-hidden">no level</span>{% endif %}</span>
-        <span class="log-msg">{% if row.stderr %}<span class="visually-hidden">stderr: </span>{% endif %}{{ row.message }}{% if row.cut %} <span class="log-cut" title="The line was longer than the store keeps and was cut.">[cut]</span>{% endif %}</span></li>
+        <span class="log-msg">{% if row.stderr %}<span class="visually-hidden">stderr: </span>{% endif %}{% for span in row.spans() %}{% if span.mark %}<mark>{{ span.text }}</mark>{% else %}{{ span.text }}{% endif %}{% endfor %}{% if row.cut %} <span class="log-cut" title="The line was longer than the store keeps and was cut.">[cut]</span>{% endif %}</span></li>
       {%- endif %}
       {%- endfor %}
     </ol>
     {%- if let Some(href) = view.newer %}
     <p class="log-pages"><a href="{{ href }}">newer</a></p>
     {%- endif %}
+    {%- if let Some(stopped) = view.stopped %}{% if !stopped.older %}
+    <p class="log-pages log-stopped">Searched forward to <time datetime="{{ stopped.at }}">{{ stopped.at }}</time>: one search reads at most {{ stopped.cap() }} records. <a href="{{ stopped.href }}">search newer</a></p>
+    {%- endif %}{% endif %}
     {%- endif %}
     {%- endif %}
-    <p class="log-foot"><span><span class="log-total">{{ view.count() }}</span> records</span>
+    <p class="log-foot"><span><span class="log-total">{{ view.count() }}</span> lines shown · {{ view.errors() }} errors · {{ view.warnings() }} warnings</span>
       <span class="log-key"><span class="log-key-swatch" aria-hidden="true"></span>stderr</span></p>
   </div>
 </section>

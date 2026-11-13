@@ -416,6 +416,49 @@ mod queries {
     }
 
     #[tokio::test]
+    async fn records_without_a_level_are_counted_by_range_scope_and_service() {
+        let (_dir, store) = mixed().await;
+        let mut query = LogQuery::new(everything(), LogScope::All);
+        // What a level filter hides: the levels and text asked for do not narrow the count.
+        query.levels = vec![Level::Error];
+        query.text = Some(TextFilter::substring("nothing matches this"));
+        assert_eq!(store.count_unleveled(&query).await.unwrap(), 2);
+        query.scope = LogScope::Stack("notes".into());
+        assert_eq!(store.count_unleveled(&query).await.unwrap(), 1);
+        query.services = vec!["api".into()];
+        assert_eq!(store.count_unleveled(&query).await.unwrap(), 0);
+        query.services.clear();
+        query.range = at(3_000)..at(7_000);
+        assert_eq!(store.count_unleveled(&query).await.unwrap(), 0);
+        store.close().await;
+    }
+
+    #[test]
+    fn matches_are_found_on_character_boundaries() {
+        let found = |filter: TextFilter, text: &str| -> Vec<String> {
+            filter
+                .find_all(text)
+                .into_iter()
+                .map(|range| text[range].to_owned())
+                .collect()
+        };
+        assert_eq!(
+            found(TextFilter::substring("ERR"), "err: Error, ERRor"),
+            ["err", "Err", "ERR"]
+        );
+        assert_eq!(found(TextFilter::substring("aa"), "aaaaa"), ["aa", "aa"]);
+        assert_eq!(found(TextFilter::substring("ö"), "Öl och öl"), ["Ö", "ö"]);
+        assert_eq!(found(TextFilter::substring("é"), "café"), ["é"]);
+        assert!(found(TextFilter::substring("x"), "").is_empty());
+        assert_eq!(
+            found(TextFilter::regex(r"\d+").unwrap(), "GET /a 200 in 12ms"),
+            ["200", "12"]
+        );
+        // Empty matches mark nothing.
+        assert!(found(TextFilter::regex("z*").unwrap(), "abc").is_empty());
+    }
+
+    #[tokio::test]
     async fn bad_patterns_are_errors() {
         assert!(TextFilter::regex("(unclosed").is_err());
         let err = TextFilter::regex(r"(?:\w{100}){100}").unwrap_err();

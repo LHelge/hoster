@@ -1,16 +1,17 @@
 ---
 id: btj
 title: "Stack logs: level filter and grep"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T13:26:20.968219900Z"
-updated: "2026-11-12T13:26:20.968219900Z"
+updated: "2026-11-13T08:41:17.480982672Z"
 tags:
   - web
   - observability
 depends_on:
   - yn7
 parent: psq
+attempts: 1
 ---
 
 ## Summary
@@ -29,6 +30,7 @@ Add the two filters of `docs/design/StackLogs.dc.html` to the shared log view (b
 - The filter belongs to the store's query type; the handler only parses GET parameters into it (`TryFrom<&Query>` as `LogOptions` does in `src/web/containers.rs`)
 - Use the `regex` crate if it is already in the tree (`cargo tree -i regex`); otherwise `cargo add regex`. It guarantees linear-time matching, so a hostile pattern cannot stall the scan; the scan cap bounds the rest
 - Highlighting is done on the server on escaped text; never mark inside an HTML entity
+- The store's `LogQuery` already has `levels` and `text` (`TextFilter`, matching fields as flattened `key=value`), and `Page::scan_stopped` (task for the store query API)
 
 ## Edge Cases
 - An empty `q` is no filter; a `q` of only spaces is a literal search
@@ -42,4 +44,6 @@ Add the two filters of `docs/design/StackLogs.dc.html` to the shared log view (b
 
 ## References
 - ADR-0067 (§3, §8), ADR-0054
-- `docs/design/StackLogs.dc.html`, `docs/design/Telemetry.dc.html` (severity chips), `src/web/stacks/logs.rs`, `src/web/containers.rs` (`LogQuery`, `LogOptions`)
+- `docs/design/StackLogs.dc.html`, `docs/design/Telemetry.dc.html` (severity chips)
+- `src/web/logs.rs` (the shared view: `LogParams::filters`, `Links`), `templates/logs_view.html`, `src/web/stacks/logs.rs` (the stack mount)
+- `src/store/logs/query.rs` (`LogQuery`, `TextFilter`, `Page::scan_stopped`), `src/web/containers.rs` (`LogQuery`, `LogOptions`)
