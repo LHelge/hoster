@@ -744,6 +744,55 @@ mod queries {
     }
 
     #[tokio::test]
+    async fn stacks_in_a_range_are_listed_by_name_without_hosters_own() {
+        let (_dir, store) = mixed().await;
+        assert_eq!(
+            store.stacks_in(everything(), 100).await.unwrap(),
+            ["blog", "notes"]
+        );
+        // notes has records before and after, none inside.
+        assert_eq!(
+            store.stacks_in(at(2_500)..at(4_500), 100).await.unwrap(),
+            ["blog"]
+        );
+        assert_eq!(store.stacks_in(everything(), 1).await.unwrap(), ["blog"]);
+        assert!(
+            store
+                .stacks_in(at(0)..at(500), 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn record_counts_take_a_scope_and_stop_at_their_cap() {
+        let (_dir, store) = mixed().await;
+        let count = |scope: LogScope, cap| {
+            let store = store.clone();
+            async move {
+                store
+                    .count_records(everything(), &scope, cap)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(count(LogScope::All, 100).await, 6);
+        assert_eq!(count(LogScope::Stack("notes".into()), 100).await, 4);
+        assert_eq!(count(LogScope::Hoster, 100).await, 1);
+        assert_eq!(count(LogScope::All, 2).await, 2);
+        assert_eq!(
+            store
+                .count_records(at(0)..at(2_500), &LogScope::All, 100)
+                .await
+                .unwrap(),
+            2
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
     async fn level_counts_bucket_by_time() {
         let (_dir, store) = mixed().await;
         let buckets = store

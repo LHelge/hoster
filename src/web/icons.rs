@@ -21,6 +21,7 @@ pub enum Icon {
     // Main navigation.
     Dashboard,
     Stacks,
+    Telemetry,
     Containers,
     Certificates,
     Settings,
@@ -44,10 +45,11 @@ pub enum Icon {
 
 impl Icon {
     /// Every icon, in sprite order.
-    pub const ALL: [Icon; 19] = [
+    pub const ALL: [Icon; 20] = [
         Icon::Brand,
         Icon::Dashboard,
         Icon::Stacks,
+        Icon::Telemetry,
         Icon::Containers,
         Icon::Certificates,
         Icon::Settings,
@@ -77,6 +79,7 @@ impl Icon {
             Icon::Brand => icondata::LuLayers,
             Icon::Dashboard => icondata::LuLayoutGrid,
             Icon::Stacks => icondata::LuLayers,
+            Icon::Telemetry => icondata::LuActivity,
             Icon::Containers => icondata::LuContainer,
             Icon::Certificates => icondata::LuLock,
             Icon::Settings => icondata::LuSlidersVertical,
@@ -102,6 +105,7 @@ impl Icon {
             Icon::Brand => "brand",
             Icon::Dashboard => "dashboard",
             Icon::Stacks => "stacks",
+            Icon::Telemetry => "telemetry",
             Icon::Containers => "containers",
             Icon::Certificates => "certificates",
             Icon::Settings => "settings",

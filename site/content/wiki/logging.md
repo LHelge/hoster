@@ -96,7 +96,10 @@ fields opens on them, nested keys flattened to dotted ones (`span.request_id`,
 `spans.0.name`), and a click on a value lists only the records with that value, such as every
 line of one request. It links each container's live log, which still
 streams straight from podman, so it shows a line before it is stored and works when the store
-is unavailable.
+is unavailable. The **Telemetry** page's **Logs** tab has the same filters across every stack,
+with a stack column and a stack selector (every stack, one, or `hoster` for hoster's own
+records that name no stack), over the last 15 minutes unless you pick another range. It does
+not follow new records; reload it, or follow on the stack's tab.
 
 **Backups and rollback.** `hoster backup db` does not include `logs.db`, and a restored server
 starts with empty logs ([[backup]]). `hoster rollback` undoes the log store's schema too

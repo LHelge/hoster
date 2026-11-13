@@ -179,6 +179,7 @@ impl Stacks {
             action,
             services: status.services.iter().map(|s| s.name.clone()).collect(),
             live,
+            stacks: Vec::new(),
         }
     }
 

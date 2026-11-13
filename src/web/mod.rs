@@ -3,7 +3,8 @@
 //! `dashboard.rs`), the event log's feeds and Events page (ADR-0055, see `events.rs`), container
 //! logs (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
 //! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029, ADR-0049, see
-//! `stacks.rs`), Settings: Registries (ADR-0025), the instance name and notifications (ADR-0058)
+//! `stacks.rs`), the Telemetry page's logs across stacks (ADR-0067, ADR-0068, see
+//! `telemetry.rs`), Settings: Registries (ADR-0025), the instance name and notifications (ADR-0058)
 //! and read-only views of the configuration (ADR-0024, see `settings.rs`), the deploy webhook
 //! (ADR-0042, ADR-0047, see `webhook.rs`), and
 //! the System page with self-update (ADR-0052, see `system.rs`).
@@ -32,6 +33,7 @@ mod pages;
 mod settings;
 mod stacks;
 mod system;
+mod telemetry;
 mod ui;
 mod webhook;
 
@@ -84,6 +86,7 @@ use self::settings::{
 };
 use self::stacks::{StackControl, StackFile, Stacks};
 use self::system::{LocalHost, System};
+use self::telemetry::Telemetry;
 pub(crate) use self::ui::Tone;
 use self::webhook::{OidcVerifier, Webhook};
 
@@ -320,6 +323,8 @@ impl WebApp {
             .layer(Extension(self.stats.clone()))
             .route("/stacks/{name}/logs", get(Stacks::logs))
             .route("/stacks/{name}/logs/stream", get(Stacks::logs_stream))
+            .route(Telemetry::PATH, get(Telemetry::index))
+            .route(Telemetry::LOGS, get(Telemetry::logs))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))
             .route(

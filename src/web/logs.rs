@@ -3,13 +3,15 @@
 //! a *since* range and paging back through history, replaced and removed containers included.
 //!
 //! One view, two scopes ([`LogScope`]): the stack logs tab mounts it with its stack fixed
-//! (`/stacks/{name}/logs`), and the Telemetry page's Logs tab mounts it across every stack. A
+//! (`/stacks/{name}/logs`), and the Telemetry page's Logs tab (`web/telemetry.rs`) mounts it
+//! across every stack, with a stack column, a stack selector (`stack`: one stack, or
+//! [`LogScope::HOSTER`] for hoster's own records without one) and the range's record count. A
 //! mount says where the view lives and what it knows beyond the store ([`LogMount`]: the
 //! services the current revision declares, the containers whose live log it links), and
 //! [`LogsView::load`] reads the store and builds what `logs_view.html` renders.
 //!
 //! Every option is a plain GET parameter ([`LogParams`]): `service`, `since` (a preset, a
-//! duration or a UTC time; 1h by default), `level` ([`LevelFilter`]), `q` and `regex=on` (grep:
+//! duration or a UTC time; by default 1h of a stack, 15m across stacks), `level` ([`LevelFilter`]), `q` and `regex=on` (grep:
 //! a substring ignoring case, or a regular expression, of the message and the fields), `field`
 //! (repeatable, [`FieldFilter`]: `<key>=<value>`, an exact match on a flattened field) and the
 //! page cursor `before`/`after`, a record's `<time>.<id>` key. Every link keeps the other
@@ -79,18 +81,32 @@ use crate::store::{
 pub enum LogScope {
     /// One stack's: the stack logs tab.
     Stack(String),
-    /// Every stack's, or the one picked: the Telemetry page's Logs tab.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the Telemetry page's Logs tab (task ckc) mounts it"
-        )
-    )]
+    /// Every stack's, or the one picked (`stack`): the Telemetry page's Logs tab.
+    /// [`LogScope::HOSTER`] picks hoster's own records that name no stack.
     All { stack: Option<String> },
 }
 
 impl LogScope {
+    /// The `stack` that picks hoster's own records without a stack (ADR-0068): `hoster` in the
+    /// selector. Stack names start with a letter, so no stack can be called this.
+    pub const HOSTER: &str = "_hoster";
+
+    /// The range without a `since`: the last hour of one stack, the last 15 minutes of all.
+    pub fn default_since(&self) -> &'static str {
+        match self {
+            LogScope::Stack(_) => "1h",
+            LogScope::All { .. } => "15m",
+        }
+    }
+
+    /// The stack picked across stacks, which every link keeps as `stack`.
+    fn picked(&self) -> Option<&str> {
+        match self {
+            LogScope::Stack(_) => None,
+            LogScope::All { stack } => stack.as_deref(),
+        }
+    }
+
     /// The sources its switch offers; none (no switch) across stacks.
     pub fn sources(&self) -> &'static [LogSource] {
         match self {
@@ -102,6 +118,9 @@ impl LogScope {
     /// The store's scope for this one.
     fn store(&self) -> store::LogScope {
         match self {
+            LogScope::All { stack: Some(stack) } if stack == Self::HOSTER => {
+                store::LogScope::Hoster
+            }
             LogScope::Stack(stack) | LogScope::All { stack: Some(stack) } => {
                 store::LogScope::Stack(stack.clone())
             }
@@ -227,7 +246,7 @@ impl LogReader {
     }
 
     /// The open store, or why there is none.
-    fn store(&self) -> Result<&LogStore, String> {
+    pub(super) fn store(&self) -> Result<&LogStore, String> {
         match &self.state {
             LogStoreState::Open(store) => Ok(store),
             LogStoreState::Unavailable(error) => {
@@ -261,12 +280,33 @@ impl LogReader {
                 false => Ok(None),
             }
         };
+        // Across stacks: the stacks of the range for the selector, and the records it holds.
+        let stacks = async {
+            match plan.across {
+                true => store
+                    .stacks_in(query.range.clone(), LogsView::STACKS_CAP)
+                    .await
+                    .map(Some),
+                false => Ok(None),
+            }
+        };
+        let total = async {
+            match plan.across {
+                true => store
+                    .count_records(query.range.clone(), &query.scope, LogsView::COUNT_CAP + 1)
+                    .await
+                    .map(Some),
+                false => Ok(None),
+            }
+        };
         let read = async {
-            let (seen, page, oldest, unleveled) = tokio::try_join!(
+            let (seen, page, oldest, unleveled, stacks, total) = tokio::try_join!(
                 store.services_in(query.range.clone(), &query.scope),
                 records,
                 store.oldest_record_time(),
                 unleveled,
+                stacks,
+                total,
             )?;
             Ok::<_, store::StoreError>(Read {
                 seen,
@@ -274,6 +314,8 @@ impl LogReader {
                 oldest,
                 unleveled,
                 head,
+                stacks: stacks.unwrap_or_default(),
+                total,
             })
         };
         read.await.map_err(|err| {
@@ -293,6 +335,11 @@ struct Read {
     unleveled: Option<u64>,
     /// The newest committed record id before the page was read.
     head: i64,
+    /// Across stacks: the stacks with records in the range.
+    stacks: Vec<String>,
+    /// Across stacks: the records of the range and scope, counted up to one past
+    /// [`LogsView::COUNT_CAP`].
+    total: Option<u64>,
 }
 
 /// The store query one page runs, and what was wrong with its options.
@@ -303,6 +350,8 @@ struct Plan {
     problem: Option<String>,
     /// Why the grep pattern does not compile; no records are read then.
     invalid: Option<String>,
+    /// Across stacks: the stack selector and the record count are read too.
+    across: bool,
 }
 
 impl Plan {
@@ -542,6 +591,10 @@ pub struct LogParams {
     from: Option<String>,
     /// Field filters ([`FieldFilter`]), as given.
     field: Vec<String>,
+    /// Across stacks, the stack picked ([`LogScope::All`]); the stack tab fixes it by its path.
+    stack: Option<String>,
+    /// The range without a `since`, set by the scope ([`LogParams::scoped`]); not a parameter.
+    default_since: Option<String>,
 }
 
 impl From<Vec<(String, String)>> for LogParams {
@@ -559,6 +612,7 @@ impl From<Vec<(String, String)>> for LogParams {
                 "regex" => &mut params.regex,
                 "follow" => &mut params.follow,
                 "from" => &mut params.from,
+                "stack" => &mut params.stack,
                 "field" => {
                     params.field.push(value);
                     continue;
@@ -574,8 +628,26 @@ impl From<Vec<(String, String)>> for LogParams {
 impl LogParams {
     /// The *since* presets, shared by both scopes.
     pub const SINCE_PRESETS: [&str; 6] = ["5m", "15m", "1h", "6h", "24h", "7d"];
-    /// The range without a `since`.
+    /// The range without a `since`, unless the scope sets its own ([`LogScope::default_since`]).
     pub const DEFAULT_SINCE: &str = "1h";
+
+    /// The same options, with the range `scope` defaults to.
+    pub fn scoped(self, scope: &LogScope) -> Self {
+        Self {
+            default_since: Some(scope.default_since().to_owned()),
+            ..self
+        }
+    }
+
+    /// The stack picked across stacks (`stack`), when given.
+    pub fn stack(&self) -> Option<&str> {
+        Self::text(&self.stack)
+    }
+
+    /// The range without a `since`.
+    fn default_since(&self) -> &str {
+        self.default_since.as_deref().unwrap_or(Self::DEFAULT_SINCE)
+    }
 
     fn text(value: &Option<String>) -> Option<&str> {
         value.as_deref().map(str::trim).filter(|v| !v.is_empty())
@@ -587,7 +659,7 @@ impl LogParams {
 
     /// The *since* in effect, as typed.
     fn since(&self) -> &str {
-        Self::text(&self.since).unwrap_or(Self::DEFAULT_SINCE)
+        Self::text(&self.since).unwrap_or(self.default_since())
     }
 
     /// The source in effect in `scope`; the containers when `source` is absent, not one of the
@@ -606,7 +678,7 @@ impl LogParams {
     fn start(&self, now: SystemTime) -> (Timestamp, Option<String>) {
         let default = || {
             Timestamp::from(
-                Self::DEFAULT_SINCE
+                self.default_since()
                     .parse::<LogSince>()
                     .expect("the default parses")
                     .resolve(now),
@@ -744,6 +816,9 @@ pub struct LogMount {
     /// Where the newest page's follow stream is ([`LogFollow`]); `None` where the view does
     /// not follow.
     pub stream: Option<String>,
+    /// Across stacks: the stacks the selector offers even without records in the range, the
+    /// current state's.
+    pub stacks: Vec<String>,
 }
 
 /// A link to one container's live log.
@@ -768,6 +843,19 @@ struct Links {
 }
 
 impl Links {
+    /// The links of a view at `action` in `scope` showing `source` with the options of
+    /// `params`: those options, and the stack picked across stacks first.
+    fn of(action: &str, scope: &LogScope, params: &LogParams, source: LogSource) -> Self {
+        let mut filters = params.filters(source);
+        if let Some(stack) = scope.picked() {
+            filters.insert(0, ("stack", stack.to_owned()));
+        }
+        Self {
+            action: action.to_owned(),
+            filters,
+        }
+    }
+
     /// The view with `set` replacing those options (`None` drops one; `field` replaces every
     /// field filter), and no page cursor unless `set` names one.
     fn to(&self, set: &[(&'static str, Option<&str>)]) -> String {
@@ -816,6 +904,30 @@ impl Links {
             .extend_pairs(pairs)
             .finish();
         format!("{}?{query}", self.action)
+    }
+}
+
+/// An option of the stack selector, across stacks.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StackOption {
+    /// The `stack` parameter; empty for every stack.
+    pub value: String,
+    pub label: String,
+    pub current: bool,
+}
+
+/// How many records the range holds, for the Telemetry page's tab: counted up to
+/// [`LogsView::COUNT_CAP`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Total(u64);
+
+impl fmt::Display for Total {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cap = u64::from(LogsView::COUNT_CAP);
+        match self.0 > cap {
+            true => write!(f, "{}+", Count(cap)),
+            false => write!(f, "{}", Count(self.0)),
+        }
     }
 }
 
@@ -1304,6 +1416,10 @@ pub struct LogsView {
     pub source: LogSource,
     /// The source switch, current one marked; empty without one.
     pub sources: Vec<Chip>,
+    /// The stack selector, across stacks; empty in the stack scope.
+    pub stacks: Vec<StackOption>,
+    /// Across stacks: the records the range holds.
+    pub total: Option<Total>,
     pub action: String,
     /// The options the form keeps as hidden fields (all but those it edits).
     pub keep: Vec<(&'static str, String)>,
@@ -1374,20 +1490,28 @@ impl LogsView {
     pub const PAGE_SIZE: u32 = 200;
     /// The colour classes of the service chips and rows, in turn by service order (ADR-0054:
     /// classes, never inline styles).
-    const PALETTE: [&str; 4] = ["svc-0", "svc-1", "svc-2", "svc-3"];
+    /// They are the categorical colours of `docs/design/README.md` (Telemetry notes), hoster's
+    /// own first ([`LogsView::HOSTER_CLASS`]).
+    const PALETTE: [&str; 6] = ["svc-0", "svc-1", "svc-2", "svc-3", "svc-4", "svc-5"];
     /// hoster's own records (ADR-0068).
     const HOSTER_CLASS: &str = "svc-hoster";
     const ALL_CLASS: &str = "svc-all";
     /// The service hoster's own records are listed under.
     const HOSTER: &str = "hoster";
     /// The options the form edits rather than keeps as hidden fields.
-    const EDITED: [&str; 3] = ["since", "q", "regex"];
+    const EDITED: [&str; 4] = ["stack", "since", "q", "regex"];
+    /// The most records the Telemetry page's tab counts; more are shown as this many and a `+`,
+    /// so the count reads at most this many index entries.
+    pub const COUNT_CAP: u32 = 100_000;
+    /// The most stacks the stack selector lists from the store.
+    const STACKS_CAP: u32 = 500;
     /// How far past now the range ends, so a line stamped as the page renders is on it.
     const END_SLACK: Duration = Duration::from_secs(1);
 
     /// The view of `mount` with the options of `params`, read from `reader`.
     pub async fn load(reader: &LogReader, mount: LogMount, params: &LogParams) -> Self {
         let now = SystemTime::now();
+        let params = &params.clone().scoped(&mount.scope);
         let plan = Self::plan(&mount.scope, params, now);
         let read = reader.read(&plan).await;
         Self::new(mount, params, now, plan, read)
@@ -1420,6 +1544,7 @@ impl LogsView {
                 .or(level_problem)
                 .or(field_problem),
             invalid,
+            across: matches!(scope, LogScope::All { .. }),
         }
     }
 
@@ -1434,11 +1559,9 @@ impl LogsView {
             query,
             problem,
             invalid,
+            ..
         } = plan;
-        let links = Links {
-            action: mount.action.clone(),
-            filters: params.filters(LogSource::Containers),
-        };
+        let links = Links::of(&mount.action, &mount.scope, params, LogSource::Containers);
         let (read, unreadable) = match read {
             Ok(read) => (read, None),
             Err(error) => (Read::default(), Some(error)),
@@ -1549,6 +1672,8 @@ impl LogsView {
         Self {
             source: LogSource::Containers,
             sources: Self::sources(&mount.scope, params, &mount.action, LogSource::Containers),
+            stacks: Self::stacks(&mount.scope, &mount.stacks, &read.stacks),
+            total: read.total.map(Total),
             empty_note: None,
             keep: links
                 .filters
@@ -1613,6 +1738,27 @@ impl LogsView {
             .collect()
     }
 
+    /// The stack selector of `scope`: every stack, then the stacks `known` and those with
+    /// records in the range (`seen`) by name, then hoster's own; the one picked is current,
+    /// and listed even when it is neither. Empty in the stack scope.
+    fn stacks(scope: &LogScope, known: &[String], seen: &[String]) -> Vec<StackOption> {
+        let LogScope::All { stack: picked } = scope else {
+            return Vec::new();
+        };
+        let picked = picked.as_deref();
+        let mut names: BTreeSet<&str> = known.iter().chain(seen).map(String::as_str).collect();
+        names.extend(picked.filter(|p| *p != LogScope::HOSTER));
+        let option = |value: &str, label: &str| StackOption {
+            value: value.to_owned(),
+            label: label.to_owned(),
+            current: picked.unwrap_or_default() == value,
+        };
+        let mut options = vec![option("", "all stacks")];
+        options.extend(names.into_iter().map(|name| option(name, name)));
+        options.push(option(LogScope::HOSTER, Self::HOSTER));
+        options
+    }
+
     /// The *since* field as typed and its presets, linking `links`.
     fn since(params: &LogParams, links: &Links) -> (String, Vec<SinceLink>) {
         let since = LogParams::text(&params.since)
@@ -1642,10 +1788,7 @@ impl LogsView {
         read: Result<Page<SourceEntry>, String>,
         empty: EmptyNote,
     ) -> Self {
-        let links = Links {
-            action: mount.action.clone(),
-            filters: params.filters(source),
-        };
+        let links = Links::of(&mount.action, &mount.scope, params, source);
         let (page, unreadable) = match read {
             Ok(page) => (page, None),
             Err(error) => (Page::default(), Some(error)),
@@ -1700,6 +1843,8 @@ impl LogsView {
         Self {
             source,
             sources: Self::sources(&mount.scope, params, &mount.action, source),
+            stacks: Self::stacks(&mount.scope, &mount.stacks, &[]),
+            total: None,
             keep: links
                 .filters
                 .iter()
@@ -1829,6 +1974,7 @@ impl LogFollow {
     ) -> Result<Self, String> {
         let store = reader.store()?.clone();
         let now = SystemTime::now();
+        let params = &params.clone().scoped(&mount.scope);
         let Plan {
             mut query, invalid, ..
         } = LogsView::plan(&mount.scope, params, now);
@@ -1860,10 +2006,7 @@ impl LogFollow {
                 ..Rows::new(
                     LogsView::services(&mount.services, &seen),
                     &seen,
-                    Links {
-                        action: mount.action.clone(),
-                        filters: params.filters(LogSource::Containers),
-                    },
+                    Links::of(&mount.action, &mount.scope, params, LogSource::Containers),
                 )
             },
             query,
@@ -2025,10 +2168,7 @@ impl<T: SourceTail> SourceFollow<T> {
                 ..Rows::new(
                     Vec::new(),
                     &[],
-                    Links {
-                        action: mount.action.clone(),
-                        filters: params.filters(source),
-                    },
+                    Links::of(&mount.action, &mount.scope, params, source),
                 )
             },
             cursor,

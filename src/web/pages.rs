@@ -36,6 +36,8 @@ pub use self::host_card::HostCard;
 pub enum Section {
     Dashboard,
     Stacks,
+    /// Logs across every stack (ADR-0067, ADR-0068); traces later.
+    Telemetry,
     Certificates,
     Settings,
     System,
@@ -46,9 +48,10 @@ pub enum Section {
 
 impl Section {
     /// The sections the navigation lists, in order.
-    const NAV: [Section; 5] = [
+    const NAV: [Section; 6] = [
         Section::Dashboard,
         Section::Stacks,
+        Section::Telemetry,
         Section::Certificates,
         Section::Settings,
         Section::System,
@@ -58,6 +61,7 @@ impl Section {
         match self {
             Section::Dashboard => "/",
             Section::Stacks => "/stacks",
+            Section::Telemetry => super::telemetry::Telemetry::PATH,
             Section::Certificates => "/certificates",
             Section::Settings => "/settings/general",
             Section::System => "/system",
@@ -70,6 +74,7 @@ impl Section {
         match self {
             Section::Dashboard => "dashboard",
             Section::Stacks => "stacks",
+            Section::Telemetry => "telemetry",
             Section::Certificates => "certificates",
             Section::Settings => "settings",
             Section::System => "system",
@@ -81,6 +86,7 @@ impl Section {
         match self {
             Section::Dashboard => Icon::Dashboard,
             Section::Stacks => Icon::Stacks,
+            Section::Telemetry => Icon::Telemetry,
             Section::Certificates => Icon::Certificates,
             Section::Settings => Icon::Settings,
             Section::System => Icon::System,
@@ -95,6 +101,7 @@ impl fmt::Display for Section {
         f.write_str(match self {
             Section::Dashboard => "Dashboard",
             Section::Stacks => "Stacks",
+            Section::Telemetry => "Telemetry",
             Section::Certificates => "Certificates",
             Section::Settings => "Settings",
             Section::System => "System",

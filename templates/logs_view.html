@@ -1,5 +1,5 @@
 {#- The stored logs view of a LogsView `view` (src/web/logs.rs): the source switch (stack scope
-    only), the toolbar of chips and GET options, then one page of records, oldest first, and
+    only), the toolbar (with the stack selector across stacks only) of chips and GET options, then one page of records, oldest first, and
     while following the rows its stream appends (log_records.html). Shared by the stack logs
     tab and the Telemetry page's Logs tab, and by every source; a source shows only the chips
     it has. -#}
@@ -47,6 +47,15 @@
       {%- for (name, value) in view.keep %}
       <input type="hidden" name="{{ name }}" value="{{ value }}">
       {%- endfor %}
+      {%- if !view.stacks.is_empty() %}
+      <label class="log-stack-pick"><span class="log-label">stack</span>
+        <select name="stack">
+          {%- for option in view.stacks %}
+          <option value="{{ option.value }}"{% if option.current %} selected{% endif %}>{{ option.label }}</option>
+          {%- endfor %}
+        </select>
+      </label>
+      {%- endif %}
       <span class="log-grep" role="group" aria-label="Grep">
         <span class="log-prompt" aria-hidden="true">&gt;</span>
         <input type="search" name="q" value="{{ view.q }}" placeholder="grep… (e.g. status=5.. or /api/)" aria-label="{{ view.source.grep_label() }}"{% if view.invalid.is_some() %} aria-invalid="true" aria-describedby="log-grep-error"{% endif %}>
