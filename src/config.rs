@@ -463,6 +463,11 @@ impl Config {
     /// app on loopback TCP instead.
     pub const ADMIN_SOCKET_NAME: &str = "admin.sock";
 
+    /// The file name, in the state directory, of the 0600 Unix socket the OTLP receiver listens
+    /// on and the proxy's `:80` hands `host.containers.internal` to (ADR-0069 §3), with or
+    /// without `web.dev_listen`.
+    pub const OTLP_SOCKET_NAME: &str = "otlp.sock";
+
     /// Checks the rules serde cannot express; the types already enforce the rest.
     fn validate(&self) -> Vec<Problem> {
         let mut problems = Vec::new();

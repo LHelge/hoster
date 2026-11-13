@@ -19,13 +19,16 @@
 //!   `ArcSwap<RouteTable>`, the forwarding headers of ADR-0010, per-route timeouts (ADR-0011)
 //!   and 421 for a request whose host is not the connection's SNI name (ADR-0032).
 //! - `:80` ([`ProxyConfig::http_listen`]) is [`ChallengeOrRedirect`]: ACME HTTP-01 answers from
-//!   the [`ChallengeMap`], 308 to HTTPS for known hosts and 404 for the rest. It never proxies.
+//!   the [`ChallengeMap`], 308 to HTTPS for known hosts and 404 for the rest. The one thing it
+//!   proxies is the OTLP receiver ([`ReceiverRoute`], ADR-0069 §3): `host.containers.internal`
+//!   from a peer that is one of the host's own addresses, matched before anything else.
 //!
 //! Both refuse a new client at accept while hoster has too many descriptors open, or the
 //! client's address too many connections ([`Admission`], ADR-0065).
 
 mod admission;
 mod plain;
+mod receiver;
 mod resolver;
 mod router;
 
@@ -48,6 +51,9 @@ use tokio::sync::{broadcast, watch};
 
 pub use self::admission::{Admission, FileLimit, FileUse};
 use self::plain::ChallengeOrRedirect;
+pub use self::receiver::ReceiverRoute;
+#[cfg(test)]
+pub(crate) use self::receiver::{HostAddresses, Interfaces};
 use self::resolver::{CertResolver, SniCapture};
 use self::router::RoutingProxy;
 use crate::acme::{CertMap, ChallengeMap};
@@ -116,6 +122,9 @@ pub struct ProxyState {
     pub admission: Admission,
     /// Where the `:443` service offers the rows of requests routed to a stack (ADR-0067 §5).
     pub logs: LogSink,
+    /// Where the `:80` service hands the OTLP receiver's requests from local peers
+    /// (ADR-0069 §3).
+    pub receiver: ReceiverRoute,
 }
 
 /// What hoster allows a client connection on either listener, where Pingora's own default is no
@@ -198,6 +207,7 @@ impl Proxy {
             traffic,
             admission,
             logs,
+            receiver,
         } = state;
         let admission = Arc::new(admission);
 
@@ -222,7 +232,7 @@ impl Proxy {
         // has no pre-TLS callback, so the app takes each connection's slot.
         let mut app = http_proxy(
             &server.configuration,
-            ChallengeOrRedirect::new(routes, challenges, config.timeouts, limits),
+            ChallengeOrRedirect::new(routes, challenges, receiver, config.timeouts, limits),
         );
         app.server_options = Some(limits.server_options());
         let mut http = Service::new("hoster http".to_owned(), admission.claiming(app));
@@ -411,6 +421,7 @@ mod thread_tests {
             traffic: Traffic::default(),
             admission: Admission::default(),
             logs: LogSink::disconnected(),
+            receiver: ReceiverRoute::new(dir.path().join("otlp.sock")),
         };
         (state, dir)
     }

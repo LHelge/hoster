@@ -97,7 +97,14 @@ async fn the_tab_lists_variables_and_secret_names_but_no_values() {
         !html.contains(r#"<input type="hidden" name="name" value="missing">"#),
         "{html}"
     );
-    assert!(html.contains("· 3 variables · 3 secrets"), "{html}");
+    assert!(html.contains("· 15 variables · 3 secrets"), "{html}");
+    // The OTLP token is masked like a secret's value.
+    assert!(
+        html.contains(
+            r#"<code class="wrap env-value">Authorization=Bearer%20••••••••</code><span class="env-changed">added by hoster: the service&#39;s OTLP token, never shown</span>"#
+        ),
+        "{html}"
+    );
     // The PORT hoster adds for api's route, marked as such.
     assert!(
         html.contains(
@@ -488,9 +495,11 @@ fn rows_follow_the_stack_file_then_the_unreferenced_secrets() {
         },
     ];
     let table = EnvTable::new(&status, &secrets, SystemTime::now());
+    // The `OTEL_*` variables every service gets have a test of their own.
     let rows: Vec<_> = table
         .rows
         .iter()
+        .filter(|r| !r.key.as_deref().is_some_and(|k| k.starts_with("OTEL_")))
         .map(|r| {
             (
                 r.key.as_deref(),
@@ -545,8 +554,68 @@ fn rows_follow_the_stack_file_then_the_unreferenced_secrets() {
             ),
         ]
     );
-    assert_eq!(table.counts(), (3, 3));
+    // Six `OTEL_*` rows per service count as variables; the masked token is no stored secret.
+    assert_eq!(table.counts(), (3 + 2 * 6, 3));
     assert!(table.error.is_none());
+}
+
+/// ADR-0069 §5: every service's `OTEL_*` variables, marked as added by hoster, the token
+/// masked like a secret and the generation named, since each deployment has its own.
+#[test]
+fn the_injected_otel_variables_are_marked_and_the_token_masked() {
+    let status = crate::web::stacks::tests::notes_status();
+    let table = EnvTable::new(&status, &[], SystemTime::now());
+    let rows: Vec<_> = table
+        .rows
+        .iter()
+        .filter(|r| r.service.as_deref() == Some("storage"))
+        .filter(|r| r.key.as_deref().is_some_and(|k| k.starts_with("OTEL_")))
+        .map(|r| {
+            (
+                r.key.as_deref().unwrap(),
+                r.value.text(),
+                r.value.to_string(),
+                r.value.injected().map(|why| why.to_string()),
+            )
+        })
+        .collect();
+    let otel = Some("OpenTelemetry export to hoster".to_owned());
+    assert_eq!(
+        rows,
+        [
+            (
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "http://host.containers.internal",
+                "var".to_owned(),
+                otel.clone()
+            ),
+            (
+                "OTEL_EXPORTER_OTLP_HEADERS",
+                "Authorization=Bearer%20••••••••",
+                "secret".to_owned(),
+                Some("the service's OTLP token, never shown".to_owned())
+            ),
+            (
+                "OTEL_EXPORTER_OTLP_PROTOCOL",
+                "http/protobuf",
+                "var".to_owned(),
+                otel.clone()
+            ),
+            (
+                "OTEL_METRICS_EXPORTER",
+                "none",
+                "var".to_owned(),
+                otel.clone()
+            ),
+            (
+                "OTEL_RESOURCE_ATTRIBUTES",
+                "service.namespace=notes,hoster.generation=<generation>",
+                "var".to_owned(),
+                Some("the stack and each deployment's generation".to_owned())
+            ),
+            ("OTEL_SERVICE_NAME", "storage", "var".to_owned(), otel),
+        ]
+    );
 }
 
 #[test]
@@ -662,7 +731,7 @@ fn the_head_counts_each_secret_once() {
                 service: Some("api".into()),
                 value: EnvValue::Var {
                     value: "info".into(),
-                    injected: false,
+                    injected: None,
                 },
             },
         ],

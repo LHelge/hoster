@@ -29,6 +29,7 @@ use super::routes::Routes;
 use super::{Interruption, Orchestrator, Result};
 use crate::health::{Check, DeploymentLog, HealthError, ProbeLog, Probes};
 use crate::logging::LogSpan;
+use crate::otlp::{ExporterEnv, ResourceAttributes};
 use crate::routing::{DesiredStack, DrainOutcome, RouteClaims, ServiceState, Upstream};
 use crate::runtime::{
     ContainerFile, ContainerId, ContainerInfo, ContainerRuntime, ContainerSpec, NetworkSpec,
@@ -1240,6 +1241,18 @@ impl<R: ContainerRuntime> Orchestrator<R> {
                     }
                 }
             }
+            // The service's OTLP token (ADR-0069 §4, §5), a secret like the ones above: kept
+            // out of `Debug` and redacted from probe output. Not hashed: it follows from the
+            // names the hash covers.
+            if !service.sets(ExporterEnv::HEADERS) {
+                let token = self
+                    .secrets
+                    .token_key()
+                    .token(run.target.stack(), &change.service);
+                let header = ExporterEnv::headers(&token);
+                run.secrets.push(SecretValue::from(token.to_string()));
+                spec.secrets.insert(ExporterEnv::HEADERS.to_owned(), header);
+            }
             spec.files = files.into_values().collect();
             for volume in &spec.volumes {
                 self.runtime
@@ -1369,8 +1382,21 @@ impl Run {
         let mut spec = ContainerSpec::new(&generation, self.id, change.image.clone());
         spec.command = service.command.clone();
         spec.entrypoint = service.entrypoint.clone();
-        // `env` plus the injected `PORT` (ADR-0051), exactly what the config hash covers.
-        spec.env = service.container_env();
+        // `env` plus the injected `PORT` (ADR-0051) and the four hashed `OTEL_*` variables
+        // (ADR-0069 §5), exactly what the config hash covers; then the resource attributes,
+        // which carry the generation and so are not hashed. The token is added with the
+        // secrets, in `create_and_start`.
+        spec.env = service.container_env(&change.service);
+        if !service.sets(ExporterEnv::RESOURCE_ATTRIBUTES) {
+            let attributes = ResourceAttributes {
+                stack,
+                generation: self.generation,
+            };
+            spec.env.insert(
+                ExporterEnv::RESOURCE_ATTRIBUTES.to_owned(),
+                attributes.to_string(),
+            );
+        }
         spec.user = service.user.clone();
         spec.read_only = service.read_only;
         spec.stop_timeout = service.stop_timeout;

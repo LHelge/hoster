@@ -31,7 +31,9 @@ use tokio::sync::{Notify, watch};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
-use super::{Admission, DownstreamLimits, Proxy, ProxyError, ProxyState, ProxyThread};
+use super::{
+    Admission, DownstreamLimits, Proxy, ProxyError, ProxyState, ProxyThread, ReceiverRoute,
+};
 use crate::acme::{CertMap, ChallengeMap};
 use crate::config::{ProxyConfig, Timeouts};
 use crate::logs::{LogSink, Tap};
@@ -516,6 +518,7 @@ impl Harness {
             traffic: traffic.clone(),
             admission: admission.clone(),
             logs: logs.clone(),
+            receiver: ReceiverRoute::new(socket_dir.path().join("otlp.sock")),
         };
         let (shutdown, rx) = watch::channel(None);
         // A port free a moment ago can be taken by another test's outgoing connection before
@@ -2543,6 +2546,7 @@ async fn a_full_log_channel_drops_rows_without_holding_requests() {
 }
 
 mod limits;
+mod receiver;
 mod smuggling;
 
 /// What scanners send matches no route, and is not in the log at `info`: an unknown host, a

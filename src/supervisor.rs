@@ -30,13 +30,15 @@ use crate::logs::{LogFollowers, LogRecorder, LogSink};
 use crate::machine::Machine;
 use crate::notify::Notifier;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
-use crate::otlp::OtlpLimits;
+use crate::otlp::{OtlpLimits, OtlpReceiver};
 use crate::ports::PortAllocator;
-use crate::proxy::{Admission, FileLimit, Proxy, ProxyEvents, ProxyState, ProxyThread};
+use crate::proxy::{
+    Admission, FileLimit, Proxy, ProxyEvents, ProxyState, ProxyThread, ReceiverRoute,
+};
 use crate::registry::{Poller, RegistryClient, StoredCredentials, UpdateChecker};
 use crate::routing::{Reserved, RouteTable};
 use crate::runtime::{PodmanRuntime, PodmanSocket};
-use crate::secrets::SecretStore;
+use crate::secrets::{KnownServices, SecretStore};
 use crate::stats::{HostStats, ResourceSampler, Stats, Traffic, TrafficRecorder};
 use crate::store::{LogStore, Store};
 use crate::web::{Listen, LocalLogs, LogStoreState, RegistryAccess, WebApp, WebServer};
@@ -576,6 +578,8 @@ struct Teardown {
     token: CancellationToken,
     /// The admin app, started in phase 8.
     web: Option<WebServer>,
+    /// The OTLP receiver on its socket (ADR-0069 §3), started in phase 8.
+    otlp: Option<WebServer>,
     proxy: ProxyHandle,
     /// The traffic recorder, started in phase 8.
     recorder: Option<RecorderHandle>,
@@ -641,10 +645,17 @@ impl Teardown {
             // Cancelling the root token (done before the first phase) stops the poller and the
             // Axum app; the orchestrator refuses new commands once it is cancelled.
             // A graceful stop lets in-flight admin requests finish.
-            ShutdownPhase::StopIntake => match self.web.as_mut() {
-                Some(web) => web.stop(mode == ShutdownMode::Graceful).await,
-                None => Ok(()),
-            },
+            // The OTLP receiver stops with it: the proxy, which still runs, answers its
+            // requests 502 until it stops too, and exporters retry.
+            ShutdownPhase::StopIntake => {
+                let graceful = mode == ShutdownMode::Graceful;
+                let mut result = Ok(());
+                for server in self.web.iter_mut().chain(self.otlp.iter_mut()) {
+                    let stopped = server.stop(graceful).await;
+                    result = result.and(stopped);
+                }
+                result
+            }
             // Deploy tasks observe the token and stop at their next safe point (§5.4); in fast
             // mode they are not waited for.
             ShutdownPhase::SettleDeploys => Ok(()),
@@ -804,6 +815,9 @@ impl Startup for Supervisor {
                     traffic: self.traffic.clone(),
                     admission: self.admission.clone(),
                     logs: self.log_sink.clone(),
+                    receiver: ReceiverRoute::new(
+                        self.config.state_dir.join(Config::OTLP_SOCKET_NAME),
+                    ),
                 };
                 self.teardown.proxy.start(&self.config.proxy, state).await
             }
@@ -1019,6 +1033,26 @@ impl Startup for Supervisor {
                     orchestrator.subscribe(),
                 );
                 tokio::spawn(notifier.run(self.teardown.token.child_token()));
+                // The OTLP receiver (ADR-0069): on its socket, which the proxy's `:80` hands
+                // `host.containers.internal` to from local peers since step 7. Its limits are
+                // the ones the System page reads.
+                let receiver = OtlpReceiver::new(
+                    secrets.token_key().clone(),
+                    Arc::clone(&orchestrator) as Arc<dyn KnownServices + Send + Sync>,
+                    self.log_sink.clone(),
+                    self.otlp_limits.clone(),
+                );
+                let socket = self.config.state_dir.join(Config::OTLP_SOCKET_NAME);
+                self.teardown.otlp = Some(
+                    WebServer::unix(
+                        receiver.router(),
+                        &socket,
+                        "OTLP receiver",
+                        self.teardown.token.child_token(),
+                    )
+                    .await?,
+                );
+                tracing::info!(socket = %socket.display(), "OTLP receiver listening");
                 // The System page's log store card (ADR-0067): its figures and what was lost.
                 let followers = self
                     .teardown

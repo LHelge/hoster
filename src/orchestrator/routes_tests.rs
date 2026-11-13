@@ -598,6 +598,7 @@ port = 9000
         traffic: Default::default(),
         admission: Default::default(),
         logs: crate::logs::LogSink::disconnected(),
+        receiver: crate::proxy::ReceiverRoute::new("/nonexistent/otlp.sock".into()),
     };
     let mut proxy = Proxy::new(&config, state).spawn(rx).unwrap();
     proxy.events.ready(Duration::from_secs(10)).await.unwrap();

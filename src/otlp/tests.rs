@@ -292,6 +292,28 @@ fn origin_received() -> MicroTimestamp {
 }
 
 #[test]
+fn a_log_records_generation_comes_from_its_resource_when_it_parses() {
+    // As OTEL_RESOURCE_ATTRIBUTES makes it: text. Some SDKs or apps set an integer.
+    for (value, expected) in [
+        (string("12"), Some(12)),
+        (int(3), Some(3)),
+        (string("twelve"), None),
+        (int(-1), None),
+    ] {
+        let mut export = logs_export(vec![record("x")]);
+        let resource = export.resource_logs[0].resource.as_mut().unwrap();
+        resource
+            .attributes
+            .push(kv("service.namespace", string("bank")));
+        resource.attributes.push(kv("hoster.generation", value));
+        let records: Vec<LogRecord> = origin().records(export).collect();
+        assert_eq!(records[0].generation, expected);
+        // The stack still comes from the token, whatever the resource says.
+        assert_eq!(records[0].stack.as_deref(), Some("shop"));
+    }
+}
+
+#[test]
 fn a_structured_body_is_json_and_attribute_values_keep_their_shape() {
     let body = AnyValue {
         value: Some(any_value::Value::KvlistValue(KeyValueList {

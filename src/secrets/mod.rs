@@ -365,10 +365,6 @@ impl SecretStore {
     }
 
     /// The key of the services' OTLP tokens (ADR-0069 §4), derived from the store's key.
-    #[allow(
-        dead_code,
-        reason = "wired into the OTLP receiver and container create by task 5up"
-    )]
     pub fn token_key(&self) -> &TokenKey {
         &self.tokens
     }

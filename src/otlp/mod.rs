@@ -1,8 +1,10 @@
 //! The OTLP receiver (ADR-0069 §1, §2, §4, §6): `POST /v1/logs` and `POST /v1/traces` over
 //! OTLP/HTTP with protobuf bodies, from containers' OpenTelemetry SDKs.
 //!
-//! [`OtlpReceiver::router`] builds the routes; which listener serves them, and the peer check in
-//! front of them, belong to the proxy's `:80` (ADR-0069 §3). A request goes through:
+//! [`OtlpReceiver::router`] builds the routes, which the supervisor serves on a Unix socket in the
+//! state directory; the proxy's `:80` hands a request for [`OtlpReceiver::HOST`] from a local
+//! peer to that socket (ADR-0069 §3), as the admin host is handed to the admin app (ADR-0031).
+//! The variables that point every service's SDK here are in `env.rs`. A request goes through:
 //!
 //! 1. **Identity**: `Authorization: Bearer <stack>.<service>.<mac>` is verified as a
 //!    [`ServiceToken`] (MAC recomputed and compared in constant time, stack and service must
@@ -27,6 +29,7 @@
 //! Errors carry a `google.rpc.Status` body, as the OTLP/HTTP specification asks, with a fixed
 //! message that never echoes the request. `/v1/metrics` is `404` (ADR-0069 §2).
 
+mod env;
 mod limits;
 mod map;
 #[cfg(test)]
@@ -52,6 +55,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
 use prost::Message;
 use tokio::time::Instant;
 
+pub use self::env::{ExporterEnv, ResourceAttributes};
 use self::limits::{Busy, InFlight, Signal};
 pub use self::limits::{Capped, OtlpLimits};
 use self::map::{InvalidSpan, Origin};
@@ -75,6 +79,14 @@ struct Inner {
 }
 
 impl OtlpReceiver {
+    /// The name containers reach the host by under rootless podman, which resolves to
+    /// `169.254.1.2` in every container's `/etc/hosts` (ADR-0069 §3). The proxy's `:80` hands
+    /// requests for it to the receiver; no stack can route it.
+    pub const HOST: &str = "host.containers.internal";
+    /// What [`ExporterEnv::ENDPOINT`] says: plain HTTP on port 80.
+    pub const ENDPOINT: &str = "http://host.containers.internal";
+    /// The address podman's `/etc/hosts` gives [`Self::HOST`] (spike `h4q`).
+    pub const HOST_ADDRESS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(169, 254, 1, 2);
     /// The largest body accepted as sent (compressed or not).
     pub const MAX_BODY: usize = 4 * 1024 * 1024;
     /// The largest body accepted once a gzip body is inflated.
