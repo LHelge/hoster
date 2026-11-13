@@ -1,5 +1,6 @@
 # The documentation site, https://docs.hoster.lhelge.se, as a hoster stack. Apply it in the admin
-# UI (Stacks → New stack); .github/workflows/release.yml deploys every release to it.
+# UI (Stacks → New stack); .github/workflows/release.yml deploys every release to it, and CI checks
+# it with actions/stack-check.
 version = 1
 name = "docs"
 

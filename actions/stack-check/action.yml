@@ -1,0 +1,40 @@
+name: Check hoster stack files
+description: >-
+  Validate hoster stack files offline with `hoster stack check`, annotating each error and
+  warning on its line.
+author: LHelge
+
+# Pin `version` to the release the server runs, so CI accepts exactly what the apply preview will:
+#
+#   - uses: LHelge/hoster/actions/stack-check@v0.8.0
+#     with:
+#       files: deploy/*.stack.toml
+#       version: v0.8.0
+#       deny-warnings: true
+#
+# See https://docs.hoster.lhelge.se/wiki/deploying-from-ci/.
+
+inputs:
+  files:
+    description: Stack files to check, separated by whitespace. Globs such as `deploy/**/*.stack.toml` are expanded.
+    required: true
+  version:
+    description: >-
+      The hoster release whose `hoster stack check` runs, e.g. `v0.8.0`; pin the one the server
+      runs. `latest` is the newest release.
+    required: false
+    default: latest
+  deny-warnings:
+    description: Fail on warnings too, not only on errors.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        CHECK_FILES: ${{ inputs.files }}
+        CHECK_VERSION: ${{ inputs.version }}
+        CHECK_DENY_WARNINGS: ${{ inputs.deny-warnings }}
+      run: bash "$GITHUB_ACTION_PATH/check.sh"
