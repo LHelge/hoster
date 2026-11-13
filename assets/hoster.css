@@ -1387,6 +1387,48 @@ p.stack-stats { font-size: 12px; }
 .telemetry-head { gap: 14px 16px; margin-bottom: 20px; }
 .telemetry-figures { margin: 0; gap: 10px 16px; color: var(--text-2); font: 12px/1.4 var(--mono); }
 .telemetry-retention { color: var(--muted); }
+/* The receiver's state: a dot in its tone before the line. */
+.telemetry-receiver { display: inline-flex; align-items: center; gap: 8px; }
+/* Traces tab (src/web/telemetry/traces.rs): the logs view's toolbar as a box of its own, then
+   the trace list as a table card, the picked row marked as the Logs tab marks a current chip. */
+.trace-toolbar {
+  margin: 0 0 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--inset);
+}
+table.traces { min-width: 920px; }
+table.traces td { padding-block: 9px; vertical-align: middle; font: 12px/1.4 var(--mono); }
+.trace-time, .trace-stack { color: var(--text-2); white-space: nowrap; }
+.trace-root { max-width: 28rem; }
+.trace-root a {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trace-row[aria-current] > * { background: var(--hover); }
+.trace-row[aria-current] > :first-child { box-shadow: inset 2px 0 var(--accent); }
+.trace-services { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.trace-svc { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2); font-size: 11px; }
+/* A service's colour is a square, a status a round dot. */
+.trace-svc .dot { width: 8px; height: 8px; border-radius: 2px; }
+.trace-uninstrumented { color: var(--muted); font-size: 11px; }
+.trace-duration { display: flex; align-items: center; gap: 8px; min-width: 170px; }
+.trace-duration .meter { flex: 1; height: 4px; border-radius: 2px; }
+.trace-duration span { flex: none; width: 62px; text-align: right; }
+/* An ok trace's bar is the latency colour; one in error is red (meter-fail). */
+.trace-duration .meter-neutral .meter-fill { fill: var(--p50); }
+.trace-status { white-space: nowrap; }
+.trace-status .dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; vertical-align: middle; }
+.trace-ok { color: var(--ok); }
+.trace-ok .dot { background: var(--ok); }
+.trace-error { color: var(--fail); }
+.trace-error .dot { background: var(--fail); }
+.trace-pager { display: flex; gap: 16px; }
 .stack-title h1 { margin: 0; font: 600 26px/1.2 var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .stack-meta {
   display: flex;

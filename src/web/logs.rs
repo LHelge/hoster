@@ -131,7 +131,7 @@ impl LogScope {
     }
 
     /// The store's scope for this one.
-    fn store(&self) -> store::LogScope {
+    pub(super) fn store(&self) -> store::LogScope {
         match self {
             LogScope::All { stack: Some(stack) } if stack == Self::HOSTER => {
                 store::LogScope::Hoster
@@ -696,6 +696,11 @@ impl LogParams {
         Self::text(&self.stack)
     }
 
+    /// The *since* given (`since`), when given: what the Telemetry page's other tab keeps.
+    pub fn since_given(&self) -> Option<&str> {
+        Self::text(&self.since)
+    }
+
     /// The range without a `since`.
     fn default_since(&self) -> &str {
         self.default_since.as_deref().unwrap_or(Self::DEFAULT_SINCE)
@@ -977,6 +982,12 @@ pub struct StackOption {
 /// [`LogsView::COUNT_CAP`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Total(u64);
+
+impl From<u64> for Total {
+    fn from(count: u64) -> Self {
+        Self(count)
+    }
+}
 
 impl fmt::Display for Total {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1566,9 +1577,9 @@ impl LogsView {
     /// classes, never inline styles).
     /// They are the categorical colours of `docs/design/README.md` (Telemetry notes), hoster's
     /// own first ([`LogsView::HOSTER_CLASS`]).
-    const PALETTE: [&str; 6] = ["svc-0", "svc-1", "svc-2", "svc-3", "svc-4", "svc-5"];
+    pub(super) const PALETTE: [&str; 6] = ["svc-0", "svc-1", "svc-2", "svc-3", "svc-4", "svc-5"];
     /// hoster's own records (ADR-0068).
-    const HOSTER_CLASS: &str = "svc-hoster";
+    pub(super) const HOSTER_CLASS: &str = "svc-hoster";
     const ALL_CLASS: &str = "svc-all";
     /// The service hoster's own records are listed under.
     const HOSTER: &str = "hoster";
@@ -1885,7 +1896,7 @@ impl LogsView {
     /// The stack selector of `scope`: every stack, then the stacks `known` and those with
     /// records in the range (`seen`) by name, then hoster's own; the one picked is current,
     /// and listed even when it is neither. Empty in the stack scope.
-    fn stacks(scope: &LogScope, known: &[String], seen: &[String]) -> Vec<StackOption> {
+    pub(super) fn stacks(scope: &LogScope, known: &[String], seen: &[String]) -> Vec<StackOption> {
         let LogScope::All { stack: picked } = scope else {
             return Vec::new();
         };

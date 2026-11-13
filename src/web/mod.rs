@@ -3,8 +3,8 @@
 //! `dashboard.rs`), the event log's feeds and Events page (ADR-0055, see `events.rs`), container
 //! logs (ADR-0044, see `containers.rs`), the certificates page (ADR-0036, ADR-0051, see
 //! `certificates.rs`), the stack pages with their secrets (ADR-0027, ADR-0029, ADR-0049, see
-//! `stacks.rs`), the Telemetry page's logs across stacks (ADR-0067, ADR-0068, see
-//! `telemetry.rs`), Settings: Registries (ADR-0025), the instance name and notifications (ADR-0058)
+//! `stacks.rs`), the Telemetry page's traces and logs across stacks (ADR-0067, ADR-0068,
+//! ADR-0069, see `telemetry.rs`), Settings: Registries (ADR-0025), the instance name and notifications (ADR-0058)
 //! and read-only views of the configuration (ADR-0024, see `settings.rs`), the deploy webhook
 //! (ADR-0042, ADR-0047, see `webhook.rs`), and
 //! the System page with self-update (ADR-0052, see `system.rs`).
@@ -325,6 +325,7 @@ impl WebApp {
             .route("/stacks/{name}/logs/stream", get(Stacks::logs_stream))
             .route("/stacks/{name}/logs/download", get(Stacks::logs_download))
             .route(Telemetry::PATH, get(Telemetry::index))
+            .route(Telemetry::TRACES, get(Telemetry::traces))
             .route(Telemetry::LOGS, get(Telemetry::logs))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))

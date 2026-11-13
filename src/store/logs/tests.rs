@@ -2256,6 +2256,22 @@ mod traces {
         q.services = vec![Span::PROXY_SERVICE.into()];
         assert_eq!(list(&store, &q).await, [6, 3, 2, 1]);
 
+        // Grep on span names, ignoring case: the root's (a request's) or any stored span's.
+        let mut q = all();
+        q.grep = Some("get /6".into());
+        assert_eq!(list(&store, &q).await, [6]);
+        q.grep = Some("SPAN 82".into());
+        assert_eq!(list(&store, &q).await, [5], "a child span's name");
+        q.grep = Some(String::new());
+        assert_eq!(list(&store, &q).await.len(), 5, "an empty grep is none");
+        assert_eq!(
+            store
+                .count_traces(everything(), &LogScope::All)
+                .await
+                .unwrap(),
+            5
+        );
+
         // The range is in milliseconds, its end exclusive.
         let q = TraceQuery::new(at(2_000)..at(5_000), LogScope::All);
         let page = store.traces(&q).await.unwrap();

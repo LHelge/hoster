@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{#- The Telemetry page's Traces tab (src/web/telemetry/traces.rs, TracesView `view`): the
+    toolbar of GET options, the trace list with the trace picked marked, and that trace below
+    it. -#}
+{% block title %}Traces · Telemetry{% endblock %}
+{% block head %}
+{% include "telemetry_head.html" %}
+{% endblock %}
+{% block content %}
+<div class="log-toolbar trace-toolbar">
+  <nav class="log-choices" aria-label="Statuses">
+    <span class="log-label">status</span>
+    {%- for chip in view.statuses %}
+    <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
+    {%- endfor %}
+  </nav>
+  <form class="log-options" method="get" action="{{ view.action }}">
+    {%- for (name, value) in view.keep %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+    {%- endfor %}
+    <label class="log-stack-pick"><span class="log-label">stack</span>
+      <select name="stack">
+        {%- for option in view.stacks %}
+        <option value="{{ option.value }}"{% if option.current %} selected{% endif %}>{{ option.label }}</option>
+        {%- endfor %}
+      </select>
+    </label>
+    <span class="log-grep" role="group" aria-label="Grep">
+      <span class="log-prompt" aria-hidden="true">&gt;</span>
+      <input type="search" name="q" value="{{ view.q }}" placeholder="grep span names… (e.g. /api/)" aria-label="Grep: what a span's name contains">
+    </span>
+    <label class="log-slower"><span class="log-label">slower than</span>
+      <input type="text" name="slower" value="{{ view.slower }}" placeholder="500ms" aria-label="Slower than: a root duration such as 500ms"></label>
+    <label class="log-stack-pick"><span class="log-label">sort</span>
+      <select name="sort">
+        {%- for choice in view.sorts %}
+        <option value="{{ choice.value }}"{% if choice.current %} selected{% endif %}>{{ choice.label }}</option>
+        {%- endfor %}
+      </select>
+    </label>
+    <button type="submit">Show</button>
+    <span class="log-since" role="group" aria-label="Range">
+      <span class="log-label">since</span>
+      {%- for preset in view.presets %}
+      <a class="log-preset" href="{{ preset.href }}"{% if preset.current %} aria-current="true"{% endif %}>{{ preset.label }}</a>
+      {%- endfor %}
+    </span>
+  </form>
+</div>
+
+<section class="card trace-list" aria-labelledby="traces-title">
+  <header class="card-head">
+    <h2 id="traces-title">Traces <span class="card-count">· {{ view.heading }}</span></h2>
+  </header>
+  {%- if let Some(error) = view.unreadable %}
+  <p class="card-body card-error">{{ error }}</p>
+  {%- else if view.rows.is_empty() %}
+  {%- if let Some((active, clear)) = view.cleared %}
+  <p class="card-body muted">No traces match {{ active }} in this range. <a href="{{ clear }}">clear filters</a></p>
+  {%- else if view.previous.is_some() %}
+  <p class="card-body muted">No traces on this page. <a href="{{ view.close }}">first page</a></p>
+  {%- else %}
+  <p class="card-body muted">No traces in this range. The proxy starts one for every request it routes, and apps that send spans over OTLP add theirs; see <a href="https://docs.hoster.lhelge.se/wiki/tracing/">tracing from an app</a>.</p>
+  {%- endif %}
+  {%- else %}
+  <div class="table-scroll">
+    <table class="list traces">
+      <thead>
+        <tr><th scope="col">Time</th><th scope="col">Root span</th><th scope="col">Stack</th><th scope="col">Services</th><th scope="col" class="num">Spans</th><th scope="col">Duration</th><th scope="col">Status</th></tr>
+      </thead>
+      <tbody>
+        {%- for row in view.rows %}
+        <tr class="trace-row"{% if row.current %} aria-current="true"{% endif %}>
+          <td class="trace-time"><time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time></td>
+          <td class="trace-root"><a href="{{ row.href }}" title="{{ row.name }}"{% if row.current %} aria-current="true"{% endif %}>{{ row.name }}</a></td>
+          <td class="trace-stack">{{ row.stack }}</td>
+          <td class="trace-services">
+            {%- for chip in row.services %}<span class="trace-svc"><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.name }}</span>{% endfor %}
+            {%- if row.proxy_only %}<span class="trace-uninstrumented">app not instrumented</span>{% endif %}</td>
+          <td class="num">{{ row.spans }}</td>
+          <td class="trace-duration">{{ row.bar }}<span>{{ row.duration }}</span></td>
+          <td class="trace-status {{ row.status_class() }}"><span class="dot" aria-hidden="true"></span>{{ row.status }}</td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </div>
+  {%- endif %}
+  {%- if view.previous.is_some() || view.next.is_some() %}
+  <nav class="card-foot trace-pager" aria-label="Pages">
+    {%- if let Some(href) = view.previous %}<a href="{{ href }}" rel="prev">← previous</a>{% endif %}
+    {%- if let Some(href) = view.next %}<a href="{{ href }}" rel="next">next →</a>{% endif %}
+  </nav>
+  {%- endif %}
+</section>
+
+{%- if let Some(picked) = view.picked %}
+<section class="card trace-picked" aria-labelledby="trace-title">
+  <header class="card-head">
+    <h2 id="trace-title">Trace <code>{{ picked.id() }}</code>{% if let Some(summary) = picked.summary() %} <span class="card-count">· {{ summary }}</span>{% endif %}</h2>
+    <a href="{{ view.close }}">close</a>
+  </header>
+  {%- match picked %}
+  {%- when traces::Picked::Found(_) %}
+  {#- The waterfall (task aum) renders the trace here. #}
+  {%- when traces::Picked::Missing(_) %}
+  <p class="card-body muted">This trace does not exist. Spans are kept {{ picked.kept_days() }} days, so it may have expired.</p>
+  {%- endmatch %}
+</section>
+{%- endif %}
+{% endblock %}

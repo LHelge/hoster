@@ -1,0 +1,20 @@
+{#- The Telemetry page's header (src/web/telemetry.rs): breadcrumb and title, the receiver's
+    state and the figures of the last minute, the tab's retention, then the signal tabs, each
+    with what the range holds. Needs `figures` and `tabs`. -#}
+<header class="page-head telemetry-head">
+  <div class="page-title">
+    <nav class="crumb" aria-label="Breadcrumb">~/telemetry/{% if tabs.on_traces() %}traces{% else %}logs{% endif %}</nav>
+    <h1>Telemetry</h1>
+  </div>
+  <p class="page-actions telemetry-figures">
+    <span class="telemetry-receiver"><span class="dot {{ figures.receiver.class() }}" aria-hidden="true"></span>otlp receiver · {{ figures.receiver.says() }}</span>
+    <span>{% if let Some(rate) = figures.spans %}{{ rate }}{% else %}—{% endif %} spans/s · {% if let Some(rate) = figures.logs %}{{ rate }}{% else %}—{% endif %} logs/s</span>
+    <span class="telemetry-retention">{{ figures.retention() }}</span>
+  </p>
+  <nav class="tabs" aria-label="Signals">
+    <div role="tablist">
+      <a role="tab" href="{{ tabs.traces_href }}"{% if tabs.on_traces() %} aria-selected="true" aria-current="page"{% else %} aria-selected="false"{% endif %}>Traces{% if let Some(total) = tabs.traces %} <span class="tab-count">{{ total }}</span>{% endif %}</a>
+      <a role="tab" href="{{ tabs.logs_href }}"{% if !tabs.on_traces() %} aria-selected="true" aria-current="page"{% else %} aria-selected="false"{% endif %}>Logs{% if let Some(total) = tabs.logs %} <span class="tab-count">{{ total }}</span>{% endif %}</a>
+    </div>
+  </nav>
+</header>

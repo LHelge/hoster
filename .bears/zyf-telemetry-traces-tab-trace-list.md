@@ -1,10 +1,10 @@
 ---
 id: zyf
 title: "Telemetry → Traces tab: trace list"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:37:09.325570794Z"
-updated: "2026-11-12T19:37:56.274186380Z"
+updated: "2026-11-13T21:56:00.057062423Z"
 tags:
   - web
   - observability
@@ -12,6 +12,7 @@ depends_on:
   - txt
   - ckc
 parent: qnh
+attempts: 1
 ---
 
 ## Summary

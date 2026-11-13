@@ -134,6 +134,9 @@ pub struct TraceQuery {
     pub status: Option<TraceStatus>,
     /// Only traces whose root took at least this long.
     pub min_duration: Option<Duration>,
+    /// Grep: only traces with a span whose name contains this, ignoring ASCII case; the root's
+    /// name is the proxy's server span's for a proxied request (OQ-43: no query language).
+    pub grep: Option<String>,
     pub sort: TraceSort,
     /// The page, from 0, of [`TraceQuery::limit`] traces each.
     pub page: u32,
@@ -155,6 +158,7 @@ impl TraceQuery {
             services: Vec::new(),
             status: None,
             min_duration: None,
+            grep: None,
             sort: TraceSort::default(),
             page: 0,
             limit: Self::DEFAULT_LIMIT,
@@ -221,6 +225,17 @@ impl TraceQuery {
         if let Some(min) = self.min_duration {
             sql.push(" AND duration >= ")
                 .push_bind(LogStore::micros(min));
+        }
+        if let Some(grep) = self.grep.as_deref().filter(|g| !g.is_empty()) {
+            let needle = grep.to_ascii_lowercase();
+            sql.push(" AND (instr(lower(name), ")
+                .push_bind(needle.clone())
+                .push(
+                    ") > 0 OR EXISTS (SELECT 1 FROM spans AS g \
+                     WHERE g.trace_id = traces.trace_id AND instr(lower(g.name), ",
+                )
+                .push_bind(needle)
+                .push(") > 0))");
         }
         if !self.services.is_empty() {
             sql.push(" AND (routed");
@@ -378,10 +393,7 @@ impl LogStore {
                 count(sql.build_query_scalar().fetch_one(&self.reads).await?)
             }
         };
-        let mut sql = QueryBuilder::<Sqlite>::new("");
-        query.push_roots(&mut sql);
-        sql.push(" SELECT count(*) FROM roots");
-        let total = count(sql.build_query_scalar().fetch_one(&self.reads).await?);
+        let total = self.count_traces(query.range.clone(), &query.scope).await?;
         let shown = u64::from(limit) * u64::from(query.page) + rows.len() as u64;
         Ok(TracePage {
             traces: rows.into_iter().map(|row| row.summary).collect(),
@@ -389,6 +401,17 @@ impl LogStore {
             total,
             more: shown < matched,
         })
+    }
+
+    /// How many traces `range` and `scope` hold, unfiltered: [`TracePage::total`] without
+    /// reading a page, for the Telemetry page's tab count on another tab.
+    pub async fn count_traces(&self, range: Range<Timestamp>, scope: &LogScope) -> Result<u64> {
+        let mut sql = QueryBuilder::<Sqlite>::new("");
+        TraceQuery::new(range, scope.clone()).push_roots(&mut sql);
+        sql.push(" SELECT count(*) FROM roots");
+        Ok(count(
+            sql.build_query_scalar().fetch_one(&self.reads).await?,
+        ))
     }
 
     /// The roots of the traces `query` matches (its sort and page aside) for the duration
