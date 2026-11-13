@@ -1,16 +1,17 @@
 ---
 id: yn7
 title: "Stack logs tab reads the log store: all-services view, time range and paging"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T13:25:46.343095158Z"
-updated: "2026-11-12T13:25:46.343095158Z"
+updated: "2026-11-13T08:26:03.312748160Z"
 tags:
   - web
   - observability
 depends_on:
   - f8z
 parent: psq
+attempts: 1
 ---
 
 ## Summary

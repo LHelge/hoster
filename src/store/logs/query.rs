@@ -399,6 +399,16 @@ impl<T> Default for Page<T> {
 /// A page of `log_records`.
 pub type LogPage = Page<LogEntry>;
 
+/// A service with records in a range: see [`LogStore::services_in`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceSeen {
+    /// `None` for hoster's own records that name no stack.
+    pub stack: Option<String>,
+    pub service: String,
+    /// The deployment generations of its records, lowest first; empty when none has one.
+    pub generations: Vec<u32>,
+}
+
 /// How many records of each level one time bucket holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelCounts {
@@ -500,6 +510,42 @@ impl LogStore {
         Ok(sqlx::query_scalar("SELECT min(time) FROM log_records")
             .fetch_one(&self.reads)
             .await?)
+    }
+
+    /// Every stack and service with records in `range` and `scope`, with the deployment
+    /// generations those records came from: the service chips of the logs view, and whether a
+    /// row needs its generation to tell replaced containers apart. Ordered by stack (hoster's
+    /// own records without one first), then service. Reads what the index narrows to, with no
+    /// message scan, as [`LogStore::count_by_level`] does.
+    pub async fn services_in(
+        &self,
+        range: Range<Timestamp>,
+        scope: &LogScope,
+    ) -> Result<Vec<ServiceSeen>> {
+        let mut sql =
+            QueryBuilder::<Sqlite>::new("SELECT stack, service, generation FROM log_records");
+        LogQuery::push_where(&mut sql, &range, scope);
+        sql.push(" GROUP BY stack, service, generation ORDER BY stack, service, generation");
+        let rows: Vec<(Option<String>, String, Option<i64>)> =
+            sql.build_query_as().fetch_all(&self.reads).await?;
+        let mut seen: Vec<ServiceSeen> = Vec::new();
+        for (stack, service, generation) in rows {
+            if seen
+                .last()
+                .is_none_or(|last| last.stack != stack || last.service != service)
+            {
+                seen.push(ServiceSeen {
+                    stack,
+                    service,
+                    generations: Vec::new(),
+                });
+            }
+            let last = seen.last_mut().expect("pushed above");
+            if let Some(generation) = generation.and_then(|g| u32::try_from(g).ok()) {
+                last.generations.push(generation);
+            }
+        }
+        Ok(seen)
     }
 
     /// Records per `bucket`-long period since the epoch and level in `range` and `scope`, for

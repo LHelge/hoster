@@ -35,7 +35,7 @@ use axum::response::{IntoResponse, Response};
 use self::figures::{Figures, Readings, RouteRow, StatusChart};
 #[cfg(test)]
 pub(super) use self::services::Role;
-pub(super) use self::services::{LogCandidate, LogPick, StackContainers};
+pub(super) use self::services::{LogCandidate, StackContainers};
 use self::services::{ServiceRow, ServiceTable};
 pub(in crate::web) use self::usage::UsageFeed;
 use super::frame::{StackHeader, Tab};

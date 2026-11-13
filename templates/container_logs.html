@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Logs of {{ container.name }}{% endblock %}
-{% block crumb %}<a href="/stacks">~/stacks</a>/<a href="/stacks#leftovers">removed</a>/logs/{{ container.name }}{% endblock %}
+{% block crumb %}<a href="/stacks">~/stacks</a>/{% if let Some(url) = stack_url %}<a href="{{ url }}">{{ container.stack }}</a>/<a href="{{ url }}/logs">logs</a>{% else %}<a href="/stacks#leftovers">removed</a>/logs{% endif %}/{{ container.name }}{% endblock %}
 {% block heading %}Logs of <code>{{ container.name }}</code>{% endblock %}
 {% block content %}
-<p class="muted">Stack {% if container.stack.is_empty() %}—{% else %}{{ container.stack }}{% endif %}, service {{ container.service }}, generation {{ container.generation }}: {{ container.state }}. <a href="/stacks#leftovers">Containers of removed stacks</a></p>
+<p class="muted">Stack {% if container.stack.is_empty() %}—{% else %}{{ container.stack }}{% endif %}, service {{ container.service }}, generation {{ container.generation }}: {{ container.state }}. {% if let Some(url) = stack_url %}The live log, from podman. <a href="{{ url }}/logs">Stored logs of {{ container.stack }}</a>{% else %}<a href="/stacks#leftovers">Containers of removed stacks</a>{% endif %}</p>
 <section class="log-view" aria-label="Log">
   <div class="log-toolbar">
     {% include "log_options.html" %}

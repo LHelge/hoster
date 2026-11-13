@@ -60,6 +60,8 @@ pub struct TestApp {
     pub mailer: Arc<FakeMailer>,
     /// Settings → Notifications, for tests that rebuild [`crate::web::settings::Settings`].
     pub notifications: Notifications,
+    /// The log store the logs views read (ADR-0067); empty until a test appends.
+    pub logs: crate::store::LogStore,
     pub app: WebApp,
     _dir: TempDir,
 }
@@ -78,6 +80,9 @@ impl TestApp {
     async fn with_idle_timeout(idle_timeout: Duration) -> Self {
         let dir = TempDir::new().unwrap();
         let store = Store::open(&dir.path().join("state")).await.unwrap();
+        let logs = crate::store::LogStore::open(&dir.path().join("state"))
+            .await
+            .unwrap();
         let github = MockServer::start().await;
         let base = Url::parse(&github.uri()).unwrap();
         let endpoints = GithubEndpoints {
@@ -131,7 +136,7 @@ impl TestApp {
             ShutdownRequest::default(),
             Arc::new(crate::web::system::Facts::default()),
         );
-        let app = WebApp::new(
+        let mut app = WebApp::new(
             Auth::new(settings, store.clone(), client),
             runtime.clone(),
             certificates.clone(),
@@ -145,6 +150,7 @@ impl TestApp {
             instance.clone(),
             notifications.clone(),
         );
+        app.logs = crate::web::logs::LogReader::from(crate::web::LogStoreState::Open(logs.clone()));
         TestApp {
             github,
             store,
@@ -159,6 +165,7 @@ impl TestApp {
             secrets,
             mailer,
             notifications,
+            logs,
             app,
             _dir: dir,
         }

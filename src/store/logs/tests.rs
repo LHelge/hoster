@@ -515,6 +515,51 @@ mod queries {
     }
 
     #[tokio::test]
+    async fn services_in_a_range_list_their_generations() {
+        let (_dir, store) = mixed().await;
+        let mut replaced = record(7_000, Some("notes"), "api", "started again");
+        replaced.generation = Some(2);
+        store
+            .append(&LogBatch {
+                records: vec![replaced],
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        let seen = |stack: Option<&str>, service: &str, generations: &[u32]| ServiceSeen {
+            stack: stack.map(str::to_owned),
+            service: service.to_owned(),
+            generations: generations.to_vec(),
+        };
+        let notes = store
+            .services_in(everything(), &LogScope::Stack("notes".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            notes,
+            [
+                seen(Some("notes"), "api", &[1, 2]),
+                seen(Some("notes"), "hoster", &[1]),
+                seen(Some("notes"), "web", &[1]),
+            ]
+        );
+        // The range narrows: api's second generation is past it.
+        let early = store
+            .services_in(at(0)..at(6_500), &LogScope::Stack("notes".into()))
+            .await
+            .unwrap();
+        assert_eq!(early[0], seen(Some("notes"), "api", &[1]));
+        let all = store
+            .services_in(everything(), &LogScope::All)
+            .await
+            .unwrap();
+        assert_eq!(all[0], seen(None, "hoster", &[]));
+        assert_eq!(all[1], seen(Some("blog"), "app", &[1]));
+        assert_eq!(all.len(), 5);
+        store.close().await;
+    }
+
+    #[tokio::test]
     async fn level_counts_bucket_by_time() {
         let (_dir, store) = mixed().await;
         let buckets = store

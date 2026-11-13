@@ -919,13 +919,16 @@ async fn the_stack_header_has_the_status_deployments_actions_and_tabs() {
         "{html}"
     );
 
-    // Without containers, the logs tab says there is no log yet; an unknown stack is a 404.
+    // Without records, the logs tab explains JSON logging; an unknown stack is a 404.
     let logs = app.get("/stacks/notes/logs", Some(&browser.cookie)).await;
     assert_eq!(logs.status(), StatusCode::OK);
     let html = body(logs).await;
-    assert!(html.contains("api has no container yet"), "{html}");
+    assert!(html.contains("No records in this range"), "{html}");
+    assert!(
+        html.contains(r#"<a href="https://docs.hoster.lhelge.se/wiki/logging/">"#),
+        "{html}"
+    );
     assert!(!html.contains("hx-sse:connect"), "{html}");
-    assert!(!html.contains(r#"class="log-options""#), "{html}");
     let missing = app.get("/stacks/nope/logs", Some(&browser.cookie)).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
@@ -1016,7 +1019,7 @@ async fn the_services_table_lists_the_containers_with_ports_and_uptime() {
     assert!(html.contains("<td>previous generation</td>"), "{html}");
     assert!(html.contains(">1d 2h</span>"), "{html}");
     assert!(
-        html.contains(r#"href="/stacks/notes/logs?service=api&#38;container=hoster-notes-api-g1""#),
+        html.contains(r#"href="/containers/hoster-notes-api-g1/logs""#),
         "{html}"
     );
     // storage is not routed and not deployed.
@@ -1028,66 +1031,22 @@ async fn the_services_table_lists_the_containers_with_ports_and_uptime() {
     assert!(!html.contains("hoster-blog-web-g1"), "{html}");
     assert!(!html.contains("style="), "{html}");
 
-    // The logs tab streams the running container's log, or the one asked for, and offers the
-    // draining generation beside it.
-    for (url, streamed) in [
-        ("/stacks/notes/logs", Some("hoster-notes-api-g2")),
-        (
-            "/stacks/notes/logs?service=api",
-            Some("hoster-notes-api-g2"),
+    // The logs tab links each container's live log.
+    let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
+    assert!(
+        html.contains(
+            r#"<nav class="log-choices log-containers" aria-label="Live container logs">"#
         ),
-        (
-            "/stacks/notes/logs?service=api&container=hoster-notes-api-g1",
-            Some("hoster-notes-api-g1"),
-        ),
-        (
-            "/stacks/notes/logs?service=api&container=hoster-blog-web-g1",
-            Some("hoster-notes-api-g2"),
-        ),
-        ("/stacks/notes/logs?service=storage", None),
-    ] {
-        let response = app.get(url, Some(&browser.cookie)).await;
-        assert_eq!(response.status(), StatusCode::OK, "{url}");
-        let html = body(response).await;
-        match streamed {
-            Some(name) => assert!(
-                html.contains(&format!(
-                    r#"hx-sse:connect="/containers/{name}/logs/stream?"#
-                )),
-                "{url}: {html}"
-            ),
-            None => assert!(
-                html.contains("storage has no container yet"),
-                "{url}: {html}"
-            ),
-        }
-    }
-    let html = body(
-        app.get(
-            "/stacks/notes/logs?container=hoster-notes-api-g1",
-            Some(&browser.cookie),
-        )
-        .await,
-    )
-    .await;
-    assert!(
-        html.contains(r#"<nav class="log-choices log-containers" aria-label="Containers of api">"#),
         "{html}"
     );
     assert!(
-        html.contains(r#"href="/stacks/notes/logs?service=api&#38;container=hoster-notes-api-g1&#38;tail=200&#38;since=&#38;follow=on" aria-current="true">hoster-notes-api-g1 <span class="log-chip-detail">g1 · previous generation · running</span></a>"#),
+        html.contains(r#"<a class="log-chip" href="/containers/hoster-notes-api-g1/logs">hoster-notes-api-g1 <span class="log-chip-detail">api · g1 · previous generation · running</span></a>"#),
         "{html}"
     );
     assert!(
-        html.contains(r#"<a class="log-chip" href="/stacks/notes/logs?service=api&#38;tail=200&#38;since=&#38;follow=on" aria-current="page"><span class="dot dot-s0" aria-hidden="true"></span>api</a>"#),
+        html.contains(r#"href="/containers/hoster-notes-api-g2/logs""#),
         "{html}"
     );
-    // The footer says what the streamed container is, and keys the stderr tint.
-    assert!(
-        html.contains(r#"<code>hoster-notes-api-g1</code> <span class="log-detail">g1 · previous generation · running</span>"#),
-        "{html}"
-    );
-    assert!(html.contains(r#"<span class="log-key">"#), "{html}");
     assert!(!html.contains("hoster-blog-web-g1"), "{html}");
 
     // When podman cannot be reached, the services are still shown, and the card says why.
@@ -1109,7 +1068,8 @@ async fn the_services_table_lists_the_containers_with_ports_and_uptime() {
         html.contains(r#"<span class="mono service-name">api</span>"#),
         "{html}"
     );
-    // The logs tab still has its service chips, and says why there is no log.
+    // The logs tab still has its service chips and records, and says why there are no live
+    // links.
     let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
     assert!(html.contains("flash-error"), "{html}");
     assert!(
@@ -1119,8 +1079,7 @@ async fn the_services_table_lists_the_containers_with_ports_and_uptime() {
         "{html}"
     );
     assert!(html.contains(r#"class="log-chip""#), "{html}");
-    assert!(html.contains("could not be listed"), "{html}");
-    assert!(!html.contains("has no container yet"), "{html}");
+    assert!(!html.contains("Live container logs"), "{html}");
 }
 
 /// ADR-0056: each service shows its `depends_on`, the health check in effect (declared or the
@@ -2868,4 +2827,298 @@ async fn the_overview_shows_limits_options_and_the_last_exit_of_a_crash_loop() {
         html.contains("restarted 6 times; last: OOM-killed (limit 64MiB)"),
         "{html}"
     );
+}
+
+/// The logs tab over a seeded log store (ADR-0067, ADR-0068).
+mod stored_logs {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::store::{Level, LogBatch, LogRecord, Stream};
+
+    fn record(ago_secs: u64, service: &str, generation: Option<u32>, message: &str) -> LogRecord {
+        LogRecord {
+            time: Timestamp::now() - Duration::from_secs(ago_secs),
+            stack: Some("notes".into()),
+            service: service.into(),
+            generation,
+            stream: Stream::Stdout,
+            level: None,
+            message: message.into(),
+            fields: None,
+            cut: false,
+            marker: false,
+        }
+    }
+
+    async fn seed(app: &TestApp, records: Vec<LogRecord>) {
+        app.logs
+            .append(&LogBatch {
+                records,
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The text of the rows, in page order.
+    fn messages(html: &str) -> Vec<String> {
+        html.split(r#"<span class="log-msg">"#)
+            .skip(1)
+            .map(|rest| {
+                let text = rest.split("</span></li>").next().unwrap();
+                text.replace(r#"<span class="visually-hidden">stderr: </span>"#, "")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_tab_merges_every_service_oldest_first() {
+        let app = TestApp::new().await;
+        let browser = app.sign_in().await;
+        let mut stderr = record(240, "storage", Some(1), "disk almost full");
+        stderr.stream = Stream::Stderr;
+        let mut json = record(180, "api", Some(2), "request failed");
+        json.level = Some(Level::Error);
+        let mut own = record(120, "hoster", Some(2), "health check failed");
+        own.stream = Stream::Hoster;
+        own.level = Some(Level::Warn);
+        let mut marker = record(60, "api", Some(2), "dropped 40 lines: rate cap");
+        marker.marker = true;
+        let mut other = record(30, "web", Some(1), "not ours");
+        other.stack = Some("blog".into());
+        seed(
+            &app,
+            vec![
+                record(300, "api", Some(1), "Listening on :8080"),
+                json,
+                stderr,
+                own,
+                marker,
+                other,
+                // Out of the default hour.
+                record(7_200, "api", Some(1), "two hours ago"),
+            ],
+        )
+        .await;
+
+        let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
+        assert_eq!(
+            messages(&html),
+            [
+                "Listening on :8080",
+                "disk almost full",
+                "request failed",
+                "health check failed",
+                "dropped 40 lines: rate cap",
+            ],
+            "{html}"
+        );
+        // Chips: all, the revision's services, hoster's own last.
+        assert!(
+            html.contains(r#"<a class="log-chip" href="/stacks/notes/logs" aria-current="page"><span class="dot svc-all" aria-hidden="true"></span>all</a>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a class="log-chip" href="/stacks/notes/logs?service=storage"><span class="dot svc-1" aria-hidden="true"></span>storage</a>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="dot svc-hoster" aria-hidden="true"></span>hoster</a>"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains(">web</a>"),
+            "another stack's service: {html}"
+        );
+        // api has two generations in the range, so its rows say which.
+        assert!(
+            html.contains(r#"<span class="log-svc">api <span class="log-gen">g1</span></span>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="log-svc">storage</span>"#),
+            "{html}"
+        );
+        // A text line has no level; stderr is set apart; levels colour their rows.
+        assert!(
+            html.contains(r#"<li class="log-record svc-1 log-stderr" title="stderr">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<span class="log-lvl"><span class="visually-hidden">no level</span></span>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<li class="log-record svc-0 log-error">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<li class="log-record svc-hoster log-warn">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<li class="log-record log-marker">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="log-total">4</span> records"#),
+            "{html}"
+        );
+        // The store reaches back past the hour, so there is no "starts at" notice.
+        assert!(!html.contains("log-starts"), "{html}");
+        assert!(html.contains(r#"<time datetime=""#), "{html}");
+        assert!(!html.contains("style="), "{html}");
+
+        // One service, over a preset; the form keeps the service.
+        let html = body(
+            app.get(
+                "/stacks/notes/logs?service=api&since=24h",
+                Some(&browser.cookie),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            messages(&html),
+            [
+                "two hours ago",
+                "Listening on :8080",
+                "request failed",
+                "dropped 40 lines: rate cap",
+            ],
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="hidden" name="service" value="api">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a class="log-preset" href="/stacks/notes/logs?service=api&#38;since=24h" aria-current="true">24h</a>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="since" value="24h""#), "{html}");
+
+        // A since that does not parse is reported, and the hour shown.
+        let html = body(
+            app.get("/stacks/notes/logs?since=soon", Some(&browser.cookie))
+                .await,
+        )
+        .await;
+        assert!(html.contains("flash-error"), "{html}");
+        assert!(html.contains("is not a start time"), "{html}");
+        assert_eq!(messages(&html).len(), 5, "{html}");
+    }
+
+    #[tokio::test]
+    async fn a_young_store_says_from_when_its_data_starts() {
+        let app = TestApp::new().await;
+        let browser = app.sign_in().await;
+        seed(&app, vec![record(600, "api", Some(1), "first line")]).await;
+        let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
+        assert!(
+            html.contains(
+                r#"<p class="log-starts">The log store&#39;s records start at <time datetime=""#
+            ) || html.contains(
+                r#"<p class="log-starts">The log store's records start at <time datetime=""#
+            ),
+            "{html}"
+        );
+        // A service without records in the range is shown empty, not as an error.
+        let html = body(
+            app.get("/stacks/notes/logs?service=storage", Some(&browser.cookie))
+                .await,
+        )
+        .await;
+        assert!(html.contains("No records in this range"), "{html}");
+        assert!(html.contains("log-starts"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn pages_go_back_by_record_key_through_equal_times() {
+        let app = TestApp::new().await;
+        let browser = app.sign_in().await;
+        let extra = 5;
+        let total = crate::web::logs::LogsView::PAGE_SIZE as usize + extra;
+        let records = (0..total)
+            .map(|n| {
+                let mut r = record(60, "api", Some(1), &format!("line {n}"));
+                // Every record in the same millisecond: only the id orders them.
+                r.time =
+                    Timestamp::from_millis(Timestamp::now().as_millis() / 1000 * 1000 - 60_000);
+                r
+            })
+            .collect();
+        seed(&app, records).await;
+
+        let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
+        let newest = messages(&html);
+        assert_eq!(newest.len(), total - extra);
+        assert_eq!(newest[0], format!("line {extra}"));
+        assert_eq!(newest.last().unwrap(), &format!("line {}", total - 1));
+        assert!(!html.contains(">newer</a>"), "{html}");
+        assert!(!html.contains(">newest</a>"), "{html}");
+        let older = html
+            .split(r#"<p class="log-pages"><a href=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("an older link")
+            .replace("&#38;", "&");
+        assert!(older.starts_with("/stacks/notes/logs?before="), "{older}");
+
+        let html = body(app.get(&older, Some(&browser.cookie)).await).await;
+        let page = messages(&html);
+        assert_eq!(
+            page,
+            (0..extra).map(|n| format!("line {n}")).collect::<Vec<_>>()
+        );
+        assert!(!html.contains(">older</a>"), "{html}");
+        assert!(
+            html.contains(r#"<a href="/stacks/notes/logs">newest</a>"#),
+            "{html}"
+        );
+        let newer = html
+            .split(r#"<p class="log-pages"><a href=""#)
+            .last()
+            .and_then(|rest| rest.split('"').next())
+            .unwrap()
+            .replace("&#38;", "&");
+        assert!(newer.starts_with("/stacks/notes/logs?after="), "{newer}");
+        let html = body(app.get(&newer, Some(&browser.cookie)).await).await;
+        assert_eq!(messages(&html)[0], format!("line {extra}"));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_store_leaves_the_live_logs() {
+        let app = TestApp::new().await;
+        let browser = app.sign_in().await;
+        start_container(&app, "notes", "api", 2, &[], Duration::from_secs(60)).await;
+        app.logs.close().await;
+        let response = app.get("/stacks/notes/logs", Some(&browser.cookie)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body(response).await;
+        assert!(html.contains("Cannot read the log store"), "{html}");
+        assert!(
+            html.contains("The live logs linked above are read straight from podman."),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"href="/containers/hoster-notes-api-g2/logs""#),
+            "{html}"
+        );
+        assert!(!html.contains("No records in this range"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn a_removed_stack_with_records_is_not_found() {
+        let app = TestApp::new().await;
+        let browser = app.sign_in().await;
+        let mut gone = record(60, "web", Some(1), "still stored");
+        gone.stack = Some("gone".into());
+        seed(&app, vec![gone]).await;
+        let response = app.get("/stacks/gone/logs", Some(&browser.cookie)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }

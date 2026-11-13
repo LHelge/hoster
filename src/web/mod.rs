@@ -27,6 +27,7 @@ mod containers;
 mod dashboard;
 mod events;
 mod icons;
+mod logs;
 mod pages;
 mod settings;
 mod stacks;
@@ -34,6 +35,7 @@ mod system;
 mod ui;
 mod webhook;
 
+use logs::LogReader;
 pub use system::{LocalLogs, LogFacts, LogStoreState};
 
 use std::fmt;
@@ -167,6 +169,8 @@ pub struct WebApp {
     webhook: Webhook,
     stats: Stats,
     shell: ShellSource,
+    /// The log store the logs views read (ADR-0067).
+    logs: LogReader,
 }
 
 impl WebApp {
@@ -176,8 +180,9 @@ impl WebApp {
     /// credentials read from their files or systemd credentials, the dashboard's `stats`, the
     /// `instance` name (ADR-0058), the `secrets` the notification API key is kept in, and
     /// `shutdown`, which the System page requests after a self-update (ADR-0052), and the proxy's
-    /// `admission`, whose descriptor use the System page shows (ADR-0065), and the log store's
-    /// figures `logs`, which it shows too (ADR-0067). Fails when the
+    /// `admission`, whose descriptor use the System page shows (ADR-0065), the log store's
+    /// figures `logs`, which it shows too, and the `log_store` the logs views read (ADR-0067).
+    /// Fails when the
     /// credentials are missing. Deploy webhook tokens are verified against GitHub's key set for
     /// the configured audience (ADR-0047).
     #[expect(
@@ -199,6 +204,7 @@ impl WebApp {
         updates: UpdateCheckHandle,
         admission: Admission,
         logs: Arc<dyn LogFacts>,
+        log_store: LogStoreState,
     ) -> anyhow::Result<Self> {
         let installation = Installation::from_env()
             .context("HOME is not set, so the binary layout ~/.local/lib/hoster cannot be found")?;
@@ -251,6 +257,7 @@ impl WebApp {
             notifications,
         );
         app.settings = app.settings.with_updates(updates);
+        app.logs = LogReader::from(log_store);
         Ok(app)
     }
 
@@ -294,6 +301,7 @@ impl WebApp {
                 notifications,
             ),
             registries: Registries::from(registries),
+            logs: LogReader::default(),
         }
     }
 
@@ -315,6 +323,7 @@ impl WebApp {
                 get(Containers::log_stream),
             )
             .layer(Extension(self.containers.clone()))
+            .layer(Extension(self.logs.clone()))
             .route("/certificates", get(Certificates::page))
             .route("/certificates/dns", post(Certificates::check_dns))
             .route("/certificates/retry", post(Certificates::retry))
