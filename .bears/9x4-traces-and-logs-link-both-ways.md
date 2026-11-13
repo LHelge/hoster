@@ -1,10 +1,10 @@
 ---
 id: "9x4"
 title: Traces and logs link both ways
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:37:50.238037958Z"
-updated: "2026-11-12T19:37:56.284179809Z"
+updated: "2026-11-13T23:30:16.622980728Z"
 tags:
   - web
   - observability
@@ -12,6 +12,7 @@ depends_on:
   - jpq
   - ckc
 parent: qnh
+attempts: 1
 ---
 
 ## Summary

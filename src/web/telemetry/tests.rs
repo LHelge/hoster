@@ -69,6 +69,9 @@ fn messages(html: &str) -> Vec<&str> {
                 .split("</span></summary>")
                 .next()
                 .unwrap()
+                .split(r#"</span><span class="log-trace">"#)
+                .next()
+                .unwrap()
         })
         .collect()
 }
@@ -108,7 +111,7 @@ async fn the_logs_tab_lists_every_stack_with_a_stack_column() {
         "{html}"
     );
     assert!(
-        html.contains(r#"class="log log-records log-stacks""#),
+        html.contains(r#"class="log log-records log-stacks log-traces""#),
         "{html}"
     );
     assert!(
@@ -1147,7 +1150,9 @@ mod traces {
             .unwrap()
             .replace("&#38;", "&");
         assert!(
-            href.starts_with("/telemetry/logs?stack=notes&since="),
+            href.starts_with(
+                "/telemetry/logs?stack=notes&trace=07070707070707070707070707070707&since="
+            ),
             "{href}"
         );
         let logs = page(&app, &browser.cookie, &href).await;
@@ -1455,6 +1460,215 @@ mod traces {
                 r#"href="/telemetry/traces?status=ok&#38;page=2&#38;trace={}""#,
                 trace(3)
             )),
+            "{html}"
+        );
+    }
+
+    /// Records of trace 1 (its app's span and none), of trace 5 (four days ago, a request
+    /// row still draws it), of trace 6 (four days ago, gone) and one outside any trace.
+    async fn seeded_links() -> TestApp {
+        let app = seeded().await;
+        let in_trace = |ago, n: u8, span: Option<SpanId>, message: &str| {
+            let mut r = record(ago, Some("notes"), "api", message);
+            r.stream = Stream::Otlp;
+            r.trace_id = Some(trace(n));
+            r.span_id = span;
+            r
+        };
+        let mut failed = in_trace(
+            110,
+            1,
+            Some(SpanId::from([51; 8])),
+            "SequelizeDatabaseError",
+        );
+        failed.level = Some(Level::Error);
+        failed.fields = Some(r#"{"db.system":"postgres"}"#.into());
+        let days = 4 * 24 * 3_600;
+        app.logs
+            .append(&LogBatch {
+                records: vec![
+                    record(100, Some("notes"), "api", "no trace"),
+                    failed,
+                    in_trace(105, 1, None, "made in the trace"),
+                    in_trace(days, 5, Some(SpanId::from([5; 8])), "old, drawn"),
+                    in_trace(days, 6, Some(SpanId::from([6; 8])), "old, gone"),
+                ],
+                requests: vec![request(5, days, "notes", "/kept", 10)],
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        app
+    }
+
+    #[tokio::test]
+    async fn records_link_to_their_trace_in_a_trace_column() {
+        let app = seeded_links().await;
+        let browser = app.sign_in().await;
+        let html = page(&app, &browser.cookie, "/telemetry/logs?since=7d").await;
+        assert!(
+            html.contains(r#"class="log log-records log-stacks log-traces""#),
+            "{html}"
+        );
+        let cell = |n: u8, span: Option<u8>| {
+            let id = trace(n).to_string();
+            let span = span.map(|s| format!("&#38;span={}", SpanId::from([s; 8])));
+            format!(
+                r#"<span class="log-trace"><a href="/telemetry/traces?trace={id}{}" title="Trace {id}">{} →</a></span>"#,
+                span.unwrap_or_default(),
+                &id[..8]
+            )
+        };
+        assert!(html.contains(&cell(1, Some(51))), "{html}");
+        assert!(
+            html.contains(&cell(1, None)),
+            "a record without a span: {html}"
+        );
+        assert!(
+            html.contains(&cell(5, Some(5))),
+            "its request row draws it: {html}"
+        );
+        let gone = trace(6).to_string();
+        assert!(
+            html.contains(&format!(
+                r#"<span class="log-trace"><span title="Trace {gone}: no longer kept (spans are kept 3 days)">{}</span></span>"#,
+                &gone[..8]
+            )),
+            "{html}"
+        );
+        assert!(
+            !html.contains(&format!("/telemetry/traces?trace={gone}")),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="log-msg">no trace</span><span class="log-trace"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></li>"#),
+            "{html}"
+        );
+
+        // Opened, a record shows its ids after its fields.
+        let id = trace(1).to_string();
+        let span = SpanId::from([51; 8]).to_string();
+        for expected in [
+            r#"<dt>db.system</dt><dd><a href="/telemetry/logs?since=7d&#38;field=db.system%3Dpostgres" title="Only records with this value">postgres</a></dd>"#.to_owned(),
+            format!(r#"<dt>trace_id</dt><dd><a href="/telemetry/logs?since=7d&#38;trace={id}" title="Only the records of this trace">{id}</a></dd>"#),
+            format!(r#"<dt>span_id</dt><dd><a href="/telemetry/traces?trace={id}&#38;span={span}" title="This span in its trace">{span}</a></dd>"#),
+            r#"<dt>service.name</dt><dd><a href="/telemetry/logs?since=7d&#38;service=api" title="Only this service&#39;s records">api</a></dd>"#.to_owned(),
+        ] {
+            assert!(html.contains(&expected), "{expected}\n{html}");
+        }
+        // A gone trace's span id links nowhere.
+        let old = SpanId::from([6; 8]);
+        assert!(
+            html.contains(&format!("<dt>span_id</dt><dd>{old}</dd>")),
+            "{html}"
+        );
+        // A record without fields or a trace does not open.
+        assert!(
+            !html.contains(r#"<dd><a href="/telemetry/logs?service=app"#),
+            "{html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trace_filter_is_a_removable_chip_over_all_the_store_keeps() {
+        let app = seeded_links().await;
+        let browser = app.sign_in().await;
+        let id = trace(1).to_string();
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/telemetry/logs?trace={id}"),
+        )
+        .await;
+        assert_eq!(
+            messages(&html),
+            ["SequelizeDatabaseError", "made in the trace"],
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r#"<a class="log-chip log-field-chip" href="/telemetry/logs" title="Remove this filter">trace_id = {}… <span aria-hidden="true">×</span>"#,
+                &id[..8]
+            )),
+            "{html}"
+        );
+        // Without a since, the range is all the store keeps; links keep the filter.
+        assert!(
+            html.contains(&format!(
+                r#"<a class="log-preset" href="/telemetry/logs?trace={id}&#38;since=7d" aria-current="true">7d</a>"#
+            )),
+            "{html}"
+        );
+        let old = trace(5).to_string();
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/telemetry/logs?trace={old}"),
+        )
+        .await;
+        assert_eq!(messages(&html), ["old, drawn"], "{html}");
+        // With other filters, an empty page clears them all.
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/telemetry/logs?trace={id}&q=nothing"),
+        )
+        .await;
+        assert!(
+            html.contains(&format!(
+                r#"No records match grep “nothing” and trace {}… in this range. <a href="/telemetry/logs">clear filters</a>"#,
+                &id[..8]
+            )),
+            "{html}"
+        );
+        // A trace id that is not one is said, and every record shown.
+        let html = page(&app, &browser.cookie, "/telemetry/logs?trace=xyz").await;
+        assert!(html.contains("is not a trace id"), "{html}");
+        assert!(!html.contains("trace_id ="), "{html}");
+
+        // The stack tab takes it too.
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/stacks/notes/logs?trace={id}&follow=off"),
+        )
+        .await;
+        assert_eq!(
+            messages(&html),
+            ["SequelizeDatabaseError", "made in the trace"],
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!("trace_id = {}… <span", &id[..8])),
+            "{html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_waterfall_links_the_logs_in_its_trace() {
+        let app = seeded_links().await;
+        let browser = app.sign_in().await;
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/telemetry/traces?trace={}", trace(1)),
+        )
+        .await;
+        assert!(
+            html.contains(&format!(
+                r#"<a class="button wf-control" href="/telemetry/logs?trace={}" title="The log records made in this trace, at every level">logs in trace (2) →</a>"#,
+                trace(1)
+            )),
+            "{html}"
+        );
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/telemetry/traces?trace={}", trace(2)),
+        )
+        .await;
+        assert!(
+            html.contains(r#"<span class="wf-control muted">no logs in trace</span>"#),
             "{html}"
         );
     }

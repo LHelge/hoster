@@ -984,6 +984,13 @@ a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent)
 .log-slower { display: inline-flex; align-items: center; gap: 6px; }
 .log-slower input { width: 7rem; }
 .log-marker { grid-template-columns: max-content minmax(0, 1fr); color: var(--muted); font-style: italic; }
+/* The TRACE column (records and request rows, not the deploy source): the trace's first 8 hex
+   digits linking to it, or `—`. */
+.log-traces .log-record { --log-cols: max-content 12ch 5ch minmax(0, 1fr) 10ch; }
+.log-stacks.log-traces .log-record { --log-cols: max-content 12ch 12ch 5ch minmax(0, 1fr) 10ch; }
+.log-traces .log-record.log-request { --log-cols: max-content 12ch 7ch minmax(0, 1fr) 3ch 9ch 9ch 16ch 10ch; }
+.log-stacks.log-traces .log-record.log-request { --log-cols: max-content 12ch 12ch 7ch minmax(0, 1fr) 3ch 9ch 9ch 16ch 10ch; }
+.log-trace { color: var(--muted); white-space: nowrap; }
 .log-starts, .log-pages { margin: 0; padding: 6px 12px; color: var(--muted); font: 12px/1.4 var(--mono); }
 .log-starts { border-bottom: 1px solid var(--divider); }
 .log-pages { display: flex; gap: 16px; }
@@ -1006,6 +1013,10 @@ a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent)
   .log-record.log-request, .log-stacks .log-record.log-request { --log-cols: max-content max-content max-content max-content; }
   .log-request .req-path { grid-column: 1 / -1; grid-row: 2; }
   .log-request .req-num { text-align: start; }
+  /* The TRACE cell starts the line after the message, or after duration, bytes and client. */
+  .log-traces .log-record { --log-cols: max-content max-content max-content; }
+  .log-stacks.log-traces .log-record { --log-cols: max-content 9ch 11ch 5ch; }
+  .log-traces .log-record.log-request, .log-stacks.log-traces .log-record.log-request { --log-cols: max-content max-content max-content max-content; }
 }
 
 /* ---- Stack pages: the apply page, its plan and pre-flight, problems and the diff ------------
@@ -1502,6 +1513,7 @@ table.traces td { padding-block: 9px; vertical-align: middle; font: 12px/1.4 var
 .wf-swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--svc); }
 .wf-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; font: 12px/1.2 var(--mono); }
 .wf-control { min-height: 30px; padding: 0 10px; font: 12px/1.2 var(--mono); }
+span.wf-control { display: inline-flex; align-items: center; }
 /* The critical-path switch: a link (?crit=on) unless CSS has :has(), then a checkbox. */
 .wf-crit-box { display: none; }
 .wf-crit-link { text-decoration: none; }

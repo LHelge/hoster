@@ -2939,6 +2939,9 @@ mod stored_logs {
                     .unwrap()
                     .split("</span></summary>")
                     .next()
+                    .unwrap()
+                    .split(r#"</span><span class="log-trace">"#)
+                    .next()
                     .unwrap();
                 text.replace(r#"<span class="visually-hidden">stderr: </span>"#, "")
             })
@@ -3245,11 +3248,11 @@ mod stored_logs {
         assert_eq!(html.matches("<details>").count(), 3, "{html}");
         // The target is in the row; the text line has no expander.
         assert!(
-            html.contains(r#"<span class="log-msg"><span class="log-target">notes::http</span> GET /notes</span></summary>"#),
+            html.contains(r#"<span class="log-msg"><span class="log-target">notes::http</span> GET /notes</span><span class="log-trace"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></summary>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<span class="log-msg">plain text</span></li>"#),
+            html.contains(r#"<span class="log-msg">plain text</span><span class="log-trace"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></li>"#),
             "{html}"
         );
         // Keys and values escaped, in the text and in the links.
@@ -3431,7 +3434,7 @@ mod stored_logs {
         use std::net::IpAddr;
 
         use super::*;
-        use crate::store::{LogHead, RequestId, RequestRow};
+        use crate::store::{LogHead, RequestId, RequestRow, SpanId};
 
         pub(in crate::web::stacks::tests) fn request(
             ago_secs: u64,
@@ -3638,6 +3641,60 @@ mod stored_logs {
                 html.contains(r#"<a href="/stacks/notes/logs?service=api">containers</a>"#),
                 "{html}"
             );
+        }
+
+        #[tokio::test]
+        async fn a_row_links_its_trace_only_once_the_proxy_sent_trace_context() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut traced = request(20, "web", "/traced", 200);
+            traced.server_span = Some(SpanId::from([0x5e; 8]));
+            traced.client_span = Some(SpanId::from([0xc1; 8]));
+            commit(&app, vec![request(30, "web", "/older", 200), traced]).await;
+            let html = body(
+                app.get("/stacks/notes/logs?source=access", Some(&browser.cookie))
+                    .await,
+            )
+            .await;
+            assert!(
+                html.contains(r#"class="log log-records log-traces""#),
+                "{html}"
+            );
+            let id = RequestId::from([20; 16]).to_string();
+            // The trace opens on its focus: no span is picked.
+            let href = format!("/telemetry/traces?trace={id}");
+            assert!(
+                html.contains(&format!(
+                    r#"<span class="log-trace"><a href="{href}" title="Trace {id}">{} →</a></span></summary>"#,
+                    &id[..8]
+                )),
+                "{html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    r#"<dt>trace</dt><dd><a href="{href}" title="The request's trace on the Traces tab">{id} →</a></dd>"#
+                )),
+                "{html}"
+            );
+            // A row from before trace context: a dash, and no trace in its details.
+            assert_eq!(html.matches("<dt>trace</dt>").count(), 1, "{html}");
+            assert_eq!(
+                html.matches(r#"<span class="log-trace"><span aria-hidden="true">—</span>"#)
+                    .count(),
+                1,
+                "{html}"
+            );
+            // The trace filter is the records': the access log drops it from its links.
+            let html = body(
+                app.get(
+                    &format!("/stacks/notes/logs?source=access&trace={id}"),
+                    Some(&browser.cookie),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(paths(&html), ["/older", "/traced"], "{html}");
+            assert!(!html.contains("trace_id ="), "{html}");
         }
 
         #[tokio::test]

@@ -956,7 +956,13 @@ fn a_record_with_fields_opens_on_them_flattened_and_linked() {
     let fields: Vec<_> = detail
         .fields
         .iter()
-        .map(|f| (f.key.as_str(), f.value.as_str(), f.href.as_str()))
+        .map(|f| {
+            (
+                f.key.as_str(),
+                f.value.as_str(),
+                f.href.as_deref().unwrap_or_default(),
+            )
+        })
         .collect();
     assert_eq!(
         fields,
@@ -1081,7 +1087,7 @@ fn opened_records_render_escaped_with_no_inline_style() {
     assert!(html.contains("&#60;i&#62;not json</p>"), "{html}");
     // The record without fields is a plain row.
     assert!(
-        html.contains(r#"<span class="log-msg">line 3</span></li>"#),
+        html.contains(r#"<span class="log-msg">line 3</span><span class="log-trace"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></li>"#),
         "{html}"
     );
 }

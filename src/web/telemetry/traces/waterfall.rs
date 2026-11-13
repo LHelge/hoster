@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
+use super::super::Telemetry;
 use super::details::SpanDetails;
 use super::{Links, ServiceChip, ServicePalette, TracesView};
 use crate::stats::Elapsed;
@@ -66,6 +67,11 @@ pub struct Waterfall {
     pub to_services: String,
     /// The spans past the span cap ([`Trace::MAX_SPANS`]), when any were left out.
     pub more: Option<Count>,
+    /// The log records made in the trace, those without a span included.
+    pub logs: Count,
+    /// "logs in trace": the Logs tab filtered to the trace, at every level; `None` when it has
+    /// no records.
+    pub logs_href: Option<String>,
 }
 
 /// A service in the legend: its name and colour, and how many spans it has.
@@ -306,6 +312,8 @@ impl Waterfall {
             more: trace
                 .is_truncated()
                 .then(|| Count(trace.total_spans() - shown)),
+            logs: Count(trace.log_records()),
+            logs_href: (trace.log_records() > 0).then(|| Telemetry::trace_logs_href(trace.id())),
         }
     }
 

@@ -145,6 +145,11 @@
       <a class="switch wf-crit-link" role="switch" aria-checked="{{ w.critical }}" href="{{ w.critical_href }}#trace-title"><span class="switch-track" aria-hidden="true"></span>critical path</a>
       <a class="button wf-control" href="{{ w.expand_all }}#trace-title">expand all</a>
       <a class="button wf-control" href="{{ w.to_services }}#trace-title">collapse to services</a>
+      {%- if let Some(href) = w.logs_href %}
+      <a class="button wf-control" href="{{ href }}" title="The log records made in this trace, at every level">logs in trace ({{ w.logs }}) →</a>
+      {%- else %}
+      <span class="wf-control muted">no logs in trace</span>
+      {%- endif %}
     </div>
   </div>
   <div class="waterfall{% if w.critical %} wf-crit-on{% endif %}">

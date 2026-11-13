@@ -58,8 +58,19 @@
 //! The stack scope's `access` source (`logs/access.rs`, [`LogsView::access`]) lists the
 //! proxy's request rows from the same store, as a source other than the records does, with
 //! columns, status chips and a footer of its own, and follows them by row id ([`AccessTail`]).
+//!
+//! Records and request rows link to their traces (ADR-0069, task 9x4): the last column
+//! ([`TraceCell`]) is the first 8 hex digits of the trace a record was made in, or of a request
+//! row's trace once the proxy sent trace context, linking to the Traces tab at the record's
+//! span; `—` for a row made in none. A trace is drawn from its spans, kept 3 days, and from its
+//! request row, kept as long as records, so an older record links only when a request row
+//! still draws its trace ([`TraceLinks`]); otherwise its id is shown without a link. An opened
+//! record shows `trace_id`, `span_id` and `service.name` after its fields. `trace` filters the
+//! records to one trace's, read with the store's trace index rather than a scan; it is a
+//! removable chip, and without a `since` its range is all the store keeps, as the trace's
+//! records are found by the index whatever their time.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
@@ -79,6 +90,7 @@ use tokio_util::sync::CancellationToken;
 use super::charts::{Buckets, SeverityBars, SeverityCounts};
 use super::containers::{LogEntry as LiveLine, LogSince, SinceLink};
 use super::system::LogStoreState;
+use super::telemetry::Telemetry;
 use super::ui::Count;
 mod access;
 mod download;
@@ -88,7 +100,7 @@ pub use download::{Download, FormatParam, LogDownload, Refused};
 
 use crate::store::{
     self, Level, LevelCounts, LogEntry, LogHead, LogPage, LogQuery, LogRecord, LogStore, Page,
-    PageAt, RecordKey, ServiceSeen, Stream, TextFilter, Timestamp,
+    PageAt, RecordKey, Retention, ServiceSeen, Stream, TextFilter, Timestamp, TraceId,
 };
 
 /// Whose records the view shows.
@@ -182,11 +194,17 @@ impl LogSource {
     fn takes(self, name: &str) -> bool {
         match self {
             LogSource::Containers => !matches!(name, "status" | "slower"),
-            LogSource::Access => !matches!(name, "level" | "field"),
-            LogSource::Deploy => {
-                !matches!(name, "service" | "level" | "field" | "status" | "slower")
-            }
+            LogSource::Access => !matches!(name, "level" | "field" | "trace"),
+            LogSource::Deploy => !matches!(
+                name,
+                "service" | "level" | "field" | "status" | "slower" | "trace"
+            ),
         }
+    }
+
+    /// Whether its rows have a TRACE column: the log store's records and request rows.
+    fn traced(self) -> bool {
+        matches!(self, LogSource::Containers | LogSource::Access)
     }
 
     /// The grep field's accessible name: what grep matches.
@@ -341,7 +359,7 @@ impl LogReader {
         };
         let read = async {
             let (seen, page, oldest, unleveled, stacks, total, levels) = tokio::try_join!(
-                store.services_in(query.range.clone(), &query.scope),
+                store.services_in(query),
                 records,
                 store.oldest_record_time(),
                 unleveled,
@@ -349,8 +367,13 @@ impl LogReader {
                 total,
                 levels,
             )?;
+            // Older records link to their trace only where a request row still draws it.
+            let drawn = store
+                .traced_requests(&plan.traces.older(&page.entries))
+                .await?;
             Ok::<_, store::StoreError>(Read {
                 seen,
+                drawn,
                 page,
                 oldest,
                 unleveled,
@@ -371,6 +394,9 @@ impl LogReader {
 #[derive(Debug, Default)]
 struct Read {
     seen: Vec<ServiceSeen>,
+    /// The traces of the page's records older than spans are kept that a request row still
+    /// draws ([`TraceLinks::drawn`]).
+    drawn: HashSet<TraceId>,
     page: LogPage,
     oldest: Option<Timestamp>,
     /// The records without a level the level filter hides, when that was counted.
@@ -398,6 +424,8 @@ struct Plan {
     across: bool,
     /// Across stacks: the severity histogram's buckets, counted on the index in one query.
     buckets: Option<Buckets>,
+    /// Which records link to their trace, before the store says which older traces it draws.
+    traces: TraceLinks,
 }
 
 impl Plan {
@@ -629,6 +657,8 @@ pub struct LogParams {
     level: Option<String>,
     /// Grep: what the message or fields contain. Not trimmed: spaces are searched for.
     q: Option<String>,
+    /// Only the records made in this trace: a [`TraceId`].
+    trace: Option<String>,
     /// `on`: `q` is a regular expression.
     regex: Option<String>,
     /// `off`: the newest page does not follow new records. Following is on otherwise.
@@ -659,6 +689,7 @@ impl From<Vec<(String, String)>> for LogParams {
                 "after" => &mut params.after,
                 "level" => &mut params.level,
                 "q" => &mut params.q,
+                "trace" => &mut params.trace,
                 "regex" => &mut params.regex,
                 "follow" => &mut params.follow,
                 "from" => &mut params.from,
@@ -682,11 +713,21 @@ impl LogParams {
     pub const SINCE_PRESETS: [&str; 6] = ["5m", "15m", "1h", "6h", "24h", "7d"];
     /// The range without a `since`, unless the scope sets its own ([`LogScope::default_since`]).
     pub const DEFAULT_SINCE: &str = "1h";
+    /// The range of a trace filter without a `since`: all the store keeps
+    /// ([`Retention::MAX_AGE`]), which costs nothing as the trace index finds the records.
+    pub const TRACE_SINCE: &str = "7d";
 
-    /// The same options, with the range `scope` defaults to.
+    /// The same options, with the range `scope` defaults to, or all the store keeps where a
+    /// trace filter applies.
     pub fn scoped(self, scope: &LogScope) -> Self {
+        // A trace filter finds its records by the trace index, whatever their time.
+        let traced = self.trace().0.is_some() && self.source(scope).0.takes("trace");
+        let since = match traced {
+            true => Self::TRACE_SINCE,
+            false => scope.default_since(),
+        };
         Self {
-            default_since: Some(scope.default_since().to_owned()),
+            default_since: Some(since.to_owned()),
             ..self
         }
     }
@@ -701,7 +742,8 @@ impl LogParams {
         Self::text(&self.since)
     }
 
-    /// The range without a `since`.
+    /// The range without a `since`: the scope's, or all the store keeps for a trace filter
+    /// ([`LogParams::scoped`]).
     fn default_since(&self) -> &str {
         self.default_since.as_deref().unwrap_or(Self::DEFAULT_SINCE)
     }
@@ -777,6 +819,21 @@ impl LogParams {
         self.q.as_deref().filter(|q| !q.is_empty())
     }
 
+    /// The trace filter; none when `trace` is absent or not a trace id, with why for the
+    /// latter.
+    fn trace(&self) -> (Option<TraceId>, Option<String>) {
+        match Self::text(&self.trace).map(|t| (t, t.parse::<TraceId>())) {
+            None => (None, None),
+            Some((_, Ok(id))) => (Some(id), None),
+            Some((given, Err(_))) => (
+                None,
+                Some(format!(
+                    "`{given}` is not a trace id (32 hexadecimal digits); showing every record."
+                )),
+            ),
+        }
+    }
+
     fn regex(&self) -> bool {
         Self::text(&self.regex).is_some_and(|v| v.eq_ignore_ascii_case("on"))
     }
@@ -826,6 +883,7 @@ impl LogParams {
     /// those given and those the source takes.
     fn filters(&self, source: LogSource) -> Vec<(&'static str, String)> {
         let level = self.level().0;
+        let trace = self.trace().0.map(|id| id.to_string());
         let mut filters: Vec<(&'static str, String)> = [
             (
                 "source",
@@ -838,6 +896,7 @@ impl LogParams {
             ("slower", Self::text(&self.slower)),
             ("q", self.q()),
             ("regex", self.regex().then_some("on")),
+            ("trace", trace.as_deref()),
         ]
         .into_iter()
         .filter_map(|(key, value)| Some((key, value?.to_owned())))
@@ -855,9 +914,12 @@ impl LogParams {
         filters
     }
 
-    /// Whether level, grep or a field filter narrow the page.
+    /// Whether level, grep, a field filter or a trace narrow the page.
     fn filtered(&self) -> bool {
-        self.level().0 != LevelFilter::All || self.q().is_some() || !self.fields().0.is_empty()
+        self.level().0 != LevelFilter::All
+            || self.q().is_some()
+            || !self.fields().0.is_empty()
+            || self.trace().0.is_some()
     }
 }
 
@@ -1042,6 +1104,109 @@ pub struct LogRow {
     /// The access log's cells: a request row has them in place of a level, and its message is
     /// the path as the collapsed row shows it.
     pub request: Option<RequestCells>,
+    /// The TRACE cell; `None` for a source without that column (the deploy source).
+    pub trace: Option<TraceCell>,
+}
+
+/// A row's TRACE cell: the trace it was made in, shown as its first
+/// [`TraceCell::SHORT`] hex digits, and that trace on the Traces tab where it can still be drawn;
+/// `—` for a row made in none.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TraceCell {
+    trace: Option<TraceId>,
+    href: Option<String>,
+}
+
+impl TraceCell {
+    /// The hex digits of a trace id the cell and the trace filter's chip show.
+    const SHORT: usize = 8;
+
+    /// `trace`, linking to the Traces tab with `span` selected (its focus without one).
+    pub fn linked(trace: TraceId, span: Option<store::SpanId>) -> Self {
+        Self {
+            trace: Some(trace),
+            href: Some(Telemetry::trace_href(trace, span)),
+        }
+    }
+
+    /// `trace`, which the store can no longer draw: shown, not linked.
+    pub fn gone(trace: TraceId) -> Self {
+        Self {
+            trace: Some(trace),
+            href: None,
+        }
+    }
+
+    /// The trace id's first [`TraceCell::SHORT`] hex digits; `None` for a row made in none.
+    pub fn short(&self) -> Option<String> {
+        self.trace.map(Self::abbreviate)
+    }
+
+    /// `trace` as the cell and the filter chip show it.
+    fn abbreviate(trace: TraceId) -> String {
+        trace.to_string()[..Self::SHORT].to_owned()
+    }
+
+    /// The whole trace id.
+    pub fn id(&self) -> Option<String> {
+        self.trace.map(|id| id.to_string())
+    }
+
+    /// The trace on the Traces tab, when it can be drawn.
+    pub fn href(&self) -> Option<&str> {
+        self.href.as_deref()
+    }
+
+    /// The days spans are kept, which a trace shown without a link is older than.
+    pub fn kept_days(&self) -> u64 {
+        Retention::SPAN_MAX_AGE.as_secs() / 86_400
+    }
+}
+
+/// Which records link to their trace (ADR-0069 §7, §9). The Traces tab draws a trace from its
+/// spans, kept [`Retention::SPAN_MAX_AGE`], and from its request row, kept as long as records.
+/// A record stamped within the spans' age links; an older one links only when its trace is a
+/// request whose row still has trace context, which the store is asked for the page's older
+/// records ([`LogStore::traced_requests`]), so no link leads to a trace that is gone. Records
+/// a follow stream adds are new, so they always link.
+#[derive(Debug, Clone)]
+struct TraceLinks {
+    /// Records stamped at or after this link to their trace.
+    spans_since: Timestamp,
+    /// The traces of older records that a request row still draws.
+    drawn: HashSet<TraceId>,
+}
+
+impl TraceLinks {
+    /// The links of records read at `now`, before the store was asked about older ones.
+    fn at(now: Timestamp) -> Self {
+        Self {
+            spans_since: now - Retention::SPAN_MAX_AGE,
+            drawn: HashSet::new(),
+        }
+    }
+
+    /// The traces of `entries` stamped before spans are kept, each once: what only a request
+    /// row can still draw.
+    fn older(&self, entries: &[LogEntry]) -> Vec<TraceId> {
+        let older: HashSet<TraceId> = entries
+            .iter()
+            .filter(|e| e.record.time < self.spans_since)
+            .filter_map(|e| e.record.trace_id)
+            .collect();
+        older.into_iter().collect()
+    }
+
+    /// The TRACE cell of `record`.
+    fn cell(&self, record: &LogRecord) -> TraceCell {
+        match record.trace_id {
+            None => TraceCell::default(),
+            Some(trace) if record.time >= self.spans_since || self.drawn.contains(&trace) => {
+                TraceCell::linked(trace, record.span_id)
+            }
+            Some(trace) => TraceCell::gone(trace),
+        }
+    }
 }
 
 /// What a record with fields shows when opened, beside the time ([`LogRow::time`]) and the cut
@@ -1055,6 +1220,9 @@ pub struct RecordDetail {
     pub fields: Vec<FieldRow>,
     /// The fields as stored, when they no longer parse as a JSON object.
     pub raw: Option<String>,
+    /// After the fields: `trace_id` and `span_id` when the record was made in a trace, and
+    /// `service.name`, as OTLP names them.
+    pub ids: Vec<FieldRow>,
     /// Grep matched in the fields: the record is shown open.
     pub open: bool,
 }
@@ -1068,8 +1236,11 @@ pub struct FieldRow {
     pub value: String,
     /// Where grep matched in `value`, as byte ranges.
     pub marks: Vec<Range<usize>>,
-    /// The view with this key and value as a field filter.
-    pub href: String,
+    /// The view with this key and value as a field filter, or what an id links to; `None` for
+    /// an id that links nowhere.
+    pub href: Option<String>,
+    /// What the link does.
+    pub title: &'static str,
 }
 
 impl FieldRow {
@@ -1147,11 +1318,17 @@ struct Rows {
     text: Option<TextFilter>,
     /// The page's links, which a field value adds its filter to.
     links: Links,
+    /// Which records link to their trace.
+    traces: TraceLinks,
 }
 
 impl Rows {
     /// The field that names a `tracing` event's module.
     const TARGET: &str = "target";
+    /// What an opened record calls its ids, as OTLP does.
+    const TRACE_ID: &str = "trace_id";
+    const SPAN_ID: &str = "span_id";
+    const SERVICE_NAME: &str = "service.name";
 
     /// Rows for `services` (in chip order), with the generations in `seen`, linking `links`.
     fn new(services: Vec<String>, seen: &[ServiceSeen], links: Links) -> Self {
@@ -1171,6 +1348,7 @@ impl Rows {
             dated: false,
             text: None,
             links,
+            traces: TraceLinks::at(Timestamp::now()),
         }
     }
 
@@ -1229,6 +1407,7 @@ impl Rows {
             target: None,
             detail: None,
             request: None,
+            trace: Some(self.traces.cell(record)),
         };
         if !record.marker {
             self.detail(record, &mut row);
@@ -1266,6 +1445,7 @@ impl Rows {
             target: entry.step.as_deref().map(LiveLine::printable),
             detail: None,
             request: entry.request.clone(),
+            trace: entry.trace.clone(),
         }
     }
 
@@ -1278,14 +1458,17 @@ impl Rows {
             .join("\n")
     }
 
-    /// The target and what `record` opens on, from its fields, parsed once.
+    /// The target and what `record` opens on, from its fields, parsed once, and its ids. A
+    /// record with neither fields nor a trace does not open.
     fn detail(&self, record: &LogRecord, row: &mut LogRow) {
         let (flat, raw) = match record.parsed_fields() {
-            None => return,
-            Some(Ok(flat)) if flat.is_empty() => return,
+            None => (Vec::new(), None),
             Some(Ok(flat)) => (flat, None),
             Some(Err(raw)) => (Vec::new(), Some(Self::lines(raw))),
         };
+        if flat.is_empty() && raw.is_none() && record.trace_id.is_none() {
+            return;
+        }
         row.target = flat
             .iter()
             .find(|(key, _)| key == Self::TARGET)
@@ -1297,12 +1480,13 @@ impl Rows {
         let fields = flat
             .into_iter()
             .map(|(key, value)| {
-                let href = self.links.with_field(&FieldFilter {
+                let href = Some(self.links.with_field(&FieldFilter {
                     key: key.clone(),
                     value: value.clone(),
-                });
+                }));
                 let value = Self::lines(&value);
                 FieldRow {
+                    title: "Only records with this value",
                     key: LiveLine::printable(&key),
                     marks: self
                         .text
@@ -1319,8 +1503,50 @@ impl Rows {
             generation: record.generation,
             fields,
             raw,
+            ids: self.ids(record, row.trace.as_ref()),
             open,
         });
+    }
+
+    /// What an opened `record` shows after its fields, as the mockup does: its trace id
+    /// (linking the view filtered to that trace), its span id (linking the span on the Traces
+    /// tab, as `trace` does where it can be drawn) and its service.
+    fn ids(&self, record: &LogRecord, trace: Option<&TraceCell>) -> Vec<FieldRow> {
+        let id = |key: &str, value: String, href: Option<String>, title| FieldRow {
+            key: key.to_owned(),
+            value,
+            marks: Vec::new(),
+            href,
+            title,
+        };
+        let mut ids = Vec::new();
+        if let Some(trace_id) = record.trace_id {
+            let value = trace_id.to_string();
+            let href = self.links.to(&[("trace", Some(&value))]);
+            ids.push(id(
+                Self::TRACE_ID,
+                value,
+                Some(href),
+                "Only the records of this trace",
+            ));
+        }
+        if let Some(span_id) = record.span_id {
+            let href = trace.and_then(TraceCell::href).map(str::to_owned);
+            ids.push(id(
+                Self::SPAN_ID,
+                span_id.to_string(),
+                href,
+                "This span in its trace",
+            ));
+        }
+        let href = self.links.to(&[("service", Some(&record.service))]);
+        ids.push(id(
+            Self::SERVICE_NAME,
+            LiveLine::printable(&record.service),
+            Some(href),
+            "Only this service's records",
+        ));
+        ids
     }
 }
 
@@ -1426,6 +1652,8 @@ pub struct SourceEntry {
     pub message: String,
     /// A request row's cells (the access log), the path as its `message`.
     pub request: Option<RequestCells>,
+    /// The TRACE cell, for a source with that column ([`LogSource::traced`]).
+    pub trace: Option<TraceCell>,
 }
 
 /// What a source other than the log store shows for an empty range.
@@ -1511,12 +1739,16 @@ pub struct LogsView {
     pub invalid: Option<String>,
     /// The active field filters, all of which a record matches.
     pub fields: Vec<FieldChip>,
+    /// The active trace filter: `trace_id = 4bf92f35…`, and the view without it.
+    pub trace: Option<FieldChip>,
     /// What the level filter hides.
     pub unleveled: Option<Unleveled>,
     /// The scan stopped before the page was full.
     pub stopped: Option<Stopped>,
     pub live: Vec<LiveLink>,
     pub stack_column: bool,
+    /// Rows end in a TRACE column ([`LogSource::traced`]).
+    pub trace_column: bool,
     pub rows: Vec<LogRow>,
     pub older: Option<String>,
     pub newer: Option<String>,
@@ -1615,6 +1847,7 @@ impl LogsView {
         let (_, source_problem) = params.source(scope);
         let (level, level_problem) = params.level();
         let (fields, field_problem) = params.fields();
+        let (trace, trace_problem) = params.trace();
         let across = matches!(scope, LogScope::All { .. });
         let buckets = across.then(|| Buckets::covering(range.clone()));
         let mut query = LogQuery::new(range, scope.store());
@@ -1622,6 +1855,7 @@ impl LogsView {
         query.levels = level.levels();
         query.fields = fields.into_iter().map(Into::into).collect();
         query.text = text;
+        query.trace = trace;
         query.page = page;
         query.limit = limit;
         Plan {
@@ -1629,10 +1863,12 @@ impl LogsView {
             problem: source_problem
                 .or(problem)
                 .or(level_problem)
-                .or(field_problem),
+                .or(field_problem)
+                .or(trace_problem),
             invalid,
             across,
             buckets,
+            traces: TraceLinks::at(now.into()),
         }
     }
 
@@ -1648,6 +1884,7 @@ impl LogsView {
             problem,
             invalid,
             buckets,
+            traces,
             ..
         } = plan;
         let links = Links::of(&mount.action, &mount.scope, params, LogSource::Containers);
@@ -1665,6 +1902,10 @@ impl LogsView {
                 .iter()
                 .all(|e| Self::utc(e.record.time).starts_with(&today)),
             text: query.text.clone(),
+            traces: TraceLinks {
+                drawn: read.drawn.clone(),
+                ..traces
+            },
             ..Rows::new(services.clone(), &read.seen, links.clone())
         };
         let mut chips = vec![Chip {
@@ -1710,6 +1951,10 @@ impl LogsView {
                 remove: links.without_field(field),
             })
             .collect();
+        let trace = query.trace.map(|id| FieldChip {
+            label: format!("trace_id = {}…", TraceCell::abbreviate(id)),
+            remove: links.to(&[("trace", None)]),
+        });
         let empty = rendered.is_empty() && !paged && unreadable.is_none() && invalid.is_none();
         let cleared = (empty && params.filtered()).then(|| {
             let mut active = Vec::new();
@@ -1725,6 +1970,9 @@ impl LogsView {
                     .iter()
                     .map(|field| format!("field {}={}", field.key, field.value)),
             );
+            if let Some(trace) = query.trace {
+                active.push(format!("trace {}…", TraceCell::abbreviate(trace)));
+            }
             (
                 active.join(" and "),
                 links.to(&[
@@ -1732,6 +1980,7 @@ impl LogsView {
                     ("q", None),
                     ("regex", None),
                     ("field", None),
+                    ("trace", None),
                 ]),
             )
         });
@@ -1798,10 +2047,12 @@ impl LogsView {
             regex: params.regex(),
             invalid,
             fields,
+            trace,
             unleveled,
             stopped,
             live: mount.live,
             stack_column,
+            trace_column: LogSource::Containers.traced(),
             empty,
             cleared,
             follow,
@@ -2035,10 +2286,12 @@ impl LogsView {
             regex: params.regex(),
             invalid,
             fields: Vec::new(),
+            trace: None,
             unleveled: None,
             stopped,
             live: mount.live,
             stack_column: rows.stack_column,
+            trace_column: source.traced(),
             empty: empty_page,
             cleared,
             empty_note: Some(empty),
@@ -2156,13 +2409,10 @@ impl LogFollow {
         if let Some(invalid) = invalid {
             return Err(invalid);
         }
-        let seen = store
-            .services_in(query.range.clone(), &query.scope)
-            .await
-            .map_err(|err| {
-                tracing::error!(error = %err, "reading the log store failed");
-                format!("Cannot read the log store: {:#}", anyhow::Error::from(err))
-            })?;
+        let seen = store.services_in(&query).await.map_err(|err| {
+            tracing::error!(error = %err, "reading the log store failed");
+            format!("Cannot read the log store: {:#}", anyhow::Error::from(err))
+        })?;
         // Every record from the start of the range on, however far its time is ahead.
         query.range.end = Timestamp::from_millis(i64::MAX);
         query.limit = Self::CHUNK;

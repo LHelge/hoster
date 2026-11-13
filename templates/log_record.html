@@ -1,8 +1,9 @@
 {#- One record of the stored logs view (src/web/logs.rs, LogRow `row`), on a page
     (logs_view.html) and in its follow stream (log_records.html); `stack_column` says whether
-    rows name their stack. A record with fields is the summary of a <details> that opens on
-    them (RecordDetail); one without has no expander. A request row of the access log
-    (RequestCells) has its own columns and always opens. -#}
+    rows name their stack. A record with fields or a trace is the summary of a <details> that
+    opens on them (RecordDetail); one without has no expander. A request row of the access log
+    (RequestCells) has its own columns and always opens. Records and request rows end in their
+    TRACE cell (log_trace.html). -#}
       {%- if let Some(req) = row.request %}
       <li class="log-record log-request {{ row.class }}"><details><summary>
         <time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time>
@@ -13,7 +14,8 @@
         <span class="req-status {{ req.tone }}"{% if req.status == "-" %} title="No response was sent"{% endif %}>{{ req.status }}</span>
         <span class="req-num" title="Total duration">{{ req.total }}</span>
         <span class="req-num" title="Response bytes">{{ req.bytes }}</span>
-        <span class="req-client" title="{{ req.client }}">{{ req.client }}</span></summary>
+        <span class="req-client" title="{{ req.client }}">{{ req.client }}</span>
+        {%- include "log_trace.html" %}</summary>
         <div class="log-expanded">
           <dl class="log-fields">
             <dt>time</dt><dd><time datetime="{{ row.time }}">{{ row.time }}</time></dd>
@@ -23,7 +25,9 @@
             <dt>to header</dt><dd>{{ req.to_header }}</dd>
             <dt>upstream</dt><dd>{% if req.upstream_failed %}<span class="req-5xx">failed</span>{% else %}ok{% endif %}</dd>
             <dt>request id</dt><dd><a href="{{ req.records }}" title="The containers' records that mention this id">{{ req.request_id }}</a></dd>
-            {#- The waterfall epic (qnh) adds the request's trace link here. #}
+            {%- if let Some(trace) = row.trace %}{% if let Some(href) = trace.href() %}
+            <dt>trace</dt><dd><a href="{{ href }}" title="The request's trace on the Traces tab">{{ trace.id().unwrap_or_default() }} →</a></dd>
+            {%- endif %}{% endif %}
           </dl>
         </div></details></li>
       {%- else if row.marker %}
@@ -36,18 +40,18 @@
         <span class="log-svc">{% if let Some(href) = row.href %}<a href="{{ href }}">{{ row.service }}</a>{% else %}{{ row.service }}{% endif %}{% if let Some(generation) = row.generation %} <span class="log-gen">g{{ generation }}</span>{% endif %}</span>
         <span class="log-lvl">{% if let Some(level) = row.level %}{{ level }}{% else %}<span class="visually-hidden">no level</span>{% endif %}</span>
         <span class="log-msg">{% if row.stderr %}<span class="visually-hidden">stderr: </span>{% endif %}{% if let Some(target) = row.target %}<span class="log-target">{{ target }}</span> {% endif %}{% for span in row.spans() %}{% if span.mark %}<mark>{{ span.text }}</mark>{% else %}{{ span.text }}{% endif %}{% endfor %}{% if row.cut %} <span class="log-cut" title="The line was longer than the store keeps and was cut.">[cut]</span>{% endif %}</span>
+        {%- include "log_trace.html" %}
         {%- if let Some(detail) = row.detail %}</summary>
         <div class="log-expanded">
           <p class="log-meta"><time datetime="{{ row.time }}">{{ row.time }}</time> · {{ detail.stream }}{% if let Some(generation) = detail.generation %} · generation {{ generation }}{% endif %}{% if row.cut %} · cut at the line length cap{% else %} · whole line{% endif %}</p>
           {%- if let Some(raw) = detail.raw %}
           <p class="log-fields-raw"><span class="log-label">fields (not valid JSON)</span> {{ raw }}</p>
-          {%- else %}
+          {%- endif %}
           <dl class="log-fields">
-            {%- for field in detail.fields %}
-            <dt>{{ field.key }}</dt><dd><a href="{{ field.href }}" title="Only records with this value">{% if field.value.is_empty() %}<span class="log-label">(empty)</span>{% endif %}{% for span in field.spans() %}{% if span.mark %}<mark>{{ span.text }}</mark>{% else %}{{ span.text }}{% endif %}{% endfor %}</a></dd>
+            {%- for field in detail.fields.iter().chain(detail.ids.iter()) %}
+            <dt>{{ field.key }}</dt><dd>{% if let Some(href) = field.href %}<a href="{{ href }}" title="{{ field.title }}">{% endif %}{% if field.value.is_empty() %}<span class="log-label">(empty)</span>{% endif %}{% for span in field.spans() %}{% if span.mark %}<mark>{{ span.text }}</mark>{% else %}{{ span.text }}{% endif %}{% endfor %}{% if field.href.is_some() %}</a>{% endif %}</dd>
             {%- endfor %}
           </dl>
-          {%- endif %}
         </div></details>
         {%- endif %}</li>
       {%- endif %}

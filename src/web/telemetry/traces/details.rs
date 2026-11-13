@@ -266,7 +266,8 @@ impl SpanLog {
 
 impl From<&LogEntry> for SpanLog {
     /// The record, linking to the Logs tab from it on: its stack (or hoster's records without
-    /// one), from the second it was made, the page starting at the record.
+    /// one), filtered to its trace, from the second it was made, the page starting at the
+    /// record.
     fn from(entry: &LogEntry) -> Self {
         let record = &entry.record;
         let time = TracesView::utc(record.time);
@@ -277,12 +278,12 @@ impl From<&LogEntry> for SpanLog {
             id: entry.id.saturating_sub(1),
         };
         let stack = record.stack.as_deref().unwrap_or(LogScope::HOSTER);
+        let trace = record.trace_id.map(|id| id.to_string());
         let query = form_urlencoded::Serializer::new(String::new())
-            .extend_pairs([
-                ("stack", stack),
-                ("since", &since),
-                ("after", &before.to_string()),
-            ])
+            .append_pair("stack", stack)
+            .extend_pairs(trace.iter().map(|trace| ("trace", trace)))
+            .append_pair("since", &since)
+            .append_pair("after", &before.to_string())
             .finish();
         Self {
             shown: time[11..23].to_owned(),

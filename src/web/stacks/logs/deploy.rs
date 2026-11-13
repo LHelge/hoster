@@ -131,6 +131,7 @@ impl DeployLog {
             step: Some(step),
             message: text.to_owned(),
             request: None,
+            trace: None,
         }
     }
 }

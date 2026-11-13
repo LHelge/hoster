@@ -1,6 +1,7 @@
 //! The read side of `requests` (ADR-0067 §5): the access-log source of the stack logs tab and,
 //! by request id, the row a container record links to.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::ops::Range;
 use std::str::FromStr;
@@ -324,6 +325,30 @@ impl LogStore {
         let row: Option<Row> = sql.build_query_as().fetch_optional(&self.reads).await?;
         row.map(RequestEntry::try_from)
             .transpose()
+            .map_err(|e| StoreError::Database(sqlx::Error::Decode(Box::new(e))))
+    }
+
+    /// Of `ids`, those of a request row with trace context, which the waterfall can draw
+    /// (ADR-0069 §9) for as long as the row is kept, after the trace's own spans have gone: what
+    /// decides whether an older record links to its trace. One lookup per id on the
+    /// request id index; nothing is read for no ids.
+    pub async fn traced_requests(&self, ids: &[RequestId]) -> Result<HashSet<RequestId>> {
+        if ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let mut sql = QueryBuilder::<Sqlite>::new(
+            "SELECT request_id FROM requests WHERE server_span_id IS NOT NULL AND request_id IN (",
+        );
+        let mut list = sql.separated(", ");
+        for id in ids {
+            list.push_bind(id.to_string());
+        }
+        sql.push(")");
+        let found: Vec<String> = sql.build_query_scalar().fetch_all(&self.reads).await?;
+        found
+            .iter()
+            .map(|id| id.parse())
+            .collect::<Result<_, UnknownLogText>>()
             .map_err(|e| StoreError::Database(sqlx::Error::Decode(Box::new(e))))
     }
 }

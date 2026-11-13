@@ -29,7 +29,7 @@ use super::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 use super::stacks::Stacks;
 use super::ui::Count;
 use crate::machine::Memory;
-use crate::store::{Retention, Timestamp};
+use crate::store::{Retention, SpanId, Timestamp, TraceId};
 
 mod traces;
 
@@ -43,6 +43,24 @@ impl Telemetry {
     pub const TRACES: &str = TracesView::PATH;
     /// The Logs tab.
     pub const LOGS: &str = "/telemetry/logs";
+
+    /// The Traces tab with `trace` picked and `span` selected in its waterfall; without a
+    /// span, the trace opens on its focus. Where a record or a request row links to its trace.
+    pub fn trace_href(trace: TraceId, span: Option<SpanId>) -> String {
+        let trace = trace.to_string();
+        let span = span.map(|id| id.to_string());
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("trace", &trace)
+            .extend_pairs(span.iter().map(|span| ("span", span)))
+            .finish();
+        format!("{}?{query}", Self::TRACES)
+    }
+
+    /// The Logs tab with only the records made in `trace`, at every level, across stacks and
+    /// over all the store keeps (a trace filter's range, [`LogParams`]): "logs in trace".
+    pub fn trace_logs_href(trace: TraceId) -> String {
+        format!("{}?trace={trace}", Self::LOGS)
+    }
 
     /// `GET /telemetry`: the Traces tab.
     pub async fn index() -> Redirect {

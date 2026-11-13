@@ -6,7 +6,10 @@
 //! stack overview writes latencies, the response bytes and the client address. Every row opens,
 //! a `<details>` as a record with fields does, on the host, the route's prefix, the whole path,
 //! the time to the response header, whether the upstream failed and the request id, which links
-//! the containers' records that mention it (grep, as no field name for it is fixed).
+//! the containers' records that mention it (grep, as no field name for it is fixed). A row the
+//! proxy sent trace context for (ADR-0069 §8, §9: its span ids are stored) ends in its trace,
+//! the request id, linking to the Traces tab, which draws it from the row for as long as the
+//! row is kept; an older row, from before those columns, has `—` there and no link.
 //!
 //! Rows are kept by stack and service as the proxy stored them, without a join to the routes,
 //! so a route that moved to another stack keeps its old rows here.
@@ -28,7 +31,7 @@ use tokio::sync::watch;
 
 use super::{
     Chip, Download, EmptyNote, Links, LogFollow, LogMount, LogParams, LogReader, LogScope,
-    LogSource, LogsView, SourceEntry, SourcePlan, SourceRead, SourceTail,
+    LogSource, LogsView, SourceEntry, SourcePlan, SourceRead, SourceTail, TraceCell,
 };
 use crate::stats::{Elapsed, StatusClass};
 use crate::store::{
@@ -282,6 +285,11 @@ impl AccessLog {
             level: None,
             step: None,
             message: shown,
+            // The trace opens on its focus: the deepest span in error, or the proxy's.
+            trace: Some(match request.server_span {
+                Some(_) => TraceCell::linked(request.request_id, None),
+                None => TraceCell::default(),
+            }),
             request: Some(RequestCells {
                 method: LiveLine::printable(&request.method),
                 status: match request.status {

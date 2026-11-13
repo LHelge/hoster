@@ -1,0 +1,12 @@
+{#- The TRACE cell of a row of the stored logs view (src/web/logs.rs, TraceCell), in
+    log_record.html: the trace's first 8 hex digits linking to it on the Traces tab, the digits
+    alone where the store no longer draws it, `—` for a row made in no trace; nothing for a
+    source without the column. -#}
+{%- if let Some(trace) = row.trace %}<span class="log-trace">
+          {%- if let Some(short) = trace.short() %}
+          {%- if let Some(href) = trace.href() %}<a href="{{ href }}" title="Trace {{ trace.id().unwrap_or_default() }}">{{ short }} →</a>
+          {%- else %}<span title="Trace {{ trace.id().unwrap_or_default() }}: no longer kept (spans are kept {{ trace.kept_days() }} days)">{{ short }}</span>
+          {%- endif %}
+          {%- else %}<span aria-hidden="true">—</span><span class="visually-hidden">no trace</span>
+          {%- endif %}</span>
+{%- endif %}

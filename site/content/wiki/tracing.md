@@ -117,8 +117,16 @@ sampling.
 **Where to see it.** Exported log records appear in the stack's **Logs** tab and the
 **Telemetry** page's **Logs** tab, merged with every other record of the stack. A row shows
 the generation it came from, and a record with attributes opens on them as fields, with the
-stream `otlp` in its details. Spans are stored now; the trace views that show them come in a
-later release.
+stream `otlp` in its details. Traces are on the **Telemetry** page's **Traces** tab.
+
+The two link both ways. A record made in a trace ends in a **trace** column, the first 8 hex
+digits of its trace id, which opens the trace at the record's span; an opened record shows its
+`trace_id`, `span_id` and `service.name`, and its `trace_id` filters the logs to that trace
+(`?trace=<id>`, shown as a removable chip, over all 7 days unless you set a range). A trace's
+**logs in trace** button opens the Logs tab filtered to it, and a span's records link to the
+record in the Logs tab. In the stack's access log, each request opens its trace. A record older
+than 3 days links to its trace only while the request row it came from is kept, as that row
+still gives the proxy's spans; otherwise its trace id is shown without a link.
 
 # Limits, and what a drop looks like
 
@@ -155,7 +163,8 @@ cap. Choose one per app:
 - **Spans and logs over OTLP.** Install the SDK's log bridge and stop printing log lines. The
   records carry their trace and span ids.
 - **Spans over OTLP, logs on stdout.** Export spans only and keep JSON lines on stdout
-  ([[logging]]). Nothing is stored twice; the lines carry no trace id unless the app adds one.
+  ([[logging]]). Nothing is stored twice; the lines are not linked to traces (a trace id
+  the app prints is kept as a field like any other).
 - **Logs on stdout only.** No SDK, or export turned off. Each request still has the proxy's
   two spans.
 

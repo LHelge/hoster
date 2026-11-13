@@ -44,6 +44,11 @@
       {%- endfor %}
     </nav>
     {%- endif %}
+    {%- if let Some(chip) = view.trace %}
+    <nav class="log-choices log-field-filters" aria-label="Trace filter">
+      <a class="log-chip log-field-chip" href="{{ chip.remove }}" title="Remove this filter">{{ chip.label }} <span aria-hidden="true">×</span><span class="visually-hidden">(remove)</span></a>
+    </nav>
+    {%- endif %}
     {%- if let Some(follow) = view.follow %}
     <nav class="log-choices log-follow" aria-label="Follow new records">
       <span class="log-label">follow</span>
@@ -132,7 +137,7 @@
       {%- if let Some(href) = view.older %}<a href="{{ href }}">older</a>{% endif %}
       {%- if let Some(href) = view.newest %}<a href="{{ href }}">newest</a>{% endif %}</p>
     {%- endif %}
-    <ol id="log-records" class="log log-records{% if view.stack_column %} log-stacks{% endif %}" tabindex="0" aria-label="Records, oldest first"{% if let Some(url) = stream %} hx-sse:connect="{{ url }}" hx-swap="beforeend" hx-sse:close="end"{% endif %}>
+    <ol id="log-records" class="log log-records{% if view.stack_column %} log-stacks{% endif %}{% if view.trace_column %} log-traces{% endif %}" tabindex="0" aria-label="Records, oldest first"{% if let Some(url) = stream %} hx-sse:connect="{{ url }}" hx-swap="beforeend" hx-sse:close="end"{% endif %}>
       {%- for row in view.rows %}
       {%- include "log_record.html" %}
       {%- endfor %}

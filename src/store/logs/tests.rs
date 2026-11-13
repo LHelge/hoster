@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -410,6 +411,90 @@ mod queries {
     }
 
     #[tokio::test]
+    async fn a_trace_filter_reads_one_traces_records_through_its_index() {
+        let traced = |time, stack, service: &str, message: &str, trace: u8, level| {
+            let mut r = record(time, stack, service, message);
+            r.trace_id = Some(TraceId::from([trace; 16]));
+            r.span_id = Some(SpanId::from([trace; 8]));
+            r.level = level;
+            r
+        };
+        let (_dir, store) = seed(vec![
+            record(1_000, Some("notes"), "api", "outside any trace"),
+            traced(2_000, Some("notes"), "api", "first", 1, Some(Level::Info)),
+            traced(
+                3_000,
+                Some("notes"),
+                "web",
+                "other trace",
+                2,
+                Some(Level::Info),
+            ),
+            traced(4_000, None, "hoster", "hoster's own", 1, Some(Level::Warn)),
+            traced(5_000, Some("notes"), "api", "unleveled", 1, None),
+        ])
+        .await;
+        let mut query = LogQuery::new(everything(), LogScope::All);
+        query.trace = Some(TraceId::from([1; 16]));
+        assert_eq!(
+            messages(&store, &query).await,
+            ["first", "hoster's own", "unleveled"]
+        );
+        // The trace narrows the other reads of the view too.
+        let services: Vec<String> = store
+            .services_in(&query)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.service)
+            .collect();
+        assert_eq!(services, ["hoster", "api"]);
+        let buckets = store
+            .count_by_level(&query, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(buckets.iter().map(|b| b.total()).sum::<u64>(), 3);
+        query.levels = vec![Level::Warn];
+        assert_eq!(messages(&store, &query).await, ["hoster's own"]);
+        assert_eq!(store.count_unleveled(&query).await.unwrap(), 1);
+        // With the other filters and a stack.
+        query.levels.clear();
+        query.scope = LogScope::Stack("notes".into());
+        query.text = Some(TextFilter::substring("UNLEVELED"));
+        assert_eq!(messages(&store, &query).await, ["unleveled"]);
+        // Paging and following take it as well.
+        query.text = None;
+        query.page = PageAt::Before(RecordKey {
+            time: at(5_000),
+            id: 5,
+        });
+        assert_eq!(messages(&store, &query).await, ["first"]);
+        let tail = store.records_after(&query, 0, 5).await.unwrap();
+        let followed: Vec<&str> = tail
+            .entries
+            .iter()
+            .map(|e| e.record.message.as_str())
+            .collect();
+        assert_eq!(followed, ["first", "unleveled"]);
+        query.trace = Some(TraceId::from([9; 16]));
+        query.page = PageAt::Newest;
+        assert!(messages(&store, &query).await.is_empty());
+
+        // The page reads the trace index, not the range's, whatever the range.
+        let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT id FROM log_records INDEXED BY log_records_by_trace \
+             WHERE time >= 0 AND time < 9 AND stack = 'notes' AND trace_id = 'x' \
+             ORDER BY time DESC, id DESC LIMIT 5",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        let plan = rows.into_iter().map(|r| r.3).collect::<Vec<_>>().join("; ");
+        assert!(plan.contains("log_records_by_trace (trace_id=?)"), "{plan}");
+        store.close().await;
+    }
+
+    #[tokio::test]
     async fn scopes_pick_a_stack_hoster_or_everything() {
         let (_dir, store) = mixed().await;
         let all = LogQuery::new(everything(), LogScope::All);
@@ -789,7 +874,10 @@ mod queries {
             generations: generations.to_vec(),
         };
         let notes = store
-            .services_in(everything(), &LogScope::Stack("notes".into()))
+            .services_in(&LogQuery::new(
+                everything(),
+                LogScope::Stack("notes".into()),
+            ))
             .await
             .unwrap();
         assert_eq!(
@@ -802,12 +890,15 @@ mod queries {
         );
         // The range narrows: api's second generation is past it.
         let early = store
-            .services_in(at(0)..at(6_500), &LogScope::Stack("notes".into()))
+            .services_in(&LogQuery::new(
+                at(0)..at(6_500),
+                LogScope::Stack("notes".into()),
+            ))
             .await
             .unwrap();
         assert_eq!(early[0], seen(Some("notes"), "api", &[1]));
         let all = store
-            .services_in(everything(), &LogScope::All)
+            .services_in(&LogQuery::new(everything(), LogScope::All))
             .await
             .unwrap();
         assert_eq!(all[0], seen(None, "hoster", &[]));
@@ -1253,6 +1344,21 @@ mod request_queries {
                 .any(|row| row.3.contains("requests_by_request_id")),
             "{plan:?}"
         );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn traced_requests_are_those_whose_rows_carry_trace_context() {
+        let mut traced = request(1_000, "notes", "web", "/", 200);
+        traced.server_span = Some(SpanId::from([0x5e; 8]));
+        let older = request(2_000, "notes", "web", "/old", 200);
+        let (_dir, store) = seed(vec![traced, older]).await;
+        let found = store
+            .traced_requests(&[id(1), id(2), id(99)])
+            .await
+            .unwrap();
+        assert_eq!(found, HashSet::from([id(1)]));
+        assert!(store.traced_requests(&[]).await.unwrap().is_empty());
         store.close().await;
     }
 
