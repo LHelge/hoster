@@ -9,7 +9,7 @@
         {%- if let Some(detail) = row.detail %}<details{% if detail.open %} open{% endif %}><summary>{% endif %}
         <time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time>
         {%- if stack_column %}<span class="log-stack">{{ row.stack.as_deref().unwrap_or_default() }}</span>{% endif %}
-        <span class="log-svc">{{ row.service }}{% if let Some(generation) = row.generation %} <span class="log-gen">g{{ generation }}</span>{% endif %}</span>
+        <span class="log-svc">{% if let Some(href) = row.href %}<a href="{{ href }}">{{ row.service }}</a>{% else %}{{ row.service }}{% endif %}{% if let Some(generation) = row.generation %} <span class="log-gen">g{{ generation }}</span>{% endif %}</span>
         <span class="log-lvl">{% if let Some(level) = row.level %}{{ level }}{% else %}<span class="visually-hidden">no level</span>{% endif %}</span>
         <span class="log-msg">{% if row.stderr %}<span class="visually-hidden">stderr: </span>{% endif %}{% if let Some(target) = row.target %}<span class="log-target">{{ target }}</span> {% endif %}{% for span in row.spans() %}{% if span.mark %}<mark>{{ span.text }}</mark>{% else %}{{ span.text }}{% endif %}{% endfor %}{% if row.cut %} <span class="log-cut" title="The line was longer than the store keeps and was cut.">[cut]</span>{% endif %}</span>
         {%- if let Some(detail) = row.detail %}</summary>

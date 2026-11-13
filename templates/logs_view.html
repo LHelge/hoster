@@ -1,21 +1,33 @@
-{#- The stored logs view of a LogsView `view` (src/web/logs.rs): the toolbar of chips and GET
-    options, then one page of records, oldest first, and while following the rows its stream
-    appends (log_records.html). Shared by the stack logs tab and the Telemetry page's Logs
-    tab. -#}
+{#- The stored logs view of a LogsView `view` (src/web/logs.rs): the source switch (stack scope
+    only), the toolbar of chips and GET options, then one page of records, oldest first, and
+    while following the rows its stream appends (log_records.html). Shared by the stack logs
+    tab and the Telemetry page's Logs tab, and by every source; a source shows only the chips
+    it has. -#}
 {%- let stack_column = view.stack_column %}
 <section class="log-view" aria-label="Logs">
   <div class="log-toolbar">
+    {%- if !view.sources.is_empty() %}
+    <nav class="range-picker log-sources" aria-label="Log source">
+      {%- for chip in view.sources %}
+      <a href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}>{{ chip.label }}</a>
+      {%- endfor %}
+    </nav>
+    {%- endif %}
+    {%- if !view.chips.is_empty() %}
     <nav class="log-choices" aria-label="Services">
       {%- for chip in view.chips %}
       <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
       {%- endfor %}
     </nav>
+    {%- endif %}
+    {%- if !view.levels.is_empty() %}
     <nav class="log-choices log-levels" aria-label="Levels">
       <span class="log-label">level</span>
       {%- for chip in view.levels %}
       <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
       {%- endfor %}
     </nav>
+    {%- endif %}
     {%- if !view.fields.is_empty() %}
     <nav class="log-choices log-field-filters" aria-label="Field filters">
       <span class="log-label">fields</span>
@@ -37,7 +49,7 @@
       {%- endfor %}
       <span class="log-grep" role="group" aria-label="Grep">
         <span class="log-prompt" aria-hidden="true">&gt;</span>
-        <input type="search" name="q" value="{{ view.q }}" placeholder="grep… (e.g. status=5.. or /api/)" aria-label="Grep: text in the message or fields"{% if view.invalid.is_some() %} aria-invalid="true" aria-describedby="log-grep-error"{% endif %}>
+        <input type="search" name="q" value="{{ view.q }}" placeholder="grep… (e.g. status=5.. or /api/)" aria-label="{{ view.source.grep_label() }}"{% if view.invalid.is_some() %} aria-invalid="true" aria-describedby="log-grep-error"{% endif %}>
         <label class="log-regex" title="A regular expression"><input type="checkbox" name="regex" value="on"{% if view.regex %} checked{% endif %}><span aria-hidden="true">.*</span><span class="visually-hidden">regular expression</span></label>
         {%- if let Some(error) = view.invalid %}
         <span class="field-error" id="log-grep-error">{{ error }}</span>
@@ -77,7 +89,11 @@
     {%- if let Some((active, clear)) = view.cleared %}
     <p class="log-empty" id="log-empty">No records match {{ active }} in {% if view.stopped.is_some() %}the records searched{% else %}this range{% endif %}. <a href="{{ clear }}">clear filters</a></p>
     {%- else if view.empty %}
+    {%- if let Some(note) = view.empty_note %}
+    <p class="log-empty" id="log-empty">{{ note.text }} <a href="{{ note.href }}">{{ note.link }}</a></p>
+    {%- else %}
     <p class="log-empty" id="log-empty">No records in this range. Apps that write one JSON object per line get levels and fields; see <a href="https://docs.hoster.lhelge.se/wiki/logging/">logging from an app</a>.</p>
+    {%- endif %}
     {%- endif %}
     {%- let stream = view.stream() %}
     {%- if !view.empty || stream.is_some() %}
@@ -92,7 +108,7 @@
       {%- endfor %}
     </ol>
     {%- if let Some(follow) = view.follow %}{% if follow.following() %}
-    <p class="log-pages log-following">Following: new records are added as hoster stores them, about once a second. The list keeps the newest {{ follow.keeps() }}; switch follow off to page back through older ones.</p>
+    <p class="log-pages log-following">Following: {{ view.source.follow_note() }}. The list keeps the newest {{ follow.keeps() }}; switch follow off to page back through older ones.</p>
     {%- endif %}{% endif %}
     {%- if let Some(href) = view.newer %}
     <p class="log-pages"><a href="{{ href }}">newer</a></p>

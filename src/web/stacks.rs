@@ -49,8 +49,9 @@ use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
 use crate::stack::{Counted, Diagnostic, StackError};
 use crate::store::{
-    Deployment, DeploymentEvent, DeploymentId, DeploymentSource, DeploymentState, DigestSet,
-    EventPage, EventQuery, Timestamp, WebhookRejection,
+    Deployment, DeploymentEvent, DeploymentId, DeploymentLogPage, DeploymentLogQuery,
+    DeploymentSource, DeploymentState, DigestSet, EventPage, EventQuery, Timestamp,
+    WebhookRejection,
 };
 
 pub(super) use crate::store::ShortDigest;
@@ -138,6 +139,12 @@ pub trait StackControl: Send + Sync + 'static {
 
     /// See [`Orchestrator::latest_live`].
     async fn latest_live(&self, stack: &str) -> Result<Option<Deployment>, OrchestratorError>;
+
+    /// See [`Orchestrator::deployment_log`].
+    async fn deployment_log(
+        &self,
+        query: &DeploymentLogQuery,
+    ) -> Result<DeploymentLogPage, OrchestratorError>;
 
     /// See [`Orchestrator::volumes`].
     async fn volumes(&self, stack: &str) -> Result<BTreeSet<String>, OrchestratorError>;
@@ -283,6 +290,13 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
 
     async fn latest_live(&self, stack: &str) -> Result<Option<Deployment>, OrchestratorError> {
         Orchestrator::latest_live(self, stack).await
+    }
+
+    async fn deployment_log(
+        &self,
+        query: &DeploymentLogQuery,
+    ) -> Result<DeploymentLogPage, OrchestratorError> {
+        Orchestrator::deployment_log(self, query).await
     }
 
     async fn volumes(&self, stack: &str) -> Result<BTreeSet<String>, OrchestratorError> {

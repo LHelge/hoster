@@ -1,16 +1,17 @@
 ---
 id: cb6
 title: "Stack logs: source switch with the deploy source"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T13:26:42.608608506Z"
-updated: "2026-11-12T13:26:42.608608506Z"
+updated: "2026-11-13T10:14:12.168092771Z"
 tags:
   - web
   - observability
 depends_on:
   - yn7
 parent: psq
+attempts: 1
 ---
 
 ## Summary

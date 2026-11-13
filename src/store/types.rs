@@ -113,6 +113,12 @@ impl From<i64> for DeploymentId {
     }
 }
 
+impl From<DeploymentId> for i64 {
+    fn from(id: DeploymentId) -> Self {
+        id.0
+    }
+}
+
 /// As [`Display`](fmt::Display) writes it, e.g. in a URL.
 impl std::str::FromStr for DeploymentId {
     type Err = std::num::ParseIntError;

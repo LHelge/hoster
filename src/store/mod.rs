@@ -17,6 +17,7 @@
     reason = "the Store API is consumed by the orchestrator and web UI"
 )]
 
+mod deploy_log;
 mod events;
 mod images;
 mod instance;
@@ -43,6 +44,7 @@ use sqlx::sqlite::{
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 use thiserror::Error;
 
+pub use deploy_log::{DeploymentLogEntry, DeploymentLogPage, DeploymentLogQuery};
 #[allow(
     unused_imports,
     reason = "the record types are written by the log store's recorder as it lands"

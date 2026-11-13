@@ -442,6 +442,65 @@ impl StackControl for FakeStacks {
         }
     }
 
+    /// Every event of the stack's deployments in the range, as the store pages them, the
+    /// event ids made up as `<deployment id> * 100 + <index>`; no caps.
+    async fn deployment_log(
+        &self,
+        query: &DeploymentLogQuery,
+    ) -> Result<DeploymentLogPage, OrchestratorError> {
+        use crate::store::{DeploymentLogEntry, PageAt};
+        let mut entries: Vec<DeploymentLogEntry> = self
+            .deployments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(d, _)| d.stack == query.stack)
+            .flat_map(|(d, events)| {
+                events
+                    .iter()
+                    .enumerate()
+                    .map(move |(n, event)| DeploymentLogEntry {
+                        id: i64::from(d.id) * 100 + n as i64,
+                        deployment: d.id,
+                        event: event.clone(),
+                    })
+            })
+            .filter(|e| query.range.contains(&e.event.at))
+            .filter(|e| {
+                query.text.as_ref().is_none_or(|text| {
+                    text.is_match(e.event.message.as_deref().unwrap_or_default())
+                })
+            })
+            .collect();
+        entries.sort_by_key(DeploymentLogEntry::key);
+        let limit = query.limit as usize;
+        let (entries, older, newer) = match query.page {
+            PageAt::Newest | PageAt::Before(_) => {
+                if let PageAt::Before(key) = query.page {
+                    entries.retain(|e| e.key() < key);
+                }
+                let skip = entries.len().saturating_sub(limit);
+                (
+                    entries.split_off(skip),
+                    skip > 0,
+                    query.page != PageAt::Newest,
+                )
+            }
+            PageAt::After(key) => {
+                entries.retain(|e| e.key() > key);
+                let more = entries.len() > limit;
+                entries.truncate(limit);
+                (entries, true, more)
+            }
+        };
+        Ok(DeploymentLogPage {
+            entries,
+            older,
+            newer,
+            scan_stopped: None,
+        })
+    }
+
     async fn history(&self, stack: &str, limit: u32) -> Result<Vec<Deployment>, OrchestratorError> {
         self.current(stack)
             .ok_or_else(|| OrchestratorError::UnknownStack(stack.into()))?;
@@ -3660,6 +3719,204 @@ mod stored_logs {
             let mut text = String::new();
             read_to_end(&mut stream, &mut text).await;
             assert!(text.contains("Signed out"), "{text}");
+        }
+
+        /// The `deploy` source (task cb6): the stack's deployment events.
+        mod deploy_source {
+            use super::*;
+
+            fn event(
+                from: Option<DeploymentState>,
+                to: DeploymentState,
+                message: &str,
+                ago: Duration,
+            ) -> DeploymentEvent {
+                DeploymentEvent {
+                    from,
+                    to,
+                    message: (!message.is_empty()).then(|| message.into()),
+                    at: Timestamp::now() - ago,
+                }
+            }
+
+            /// Deployment 7, ten days ago, failed; 8 started an hour and a half ago and is
+            /// still running into the last hour; 9 of another stack.
+            fn seed(app: &TestApp) {
+                use DeploymentState::*;
+                let mins = |m: u64| Duration::from_secs(m * 60);
+                let mut other = deployment(9, Live);
+                other.stack = "blog".into();
+                *app.stacks.deployments.lock().unwrap() = vec![
+                    (
+                        deployment(7, Failed),
+                        vec![
+                            event(None, Received, "", mins(14_400)),
+                            event(Some(Received), Failed, "pull <api> denied", mins(14_399)),
+                        ],
+                    ),
+                    (
+                        deployment(8, Starting),
+                        vec![
+                            event(None, Received, "", mins(90)),
+                            event(Some(Received), Pulling, "", mins(50)),
+                            event(
+                                Some(Starting),
+                                Starting,
+                                "health probe http: 200 OK",
+                                mins(5),
+                            ),
+                        ],
+                    ),
+                    (other, vec![event(None, Received, "not ours", mins(1))]),
+                ];
+            }
+
+            #[tokio::test]
+            async fn the_deploy_source_lists_the_events_across_deployments() {
+                let app = TestApp::new().await;
+                let browser = app.sign_in().await;
+                seed(&app);
+                let get = async |path: &str| body(app.get(path, Some(&browser.cookie)).await).await;
+
+                let html = get("/stacks/notes/logs?source=deploy&since=14d").await;
+                assert_eq!(
+                    messages(&html),
+                    [
+                        r#"<span class="log-target">→ Received</span> "#,
+                        r#"<span class="log-target">Received → Failed</span> pull &#60;api&#62; denied"#,
+                        r#"<span class="log-target">→ Received</span> "#,
+                        r#"<span class="log-target">Received → Pulling</span> "#,
+                        r#"<span class="log-target">Starting · probe</span> health probe http: 200 OK"#,
+                    ],
+                    "{html}"
+                );
+                assert!(
+                    html.contains(r#"<span class="log-svc"><a href="/stacks/notes/deployments/7">#7</a></span>"#),
+                    "{html}"
+                );
+                assert!(
+                    html.contains(r#"<span class="log-lvl">error</span>"#),
+                    "{html}"
+                );
+                // Older than the log store keeps, and no notice about where its data starts.
+                assert!(!html.contains("log-starts"), "{html}");
+                // The switch: containers keeps the range, deploy is current.
+                assert!(
+                    html.contains(
+                        r#"<nav class="range-picker log-sources" aria-label="Log source">"#
+                    ),
+                    "{html}"
+                );
+                assert!(
+                    html.contains(r#"<a href="/stacks/notes/logs?since=14d">containers</a>"#),
+                    "{html}"
+                );
+                assert!(
+                    html.contains(r#"<a href="/stacks/notes/logs?source=deploy&#38;since=14d" aria-current="page">deploy</a>"#),
+                    "{html}"
+                );
+                // No service, level or field filters, and no live logs.
+                assert!(!html.contains(r#"aria-label="Services""#), "{html}");
+                assert!(!html.contains(r#"aria-label="Levels""#), "{html}");
+                assert!(!html.contains("Live container logs"), "{html}");
+                assert!(
+                    html.contains(r#"<input type="hidden" name="source" value="deploy">"#),
+                    "{html}"
+                );
+                assert!(
+                    html.contains(r#"aria-label="Grep: text in the message""#),
+                    "{html}"
+                );
+                // It follows from the newest event on the page.
+                assert!(
+                    html.contains("hx-sse:connect=\"/stacks/notes/logs/stream?source=deploy&#38;since=14d&#38;from="),
+                    "{html}"
+                );
+
+                // The default hour: only the events in it, of the deployment still running.
+                let html = get("/stacks/notes/logs?source=deploy").await;
+                assert_eq!(messages(&html).len(), 2, "{html}");
+
+                // Parameters the source does not take are dropped, from links and the query.
+                let html = get(
+                    "/stacks/notes/logs?source=deploy&service=api&level=error&field=a%3Db&since=14d",
+                )
+                .await;
+                assert_eq!(messages(&html).len(), 5, "{html}");
+                assert!(!html.contains("level=error"), "{html}");
+                assert!(!html.contains("service=api"), "{html}");
+                // From the containers, the switch keeps what the deploy source takes.
+                let html = get("/stacks/notes/logs?service=api&level=error&since=6h").await;
+                assert!(
+                    html.contains(
+                        r#"<a href="/stacks/notes/logs?source=deploy&#38;since=6h">deploy</a>"#
+                    ),
+                    "{html}"
+                );
+
+                // Grep matches the message.
+                let html = get("/stacks/notes/logs?source=deploy&since=14d&q=DENIED").await;
+                assert_eq!(messages(&html).len(), 1, "{html}");
+                assert!(html.contains("<mark>denied</mark>"), "{html}");
+                let html = get("/stacks/notes/logs?source=deploy&since=14d&q=nothing").await;
+                assert!(
+                    html.contains(r#"No records match grep “nothing” in this range. <a href="/stacks/notes/logs?source=deploy&#38;since=14d">clear filters</a>"#),
+                    "{html}"
+                );
+
+                // An empty range links the deployments tab.
+                let html = get("/stacks/notes/logs?source=deploy&since=1m").await;
+                assert!(
+                    html.contains(r#"No deployments in this range. <a href="/stacks/notes/deployments">deployments</a>"#),
+                    "{html}"
+                );
+
+                // An unknown source falls back to the containers, and says so.
+                let html = get("/stacks/notes/logs?source=nope").await;
+                assert!(html.contains("`nope` is not a log source"), "{html}");
+                assert!(html.contains(r#"aria-label="Levels""#), "{html}");
+            }
+
+            #[tokio::test]
+            async fn following_appends_new_deployment_events() {
+                let app = TestApp::new().await;
+                let browser = app.sign_in().await;
+                seed(&app);
+                let html = body(
+                    app.get("/stacks/notes/logs?source=deploy", Some(&browser.cookie))
+                        .await,
+                )
+                .await;
+                let from = html
+                    .split("stream?source=deploy&#38;from=")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or_else(|| panic!("{html}"))
+                    .to_owned();
+                let mut stream = open(&app, &browser, &format!("source=deploy&from={from}")).await;
+                {
+                    let mut deployments = app.stacks.deployments.lock().unwrap();
+                    deployments[1].1.push(event(
+                        Some(DeploymentState::Starting),
+                        DeploymentState::Switching,
+                        "switching <routes>",
+                        Duration::ZERO,
+                    ));
+                }
+                app.stacks
+                    .events
+                    .send(UiEvent::Deployment {
+                        stack: "notes".into(),
+                        id: DeploymentId::from(8),
+                        state: DeploymentState::Switching,
+                    })
+                    .unwrap();
+                let mut text = String::new();
+                read_until(&mut stream, &mut text, "switching &#60;routes&#62;").await;
+                // Only the new event: none of those on the page again.
+                assert_eq!(rows(&text).len(), 1, "{text}");
+                assert!(text.contains("id: "), "{text}");
+            }
         }
 
         #[tokio::test]
