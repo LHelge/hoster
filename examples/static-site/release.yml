@@ -1,9 +1,10 @@
 # Example workflow for a static site deployed to hoster.
 #
 # Copy it to `.github/workflows/release.yml` in the site repository, next to the Dockerfile from
-# this directory, and adjust the `env` block. On every push to `main` it builds the site with
-# aphid, packs it into an aphid-server image, pushes it to ghcr and posts the digest to
-# hoster's deploy webhook with the job's OIDC token. See https://docs.hoster.lhelge.se/wiki/static-sites/ and
+# this directory, and adjust `IMAGE` and the deploy step's inputs. On every push to `main` it
+# builds the site with aphid, packs it into an aphid-server image, pushes it to ghcr and deploys
+# the digest with hoster's deploy action, which authenticates with the job's OIDC token. See
+# https://docs.hoster.lhelge.se/wiki/static-sites/ and
 # https://docs.hoster.lhelge.se/wiki/deploying-from-ci/.
 #
 # The stack file must allow this repository and ref, e.g.
@@ -12,6 +13,8 @@
 #   repository_id = 123456789        # gh api repos/OWNER/REPO --jq .id
 #   refs = ["refs/heads/main"]
 #   environment = "production"
+#
+# The stack is `blog` and the service `web`, as in the deploy step.
 
 name: Release
 
@@ -30,10 +33,6 @@ concurrency:
 env:
   # The repository the stack's service `image` names. ghcr names are lowercase.
   IMAGE: ghcr.io/acme/blog
-  STACK: blog
-  SERVICE: web
-  HOSTER_URL: https://hoster.example.com/hooks/deploy
-  HOSTER_AUDIENCE: https://hoster.example.com
 
 jobs:
   release:
@@ -81,25 +80,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # Identical to examples/github-actions/release.yml; see that file for comments.
-      - name: Deploy to hoster
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          set -euo pipefail
-          audience=$(jq -rn --arg a "$HOSTER_AUDIENCE" '$a|@uri')
-          token=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -r .value)
-          echo "::add-mask::$token"
-
-          body=$(jq -nc --arg s "$STACK" --arg svc "$SERVICE" --arg d "$DIGEST" \
-            --arg t "${GITHUB_SHA::7}" '{stack:$s, images:{($svc):$d}, tag:$t}')
-          status=$(curl -sS -o response.json -w '%{http_code}' -X POST "$HOSTER_URL" \
-            -H 'Content-Type: application/json' \
-            -H "Authorization: Bearer $token" \
-            --data "$body")
-          echo "response ($status): $(cat response.json)"
-          case "$status" in
-            200|202) ;;
-            *) echo "::error::hoster refused the deploy ($status): $(cat response.json)"; exit 1 ;;
-          esac
+      # As in examples/github-actions/release.yml. The deploy history shows the short commit SHA.
+      - uses: LHelge/hoster/actions/deploy@v0.8.0
+        with:
+          url: https://hoster.example.com
+          stack: blog
+          images: |
+            web=${{ steps.push.outputs.digest }}

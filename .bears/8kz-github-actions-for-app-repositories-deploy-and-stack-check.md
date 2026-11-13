@@ -2,10 +2,10 @@
 id: "8kz"
 title: "GitHub Actions for app repositories: deploy and stack check"
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-13T10:04:28.415257Z"
-updated: "2026-11-13T10:04:28.415257Z"
+updated: "2026-11-13T10:12:45.564803Z"
 tags:
   - ci
   - docs

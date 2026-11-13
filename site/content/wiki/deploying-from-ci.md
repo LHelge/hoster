@@ -4,8 +4,9 @@ category: Guides
 ---
 
 This guide is for an app repository that wants its GitHub Actions release workflow to deploy to
-hoster. The workflow builds and pushes the image, takes the digest from the push step, asks
-GitHub for an OIDC token meant for hoster, and posts the digest to hoster's deploy webhook.
+hoster. The workflow builds and pushes the image, takes the digest from the push step, and hands
+it to hoster's deploy action, which asks GitHub for an OIDC token meant for hoster and posts the
+digest to hoster's deploy webhook.
 No deploy secret is stored in CI: the token proves which repository, ref, workflow and
 environment the request comes from, and the stack file says which of those may deploy
 ([ADR-0003](https://github.com/LHelge/hoster/blob/main/docs/adr/0003-images-built-in-ci-pushed-to-ghcr.md), [ADR-0042](https://github.com/LHelge/hoster/blob/main/docs/adr/0042-webhook-endpoint-payload-and-replay.md), [ADR-0047](https://github.com/LHelge/hoster/blob/main/docs/adr/0047-oidc-authenticated-deploy-webhook.md)).
@@ -93,8 +94,8 @@ permissions:
   id-token: write   # request an OIDC token for hoster
 ```
 
-Without `id-token: write`, the `ACTIONS_ID_TOKEN_REQUEST_*` variables are not set and the token
-request fails.
+Without `id-token: write`, the `ACTIONS_ID_TOKEN_REQUEST_*` variables are not set and the deploy
+step fails, saying so. Pull requests from forks never get a token.
 
 ## 2.2 Build, push and capture the digest
 
@@ -112,10 +113,47 @@ nothing:
     tags: ${{ steps.meta.outputs.tags }}
 ```
 
-## 2.3 Request the token with hoster's audience
+## 2.3 Deploy with hoster's action
 
-The token's `aud` must equal hoster's configured audience: `https://<admin_host>` by default, or
-`[webhook] audience` in `hoster.toml` (`HOSTER_WEBHOOK__AUDIENCE`). Request it from the runner's
+[`actions/deploy`](https://github.com/LHelge/hoster/tree/main/actions/deploy) in hoster's
+repository requests the token and sends the webhook:
+
+```yaml
+- uses: LHelge/hoster/actions/deploy@v0.8.0
+  with:
+    url: https://hoster.example.com   # hoster's admin host
+    stack: notes
+    images: |
+      api=${{ steps.push.outputs.digest }}
+```
+
+| Input | Required | Meaning |
+|---|---|---|
+| `url` | yes | hoster's admin URL, `https://<admin_host>`. A trailing `/hooks/deploy` is accepted too. |
+| `stack` | yes | The stack's `name`. |
+| `images` | yes | One `service=digest` per line. Every service listed deploys together, as **one** deployment; services left out keep what they run. |
+| `audience` | no | The token's `aud`. Defaults to `url`, which is hoster's default; set it only when `[webhook] audience` is set in `hoster.toml` (`HOSTER_WEBHOOK__AUDIENCE`). |
+| `tag` | no | Shown in the deploy history. Defaults to the tag name on a tag push, otherwise the short commit SHA. |
+
+| Output | Meaning |
+|---|---|
+| `result` | `accepted` (a deployment started or was queued) or `noop` (the stack already runs these digests). |
+| `deployment-id` | The deployment's id. |
+| `deployment-url` | The deployment's page in the admin UI, also linked in the job summary. |
+
+The step fails with hoster's reason on any answer but `200` and `202` (§2.5). It retries `502`,
+`503` and connection failures twice, each time with a new token. A wrong `images` line, such as
+a tag where a digest belongs or an empty digest from a misnamed step id, fails it before anything
+is sent.
+
+Use the action from the release tag the server runs: the tag names the webhook contract it
+speaks. It needs `bash`, `curl` and `jq`, which GitHub's runners have.
+
+## 2.4 Without the action
+
+On another CI system, or to see what the action does, these are the two requests it makes.
+
+The token's `aud` must equal hoster's configured audience (above). Request it from the runner's
 token endpoint with that audience, URL-encoded, and mask it in the log:
 
 ```sh
@@ -127,27 +165,23 @@ echo "::add-mask::$token"
 
 `core.getIDToken(audience)` from `actions/github-script` does the same. A token is valid for a
 few minutes and hoster accepts each one **once**: request a fresh one for every POST, including
-retries.
-
-## 2.4 Send the webhook
+retries. Then post the digests to `https://<admin_host>/hooks/deploy`:
 
 ```sh
 body=$(jq -nc --arg d "$DIGEST" --arg t "$GITHUB_REF_NAME" \
   '{stack:"notes", images:{api:$d}, tag:$t}')
-curl -sS --fail-with-body -X POST "$HOSTER_URL" \
+curl -sS --fail-with-body -X POST "https://hoster.example.com/hooks/deploy" \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $token" \
   --data "$body"
 ```
-
-`HOSTER_URL` is `https://<admin_host>/hooks/deploy`.
 
 The body (at most 64 KiB):
 
 | Field | Required | Meaning |
 |---|---|---|
 | `stack` | yes | The stack's `name`. |
-| `images` | yes | Service name → digest (`sha256:` and 64 hex digits). Several services deploy together as **one** deployment; services left out keep what they run. |
+| `images` | yes | Service name → digest (`sha256:` and 64 hex digits). |
 | `tag` | no | Informational, shown in the deploy history. Any text up to 256 characters. |
 
 Unknown fields are refused, and `stack_file` is reserved: stack files are applied in the UI
@@ -182,10 +216,10 @@ anyone applies it. It runs the same parser as the apply preview, needs no runnin
 It exits non-zero on errors; warnings print but pass unless `--deny-warnings` is given.
 `--format json` prints one JSON object instead (`{ok, errors, warnings, files, skipped}`).
 
-`hoster stack check` is new in hoster 0.4.0; older releases reject it as an unknown subcommand.
-The release binaries are static, so a job downloads one and runs it. Pin the version the server
-runs, so CI accepts exactly what the apply preview will. If the server runs a release older than
-0.4.0, update it first, or pin v0.4.0 until you do:
+[`actions/stack-check`](https://github.com/LHelge/hoster/tree/main/actions/stack-check) downloads
+the static release binary for the runner, verifies it against the release's `SHA256SUMS`, runs
+the check and annotates each finding on its line in the pull request. Pin `version` to the release
+the server runs, so CI accepts exactly what the apply preview will:
 
 ```yaml
 name: Stack file
@@ -201,21 +235,19 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    env:
-      # The release tag of your hoster (0.4.0 or later): `v` and the version `hoster version` prints.
-      HOSTER_VERSION: v0.4.0
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check the stack file
-        run: |
-          set -euo pipefail
-          base="https://github.com/LHelge/hoster/releases/download/$HOSTER_VERSION"
-          curl -fsSLO "$base/hoster-x86_64-unknown-linux-musl" -O "$base/SHA256SUMS"
-          sha256sum --check --ignore-missing SHA256SUMS
-          install -m 755 hoster-x86_64-unknown-linux-musl hoster
-          ./hoster stack check --deny-warnings deploy/notes.stack.toml
+      - uses: LHelge/hoster/actions/stack-check@v0.8.0
+        with:
+          files: deploy/notes.stack.toml   # several, separated by whitespace; globs work
+          version: v0.8.0                  # the release the server runs; default `latest`
+          deny-warnings: true
 ```
+
+Without the action, download `hoster-x86_64-unknown-linux-musl` and `SHA256SUMS` from the
+release, check them with `sha256sum --check --ignore-missing SHA256SUMS` and run
+`hoster stack check --deny-warnings FILE...`. The subcommand is new in hoster 0.4.0.
 
 A passing check means the file parses and validates on its own. The pre-flight checks that need
 the server still run when the stack is applied in the UI, and the output ends with a note naming

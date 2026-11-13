@@ -24,7 +24,7 @@ Files to copy into the site's repository are in
 | File | What it does |
 |---|---|
 | [`Dockerfile`](https://github.com/LHelge/hoster/blob/main/examples/static-site/Dockerfile) | Two lines: `FROM ghcr.io/lhelge/aphid-server`, then copies the built site from `dist/` to `/site`. The server runs as non-root, answers `/healthz` and serves `404.html` for missing pages. |
-| [`release.yml`](https://github.com/LHelge/hoster/blob/main/examples/static-site/release.yml) | On every push to `main`: builds the site with [aphid](https://github.com/LHelge/aphid), builds and pushes the image, posts the digest to hoster. |
+| [`release.yml`](https://github.com/LHelge/hoster/blob/main/examples/static-site/release.yml) | On every push to `main`: builds the site with [aphid](https://github.com/LHelge/aphid), builds and pushes the image, deploys the digest with hoster's deploy action. |
 
 # 1. The stack file
 
@@ -62,7 +62,9 @@ rather than from tags, limit the environment to the `main` branch.
 
 `release.yml` is [`examples/github-actions/release.yml`](https://github.com/LHelge/hoster/blob/main/examples/github-actions/release.yml)
 with two changes: it runs on pushes to `main` instead of `v*` tags, and it builds the site before
-building the image. The build step is aphid's GitHub Action:
+building the image. The deploy step is the same `LHelge/hoster/actions/deploy`
+([[deploying-from-ci#2-3-deploy-with-hoster-s-action|Deploying from CI, §2.3]]); off a tag, the
+deploy history shows the short commit SHA. The build step is aphid's GitHub Action:
 
 ```yaml
 - uses: LHelge/aphid@v0.5.0
