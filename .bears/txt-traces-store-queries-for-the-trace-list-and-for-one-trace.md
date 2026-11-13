@@ -28,6 +28,7 @@ The read side the Traces tab needs: a list of traces over a range (one row per t
 ## Implementation Notes
 - Waterfall math belongs on the trace type, not in templates: depth, DFS order, the critical path (recursively the child with the latest end), self time (duration minus the union of child intervals). `renderVals()` in `docs/design/Telemetry.dc.html` has reference implementations
 - A trace can have more than one root when spans are lost; keep all, ordered by start
+- `LogStore::root_spans` (from `aqy`) finds only traces an app started itself (background jobs). A proxied request's root is the proxy's server span, built from its request row, so the trace list has to merge request rows that have span ids with those roots
 
 ## Testing
 - Store tests with seeded spans and request rows: list sorts and filters, proxy-only traces, missing parents, the span cap, critical path and self time on the mockup's sample trace (`t1`)

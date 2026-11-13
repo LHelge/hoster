@@ -15,10 +15,6 @@ mod recorder;
 
 pub use cap::RateCap;
 pub use follower::LogFollowers;
-#[allow(
-    unused_imports,
-    reason = "the OTLP receiver (task m7x) maps severities with it"
-)]
 pub use line::OtlpSeverity;
 pub use line::ParsedLine;
 #[cfg(test)]

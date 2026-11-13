@@ -1,10 +1,10 @@
 ---
 id: m7x
 title: "OTLP: /v1/logs and /v1/traces handlers for OTLP/HTTP protobuf"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:36:20.222913703Z"
-updated: "2026-11-12T19:36:20.222913703Z"
+updated: "2026-11-13T17:49:33.061384459Z"
 tags:
   - observability
   - web
@@ -12,6 +12,7 @@ depends_on:
   - aqy
   - j6z
 parent: xv9
+attempts: 1
 ---
 
 ## Summary
