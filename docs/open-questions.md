@@ -646,3 +646,28 @@ costs descriptors that the total cap already guards, and B adds state to the hot
 the proxy for a margin no client can exploit beyond what the total cap allows. Revisit B if
 the System page's refusal counts show one address regularly crowding others out.
 
+
+## OQ-45: Trace ids on container stdout log lines
+
+**Problem.** The Traces and Logs tabs link both ways through the trace and span ids on a log
+record (epic `qnh`, task `9x4`). OTLP records carry them (ADR-0069 §6) and so do hoster's own
+records made inside a request, but a line a container prints never does: the follower stores
+`trace_id: None` (`src/logs/follower.rs`), and ADR-0067 §3's key mapping for JSON lines has no
+trace or span keys. An app that logs to stdout and prints `trace_id` gets it as a field like
+any other, with no link to its trace and no place in "logs in trace". Task `9x4` asked for
+"stdout records that carry ids" to link too. Raised 2026-11-14 while implementing it.
+
+**Options.**
+
+- **A. Keep as is.** Stdout lines are not linked; an app that wants linked logs sends them over
+  OTLP. The tracing guide says so today. No code change.
+- **B. Read `trace_id` and `span_id`.** The follower takes those two keys of a JSON line when
+  they are valid W3C ids (32 and 16 hex digits, not all zero, the check hoster's own records
+  already use in `src/logging/records.rs`) and stores them in the record's columns. Anything
+  else stays a field. These are the names `tracing` and the OTLP log model use.
+- **C. B plus aliases.** Also accept `traceId`/`spanId`, `trace.id`/`span.id`,
+  `dd.trace_id` and the like. Covers more loggers, at the cost of a list to maintain and
+  formats that are not W3C ids (Datadog's are decimal).
+
+**Recommendation.** B. It is small, matches the names already shown in an opened record, and a
+stdout-only app gets linked logs by printing two fields. Add aliases later if an app needs one.
