@@ -1079,6 +1079,57 @@ impl Fixtures {
         );
         marker.marker = true;
         records.push(marker);
+        // Other stacks' records and hoster's own without a stack, for the Telemetry page.
+        let other = |ago: u64, stack: Option<&str>, service: &str, level, message: &str| {
+            let mut r = record(ago, service, 4, level, message);
+            r.stack = stack.map(str::to_owned);
+            r.generation = stack.map(|_| 4);
+            r
+        };
+        records.extend([
+            other(
+                780_000,
+                Some("blog"),
+                "web",
+                Some(Level::Info),
+                "GET /posts/hello 200 in 3ms",
+            ),
+            other(
+                720_000,
+                Some("shop"),
+                "storefront",
+                Some(Level::Error),
+                "payment provider timed out after 30s",
+            ),
+            other(
+                540_000,
+                None,
+                "hoster",
+                Some(Level::Info),
+                "certificate for shop.example.com renewed",
+            ),
+            other(
+                420_000,
+                Some("blog"),
+                "worker",
+                None,
+                "rebuilt 14 pages in 2.1s",
+            ),
+            other(
+                240_000,
+                Some("shop"),
+                "db",
+                Some(Level::Warn),
+                "checkpoint took 4.2s",
+            ),
+            other(
+                120_000,
+                None,
+                "hoster",
+                Some(Level::Warn),
+                "the update check could not reach ghcr.io",
+            ),
+        ]);
         records.sort_by_key(|r| r.time);
         app.logs
             .append(&LogBatch {
@@ -1983,6 +2034,7 @@ async fn ui_preview() {
             "Logs of notes: every service, the last hour",
         ),
         ("/stacks/docs/logs", "Logs of docs: no records"),
+        ("/telemetry/logs", "Telemetry: logs of every stack"),
     ] {
         let html = session.get(url, StatusCode::OK).await;
         preview.write(&Preview::file_of("", url), label, &html);
@@ -2027,6 +2079,25 @@ async fn ui_preview() {
         "Logs of notes: api over 6 hours",
         &html,
     );
+
+    // The Telemetry page's logs of one stack, and of hoster's own records.
+    for (query, file, label) in [
+        (
+            "stack=shop&since=1h",
+            "telemetry-logs-shop",
+            "Telemetry: logs of shop over an hour",
+        ),
+        (
+            "stack=_hoster",
+            "telemetry-logs-hoster",
+            "Telemetry: hoster's own records",
+        ),
+    ] {
+        let html = session
+            .get(&format!("/telemetry/logs?{query}"), StatusCode::OK)
+            .await;
+        preview.write(&format!("states/{file}.html"), label, &html);
+    }
 
     // Live parts, with their first content in place.
     let page = session.get(&logs, StatusCode::OK).await;

@@ -62,6 +62,17 @@
   --fail: #ba0d33;        /* red #d20f39 darkened from 3.8:1 */
   --p50: #116a6f;         /* teal #179299 darkened from 2.8:1 */
   --p95: #855511;         /* yellow #df8e1d darkened from 2:1 */
+  /* The categorical service colours of the logs (docs/design/README.md, Telemetry notes), apart
+     from the status colours; hoster's own first. Admin UI only, not copied to the docs theme.
+     Darkened to 4.5:1, Latte's teal, sky and sapphire all came out a dark cyan, so they are
+     spread apart in hue (green-teal, teal, blue): every pair is at least ΔE2000 12 apart. */
+  --svc-hoster: #4c5aaa;  /* lavender #7287fd darkened from 2.6:1 */
+  --svc-0: #1f6950;       /* teal #179299 darkened from 3.1:1, turned towards green */
+  --svc-1: #7a33d7;       /* mauve #8839ef darkened from 4.4:1 */
+  --svc-2: #226670;       /* sky #04a5e5 darkened from 2.3:1, turned towards teal */
+  --svc-3: #006496;       /* sapphire #209fb5 darkened from 2.6:1, turned towards blue */
+  --svc-4: #8c477a;       /* pink #ea76cb darkened from 2.2:1 */
+  --svc-5: #865511;       /* yellow #df8e1d darkened from 2.2:1 */
   color-scheme: light;
 }
 
@@ -87,6 +98,13 @@
     --fail: #f38ba8;        /* red */
     --p50: #94e2d5;         /* teal */
     --p95: #f9e2af;         /* yellow */
+    --svc-hoster: #b4befe;  /* lavender */
+    --svc-0: #94e2d5;       /* teal */
+    --svc-1: #cba6f7;       /* mauve */
+    --svc-2: #89dceb;       /* sky */
+    --svc-3: #1c9dbd;       /* sapphire #74c7ec deepened: beside sky it read as the same */
+    --svc-4: #f5c2e7;       /* pink */
+    --svc-5: #f9e2af;       /* yellow */
     color-scheme: dark;
   }
 }
@@ -754,18 +772,26 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .log-containers .log-chip { flex-wrap: wrap; gap: 0 6px; min-height: 28px; padding-block: 3px; overflow-wrap: anywhere; }
 /* An active field filter: drawn as a current chip; following it removes the filter. */
 .log-field-chip { border-color: var(--accent); background: var(--hover); color: var(--text); overflow-wrap: anywhere; }
-/* The service palette, assigned by service order; hoster's own records and "all" are neutral. */
-.dot.svc-0 { background: var(--accent); }
-.dot.svc-1 { background: var(--progress); }
-.dot.svc-2 { background: var(--p50); }
-.dot.svc-3 { background: var(--p95); }
-.dot.svc-hoster { background: var(--text-2); }
+/* The service palette (the --svc-* tokens), assigned by service order; hoster's own records
+   have their own colour and "all" is neutral. */
+.dot.svc-0 { background: var(--svc-0); }
+.dot.svc-1 { background: var(--svc-1); }
+.dot.svc-2 { background: var(--svc-2); }
+.dot.svc-3 { background: var(--svc-3); }
+.dot.svc-4 { background: var(--svc-4); }
+.dot.svc-5 { background: var(--svc-5); }
+.dot.svc-hoster { background: var(--svc-hoster); }
 .dot.svc-all { background: var(--muted); }
-.svc-0 .log-svc { color: var(--accent); }
-.svc-1 .log-svc { color: var(--progress); }
-.svc-2 .log-svc { color: var(--p50); }
-.svc-3 .log-svc { color: var(--p95); }
-.svc-hoster .log-svc { color: var(--text-2); font-style: italic; }
+.svc-0 .log-svc { color: var(--svc-0); }
+.svc-1 .log-svc { color: var(--svc-1); }
+.svc-2 .log-svc { color: var(--svc-2); }
+.svc-3 .log-svc { color: var(--svc-3); }
+.svc-4 .log-svc { color: var(--svc-4); }
+.svc-5 .log-svc { color: var(--svc-5); }
+.svc-hoster .log-svc { color: var(--svc-hoster); font-style: italic; }
+/* The stack selector (across stacks). */
+.log-stack-pick { display: inline-flex; align-items: center; gap: 6px; }
+.log-stack-pick select { min-height: 30px; max-width: 100%; padding: 4px 8px; font: 12px/1.4 var(--mono); }
 /* The level chips' dots: the colours of the rows they list. */
 .dot.lvl-all, .dot.lvl-debug { background: var(--muted); }
 .dot.lvl-error { background: var(--fail); }
@@ -931,11 +957,14 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .log-total { color: var(--text-2); }
 /* At phone width the toolbar's controls are touch targets. */
 @media (max-width: 760px) {
-  .log-chip, .log-preset, .log-containers .log-chip, .switch, .log-toolbar input, .log-options button, .log-regex { min-height: 44px; }
+  .log-chip, .log-preset, .log-containers .log-chip, .switch, .log-toolbar input, .log-toolbar select, .log-options button, .log-regex { min-height: 44px; }
   .log-regex input { min-height: 0; }
   .log-pages a { display: inline-flex; align-items: center; min-height: 44px; }
   /* The message gets its own line under time, service and level. */
-  .log-record, .log-stacks .log-record { --log-cols: max-content max-content max-content; }
+  .log-record { --log-cols: max-content max-content max-content; }
+  /* Across stacks: time, stack, service and level on one line, in the same columns on every
+     row, long names cut. */
+  .log-stacks .log-record { --log-cols: max-content 9ch 11ch 5ch; }
   .log-fields { grid-template-columns: minmax(0, 1fr); }
   .log-fields dd { margin-bottom: 4px; }
   .log-record .log-msg { grid-column: 1 / -1; }
@@ -1315,6 +1344,11 @@ p.stack-stats { font-size: 12px; }
 .stack-head .page-title { display: flex; flex: 1 1 420px; flex-direction: column; gap: 8px; }
 .stack-head .page-actions { padding-top: 22px; }
 .stack-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+/* Telemetry header (src/web/telemetry.rs): breadcrumb and h1, the log store's figures in mono,
+   then the signal tabs across the full width as on the stack pages. */
+.telemetry-head { gap: 14px 16px; margin-bottom: 20px; }
+.telemetry-figures { margin: 0; gap: 10px 16px; color: var(--text-2); font: 12px/1.4 var(--mono); }
+.telemetry-retention { color: var(--muted); }
 .stack-title h1 { margin: 0; font: 600 26px/1.2 var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .stack-meta {
   display: flex;
@@ -1344,6 +1378,7 @@ p.stack-stats { font-size: 12px; }
 .tabs a:hover { color: var(--text); text-decoration: none; }
 .tabs a:focus-visible { outline-offset: -2px; }
 .tabs a[aria-selected="true"] { box-shadow: inset 0 -2px var(--accent); color: var(--text); font-weight: 600; }
+.tab-count { color: var(--muted); font-weight: 400; }
 #stack-action-result:empty, #reresolve-result:empty { display: none; }
 #reresolve-result .plan-card { margin: 0 0 1.25rem; }
 

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Logs · Telemetry{% endblock %}
+{% block head %}
+<header class="page-head telemetry-head">
+  <div class="page-title">
+    <nav class="crumb" aria-label="Breadcrumb">~/telemetry/logs</nav>
+    <h1>Telemetry</h1>
+  </div>
+  <p class="page-actions telemetry-figures">
+    <span>{% if let Some(rate) = figures.rate %}{{ rate }}{% else %}—{% endif %} logs/s</span>
+    <span class="telemetry-retention">{{ figures.retention() }}</span>
+  </p>
+  <nav class="tabs" aria-label="Signals">
+    <div role="tablist">
+      <a role="tab" href="/telemetry/logs" aria-selected="true" aria-current="page">Logs{% if let Some(total) = view.total %} <span class="tab-count">{{ total }}</span>{% endif %}</a>
+    </div>
+  </nav>
+</header>
+{% endblock %}
+{% block content %}
+{% include "logs_view.html" %}
+{% endblock %}

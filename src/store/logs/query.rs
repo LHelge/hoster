@@ -678,6 +678,48 @@ impl LogStore {
         Ok(seen)
     }
 
+    /// The stacks with records in `range`, by name, at most `limit` of them: the Telemetry
+    /// page's stack selector. Steps from one stack to the next on the `(stack, time)` index and
+    /// checks each for a record in the range there, so it reads a few index entries per stack
+    /// whatever the range holds.
+    pub async fn stacks_in(&self, range: Range<Timestamp>, limit: u32) -> Result<Vec<String>> {
+        let stacks: Vec<String> = sqlx::query_scalar(
+            "WITH RECURSIVE named(stack) AS ( \
+                 SELECT (SELECT min(stack) FROM log_records) \
+                 UNION ALL \
+                 SELECT (SELECT min(stack) FROM log_records WHERE stack > named.stack) \
+                 FROM named WHERE named.stack IS NOT NULL \
+                 LIMIT ?1 \
+             ) \
+             SELECT stack FROM named WHERE stack IS NOT NULL AND EXISTS ( \
+                 SELECT 1 FROM log_records r \
+                 WHERE r.stack = named.stack AND r.time >= ?2 AND r.time < ?3 \
+             )",
+        )
+        .bind(i64::from(limit))
+        .bind(range.start)
+        .bind(range.end)
+        .fetch_all(&self.reads)
+        .await?;
+        Ok(stacks)
+    }
+
+    /// How many records `range` and `scope` hold, counting at most `cap`: a covering index
+    /// read of at most `cap` entries.
+    pub async fn count_records(
+        &self,
+        range: Range<Timestamp>,
+        scope: &LogScope,
+        cap: u32,
+    ) -> Result<u64> {
+        let mut sql =
+            QueryBuilder::<Sqlite>::new("SELECT count(*) FROM (SELECT 1 FROM log_records");
+        LogQuery::push_where(&mut sql, &range, scope);
+        sql.push(" LIMIT ").push_bind(i64::from(cap)).push(")");
+        let count: i64 = sql.build_query_scalar().fetch_one(&self.reads).await?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
     /// Records per `bucket`-long period since the epoch and level in `range` and `scope`, for
     /// the severity histogram, oldest bucket first. Buckets without records are left out. Reads
     /// what the index narrows to, with no message scan; a zero `bucket` counts per millisecond.

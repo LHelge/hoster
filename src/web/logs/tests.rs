@@ -25,6 +25,7 @@ fn mount(scope: LogScope) -> LogMount {
         services: vec!["api".into(), "storage".into()],
         live: Vec::new(),
         stream: Some("/stacks/notes/logs/stream".into()),
+        stacks: Vec::new(),
     }
 }
 
@@ -208,6 +209,7 @@ fn rows_show_the_generation_only_where_a_service_has_several() {
         oldest: Some(Timestamp::from(noon() - Duration::from_secs(1_800))),
         unleveled: None,
         head: 4,
+        ..Read::default()
     };
     // Not following, so the page links older ones.
     let view = view(
@@ -1113,4 +1115,48 @@ fn the_source_switch_is_the_stack_scopes_and_each_source_keeps_its_own_options()
         given.filters(LogSource::Containers)[0],
         ("service", "api".to_owned())
     );
+}
+
+#[test]
+fn across_stacks_the_range_defaults_to_15_minutes_and_hoster_picks_its_own_records() {
+    let all = LogScope::All { stack: None };
+    let Plan { query, .. } = LogsView::plan(&all, &params_scoped("", &all), noon());
+    assert_eq!(
+        query.range.start,
+        Timestamp::from(noon() - Duration::from_secs(900))
+    );
+    // The stack tab keeps its hour.
+    let stack = LogScope::Stack("notes".into());
+    let Plan { query, .. } = LogsView::plan(&stack, &params_scoped("", &stack), noon());
+    assert_eq!(
+        query.range.start,
+        Timestamp::from(noon() - Duration::from_secs(3_600))
+    );
+
+    let hoster = LogScope::All {
+        stack: Some(LogScope::HOSTER.into()),
+    };
+    let Plan { query, .. } = LogsView::plan(&hoster, &params(""), noon());
+    assert_eq!(query.scope, store::LogScope::Hoster);
+    // The stack tab ignores a `stack` parameter: its path fixes it.
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "stack=blog",
+        Ok(Read::default()),
+    );
+    assert!(view.stacks.is_empty());
+    assert!(view.keep.is_empty());
+    assert_eq!(view.chips[0].href, "/stacks/notes/logs");
+}
+
+fn params_scoped(query: &str, scope: &LogScope) -> LogParams {
+    params(query).scoped(scope)
+}
+
+#[test]
+fn the_record_count_says_when_it_stopped_at_its_cap() {
+    assert_eq!(Total(1_234).to_string(), "1,234");
+    let cap = u64::from(LogsView::COUNT_CAP);
+    assert_eq!(Total(cap).to_string(), "100,000");
+    assert_eq!(Total(cap + 1).to_string(), "100,000+");
 }

@@ -1,16 +1,17 @@
 ---
 id: ckc
 title: "Telemetry page: nav item and the Logs tab across stacks"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:35:00.245280479Z"
-updated: "2026-11-12T19:35:00.245280479Z"
+updated: "2026-11-13T13:01:43.901133803Z"
 tags:
   - web
   - observability
 depends_on:
   - yn7
 parent: psq
+attempts: 1
 ---
 
 ## Summary
