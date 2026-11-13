@@ -168,7 +168,7 @@ impl fmt::Display for Offset {
 
 /// A coordinate to two decimals, without trailing zeros: `12.5`, `180`.
 #[derive(Debug, Clone, Copy)]
-struct Num(f64);
+pub(super) struct Num(pub(super) f64);
 
 impl Num {
     /// The value as written: rounded to two decimals, so stacked segments meet exactly.

@@ -686,15 +686,108 @@ mod traces {
             )),
             "{html}"
         );
-        // The trace below the list, where the waterfall goes.
+        // The trace below the list, as its waterfall.
+        let picked = &html[html.find(r#"<section class="card trace-picked""#).unwrap()..];
         assert!(
-            html.contains(&format!(r#"<h2 id="trace-title">Trace <code>{id}</code> <span class="card-count">· 3 spans · "#)),
+            picked.contains(r#"<h2 id="trace-title">GET /api/documents</h2>"#),
+            "{picked}"
+        );
+        assert!(
+            picked.contains(&format!(
+                r#"<span class="wf-meta"><code>{id}</code> · <time"#
+            )),
+            "{picked}"
+        );
+        assert!(picked.contains(r#"<dt>Spans</dt><dd>3</dd>"#), "{picked}");
+        assert!(picked.contains(r#"<dt>Depth</dt><dd>3</dd>"#), "{picked}");
+        assert!(
+            picked.contains(r#"<dt>Errors</dt><dd class="wf-errors">1</dd>"#),
+            "{picked}"
+        );
+        assert!(
+            picked.contains(r#"<li class="svc-0"><span class="wf-swatch" aria-hidden="true"></span>api <span class="muted">1 span</span></li>"#),
+            "{picked}"
+        );
+        assert!(picked.contains(r#"<svg class="wf-minimap""#), "{picked}");
+        assert_eq!(picked.matches(r#"<a class="wf-row""#).count(), 3);
+        // Rows in depth-first order: the proxy's two, then the app's span in error.
+        let server = picked
+            .find("wf-text\" title=\"GET /api/documents\"")
+            .unwrap();
+        let client = picked.find("wf-text\" title=\"upstream api\"").unwrap();
+        let app_span = picked.find("wf-text\" title=\"SELECT documents\"").unwrap();
+        assert!(server < client && client < app_span, "{picked}");
+        let span = SpanId::from([51; 8]);
+        assert!(
+            picked.contains(&format!(r#"<li id="span-{span}" class="svc-0 wf-error">"#)),
+            "{picked}"
+        );
+        assert!(
+            picked.contains(&format!(
+                r##"<a class="wf-row" href="/telemetry/traces?sort=slowest&#38;trace={id}&#38;span={span}#span-{span}">"##
+            )),
+            "{picked}"
+        );
+        assert!(
+            picked.contains(r#"<span class="wf-name wf-d2">"#),
+            "{picked}"
+        );
+        assert!(picked.contains(r#"<rect class="wf-ring""#), "{picked}");
+        assert!(!picked.contains("aria-current"), "no span selected");
+        assert!(
+            picked
+                .contains(r#"<a class="wf-close" href="/telemetry/traces?sort=slowest">close</a>"#),
+            "{picked}"
+        );
+        assert!(!html.contains("style="), "no inline styles");
+
+        // A span selected: its row marked, linking to clear it; picking another trace or
+        // closing drops it, a filter keeps it.
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/telemetry/traces?sort=slowest&trace={id}&span={span}"),
+        )
+        .await;
+        assert!(
+            html.contains(&format!(
+                r##"<a class="wf-row" href="/telemetry/traces?sort=slowest&#38;trace={id}#span-{span}" aria-current="true">"##
+            )),
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"class="wf-row" href"#).count(), 3);
+        let picked = &html[html.find(r#"<section class="card trace-picked""#).unwrap()..];
+        assert_eq!(picked.matches("aria-current").count(), 1, "{picked}");
+        assert!(
+            row(&html, "GET /healthz").contains(&format!(
+                r#"href="/telemetry/traces?sort=slowest&#38;trace={}""#,
+                trace(2)
+            )),
             "{html}"
         );
         assert!(
-            html.contains(r#"<a href="/telemetry/traces?sort=slowest">close</a>"#),
+            html.contains(r#"<a class="wf-close" href="/telemetry/traces?sort=slowest">close</a>"#),
             "{html}"
         );
+        assert!(
+            html.contains(&format!(
+                r#"<input type="hidden" name="span" value="{span}">"#
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r#"href="/telemetry/traces?sort=slowest&#38;trace={id}&#38;span={span}&#38;since=1h""#
+            )),
+            "a preset keeps the span: {html}"
+        );
+        let html = page(
+            &app,
+            &browser.cookie,
+            &format!("/telemetry/traces?trace={id}&span=nope"),
+        )
+        .await;
+        assert!(html.contains("`nope` is not a span id"), "{html}");
         // A filter keeps the trace picked.
         assert!(
             html.contains(&format!(

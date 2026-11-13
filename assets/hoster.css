@@ -1429,6 +1429,118 @@ table.traces td { padding-block: 9px; vertical-align: middle; font: 12px/1.4 var
 .trace-error { color: var(--fail); }
 .trace-error .dot { background: var(--fail); }
 .trace-pager { display: flex; gap: 16px; }
+
+/* The waterfall of the trace picked (src/web/telemetry/traces/waterfall.rs). Positions are SVG
+   attributes; a row's (or legend entry's, or minimap line's) service class sets --svc, which
+   its name's border, its bar and its swatch take. */
+.trace-picked .svc-hoster { --svc: var(--svc-hoster); }
+.trace-picked .svc-0 { --svc: var(--svc-0); }
+.trace-picked .svc-1 { --svc: var(--svc-1); }
+.trace-picked .svc-2 { --svc: var(--svc-2); }
+.trace-picked .svc-3 { --svc: var(--svc-3); }
+.trace-picked .svc-4 { --svc: var(--svc-4); }
+.trace-picked .svc-5 { --svc: var(--svc-5); }
+.wf-head { align-items: flex-start; gap: 14px 24px; }
+.wf-title { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.wf-caps { text-transform: uppercase; letter-spacing: 0.06em; }
+.wf-kicker { color: var(--muted); font: 11px/1.3 var(--mono); }
+.card-head.wf-head h2 { font: 700 18px/1.3 var(--mono); overflow-wrap: anywhere; }
+.wf-meta { color: var(--text-2); font: 12px/1.4 var(--mono); overflow-wrap: anywhere; }
+.wf-meta code { font-size: inherit; }
+.wf-figures { display: flex; flex-wrap: wrap; gap: 22px; margin: 0 0 0 auto; font-family: var(--mono); }
+.wf-figures > div { display: flex; flex-direction: column; gap: 2px; }
+.wf-figures dt { color: var(--muted); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+.wf-figures dd { margin: 0; font-size: 17px; font-weight: 600; }
+.wf-figures .wf-errors { color: var(--fail); }
+.wf-close { align-self: center; }
+.wf-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.wf-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-2);
+  font: 12px/1.4 var(--mono);
+}
+.wf-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.wf-swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--svc); }
+.wf-map { padding: 10px 18px 8px; border-bottom: 1px solid var(--border); }
+.wf-minimap { display: block; border-radius: 4px; background: var(--inset); }
+.wf-mini { fill: var(--svc); }
+.wf-mini.wf-mini-error { fill: var(--fail); }
+.wf-scroll { overflow-x: auto; }
+.wf-grid-head, .wf-row { display: grid; grid-template-columns: 330px minmax(0, 1fr); min-width: 860px; }
+.wf-grid-head { border-bottom: 1px solid var(--border); color: var(--muted); font: 10px/1.4 var(--mono); }
+.wf-grid-head > .wf-caps { padding: 8px 18px; font-size: 11px; }
+.wf-ticks { display: flex; justify-content: space-between; padding: 8px 18px 8px 0; }
+.wf-rows { margin: 0; padding: 0; list-style: none; }
+.wf-rows > li { border-bottom: 1px solid var(--divider); }
+.wf-row { align-items: stretch; padding-right: 18px; color: var(--text); text-decoration: none; }
+.wf-row:hover { background: var(--hover); text-decoration: none; }
+.wf-row[aria-current] { background: var(--hover); box-shadow: inset 2px 0 var(--accent); }
+.wf-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 30px;
+  padding-right: 10px;
+  border-left: 3px solid var(--svc);
+  font: 12px/1 var(--mono);
+}
+/* Indented by depth, from 8px by 16px a level, up to Waterfall::DEPTH_CAP. */
+.wf-d0 { padding-left: 8px; }
+.wf-d1 { padding-left: 24px; }
+.wf-d2 { padding-left: 40px; }
+.wf-d3 { padding-left: 56px; }
+.wf-d4 { padding-left: 72px; }
+.wf-d5 { padding-left: 88px; }
+.wf-d6 { padding-left: 104px; }
+.wf-d7 { padding-left: 120px; }
+.wf-d8 { padding-left: 136px; }
+.wf-d9 { padding-left: 152px; }
+.wf-d10 { padding-left: 168px; }
+.wf-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-error .wf-text { color: var(--fail); }
+.wf-badge {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fail);
+  color: var(--on-accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+.wf-tag, .wf-orphan { flex: none; padding: 1px 5px; border-radius: 4px; font-size: 10px; }
+.wf-tag { background: var(--hover); color: var(--text-2); }
+.wf-orphan { border: 1px dashed var(--input-border); color: var(--muted); }
+.wf-bar { display: block; overflow: visible; }
+.wf-grid { stroke: var(--border); stroke-width: 1px; }
+.wf-fill { fill: var(--svc); }
+/* An error span keeps its colour, ringed in red round a gap of the card's background. */
+.wf-error .wf-fill { stroke: var(--surface); stroke-width: 3px; paint-order: stroke; }
+.wf-ring { fill: none; stroke: var(--fail); stroke-width: 6px; }
+.wf-error > .wf-row:hover .wf-fill, .wf-error > .wf-row[aria-current] .wf-fill { stroke: var(--hover); }
+.wf-label { fill: var(--text-2); font: 11px var(--mono); dominant-baseline: central; }
+/* Inside a bar: --on-accent is the dark (Mocha) or white (Latte) text the pastel or darkened
+   service colours need. */
+.wf-label-inside { fill: var(--on-accent); font-weight: 600; }
+.wf-label-left { text-anchor: end; }
+.wf-more { margin: 0; padding: 11px 18px; font-size: 12px; }
 .stack-title h1 { margin: 0; font: 600 26px/1.2 var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .stack-meta {
   display: flex;

@@ -1,10 +1,10 @@
 ---
 id: aum
 title: "Trace waterfall: span rows, bars, axis, legend and minimap"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:37:26.941263741Z"
-updated: "2026-11-12T19:37:26.941263741Z"
+updated: "2026-11-13T22:12:15.543469940Z"
 tags:
   - web
   - observability
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - zyf
 parent: qnh
+attempts: 1
 ---
 
 ## Summary

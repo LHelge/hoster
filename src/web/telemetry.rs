@@ -49,7 +49,7 @@ impl Telemetry {
         Redirect::to(Self::TRACES)
     }
 
-    /// `GET /telemetry/traces[?stack=…&since=…&q=…&sort=…&status=…&slower=…&page=…&trace=…]`:
+    /// `GET /telemetry/traces[?stack=…&since=…&q=…&sort=…&status=…&slower=…&page=…&trace=…&span=…]`:
     /// the trace list across stacks, and the trace picked.
     pub async fn traces(
         Extension(stacks): Extension<Stacks>,

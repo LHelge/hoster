@@ -5,13 +5,15 @@
 //! Every option is a GET parameter ([`TraceParams`]): `stack`, `since` (a preset from 5m to
 //! 24h, or anything the Logs tab takes: spans are kept 3 days), `q` (grep on span names; no
 //! query language, OQ-43), `sort`, `status`, `slower` (the root's minimum duration), `page`
-//! (from 1) and `trace`. A link changes some and keeps the rest; a new filter starts at the
-//! first page, picking a trace keeps the page.
+//! (from 1), `trace` and `span` (a span of that trace, selected in its waterfall). A link changes
+//! some and keeps the rest; a new filter starts at the first page, picking a trace keeps the page
+//! and drops the span.
 //!
 //! Services are coloured by class from the categorical palette (`docs/design/README.md`):
 //! hoster's proxy its own, the others in turn by name over everything the page shows, so a
 //! service has one colour in every row and in the trace below. Bars are server-drawn SVG
-//! ([`Meter`]) and tones are classes: nothing is an inline style (ADR-0054).
+//! ([`Meter`]) and tones are classes: nothing is an inline style (ADR-0054). The trace picked is
+//! drawn as a [`Waterfall`] (`traces/waterfall.rs`).
 
 use std::ops::Range;
 use std::time::{Duration, SystemTime};
@@ -23,9 +25,13 @@ use super::super::logs::{LogScope, LogsView, StackOption};
 use super::super::ui::{Count, Meter, Tone};
 use crate::stats::Elapsed;
 use crate::store::{
-    LogStore, Retention, Span, StoreError, Timestamp, Trace, TraceId, TracePage, TraceQuery,
-    TraceSort, TraceStatus, TraceSummary,
+    LogStore, Retention, Span, SpanId, StoreError, Timestamp, Trace, TraceId, TracePage,
+    TraceQuery, TraceSort, TraceStatus, TraceSummary,
 };
+
+pub use self::waterfall::Waterfall;
+
+mod waterfall;
 
 /// The options of the Traces tab, as GET parameters; every field is text, as an HTML form
 /// sends it. Of a parameter given twice, the first counts.
@@ -48,6 +54,8 @@ pub struct TraceParams {
     page: Option<String>,
     /// The trace picked, shown below the list.
     trace: Option<String>,
+    /// The span of the trace picked that is selected in its waterfall.
+    span: Option<String>,
 }
 
 impl From<Vec<(String, String)>> for TraceParams {
@@ -63,6 +71,7 @@ impl From<Vec<(String, String)>> for TraceParams {
                 "slower" => &mut params.slower,
                 "page" => &mut params.page,
                 "trace" => &mut params.trace,
+                "span" => &mut params.span,
                 _ => continue,
             };
             slot.get_or_insert(value);
@@ -190,6 +199,20 @@ impl TraceParams {
         }
     }
 
+    /// The span selected; none when `span` is not a span id, with why.
+    fn span(&self) -> (Option<SpanId>, Option<String>) {
+        match Self::text(&self.span).map(|s| (s, s.parse::<SpanId>())) {
+            None => (None, None),
+            Some((_, Ok(id))) => (Some(id), None),
+            Some((given, Err(_))) => (
+                None,
+                Some(format!(
+                    "`{given}` is not a span id: one is 16 hexadecimal digits."
+                )),
+            ),
+        }
+    }
+
     /// The options in effect as they are written, in a fixed order, for links: those given
     /// and valid, without the page.
     fn pairs(&self) -> Vec<(&'static str, String)> {
@@ -207,7 +230,10 @@ impl TraceParams {
                 .filter(|_| self.slower().0.is_some())
                 .map(str::to_owned),
         );
-        keep("trace", self.trace().0.map(|id| id.to_string()));
+        let trace = self.trace().0;
+        keep("trace", trace.map(|id| id.to_string()));
+        let span = trace.and(self.span().0);
+        keep("span", span.map(|id| id.to_string()));
         pairs
     }
 }
@@ -249,20 +275,31 @@ impl Links {
         Self::href(self.action, pairs)
     }
 
-    /// The same list and page with `trace` picked, or none.
+    /// The same list and page with `trace` picked, or none, and no span selected.
     fn picking(&self, trace: Option<TraceId>) -> String {
-        let trace = trace.map(|id| id.to_string());
-        let links = Self {
+        self.with("span", None)
+            .with("trace", trace.map(|id| id.to_string()))
+            .at_page(self.page)
+    }
+
+    /// The same list, page and trace with `span` selected, or none.
+    fn selecting(&self, span: Option<SpanId>) -> String {
+        self.with("span", span.map(|id| id.to_string()))
+            .at_page(self.page)
+    }
+
+    /// These links with `key` set to `value` (last), or dropped.
+    fn with(&self, key: &'static str, value: Option<String>) -> Self {
+        Self {
             pairs: self
                 .pairs
                 .iter()
-                .filter(|(k, _)| *k != "trace")
+                .filter(|(k, _)| *k != key)
                 .cloned()
-                .chain(trace.map(|id| ("trace", id)))
+                .chain(value.map(|v| (key, v)))
                 .collect(),
             ..self.clone()
-        };
-        links.at_page(self.page)
+        }
     }
 
     fn href(action: &str, pairs: Vec<(&str, &str)>) -> String {
@@ -362,11 +399,14 @@ impl TraceRow {
     }
 }
 
+/// The trace `?trace=` asks for, and the store's trace of that id if it has one.
+type Requested = (TraceId, Option<Trace>);
+
 /// The trace `?trace=` picks.
 #[derive(Debug)]
 pub enum Picked {
-    /// Found: the waterfall (task aum) draws it.
-    Found(Box<Trace>),
+    /// Found, as its waterfall.
+    Found(Box<Waterfall>),
     /// No span and no request row of it is left: never sent, or older than spans are kept.
     Missing(TraceId),
 }
@@ -374,23 +414,9 @@ pub enum Picked {
 impl Picked {
     pub fn id(&self) -> TraceId {
         match self {
-            Picked::Found(trace) => trace.id(),
+            Picked::Found(waterfall) => waterfall.id,
             Picked::Missing(id) => *id,
         }
-    }
-
-    /// `3 spans · 1.9 s`, of a trace found.
-    pub fn summary(&self) -> Option<String> {
-        let Picked::Found(trace) = self else {
-            return None;
-        };
-        let spans = trace.total_spans();
-        let noun = if spans == 1 { "span" } else { "spans" };
-        Some(format!(
-            "{} {noun} · {}",
-            Count(spans),
-            Elapsed(trace.duration())
-        ))
     }
 
     /// The days spans are kept, which a missing trace may be older than.
@@ -447,16 +473,12 @@ impl TracesView {
     ) -> Self {
         let (query, problem) = Self::query(params, now);
         let (picked_id, trace_problem) = params.trace();
+        let span_problem = picked_id.and(params.span().1);
         let read = match store {
             Ok(store) => {
                 let picked = async {
                     match picked_id {
-                        Some(id) => store.load_trace(id).await.map(|t| {
-                            Some(match t {
-                                Some(trace) => Picked::Found(Box::new(trace)),
-                                None => Picked::Missing(id),
-                            })
-                        }),
+                        Some(id) => store.load_trace(id).await.map(|t| Some((id, t))),
                         None => Ok(None),
                     }
                 };
@@ -467,7 +489,8 @@ impl TracesView {
             }
             Err(error) => Err(error),
         };
-        Self::new(params, query, read, known, problem.or(trace_problem), now)
+        let problem = problem.or(trace_problem).or(span_problem);
+        Self::new(params, query, read, known, problem, now)
     }
 
     /// The store query `params` ask for at `now`, and what was wrong with them.
@@ -494,7 +517,7 @@ impl TracesView {
     fn new(
         params: &TraceParams,
         query: TraceQuery,
-        read: Result<(TracePage, Option<Picked>), String>,
+        read: Result<(TracePage, Option<Requested>), String>,
         known: &[String],
         problem: Option<String>,
         now: SystemTime,
@@ -511,17 +534,26 @@ impl TracesView {
             }
             Err(error) => (TracePage::default(), None, Some(error), None),
         };
-        let picked_id = picked.as_ref().map(Picked::id);
+        let picked_id = picked.as_ref().map(|(id, _)| *id);
         let mut services: Vec<&str> = page
             .traces
             .iter()
             .flat_map(|t| t.services.iter().map(String::as_str))
             .collect();
-        if let Some(Picked::Found(trace)) = &picked {
+        if let Some((_, Some(trace))) = &picked {
             services.extend(trace.services());
         }
-        // The picked trace's services too, so the waterfall (task aum) colours them alike.
+        // The picked trace's services too, so its waterfall colours them alike.
         let palette = ServicePalette::of(services);
+        let picked = picked.map(|(id, trace)| match trace {
+            Some(trace) => Picked::Found(Box::new(Waterfall::new(
+                &trace,
+                &palette,
+                &links,
+                params.span().0,
+            ))),
+            None => Picked::Missing(id),
+        });
         let slowest = page
             .traces
             .iter()
