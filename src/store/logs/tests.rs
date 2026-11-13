@@ -796,7 +796,10 @@ mod queries {
     async fn level_counts_bucket_by_time() {
         let (_dir, store) = mixed().await;
         let buckets = store
-            .count_by_level(everything(), &LogScope::All, Duration::from_secs(3))
+            .count_by_level(
+                &LogQuery::new(everything(), LogScope::All),
+                Duration::from_secs(3),
+            )
             .await
             .unwrap();
         let starts: Vec<Timestamp> = buckets.iter().map(|b| b.start).collect();
@@ -811,8 +814,7 @@ mod queries {
 
         let notes = store
             .count_by_level(
-                at(0)..at(6_000),
-                &LogScope::Stack("notes".into()),
+                &LogQuery::new(at(0)..at(6_000), LogScope::Stack("notes".into())),
                 Duration::from_secs(60),
             )
             .await
@@ -820,6 +822,18 @@ mod queries {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].total(), 3);
         assert_eq!(notes[0].count(Some(Level::Error)), 0);
+
+        // The service filter narrows it; a level filter does not.
+        let mut query = LogQuery::new(at(0)..at(6_000), LogScope::Stack("notes".into()));
+        query.services = vec!["api".into()];
+        query.levels = vec![Level::Error];
+        let api = store
+            .count_by_level(&query, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(api.len(), 1);
+        assert_eq!(api[0].total(), 1);
+        assert_eq!(api[0].count(Some(Level::Info)), 1);
         store.close().await;
     }
 

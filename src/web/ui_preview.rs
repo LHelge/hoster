@@ -33,7 +33,9 @@ use http_body_util::BodyExt as _;
 
 use super::assets::Assets;
 use super::certificates::{AcmeDirectory, CertOverview, CertOwner, CertRow};
-use super::charts::{LineChart, Percentiles, Sparkline, StackedBars, Timeline};
+use super::charts::{
+    Buckets, LineChart, Percentiles, SeverityBars, SeverityCounts, Sparkline, StackedBars, Timeline,
+};
 use super::settings::{EffectiveConfig, Settings};
 use super::system::{Facts, LogFigures, LogHealth, System};
 use super::ui::Tone;
@@ -1648,6 +1650,74 @@ impl Fixtures {
             };
         }
         html += &lines(Range::Hour, sporadic, "Response time", "1h · sporadic load");
+        html += "</div>";
+
+        // The severity histogram of the Telemetry logs (epic psq): a wave of info with error
+        // spikes, a week, a level filter, an unfiltered chart and an empty range.
+        let now = crate::store::Timestamp::from_millis(1_794_598_211_000);
+        let severity = |length: Duration, levels: &[crate::store::Level]| {
+            let buckets = Buckets::covering((now - length)..(now + Duration::from_secs(1)));
+            let n = (length.as_secs() / buckets.bucket().as_secs()) as usize + 1;
+            let first = (now - length).floor(buckets.bucket());
+            let bars = (0..n).map(|i| {
+                let info = Self::wave(i, n, 20.0, 60.0);
+                let spike = i == n * 3 / 4 || i == n - 3;
+                let keeps = |level| levels.is_empty() || levels.contains(&level);
+                (
+                    first + buckets.bucket() * i as u32,
+                    SeverityCounts {
+                        info: if levels.is_empty() { info } else { 0 },
+                        warn: if keeps(crate::store::Level::Warn) {
+                            if spike { 8 } else { (i % 4) as u64 }
+                        } else {
+                            0
+                        },
+                        error: if keeps(crate::store::Level::Error) {
+                            if spike { 18 } else { u64::from(i % 9 == 0) }
+                        } else {
+                            0
+                        },
+                        unleveled: if levels.is_empty() { info / 3 } else { 0 },
+                    },
+                )
+            });
+            SeverityBars::new(buckets, bars.collect::<Vec<_>>(), levels)
+                .of("all stacks")
+                .linked(|_, _| "#".to_owned())
+        };
+        let severity_card = |chart: SeverityBars, note: &str| {
+            let unfiltered = if chart.is_unfiltered() {
+                " · unfiltered by grep and fields"
+            } else {
+                ""
+            };
+            card(
+                "Log records by severity",
+                &format!("{} buckets{unfiltered} · {note}", chart.bucket_label()),
+                &chart.legend().to_string(),
+                &chart.to_string(),
+            )
+        };
+        let minute = Duration::from_secs(60);
+        html += "<div class=\"card-pair\">";
+        html += &severity_card(severity(15 * minute, &[]), "15m, error spikes");
+        html += &severity_card(severity(7 * 24 * 60 * minute, &[]), "7d");
+        html += &severity_card(
+            severity(
+                60 * minute,
+                &[crate::store::Level::Warn, crate::store::Level::Error],
+            ),
+            "1h, level warn+",
+        );
+        html += &severity_card(severity(5 * minute, &[]).unfiltered(), "5m, grep");
+        html += &severity_card(
+            SeverityBars::new(
+                Buckets::covering((now - 6 * 60 * minute)..now),
+                Vec::new(),
+                &[],
+            ),
+            "6h, empty",
+        );
         html += "</div>";
 
         html += "<section class=\"card\"><div class=\"card-head\"><h2>Sparklines</h2></div>\

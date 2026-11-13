@@ -76,6 +76,7 @@ use serde::Deserialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use super::charts::{Buckets, SeverityBars, SeverityCounts};
 use super::containers::{LogEntry as LiveLine, LogSince, SinceLink};
 use super::system::LogStoreState;
 use super::ui::Count;
@@ -86,8 +87,8 @@ pub use access::{AccessTail, RequestCells, RequestFoot};
 pub use download::{Download, FormatParam, LogDownload, Refused};
 
 use crate::store::{
-    self, Level, LogEntry, LogHead, LogPage, LogQuery, LogRecord, LogStore, Page, PageAt,
-    RecordKey, ServiceSeen, Stream, TextFilter, Timestamp,
+    self, Level, LevelCounts, LogEntry, LogHead, LogPage, LogQuery, LogRecord, LogStore, Page,
+    PageAt, RecordKey, ServiceSeen, Stream, TextFilter, Timestamp,
 };
 
 /// Whose records the view shows.
@@ -320,6 +321,15 @@ impl LogReader {
                 false => Ok(None),
             }
         };
+        let levels = async {
+            match plan.buckets {
+                Some(buckets) => store
+                    .count_by_level(query, buckets.bucket())
+                    .await
+                    .map(Some),
+                None => Ok(None),
+            }
+        };
         let total = async {
             match plan.across {
                 true => store
@@ -330,13 +340,14 @@ impl LogReader {
             }
         };
         let read = async {
-            let (seen, page, oldest, unleveled, stacks, total) = tokio::try_join!(
+            let (seen, page, oldest, unleveled, stacks, total, levels) = tokio::try_join!(
                 store.services_in(query.range.clone(), &query.scope),
                 records,
                 store.oldest_record_time(),
                 unleveled,
                 stacks,
                 total,
+                levels,
             )?;
             Ok::<_, store::StoreError>(Read {
                 seen,
@@ -346,6 +357,7 @@ impl LogReader {
                 head,
                 stacks: stacks.unwrap_or_default(),
                 total,
+                levels,
             })
         };
         read.await.map_err(|err| {
@@ -370,6 +382,8 @@ struct Read {
     /// Across stacks: the records of the range and scope, counted up to one past
     /// [`LogsView::COUNT_CAP`].
     total: Option<u64>,
+    /// Across stacks: the records of the range per bucket and level, for the histogram.
+    levels: Option<Vec<LevelCounts>>,
 }
 
 /// The store query one page runs, and what was wrong with its options.
@@ -382,6 +396,8 @@ struct Plan {
     invalid: Option<String>,
     /// Across stacks: the stack selector and the record count are read too.
     across: bool,
+    /// Across stacks: the severity histogram's buckets, counted on the index in one query.
+    buckets: Option<Buckets>,
 }
 
 impl Plan {
@@ -1511,6 +1527,8 @@ pub struct LogsView {
     pub follow: Option<Follow>,
     /// The download button, where the mount has one and the source can be downloaded.
     pub download: Option<Download>,
+    /// Across stacks: the severity histogram of the range.
+    pub severity: Option<SeverityBars>,
     /// The access log's status chips; empty for the other sources.
     pub statuses: Vec<Chip>,
     /// The access log's minimum duration field as typed; `None` for the other sources.
@@ -1586,6 +1604,8 @@ impl LogsView {
         let (_, source_problem) = params.source(scope);
         let (level, level_problem) = params.level();
         let (fields, field_problem) = params.fields();
+        let across = matches!(scope, LogScope::All { .. });
+        let buckets = across.then(|| Buckets::covering(range.clone()));
         let mut query = LogQuery::new(range, scope.store());
         query.services = params.service().map(str::to_owned).into_iter().collect();
         query.levels = level.levels();
@@ -1600,7 +1620,8 @@ impl LogsView {
                 .or(level_problem)
                 .or(field_problem),
             invalid,
-            across: matches!(scope, LogScope::All { .. }),
+            across,
+            buckets,
         }
     }
 
@@ -1615,6 +1636,7 @@ impl LogsView {
             query,
             problem,
             invalid,
+            buckets,
             ..
         } = plan;
         let links = Links::of(&mount.action, &mount.scope, params, LogSource::Containers);
@@ -1725,12 +1747,23 @@ impl LogsView {
             stopped,
             ..
         } = paging;
+        let severity = buckets.zip(read.levels.as_ref()).map(|(buckets, counts)| {
+            Self::severity(
+                &mount.scope,
+                params,
+                &links,
+                buckets,
+                counts,
+                &level.levels(),
+            )
+        });
         let download = mount
             .download
             .as_ref()
             .map(|action| Download::of(action, &links));
         Self {
             download,
+            severity,
             statuses: Vec::new(),
             slower: None,
             requests: None,
@@ -1768,6 +1801,53 @@ impl LogsView {
             starts_at,
             problem,
             unreadable,
+        }
+    }
+
+    /// The severity histogram across stacks: `counts` in `buckets`, the segments the level
+    /// filter keeps, each bar a link to the view of its bucket (since its start, the page
+    /// before its end; the newest only since its start, so it keeps up). It counts on the
+    /// index alone, so a grep or field filter does not narrow it: the chart then says it is
+    /// unfiltered rather than scanning every message of the range.
+    fn severity(
+        scope: &LogScope,
+        params: &LogParams,
+        links: &Links,
+        buckets: Buckets,
+        counts: &[LevelCounts],
+        levels: &[Level],
+    ) -> SeverityBars {
+        let mut subject = match scope.picked() {
+            None => "all stacks".to_owned(),
+            Some(LogScope::HOSTER) => "hoster's own records".to_owned(),
+            Some(stack) => stack.to_owned(),
+        };
+        if let Some(service) = params.service() {
+            subject = format!("{subject}, service {service}");
+        }
+        let chart = SeverityBars::new(
+            buckets,
+            counts
+                .iter()
+                .map(|c| (c.start, SeverityCounts::kept(c, levels))),
+            levels,
+        )
+        .of(subject)
+        .linked(|range, newest| {
+            let since = humantime::format_rfc3339_seconds(range.start.into()).to_string();
+            let before = RecordKey {
+                time: range.end,
+                id: 0,
+            }
+            .to_string();
+            links.to(&[
+                ("since", Some(&since)),
+                ("before", (!newest).then_some(before.as_str())),
+            ])
+        });
+        match params.q().is_some() || !params.fields().0.is_empty() {
+            true => chart.unfiltered(),
+            false => chart,
         }
     }
 
@@ -1921,6 +2001,7 @@ impl LogsView {
         } = paging;
         Self {
             download: None,
+            severity: None,
             statuses: Vec::new(),
             slower: None,
             requests: None,

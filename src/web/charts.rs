@@ -84,6 +84,11 @@ impl Timeline {
             .map_or_else(|| labels(1).collect(), |k| labels(k).collect())
     }
 
+    /// [`Timeline::ticks`] as the x axis writes them.
+    fn labels(&self) -> Vec<String> {
+        self.ticks().iter().map(ToString::to_string).collect()
+    }
+
     /// `items`, one per bar: a shorter series leaves the oldest bars empty, a longer one loses
     /// its oldest entries.
     fn align<T: Default>(&self, items: impl IntoIterator<Item = T>) -> Vec<T> {
@@ -250,9 +255,12 @@ impl fmt::Display for Compact {
 /// around what `plot` draws inside the SVG.
 struct Frame<'a> {
     class: &'a str,
+    /// `img`, or `group` where the bars are links (an image's children are not reachable).
+    role: &'a str,
     label: &'a str,
     y_labels: Vec<String>,
-    timeline: Timeline,
+    /// The x axis labels, oldest first.
+    x_labels: Vec<String>,
 }
 
 impl Frame<'_> {
@@ -263,8 +271,9 @@ impl Frame<'_> {
     ) -> fmt::Result {
         write!(
             f,
-            r#"<div class="chart {}" role="img" aria-label="{}"><div class="chart-y" aria-hidden="true">"#,
+            r#"<div class="chart {}" role="{}" aria-label="{}"><div class="chart-y" aria-hidden="true">"#,
             self.class,
+            self.role,
             Escaped(self.label)
         )?;
         for label in &self.y_labels {
@@ -287,8 +296,8 @@ impl Frame<'_> {
             f,
             r#"<line class="chart-axis" x1="0" y1="{h}" x2="{w}" y2="{h}" vector-effect="non-scaling-stroke"></line></svg><div class="chart-x" aria-hidden="true">"#
         )?;
-        for tick in self.timeline.ticks() {
-            write!(f, "<span>{tick}</span>")?;
+        for label in &self.x_labels {
+            write!(f, "<span>{}</span>", Escaped(label))?;
         }
         f.write_str("</div></div>")
     }
@@ -413,6 +422,7 @@ impl fmt::Display for StackedBars {
         let scale = Scale::new(max as f64, 1.0);
         let frame = Frame {
             class: "chart-bars",
+            role: "img",
             label: &self.label(),
             y_labels: scale
                 .ticks()
@@ -424,7 +434,7 @@ impl fmt::Display for StackedBars {
                     }
                 })
                 .collect(),
-            timeline: self.timeline,
+            x_labels: self.timeline.labels(),
         };
         let slot = self.timeline.slot();
         let gap = slot * 0.2;
@@ -608,6 +618,7 @@ impl fmt::Display for LineChart {
         let scale = Scale::new(max.as_secs_f64(), Self::UNIT);
         let frame = Frame {
             class: "chart-lines",
+            role: "img",
             label: &self.label(),
             y_labels: scale
                 .ticks()
@@ -619,7 +630,7 @@ impl fmt::Display for LineChart {
                     }
                 })
                 .collect(),
-            timeline: self.timeline,
+            x_labels: self.timeline.labels(),
         };
         let slot = self.timeline.slot();
         frame.write(f, |f| {
@@ -750,6 +761,10 @@ impl fmt::Display for Sparkline {
 
 /// Numbers only.
 impl askama::filters::HtmlSafe for Sparkline {}
+
+mod severity;
+
+pub use severity::{Buckets, SeverityBars, SeverityCounts};
 
 #[cfg(test)]
 mod tests;

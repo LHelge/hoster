@@ -18,5 +18,14 @@
 </header>
 {% endblock %}
 {% block content %}
+{%- if let Some(chart) = view.severity %}
+<section class="card log-severity" aria-labelledby="severity-title">
+  <header class="card-head">
+    <h2 id="severity-title">Log records by severity <span class="card-count">· {{ chart.bucket_label() }} buckets{% if chart.is_unfiltered() %} · unfiltered by grep and fields{% endif %}</span></h2>
+    {{ chart.legend() }}
+  </header>
+  <div class="card-body">{{ chart }}</div>
+</section>
+{%- endif %}
 {% include "logs_view.html" %}
 {% endblock %}

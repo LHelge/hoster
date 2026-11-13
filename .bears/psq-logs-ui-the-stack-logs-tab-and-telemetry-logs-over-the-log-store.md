@@ -2,10 +2,10 @@
 id: psq
 title: "Logs UI: the stack logs tab and Telemetry → Logs over the log store"
 type: epic
-status: open
+status: done
 priority: P3
 created: "2026-11-08T18:22:30.024239523Z"
-updated: "2026-11-12T19:35:43.014141451Z"
+updated: "2026-11-13T14:03:02.244486220Z"
 tags:
   - design-followup
   - observability
