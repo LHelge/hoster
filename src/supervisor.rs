@@ -1287,6 +1287,9 @@ mod tests {
                 client: IpAddr::V6(Ipv6Addr::LOCALHOST),
                 upstream_failed: false,
                 request_id: RequestId::from([1; 16]),
+                server_span: None,
+                client_span: None,
+                upstream_start: None,
             }));
         }));
 

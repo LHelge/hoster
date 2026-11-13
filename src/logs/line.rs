@@ -11,8 +11,8 @@
 //! Level names are read in any case and folded onto [`Level`] (`warning` → warn, `fatal` and
 //! `critical` → error, …). Two numeric scales are read: pino and bunyan (10, 20, …, 60) and
 //! syslog (0–7). Any other number, and any unknown name, gives no level and keeps the key in
-//! the fields. OpenTelemetry's severity numbers (1–24) overlap syslog's and are not read here:
-//! they arrive over OTLP, whose receiver maps them itself.
+//! the fields. OpenTelemetry's severity numbers (1–24) overlap syslog's and are not read from
+//! lines: they arrive over OTLP, mapped by [`OtlpSeverity`] onto the same levels.
 //!
 //! Any other line, a JSON value that is not an object included, is kept whole as the message
 //! with no level: levels are never guessed in text (`ERROR …` has none). A line longer than
@@ -142,6 +142,32 @@ impl ParsedLine {
     }
 }
 
+/// An OTLP log record's severity (ADR-0069 §6): its `SeverityNumber` and `severity_text`, as
+/// the payload gives them.
+///
+/// It maps onto the five levels as a JSON line's level does: the number by its ranges
+/// (1–4 trace, 5–8 debug, 9–12 info, 13–16 warn, 17–24 error and fatal), else, when the
+/// number is unspecified (0) or out of range, the text by the names the line parser knows.
+/// Neither gives no level, and none is guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpSeverity<'a> {
+    pub number: i32,
+    pub text: &'a str,
+}
+
+impl From<OtlpSeverity<'_>> for Option<Level> {
+    fn from(severity: OtlpSeverity<'_>) -> Self {
+        match severity.number {
+            1..=4 => Some(Level::Trace),
+            5..=8 => Some(Level::Debug),
+            9..=12 => Some(Level::Info),
+            13..=16 => Some(Level::Warn),
+            17..=24 => Some(Level::Error),
+            _ => ParsedLine::level_named(severity.text),
+        }
+    }
+}
+
 /// Maps a JSON object by the common keys, as a JSON line holding it would be. hoster's own
 /// layer (ADR-0068) builds the object its JSON formatter would write and maps it here.
 impl From<Map<String, Value>> for ParsedLine {
@@ -174,6 +200,31 @@ mod tests {
 
     fn parse(line: &str) -> ParsedLine {
         ParsedLine::from(line)
+    }
+
+    #[test]
+    fn otlp_severities_map_by_number_then_by_text() {
+        let level = |number, text| Option::<Level>::from(OtlpSeverity { number, text });
+        for (numbers, expected) in [
+            (1..=4, Level::Trace),
+            (5..=8, Level::Debug),
+            (9..=12, Level::Info),
+            (13..=16, Level::Warn),
+            (17..=24, Level::Error),
+        ] {
+            for number in numbers {
+                assert_eq!(level(number, ""), Some(expected), "{number}");
+            }
+        }
+        // The number wins over the text.
+        assert_eq!(level(13, "ERROR"), Some(Level::Warn));
+        // Unspecified or out of range: the text, by the line parser's names.
+        assert_eq!(level(0, "Warning"), Some(Level::Warn));
+        assert_eq!(level(0, "FATAL"), Some(Level::Error));
+        assert_eq!(level(25, "info"), Some(Level::Info));
+        // Neither: no level, as for a text line.
+        assert_eq!(level(0, ""), None);
+        assert_eq!(level(-3, "loud"), None);
     }
 
     /// The fields as JSON, for comparing without depending on key order.

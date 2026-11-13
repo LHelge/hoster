@@ -562,6 +562,9 @@ mod log_store {
             fields: None,
             cut: false,
             marker: false,
+            trace_id: None,
+            span_id: None,
+            received: None,
         }
     }
 
@@ -581,6 +584,9 @@ mod log_store {
             client: IpAddr::V4(Ipv4Addr::LOCALHOST),
             upstream_failed: false,
             request_id: RequestId::from([1; 16]),
+            server_span: None,
+            client_span: None,
+            upstream_start: None,
         }
     }
 
@@ -713,6 +719,7 @@ mod log_store {
             capped: Removed {
                 records: 52_000,
                 requests: 1_200,
+                spans: 0,
             },
             file_bytes: 1 << 30,
         });
@@ -725,6 +732,7 @@ mod log_store {
         figures.last_hour = Some(RowCounts {
             records: 1_204_000,
             requests: 0,
+            spans: 0,
         });
         let html = page(Arc::new(LogHealth::Open(Box::new(figures)))).await;
         let card = card(&html);

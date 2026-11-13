@@ -87,12 +87,14 @@ impl LogFigures {
             last_hour: Some(RowCounts {
                 records: 18_204,
                 requests: 3_311,
+                spans: 0,
             }),
             sweep: Some(SweepReport {
                 started: Timestamp::from(now - Duration::from_secs(1_800)),
                 expired: Removed {
                     records: 2_410,
                     requests: 512,
+                    spans: 0,
                 },
                 capped: Removed::default(),
                 file_bytes: 912 * 1024 * 1024,
@@ -205,7 +207,9 @@ impl LogFigures {
         let mut rows = Vec::new();
         let full = Self::parts(&[
             (self.drops.records, "container lines"),
+            (self.drops.otlp_records, "OTLP records"),
             (self.drops.requests, "request rows"),
+            (self.drops.spans, "spans"),
         ]);
         if let Some(full) = full {
             rows.push(Fact {

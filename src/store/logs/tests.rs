@@ -1,10 +1,12 @@
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
 
 use super::*;
+use crate::store::Timestamp;
 
 async fn open() -> (TempDir, LogStore) {
     let dir = TempDir::new().unwrap();
@@ -52,7 +54,7 @@ async fn open_creates_a_private_wal_file_with_incremental_vacuum() {
     assert_eq!(auto_vacuum(&store).await, 2);
     assert_eq!(
         tables(&store).await,
-        ["log_cursors", "log_records", "requests"]
+        ["log_cursors", "log_records", "requests", "spans"]
     );
     store.close().await;
 }
@@ -187,8 +189,16 @@ fn levels_and_streams_round_trip_through_their_text() {
     for stream in Stream::ALL {
         assert_eq!(stream.to_string().parse::<Stream>(), Ok(stream));
     }
+    for kind in SpanKind::ALL {
+        assert_eq!(kind.to_string().parse::<SpanKind>(), Ok(kind));
+    }
+    for status in SpanStatus::ALL {
+        assert_eq!(status.to_string().parse::<SpanStatus>(), Ok(status));
+    }
     assert!("WARN".parse::<Level>().is_err());
-    assert!("otlp".parse::<Stream>().is_err());
+    assert!("OTLP".parse::<Stream>().is_err());
+    assert!("SERVER".parse::<SpanKind>().is_err());
+    assert!("failed".parse::<SpanStatus>().is_err());
     assert!(Level::Warn > Level::Info && Level::Error > Level::Warn);
 }
 
@@ -209,6 +219,46 @@ fn request_ids_are_32_lowercase_hex_digits() {
     ] {
         assert!(bad.parse::<RequestId>().is_err(), "{bad:?}");
     }
+}
+
+#[test]
+fn span_ids_are_16_lowercase_hex_digits_and_take_otlp_bytes() {
+    let id = SpanId::from([0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7]);
+    assert_eq!(id.to_string(), "00f067aa0ba902b7");
+    assert_eq!("00f067aa0ba902b7".parse(), Ok(id));
+    assert_eq!(SpanId::try_from(id.as_ref()).unwrap(), id);
+    for bad in [
+        "",
+        "00f067aa0ba902b",
+        "00F067AA0BA902B7",
+        "4bf92f3577b34da6a3ce929d0e0e4736",
+    ] {
+        assert!(bad.parse::<SpanId>().is_err(), "{bad:?}");
+    }
+    assert!(SpanId::try_from(&[1u8; 16][..]).is_err());
+    let trace = TraceId::try_from(&[0xab; 16][..]).unwrap();
+    assert_eq!(trace.to_string(), "ab".repeat(16));
+}
+
+#[test]
+fn micro_timestamps_convert_to_and_from_milliseconds() {
+    let ms = Timestamp::from_millis(1_700_000_000_123);
+    let us = MicroTimestamp::from(ms);
+    assert_eq!(us.as_micros(), 1_700_000_000_123_000);
+    assert_eq!(Timestamp::from(us + Duration::from_micros(999)), ms);
+    assert_eq!(
+        Timestamp::from(MicroTimestamp::from_micros(-1)),
+        Timestamp::from_millis(-1)
+    );
+    assert_eq!(
+        MicroTimestamp::from_unix_nanos(1_700_000_000_123_456_789),
+        MicroTimestamp::from_micros(1_700_000_000_123_456)
+    );
+    let now = SystemTime::now();
+    assert_eq!(
+        Timestamp::from(MicroTimestamp::from(now)),
+        Timestamp::from(now)
+    );
 }
 
 #[tokio::test]
@@ -288,6 +338,9 @@ mod queries {
             fields: None,
             cut: false,
             marker: false,
+            trace_id: None,
+            span_id: None,
+            received: None,
         }
     }
 
@@ -334,6 +387,26 @@ mod queries {
             .into_iter()
             .map(|entry| entry.record.message)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn an_otlp_record_reads_back_with_its_trace_and_the_time_received() {
+        let mut otlp = record(2_000, Some("notes"), "api", "user signed in");
+        otlp.stream = Stream::Otlp;
+        otlp.level = Some(Level::Info);
+        otlp.fields = Some(r#"{"user.id":42,"tags":["a","b"]}"#.into());
+        otlp.trace_id = Some(TraceId::from([0x4b; 16]));
+        otlp.span_id = Some(SpanId::from([0x07; 8]));
+        otlp.received = Some(at(2_350));
+        let (_dir, store) =
+            seed(vec![record(1_000, Some("notes"), "api", "x"), otlp.clone()]).await;
+
+        let mut query = LogQuery::new(everything(), LogScope::Stack("notes".into()));
+        query.streams = vec![Stream::Otlp];
+        let page = store.records(&query).await.unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].record, otlp);
+        store.close().await;
     }
 
     #[tokio::test]
@@ -951,6 +1024,9 @@ mod request_queries {
             upstream_failed: false,
             // Unique per row in these tests: the time's low byte.
             request_id: id((time / 1_000) as u8),
+            server_span: None,
+            client_span: None,
+            upstream_start: None,
         }
     }
 
@@ -998,6 +1074,9 @@ mod request_queries {
         row.total = Duration::from_millis(61_000);
         row.upstream_failed = true;
         row.bytes = 1 << 40;
+        row.server_span = Some(SpanId::from([0x5e; 8]));
+        row.client_span = Some(SpanId::from([0xc1; 8]));
+        row.upstream_start = Some(MicroTimestamp::from(at(7_000)) + Duration::from_micros(1_250));
         let (_dir, store) = seed(vec![row.clone()]).await;
         let page = store
             .requests(&RequestQuery::new(everything(), LogScope::All))
@@ -1267,6 +1346,9 @@ mod retention {
             fields: None,
             cut: false,
             marker: false,
+            trace_id: None,
+            span_id: None,
+            received: None,
         }
     }
 
@@ -1286,10 +1368,34 @@ mod retention {
             client: IpAddr::V4(Ipv4Addr::LOCALHOST),
             upstream_failed: false,
             request_id: RequestId::from([1; 16]),
+            server_span: None,
+            client_span: None,
+            upstream_start: None,
         }
     }
 
-    /// Appends `records` and `requests` rows of `bytes` each at `time`.
+    fn span(time: Timestamp, bytes: usize) -> Span {
+        Span {
+            trace_id: TraceId::from([1; 16]),
+            span_id: SpanId::from([2; 8]),
+            parent: None,
+            stack: "notes".to_owned(),
+            service: "api".to_owned(),
+            name: "x".repeat(bytes),
+            kind: SpanKind::Server,
+            start: MicroTimestamp::from(time) + Duration::from_micros(250),
+            duration: Duration::from_micros(40),
+            status: SpanStatus::Unset,
+            status_message: None,
+            attributes: None,
+            resource: None,
+            events: None,
+            received: time,
+        }
+    }
+
+    /// Appends `records` and `requests` rows of `bytes` each at `time`, and as many spans as
+    /// request rows, started within that millisecond.
     async fn seed(
         store: &LogStore,
         time: Timestamp,
@@ -1301,6 +1407,7 @@ mod retention {
             .append(&LogBatch {
                 records: (0..records).map(|_| record(time, bytes)).collect(),
                 requests: (0..requests).map(|_| request(time, bytes)).collect(),
+                spans: (0..requests).map(|_| span(time, bytes)).collect(),
                 ..LogBatch::default()
             })
             .await
@@ -1318,6 +1425,14 @@ mod retention {
             .await
             .unwrap();
         (records, requests)
+    }
+
+    /// The starts of the stored spans, in milliseconds, oldest first.
+    async fn span_times(store: &LogStore) -> Vec<i64> {
+        sqlx::query_scalar("SELECT start / 1000 FROM spans ORDER BY start, id")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
     }
 
     async fn used_bytes(store: &LogStore) -> u64 {
@@ -1346,12 +1461,14 @@ mod retention {
             report.expired,
             Removed {
                 records: 3,
-                requests: 2
+                requests: 2,
+                spans: 2
             }
         );
         assert_eq!(report.capped, Removed::default());
         assert!(report.file_bytes > 0);
         assert_eq!(times(&store).await, (vec![ms(recent)], vec![ms(recent)]));
+        assert_eq!(span_times(&store).await, [ms(recent)]);
     }
 
     #[tokio::test]
@@ -1366,14 +1483,41 @@ mod retention {
             report.expired,
             Removed {
                 records: 1,
-                requests: 1
+                requests: 1,
+                spans: 1
             }
         );
         assert_eq!(report.capped, Removed::default());
         let old = ms(now() - 30 * DAY);
         assert_eq!(times(&store).await, (vec![old], vec![old]));
+        assert_eq!(span_times(&store).await, [old]);
         // The next id is not one handed out before.
         assert_eq!(store.head().await.unwrap(), head);
+    }
+
+    #[tokio::test]
+    async fn spans_go_after_three_days_while_records_and_requests_stay_seven() {
+        let (_dir, store) = open().await;
+        let four_days = now() - 4 * DAY;
+        let two_days = now() - 2 * DAY;
+        seed(&store, four_days, 2, 2, 10).await;
+        seed(&store, two_days, 1, 1, 10).await;
+
+        let report = store
+            .sweep(now(), Retention::default())
+            .finish()
+            .await
+            .unwrap();
+        assert_eq!(
+            report.expired,
+            Removed {
+                spans: 2,
+                ..Removed::default()
+            }
+        );
+        assert_eq!(span_times(&store).await, [ms(two_days)]);
+        let (records, requests) = times(&store).await;
+        assert_eq!((records.len(), requests.len()), (3, 3));
     }
 
     #[tokio::test]
@@ -1423,12 +1567,20 @@ mod retention {
             report.capped,
             Removed {
                 records: 20,
-                requests: 20
+                requests: 20,
+                spans: 20
             }
         );
         let (records, requests) = times(&store).await;
-        assert!(records.iter().chain(&requests).all(|&t| t >= ms(second)));
-        assert_eq!((records.len(), requests.len()), (21, 21));
+        let spans = span_times(&store).await;
+        assert!(
+            records
+                .iter()
+                .chain(&requests)
+                .chain(&spans)
+                .all(|&t| t >= ms(second))
+        );
+        assert_eq!((records.len(), requests.len(), spans.len()), (21, 21, 21));
         assert!(used_bytes(&store).await <= cap);
     }
 
@@ -1449,11 +1601,13 @@ mod retention {
             report.capped,
             Removed {
                 records: 5,
-                requests: 5
+                requests: 5,
+                spans: 5
             }
         );
         let (records, requests) = times(&store).await;
         assert_eq!((records.len(), requests.len()), (50, 50));
+        assert_eq!(span_times(&store).await.len(), 50);
     }
 
     #[tokio::test]
@@ -1476,7 +1630,8 @@ mod retention {
             report.expired,
             Removed {
                 records: 500,
-                requests: 500
+                requests: 500,
+                spans: 500
             }
         );
         let after = fs::metadata(store.path()).unwrap().len();
@@ -1495,7 +1650,8 @@ mod retention {
             store.rows_since(now() - HOUR).await.unwrap(),
             RowCounts {
                 records: 5,
-                requests: 1
+                requests: 1,
+                spans: 1
             }
         );
         assert_eq!(
@@ -1620,4 +1776,190 @@ async fn moving_the_log_store_aside_takes_its_sidecars_and_drops_stale_ones() {
         LogStore::move_aside(&state, "rollback-v0.2.0").unwrap_err(),
         StoreError::Io { .. }
     ));
+}
+
+mod spans {
+    use std::ops::Range;
+
+    use super::*;
+
+    const HOUR: Duration = Duration::from_secs(60 * 60);
+
+    fn at(millis: i64) -> Timestamp {
+        Timestamp::from_millis(millis)
+    }
+
+    fn everything() -> Range<Timestamp> {
+        at(0)..at(1_000_000_000)
+    }
+
+    fn trace(n: u8) -> TraceId {
+        TraceId::from([n; 16])
+    }
+
+    /// A span of `trace` started `start_us` µs after the epoch.
+    fn span(trace: TraceId, id: u8, parent: Option<u8>, stack: &str, start_us: i64) -> Span {
+        Span {
+            trace_id: trace,
+            span_id: SpanId::from([id; 8]),
+            parent: parent.map(|p| SpanId::from([p; 8])),
+            stack: stack.to_owned(),
+            service: "api".to_owned(),
+            name: format!("span {id}"),
+            kind: SpanKind::Internal,
+            start: MicroTimestamp::from_micros(start_us),
+            duration: Duration::from_micros(130),
+            status: SpanStatus::Unset,
+            status_message: None,
+            attributes: None,
+            resource: None,
+            events: None,
+            received: at(900_000),
+        }
+    }
+
+    async fn seed(spans: Vec<Span>) -> (TempDir, LogStore) {
+        let (dir, store) = open().await;
+        store
+            .append(&LogBatch {
+                spans,
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        (dir, store)
+    }
+
+    fn ids(spans: &[Span]) -> Vec<String> {
+        spans
+            .iter()
+            .map(|s| s.span_id.to_string()[..2].to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_span_reads_back_as_written() {
+        let mut full = span(trace(1), 1, None, "notes", 1_234_567);
+        full.kind = SpanKind::Server;
+        full.status = SpanStatus::Error;
+        full.status_message = Some("upstream timed out".into());
+        full.attributes = Some(r#"{"http.route":"/users/:id","retries":[1,2]}"#.into());
+        full.resource = Some(r#"{"service.name":"notes-api"}"#.into());
+        full.events = Some(r#"[{"name":"exception","time_us":1234600}]"#.into());
+        full.duration = Duration::from_micros(7);
+        let child = span(trace(1), 2, Some(1), "notes", 1_234_570);
+        let (_dir, store) = seed(vec![child.clone(), full.clone()]).await;
+
+        assert_eq!(store.trace_spans(trace(1)).await.unwrap(), [full, child]);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_trace_is_its_spans_by_start() {
+        let (_dir, store) = seed(vec![
+            span(trace(1), 3, Some(1), "notes", 3_000),
+            span(trace(2), 9, None, "notes", 1_500),
+            span(trace(1), 1, None, "notes", 1_000),
+            span(trace(1), 2, Some(1), "blog", 2_000),
+        ])
+        .await;
+        assert_eq!(
+            ids(&store.trace_spans(trace(1)).await.unwrap()),
+            ["01", "02", "03"]
+        );
+        assert!(store.trace_spans(trace(7)).await.unwrap().is_empty());
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn roots_over_a_range_and_scope_come_newest_first() {
+        let ms = 1_000;
+        let (_dir, store) = seed(vec![
+            span(trace(1), 1, None, "notes", 1_000 * ms),
+            span(trace(1), 2, Some(1), "notes", 1_001 * ms),
+            span(trace(2), 3, None, "blog", 2_000 * ms),
+            span(trace(3), 4, None, "notes", 3_000 * ms),
+            // Its parent was lost or is the proxy's: not a root here.
+            span(trace(4), 5, Some(99), "notes", 4_000 * ms),
+        ])
+        .await;
+        let roots = |query: RootQuery| {
+            let store = store.clone();
+            async move { ids(&store.root_spans(&query).await.unwrap()) }
+        };
+
+        assert_eq!(
+            roots(RootQuery::new(everything(), LogScope::All)).await,
+            ["04", "03", "01"]
+        );
+        assert_eq!(
+            roots(RootQuery::new(
+                everything(),
+                LogScope::Stack("notes".into())
+            ))
+            .await,
+            ["04", "01"]
+        );
+        assert!(
+            roots(RootQuery::new(everything(), LogScope::Hoster))
+                .await
+                .is_empty()
+        );
+        // The range is in milliseconds, its end exclusive.
+        assert_eq!(
+            roots(RootQuery::new(at(1_000)..at(3_000), LogScope::All)).await,
+            ["03", "01"]
+        );
+        let mut limited = RootQuery::new(everything(), LogScope::All);
+        limited.limit = 2;
+        assert_eq!(roots(limited).await, ["04", "03"]);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn trace_and_root_reads_use_their_indexes() {
+        let (_dir, store) = open().await;
+        let plan = |sql: &'static str| {
+            let store = store.clone();
+            async move {
+                let rows: Vec<(i64, i64, i64, String)> =
+                    sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+                        .fetch_all(&store.pool)
+                        .await
+                        .unwrap();
+                rows.into_iter().map(|r| r.3).collect::<Vec<_>>().join("; ")
+            }
+        };
+        let by_trace = plan("SELECT * FROM spans WHERE trace_id = 'x' ORDER BY start").await;
+        assert!(by_trace.contains("spans_by_trace"), "{by_trace}");
+        let roots = plan(
+            "SELECT * FROM spans WHERE parent_span_id IS NULL AND start >= 0 AND start < 9 \
+             ORDER BY start DESC LIMIT 5",
+        )
+        .await;
+        assert!(roots.contains("spans_roots_by_start"), "{roots}");
+        let stack_roots = plan(
+            "SELECT * FROM spans WHERE parent_span_id IS NULL AND start >= 0 AND start < 9 \
+             AND stack = 'notes' ORDER BY start DESC LIMIT 5",
+        )
+        .await;
+        assert!(
+            stack_roots.contains("spans_roots_by_stack"),
+            "{stack_roots}"
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn spans_of_the_last_hour_are_counted_by_start() {
+        let now = at(1_800_000_000_000);
+        let micros = |t: Timestamp| MicroTimestamp::from(t).as_micros();
+        let (_dir, store) = seed(vec![
+            span(trace(1), 1, None, "notes", micros(now - 2 * HOUR)),
+            span(trace(2), 2, None, "notes", micros(now - HOUR / 2)),
+        ])
+        .await;
+        assert_eq!(store.rows_since(now - HOUR).await.unwrap().spans, 1);
+        store.close().await;
+    }
 }

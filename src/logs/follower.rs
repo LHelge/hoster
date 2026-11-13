@@ -537,6 +537,9 @@ impl<R: ContainerRuntime> Tail<R> {
             fields: parsed.fields,
             cut: parsed.cut,
             marker: false,
+            trace_id: None,
+            span_id: None,
+            received: None,
         };
         self.send(record, mark);
     }
@@ -555,6 +558,9 @@ impl<R: ContainerRuntime> Tail<R> {
             fields: None,
             cut: false,
             marker: true,
+            trace_id: None,
+            span_id: None,
+            received: None,
         };
         self.send(record, None);
     }
@@ -583,6 +589,9 @@ impl<R: ContainerRuntime> Tail<R> {
             fields: None,
             cut: false,
             marker: true,
+            trace_id: None,
+            span_id: None,
+            received: None,
         };
         self.send(record, self.after);
     }

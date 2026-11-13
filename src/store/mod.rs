@@ -50,10 +50,11 @@ pub use deploy_log::{DeploymentLogEntry, DeploymentLogPage, DeploymentLogQuery};
     reason = "the record types are written by the log store's recorder as it lands"
 )]
 pub use logs::{
-    InvalidPattern, Level, LevelCounts, LogBatch, LogCursor, LogEntry, LogFileFacts, LogHead,
-    LogPage, LogQuery, LogRecord, LogScope, LogStore, LogTail, Page, PageAt, RecordKey, Removed,
-    RequestCounts, RequestEntry, RequestId, RequestQuery, RequestRow, Retention, RowCounts,
-    ServiceSeen, StatusFilter, Stream, Sweep, SweepReport, Tail, TextFilter, UnknownLogText,
+    HexId, InvalidPattern, Level, LevelCounts, LogBatch, LogCursor, LogEntry, LogFileFacts,
+    LogHead, LogPage, LogQuery, LogRecord, LogScope, LogStore, LogTail, MicroTimestamp, Page,
+    PageAt, RecordKey, Removed, RequestCounts, RequestEntry, RequestId, RequestQuery, RequestRow,
+    Retention, RootQuery, RowCounts, ServiceSeen, Span, SpanId, SpanKind, SpanStatus, StatusFilter,
+    Stream, Sweep, SweepReport, Tail, TextFilter, TraceId, UnknownLogText,
 };
 pub use notifications::{
     DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,

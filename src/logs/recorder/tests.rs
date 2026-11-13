@@ -3,7 +3,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use tempfile::TempDir;
 
 use super::*;
-use crate::store::{Level, LogBatch, RequestId, Retention, Timestamp};
+use crate::store::{
+    Level, LogBatch, MicroTimestamp, RequestId, Retention, SpanId, SpanKind, SpanStatus, Timestamp,
+    TraceId,
+};
 
 const SHORT: Duration = Duration::from_millis(20);
 const NEVER: Duration = Duration::from_secs(3600);
@@ -44,6 +47,9 @@ fn record(stream: Stream, message: &str) -> LogRecord {
         fields: Some(r#"{"user":"me"}"#.to_owned()),
         cut: false,
         marker: false,
+        trace_id: None,
+        span_id: None,
+        received: None,
     }
 }
 
@@ -63,6 +69,29 @@ fn request(path: &str) -> RequestRow {
         client: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
         upstream_failed: false,
         request_id: RequestId::from([7; 16]),
+        server_span: None,
+        client_span: None,
+        upstream_start: None,
+    }
+}
+
+fn span(id: u8) -> Span {
+    Span {
+        trace_id: TraceId::from([7; 16]),
+        span_id: SpanId::from([id; 8]),
+        parent: None,
+        stack: "notes".to_owned(),
+        service: "api".to_owned(),
+        name: "GET /users".to_owned(),
+        kind: SpanKind::Server,
+        start: MicroTimestamp::from(Timestamp::now()),
+        duration: Duration::from_micros(830),
+        status: SpanStatus::Ok,
+        status_message: None,
+        attributes: Some(r#"{"http.route":"/users"}"#.to_owned()),
+        resource: None,
+        events: None,
+        received: Timestamp::now(),
     }
 }
 
@@ -114,6 +143,36 @@ async fn offered_items_are_committed_together_with_their_newest_cursors() {
     assert_eq!(counts(&store).await, (4, 1));
     assert_eq!(cursor_time(&store, "c1").await, Some(20));
     assert_eq!(cursor_time(&store, "c2").await, Some(5));
+    assert!(sink.drops().is_empty());
+
+    stop.cancel();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn spans_and_otlp_records_are_committed_with_the_rest() {
+    let (_dir, store) = store().await;
+    let (recorder, sink) = LogRecorder::new(store.clone()).await.unwrap();
+    let stop = CancellationToken::new();
+    let task = tokio::spawn(recorder.with_interval(SHORT).run(stop.clone()));
+
+    let mut otlp = record(Stream::Otlp, "exported");
+    otlp.trace_id = Some(TraceId::from([7; 16]));
+    otlp.span_id = Some(SpanId::from([1; 8]));
+    otlp.received = Some(Timestamp::now());
+    assert!(sink.try_span(span(1)));
+    assert!(sink.try_span(span(2)));
+    assert!(sink.try_record(otlp));
+
+    head_reaches(&sink, |head| head.record == 1).await;
+    assert_eq!(
+        store
+            .trace_spans(TraceId::from([7; 16]))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(sink.drops().is_empty());
 
     stop.cancel();
@@ -207,12 +266,17 @@ async fn a_full_channel_drops_and_counts_by_kind_without_blocking() {
     assert!(!sink.try_record(record(Stream::Hoster, "y")));
     assert!(!sink.try_record(record(Stream::Hoster, "z")));
     assert!(!sink.try_request(request("/over")));
+    assert!(!sink.try_record(record(Stream::Otlp, "exported")));
+    assert!(!sink.try_span(span(1)));
+    assert!(!sink.try_span(span(2)));
     assert_eq!(
         sink.drops(),
         Drops {
             records: 1,
             hoster_records: 2,
+            otlp_records: 1,
             requests: 1,
+            spans: 2,
             ..Drops::default()
         }
     );

@@ -6,10 +6,11 @@ use std::ops::Range;
 use std::str::FromStr;
 use std::time::Duration;
 
-use sqlx::{QueryBuilder, Sqlite};
+use sqlx::sqlite::SqliteRow;
+use sqlx::{FromRow, QueryBuilder, Row as _, Sqlite};
 
 use super::{LogQuery, LogScope, Page, PageAt, Paged, RecordKey, Tail, TextFilter};
-use crate::store::logs::{LogStore, RequestId, RequestRow, UnknownLogText};
+use crate::store::logs::{LogStore, MicroTimestamp, RequestId, RequestRow, UnknownLogText};
 use crate::store::{Result, StoreError, Timestamp};
 
 /// Which statuses a request query keeps.
@@ -110,7 +111,8 @@ impl RequestQuery {
 }
 
 const COLUMNS: &str = "SELECT id, time, host, prefix, stack, service, method, path, status, \
-                       header_ms, total_ms, bytes, client, upstream_failed, request_id FROM";
+                       header_ms, total_ms, bytes, client, upstream_failed, request_id, \
+                       server_span_id, client_span_id, upstream_start FROM";
 
 impl Paged for RequestQuery {
     type Row = Row;
@@ -179,66 +181,84 @@ impl RequestEntry {
     }
 }
 
-type Row = (
-    i64,
-    Timestamp,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    i64,
-    Option<i64>,
-    i64,
-    i64,
-    String,
-    bool,
-    String,
-);
+/// A request row as SQL returns it: more columns than sqlx decodes a tuple of.
+#[derive(Debug)]
+pub(super) struct Row {
+    id: i64,
+    time: Timestamp,
+    host: String,
+    prefix: String,
+    stack: String,
+    service: String,
+    method: String,
+    path: String,
+    status: i64,
+    header_ms: Option<i64>,
+    total_ms: i64,
+    bytes: i64,
+    client: String,
+    upstream_failed: bool,
+    request_id: String,
+    server_span_id: Option<String>,
+    client_span_id: Option<String>,
+    upstream_start: Option<MicroTimestamp>,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for Row {
+    fn from_row(row: &'r SqliteRow) -> sqlx::Result<Self> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            time: row.try_get("time")?,
+            host: row.try_get("host")?,
+            prefix: row.try_get("prefix")?,
+            stack: row.try_get("stack")?,
+            service: row.try_get("service")?,
+            method: row.try_get("method")?,
+            path: row.try_get("path")?,
+            status: row.try_get("status")?,
+            header_ms: row.try_get("header_ms")?,
+            total_ms: row.try_get("total_ms")?,
+            bytes: row.try_get("bytes")?,
+            client: row.try_get("client")?,
+            upstream_failed: row.try_get("upstream_failed")?,
+            request_id: row.try_get("request_id")?,
+            server_span_id: row.try_get("server_span_id")?,
+            client_span_id: row.try_get("client_span_id")?,
+            upstream_start: row.try_get("upstream_start")?,
+        })
+    }
+}
 
 impl TryFrom<Row> for RequestEntry {
     type Error = UnknownLogText;
 
     fn try_from(row: Row) -> Result<Self, Self::Error> {
-        let (
-            id,
-            time,
-            host,
-            prefix,
-            stack,
-            service,
-            method,
-            path,
-            status,
-            header_ms,
-            total_ms,
-            bytes,
-            client,
-            upstream_failed,
-            request_id,
-        ) = row;
         let millis = |ms: i64| Duration::from_millis(u64::try_from(ms).unwrap_or(0));
+        let span = |id: Option<String>| id.as_deref().map(str::parse).transpose();
         Ok(Self {
-            id,
+            id: row.id,
             request: RequestRow {
-                time,
-                host,
-                prefix,
-                stack,
-                service,
-                method,
-                path,
-                status: u16::try_from(status)
-                    .map_err(|_| UnknownLogText::new("status", &status.to_string()))?,
-                to_header: header_ms.map(millis),
-                total: millis(total_ms),
-                bytes: u64::try_from(bytes).unwrap_or(0),
-                client: client
+                time: row.time,
+                host: row.host,
+                prefix: row.prefix,
+                stack: row.stack,
+                service: row.service,
+                method: row.method,
+                path: row.path,
+                status: u16::try_from(row.status)
+                    .map_err(|_| UnknownLogText::new("status", &row.status.to_string()))?,
+                to_header: row.header_ms.map(millis),
+                total: millis(row.total_ms),
+                bytes: u64::try_from(row.bytes).unwrap_or(0),
+                client: row
+                    .client
                     .parse()
-                    .map_err(|_| UnknownLogText::new("client address", &client))?,
-                upstream_failed,
-                request_id: request_id.parse()?,
+                    .map_err(|_| UnknownLogText::new("client address", &row.client))?,
+                upstream_failed: row.upstream_failed,
+                request_id: row.request_id.parse()?,
+                server_span: span(row.server_span_id)?,
+                client_span: span(row.client_span_id)?,
+                upstream_start: row.upstream_start,
             },
         })
     }

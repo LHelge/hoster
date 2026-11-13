@@ -116,6 +116,9 @@ impl HosterRecords {
                 fields: None,
                 cut: false,
                 marker: true,
+                trace_id: None,
+                span_id: None,
+                received: None,
             });
         }
         if admission.keep {
@@ -227,6 +230,9 @@ where
             fields: parsed.fields,
             cut: false,
             marker: false,
+            trace_id: None,
+            span_id: None,
+            received: None,
         };
         self.0.offer(&sink, record);
     }

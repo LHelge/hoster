@@ -1,5 +1,6 @@
-//! Retention of the log store (ADR-0067 §7): records and request rows older than
-//! [`Retention::MAX_AGE`] are deleted, then whole hours, oldest first and across both tables,
+//! Retention of the log store (ADR-0067 §7, ADR-0069 §7): records and request rows older than
+//! [`Retention::MAX_AGE`] and spans older than [`Retention::SPAN_MAX_AGE`] are deleted, then
+//! whole hours, oldest first and across all three tables,
 //! while the file holds more than [`Retention::MAX_BYTES`]; each pass ends with an incremental
 //! vacuum that gives the freed pages back to the file system.
 //!
@@ -22,6 +23,7 @@ use crate::store::{Result, Timestamp};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retention {
     max_age: Duration,
+    span_max_age: Duration,
     max_bytes: u64,
     batch_rows: i64,
 }
@@ -29,6 +31,8 @@ pub struct Retention {
 impl Retention {
     /// How long records and request rows are kept.
     pub const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    /// How long spans are kept (ADR-0069 §7), by their start.
+    pub const SPAN_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
     /// How large the file may grow, measured without its free pages, before the oldest hours go.
     pub const MAX_BYTES: u64 = 1 << 30;
     /// Rows one delete statement removes at most.
@@ -36,11 +40,13 @@ impl Retention {
     /// The unit the size cap removes, oldest first.
     const HOUR: Duration = Duration::from_secs(60 * 60);
 
-    /// Limits other than ADR-0067's, for tests.
+    /// Limits other than ADR-0067's, for tests. Spans are kept for the shorter of `max_age`
+    /// and [`Retention::SPAN_MAX_AGE`].
     #[cfg(test)]
     pub(crate) fn new(max_age: Duration, max_bytes: u64, batch_rows: i64) -> Self {
         Self {
             max_age,
+            span_max_age: max_age.min(Self::SPAN_MAX_AGE),
             max_bytes,
             batch_rows: batch_rows.max(1),
         }
@@ -51,29 +57,30 @@ impl Default for Retention {
     fn default() -> Self {
         Self {
             max_age: Self::MAX_AGE,
+            span_max_age: Self::SPAN_MAX_AGE,
             max_bytes: Self::MAX_BYTES,
             batch_rows: Self::BATCH_ROWS,
         }
     }
 }
 
-/// The tables a sweep keeps within the limits, in the order it sweeps them.
-///
-/// The span table of the OTLP epic joins here as a third variant: its statements below, and
-/// its own age in [`Swept::max_age`] (3 days, OQ-42). The size pass then removes its oldest
-/// hours together with the others'.
+/// The tables a sweep keeps within the limits, in the order it sweeps them. A span's time is
+/// its start, in microseconds; the statements compare it with the same millisecond bound as
+/// the other tables' times, so the size pass removes the same hours from all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Swept {
     Records,
     Requests,
+    Spans,
 }
 
 impl Swept {
-    const ALL: [Self; 2] = [Self::Records, Self::Requests];
+    const ALL: [Self; 3] = [Self::Records, Self::Requests, Self::Spans];
 
     fn max_age(self, retention: &Retention) -> Duration {
         match self {
             Self::Records | Self::Requests => retention.max_age,
+            Self::Spans => retention.span_max_age,
         }
     }
 
@@ -88,6 +95,11 @@ impl Swept {
                 "DELETE FROM requests WHERE id IN (SELECT id FROM requests \
                  WHERE time < ?1 AND id < (SELECT max(id) FROM requests) ORDER BY time LIMIT ?2)"
             }
+            Self::Spans => {
+                "DELETE FROM spans WHERE id IN (SELECT id FROM spans \
+                 WHERE start < ?1 * 1000 AND id < (SELECT max(id) FROM spans) \
+                 ORDER BY start LIMIT ?2)"
+            }
         }
     }
 
@@ -100,6 +112,11 @@ impl Swept {
             Self::Requests => {
                 "SELECT min(time) FROM requests WHERE id < (SELECT max(id) FROM requests)"
             }
+            // Milliseconds, towards the past, like the other tables' times.
+            Self::Spans => {
+                "SELECT (min(start) - ((min(start) % 1000) + 1000) % 1000) / 1000 FROM spans \
+                 WHERE id < (SELECT max(id) FROM spans)"
+            }
         }
     }
 }
@@ -111,6 +128,8 @@ pub struct Removed {
     pub records: u64,
     /// From `requests`.
     pub requests: u64,
+    /// From `spans`.
+    pub spans: u64,
 }
 
 impl Removed {
@@ -118,6 +137,7 @@ impl Removed {
         match table {
             Swept::Records => self.records += rows,
             Swept::Requests => self.requests += rows,
+            Swept::Spans => self.spans += rows,
         }
     }
 }

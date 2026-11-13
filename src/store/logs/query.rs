@@ -6,6 +6,7 @@
 //! been visited. The two share that scan, the [`PageAt`] cursor and the [`Page`] they return.
 
 mod requests;
+mod spans;
 
 use std::fmt;
 use std::ops::Range;
@@ -20,6 +21,7 @@ use super::{Level, LogRecord, LogStore, Stream, UnknownLogText};
 use crate::store::{Result, StoreError, Timestamp};
 
 pub use requests::{RequestCounts, RequestEntry, RequestQuery, StatusFilter};
+pub use spans::RootQuery;
 
 /// The most rows one query visits. A query that reaches it before its page is full stops and
 /// says where ([`Page::scan_stopped`]).
@@ -288,7 +290,7 @@ impl Paged for LogQuery {
     fn select_from(&self, from: &str) -> QueryBuilder<Sqlite> {
         let mut sql = QueryBuilder::new(format!(
             "SELECT id, time, stack, service, generation, stream, level, message, fields, cut, \
-             marker FROM {from}"
+             marker, trace_id, span_id, received FROM {from}"
         ));
         Self::push_where(&mut sql, &self.range, &self.scope);
         Self::push_in(&mut sql, "service", self.services.clone());
@@ -393,14 +395,31 @@ type EntryRow = (
     Option<String>,
     bool,
     bool,
+    Option<String>,
+    Option<String>,
+    Option<Timestamp>,
 );
 
 impl TryFrom<EntryRow> for LogEntry {
     type Error = UnknownLogText;
 
     fn try_from(row: EntryRow) -> Result<Self, Self::Error> {
-        let (id, time, stack, service, generation, stream, level, message, fields, cut, marker) =
-            row;
+        let (
+            id,
+            time,
+            stack,
+            service,
+            generation,
+            stream,
+            level,
+            message,
+            fields,
+            cut,
+            marker,
+            trace_id,
+            span_id,
+            received,
+        ) = row;
         Ok(Self {
             id,
             record: LogRecord {
@@ -414,6 +433,9 @@ impl TryFrom<EntryRow> for LogEntry {
                 fields,
                 cut,
                 marker,
+                trace_id: trace_id.as_deref().map(str::parse).transpose()?,
+                span_id: span_id.as_deref().map(str::parse).transpose()?,
+                received,
             },
         })
     }
