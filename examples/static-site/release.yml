@@ -48,9 +48,9 @@ jobs:
 
       # Any generator works here; the Dockerfile only needs the output in `dist/`.
       # The same version as the aphid-server tag in the Dockerfile.
-      - uses: LHelge/aphid@v0.5.0
+      - uses: LHelge/aphid@v0.5.1
         with:
-          version: v0.5.0   # the binary; defaults to the latest release
+          version: v0.5.1   # the binary; defaults to the latest release
           config: aphid.toml
           output: dist
           precompress: true   # .br/.gz siblings that aphid-server sends instead of compressing live
