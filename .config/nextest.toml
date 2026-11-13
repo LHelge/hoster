@@ -13,3 +13,11 @@ fail-fast = false
 retries = 0
 # A hung test fails after five minutes instead of running into the job's timeout.
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The per-address cap is checked when a connection is accepted and its slot is taken a moment
+# later in the connection's task, so a burst gets past it by however far the accept loop runs
+# ahead: about 3 on an idle machine, 80 under a loaded CI runner. The test measures the idle
+# figure, so it runs alone (OQ-44).
+[[profile.default.overrides]]
+filter = "test(=proxy::tests::limits::a_burst_from_one_address_overshoots_its_cap_by_little)"
+threads-required = "num-test-threads"
