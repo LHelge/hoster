@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-38, OQ-40, OQ-42 and OQ-43 are open (OQ-42 has the owner's answers and waits for a spike; OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38, OQ-40, OQ-42 and OQ-43 are open (OQ-42 has the owner's answers and the spike's findings, and waits for its ADR; OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -657,6 +657,38 @@ is written once it has run (task `yjp`).
 8. Open (added after the answers above). On 2026-11-12 the owner chose not to split the edge
    part (questions 6 and 8) into an ADR of its own, so the trace pages (`qnh`) wait for this
    ADR and the receiver (`xv9`).
+
+**Spike findings for question 2 (2026-11-13, `h4q`).** Full note:
+[spikes/container-to-host-listener.md](spikes/container-to-host-listener.md). Run on podman
+6.1.4 with pasta; other versions from release notes.
+
+- **2A works with no host-wide change, but not on loopback.** `host.containers.internal` is
+  `169.254.1.2`, which pasta delivers to the host's interface address. The listener must bind
+  the wildcard or that address, so its port is open on the public address. Binding to the `lo`
+  device does not help. hoster can refuse every peer that is not one of the host's own
+  addresses (reasoned, not tested from a second machine), and needs the token anyway: every
+  container arrives from the host's own address.
+- **The problem statement above is wrong on one point:** containers already have a path to
+  the host. Anything listening on the wildcard or the interface address (sshd, for one) is
+  reachable as `host.containers.internal` today. Services on `127.0.0.1`, hoster's upstream
+  ports included, are not. 2A exposes nothing new to containers.
+- **2B does not work as written.** From a container the host's public address is the rootless
+  namespace itself, so a public route is refused on any host with its public address on its
+  interface. That also contradicts ADR-0046 (proposed task `kf3`). It works when the hostname
+  is pinned to `169.254.1.2` with an extra-hosts entry on the container, at the cost of TLS, a
+  CA bundle in every image and the connection caps of ADR-0065 shared by all containers.
+- **2C** cannot be configured through `OTEL_EXPORTER_OTLP_ENDPOINT` (the specification allows
+  only `http` and `https`), so it rules out answer 3.
+
+- **A third form, 2A′, came up after the first results:** the receiver as a route on the
+  proxy's existing `:80`, matched by `Host: host.containers.internal` and a peer that is one of
+  the host's own addresses, 404 otherwise. No new port, no TLS, no firewall rule. It worked
+  with a stand-in listener, not yet on the real proxy. Local peers need their own treatment
+  in the caps of ADR-0065 and should stay out of the request log.
+
+Agent's recommendation: 2A′, with the token as identity. The owner preferred it over a
+dedicated port (2026-11-13); it is not yet a decision, which `yjp` records. Plain 2A with a
+firewall rule for its port is the fallback if the proxy cannot make the check.
 
 ## OQ-43: A filter language for the Telemetry query box
 
