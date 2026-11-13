@@ -26,6 +26,9 @@ fn record(ago_secs: u64, stack: Option<&str>, service: &str, message: &str) -> L
         fields: None,
         cut: false,
         marker: false,
+        trace_id: None,
+        span_id: None,
+        received: None,
     }
 }
 

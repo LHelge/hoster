@@ -1,16 +1,17 @@
 ---
 id: aqy
 title: "OTLP: span table and OTLP log record columns in logs.db"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:36:02.163756928Z"
-updated: "2026-11-12T19:36:02.163756928Z"
+updated: "2026-11-13T17:22:43.169750039Z"
 tags:
   - store
   - observability
 depends_on:
   - yjp
 parent: xv9
+attempts: 1
 ---
 
 ## Summary

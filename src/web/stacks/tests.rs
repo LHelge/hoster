@@ -2911,6 +2911,9 @@ mod stored_logs {
             fields: None,
             cut: false,
             marker: false,
+            trace_id: None,
+            span_id: None,
+            received: None,
         }
     }
 
@@ -3451,6 +3454,9 @@ mod stored_logs {
                 client: IpAddr::from([203, 0, 113, 7]),
                 upstream_failed: false,
                 request_id: RequestId::from([ago_secs as u8; 16]),
+                server_span: None,
+                client_span: None,
+                upstream_start: None,
             }
         }
 

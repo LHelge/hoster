@@ -555,6 +555,9 @@ mod tests {
                 fields: None,
                 cut: false,
                 marker: false,
+                trace_id: None,
+                span_id: None,
+                received: None,
             },
         }
     }

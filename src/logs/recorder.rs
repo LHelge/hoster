@@ -1,7 +1,7 @@
 //! The log recorder (ADR-0067 §6): the one writer of `logs.db`.
 //!
-//! Producers (the container log followers, the proxy, hoster's own layer of ADR-0068) hold a
-//! [`LogSink`] and offer it records and request rows. The sink never awaits: when the bounded
+//! Producers (the container log followers, the proxy, hoster's own layer of ADR-0068, the OTLP
+//! receiver of ADR-0069) hold a [`LogSink`] and offer it records, request rows and spans. The sink never awaits: when the bounded
 //! channel to the [`LogRecorder`] is full, or there is no recorder because `logs.db` could not
 //! be opened, the item is dropped and counted ([`Drops`]). The recorder commits what it has
 //! received in one transaction about once a second, or as soon as a batch reaches its cap, and
@@ -28,8 +28,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::store::{
-    LogBatch, LogCursor, LogHead, LogRecord, LogStore, RequestRow, Retention, StoreError, Stream,
-    Sweep, SweepReport, Timestamp,
+    LogBatch, LogCursor, LogHead, LogRecord, LogStore, RequestRow, Retention, Span, StoreError,
+    Stream, Sweep, SweepReport, Timestamp,
 };
 
 /// One item on its way to the recorder.
@@ -41,6 +41,8 @@ enum Entry {
         cursor: Option<LogCursor>,
     },
     Request(RequestRow),
+    /// A span a container exported over OTLP.
+    Span(Span),
     /// The container no longer exists: delete its cursor.
     ForgetCursor(String),
 }
@@ -52,11 +54,15 @@ pub struct Drops {
     pub records: u64,
     /// hoster's own records dropped the same way (ADR-0068 §4).
     pub hoster_records: u64,
+    /// Records received over OTLP dropped the same way (ADR-0069 §7).
+    pub otlp_records: u64,
     /// Request rows dropped the same way.
     pub requests: u64,
+    /// Spans received over OTLP dropped the same way.
+    pub spans: u64,
     /// Commits that failed; their batches are lost.
     pub failed_commits: u64,
-    /// Records and request rows lost with those batches.
+    /// Records, request rows and spans lost with those batches.
     pub lost_in_failed_commits: u64,
 }
 
@@ -72,7 +78,9 @@ impl Drops {
 struct Counters {
     records: AtomicU64,
     hoster_records: AtomicU64,
+    otlp_records: AtomicU64,
     requests: AtomicU64,
+    spans: AtomicU64,
     failed_commits: AtomicU64,
     lost_in_failed_commits: AtomicU64,
 }
@@ -87,7 +95,9 @@ impl Counters {
         Drops {
             records: read(&self.records),
             hoster_records: read(&self.hoster_records),
+            otlp_records: read(&self.otlp_records),
             requests: read(&self.requests),
+            spans: read(&self.spans),
             failed_commits: read(&self.failed_commits),
             lost_in_failed_commits: read(&self.lost_in_failed_commits),
         }
@@ -118,8 +128,8 @@ impl LogSink {
         }
     }
 
-    /// Offers a record that came from no container (hoster's own, ADR-0068). `false` when it
-    /// was dropped.
+    /// Offers a record that came from no container's output: hoster's own (ADR-0068), or one a
+    /// container exported over OTLP (ADR-0069 §6). `false` when it was dropped.
     pub fn try_record(&self, record: LogRecord) -> bool {
         self.offer(Entry::Record {
             record,
@@ -139,6 +149,12 @@ impl LogSink {
     /// Offers one of the proxy's request rows. `false` when it was dropped.
     pub fn try_request(&self, request: RequestRow) -> bool {
         self.offer(Entry::Request(request))
+    }
+
+    /// Offers a span a container exported over OTLP (ADR-0069 §6). `false` when it was
+    /// dropped.
+    pub fn try_span(&self, span: Span) -> bool {
+        self.offer(Entry::Span(span))
     }
 
     /// Asks for the cursor of `container`, which no longer exists, to be deleted, after every
@@ -182,11 +198,13 @@ impl LogSink {
 
     fn offer(&self, entry: Entry) -> bool {
         let counter = match &entry {
-            Entry::Record { record, .. } if record.stream == Stream::Hoster => {
-                Some(&self.counters.hoster_records)
-            }
-            Entry::Record { .. } => Some(&self.counters.records),
+            Entry::Record { record, .. } => Some(match record.stream {
+                Stream::Hoster => &self.counters.hoster_records,
+                Stream::Otlp => &self.counters.otlp_records,
+                Stream::Stdout | Stream::Stderr => &self.counters.records,
+            }),
             Entry::Request(_) => Some(&self.counters.requests),
+            Entry::Span(_) => Some(&self.counters.spans),
             Entry::ForgetCursor(_) => None,
         };
         let sent = self.entries.try_send(entry).is_ok();
@@ -210,7 +228,7 @@ impl Tap {
         loop {
             match self.0.recv().await? {
                 Entry::Record { record, cursor } => return Some((record, cursor)),
-                Entry::Request(_) | Entry::ForgetCursor(_) => {}
+                Entry::Request(_) | Entry::Span(_) | Entry::ForgetCursor(_) => {}
             }
         }
     }
@@ -233,6 +251,17 @@ impl Tap {
             }
         }
         requests
+    }
+
+    /// The spans offered so far, without waiting. Records and request rows are skipped.
+    pub fn drain_spans(&mut self) -> Vec<Span> {
+        let mut spans = Vec::new();
+        while let Ok(entry) = self.0.try_recv() {
+            if let Entry::Span(span) = entry {
+                spans.push(span);
+            }
+        }
+        spans
     }
 
     /// The records offered so far, without waiting.
@@ -267,7 +296,7 @@ impl LogRecorder {
     pub const CHANNEL_CAPACITY: usize = 16_384;
     /// How long received items wait before they are committed.
     pub const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
-    /// Records plus request rows that are committed at once, without waiting for the interval,
+    /// Records plus request rows plus spans that are committed at once, without waiting for the interval,
     /// so a burst never builds one huge transaction.
     pub const BATCH_CAP: usize = 4_096;
     /// How often a retention pass starts after the one at startup.
@@ -391,6 +420,8 @@ impl LogRecorder {
             expired_requests = report.expired.requests,
             capped_records = report.capped.records,
             capped_requests = report.capped.requests,
+            expired_spans = report.expired.spans,
+            capped_spans = report.capped.spans,
             file_bytes = report.file_bytes,
             "swept the log store to its retention"
         );
@@ -425,6 +456,7 @@ impl LogRecorder {
 struct Batch {
     records: Vec<LogRecord>,
     requests: Vec<RequestRow>,
+    spans: Vec<Span>,
     /// The newest cursor per container; followers send lines in order.
     cursors: BTreeMap<String, LogCursor>,
     /// Containers whose cursors are deleted.
@@ -442,6 +474,7 @@ impl Batch {
                 }
             }
             Entry::Request(request) => self.requests.push(request),
+            Entry::Span(span) => self.spans.push(span),
             Entry::ForgetCursor(container) => {
                 self.cursors.remove(&container);
                 self.forgotten.insert(container);
@@ -450,13 +483,14 @@ impl Batch {
     }
 
     fn len(&self) -> usize {
-        self.records.len() + self.requests.len()
+        self.records.len() + self.requests.len() + self.spans.len()
     }
 
     fn into_log_batch(self) -> LogBatch {
         LogBatch {
             records: self.records,
             requests: self.requests,
+            spans: self.spans,
             cursors: self.cursors.into_values().collect(),
             forgotten: self.forgotten.into_iter().collect(),
         }

@@ -458,6 +458,9 @@ impl<'a> AccessRecord<'a> {
                 .unwrap_or(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)),
             upstream_failed: self.upstream_failed(),
             request_id,
+            server_span: None,
+            client_span: None,
+            upstream_start: None,
         })
     }
 }
@@ -1130,6 +1133,9 @@ mod tests {
                 client: IpAddr::V6("2001:db8::1".parse().unwrap()),
                 upstream_failed: false,
                 request_id: id,
+                server_span: None,
+                client_span: None,
+                upstream_start: None,
             }
         );
         assert_eq!(record(Some(&reserved)).request_row(at, id), None);

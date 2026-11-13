@@ -6,13 +6,15 @@ use std::path::Path;
 use super::LogStore;
 use crate::store::{Migrations, Result, SchemaVersion, StoreError, Timestamp};
 
-/// Records and request rows stamped in some period.
+/// Records, request rows and spans stamped in some period.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RowCounts {
     /// In `log_records`.
     pub records: u64,
     /// In `requests`.
     pub requests: u64,
+    /// In `spans`, by their start.
+    pub spans: u64,
 }
 
 /// What `hoster doctor` reads of an existing `logs.db`.
@@ -28,12 +30,13 @@ impl LogStore {
     /// SQLite's `auto_vacuum` value for `INCREMENTAL`.
     const AUTO_VACUUM_INCREMENTAL: i64 = 2;
 
-    /// The records and request rows stamped at or after `since`, counted with the time
-    /// indexes.
+    /// The records, request rows and spans stamped at or after `since`, counted with the
+    /// time indexes.
     pub async fn rows_since(&self, since: Timestamp) -> Result<RowCounts> {
-        let (records, requests): (i64, i64) = sqlx::query_as(
+        let (records, requests, spans): (i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT count(*) FROM log_records WHERE time >= ?1), \
-                    (SELECT count(*) FROM requests WHERE time >= ?1)",
+                    (SELECT count(*) FROM requests WHERE time >= ?1), \
+                    (SELECT count(*) FROM spans WHERE start >= ?1 * 1000)",
         )
         .bind(since)
         .fetch_one(&self.reads)
@@ -41,6 +44,7 @@ impl LogStore {
         Ok(RowCounts {
             records: u64::try_from(records).unwrap_or(0),
             requests: u64::try_from(requests).unwrap_or(0),
+            spans: u64::try_from(spans).unwrap_or(0),
         })
     }
 

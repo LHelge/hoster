@@ -158,6 +158,9 @@ async fn records_carry_the_labels_and_the_line_with_its_cursor() {
             fields: Some(r#"{"fields":{"ms":12}}"#.into()),
             cut: false,
             marker: false,
+            trace_id: None,
+            span_id: None,
+            received: None,
         }
     );
     assert_eq!(
@@ -569,6 +572,9 @@ async fn cursors_of_containers_that_are_gone_are_swept() {
         fields: None,
         cut: false,
         marker: false,
+        trace_id: None,
+        span_id: None,
+        received: None,
     };
     // Cursors from before the restart; "gone" was removed while hoster was down.
     let gone = ContainerId::from("gone".to_owned());
