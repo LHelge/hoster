@@ -1,16 +1,17 @@
 ---
 id: gz9
 title: "Stack logs: download the shown range"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T13:26:42.586128686Z"
-updated: "2026-11-12T13:26:42.586128686Z"
+updated: "2026-11-13T13:16:22.490354052Z"
 tags:
   - web
   - observability
 depends_on:
   - btj
 parent: psq
+attempts: 1
 ---
 
 ## Summary
@@ -42,4 +43,6 @@ A **Download** button on the stack logs tab saves what the current filters selec
 
 ## References
 - ADR-0067 (§8), ADR-0031 (sessions, CSRF)
-- `src/web/stacks/logs.rs`, `src/web/mod.rs` (routes)
+- `src/web/logs.rs` (the shared view: `LogParams`, `LogsView::plan`, `Links`, `LogMount`), `src/web/logs/download.rs`, `templates/logs_view.html`
+- `src/web/stacks/logs.rs`, `src/web/mod.rs` (routes), `src/store/logs/query.rs` (`LogStore::records`, `Page`)
+- `site/content/wiki/logging.md` (the user-facing description)

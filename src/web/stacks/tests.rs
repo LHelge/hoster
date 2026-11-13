@@ -3423,6 +3423,228 @@ mod stored_logs {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// The download of the tab's records (task gz9).
+    mod download {
+        use axum::http::header;
+
+        use super::*;
+        use crate::web::logs::LogDownload;
+
+        fn header_of(response: &Response, name: header::HeaderName) -> String {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        }
+
+        #[tokio::test]
+        async fn the_tabs_filters_select_the_file_in_either_format() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut error = record(240, "api", Some(2), "request failed\nat line 3");
+            error.level = Some(Level::Error);
+            error.fields = Some(r#"{"span":{"request_id":"r-1"}}"#.into());
+            let mut other = record(30, "web", Some(1), "not ours");
+            other.stack = Some("blog".into());
+            seed(
+                &app,
+                vec![
+                    record(300, "api", Some(1), "Listening on :8080"),
+                    error,
+                    record(120, "storage", None, "disk almost full"),
+                    other,
+                    record(7_200, "api", Some(1), "two hours ago"),
+                ],
+            )
+            .await;
+
+            // Text, by default: the whole hour, oldest first, a line break escaped.
+            let response = app
+                .get("/stacks/notes/logs/download", Some(&browser.cookie))
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                header_of(&response, header::CONTENT_TYPE),
+                "text/plain; charset=utf-8"
+            );
+            let disposition = header_of(&response, header::CONTENT_DISPOSITION);
+            assert!(
+                disposition.starts_with(r#"attachment; filename="notes-"#)
+                    && disposition.ends_with(r#"Z-1h.log""#),
+                "{disposition}"
+            );
+            let text = body(response).await;
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 3, "{text}");
+            assert!(lines[0].ends_with(" api - Listening on :8080"), "{text}");
+            assert!(
+                lines[1].ends_with(r" api error request failed\nat line 3"),
+                "{text}"
+            );
+            assert!(lines[2].ends_with(" storage - disk almost full"), "{text}");
+            assert!(lines[0].starts_with("20") && lines[0].as_bytes()[23] == b'Z');
+
+            // The tab's filters apply, a range and a field filter among them; JSON lines.
+            let response = app
+                .get(
+                    "/stacks/notes/logs/download?since=24h&field=span.request_id%3Dr-1&format=jsonl",
+                    Some(&browser.cookie),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                header_of(&response, header::CONTENT_DISPOSITION).ends_with(r#"Z-1d.jsonl""#),
+                "{:?}",
+                response.headers()
+            );
+            let text = body(response).await;
+            assert_eq!(text.lines().count(), 1, "{text}");
+            let value: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+            assert_eq!(value["stack"], "notes");
+            assert_eq!(value["service"], "api");
+            assert_eq!(value["generation"], 2);
+            assert_eq!(value["stream"], "stdout");
+            assert_eq!(value["level"], "error");
+            assert_eq!(value["message"], "request failed\nat line 3");
+            assert_eq!(value["fields"]["span"]["request_id"], "r-1");
+            let text = body(
+                app.get(
+                    "/stacks/notes/logs/download?since=24h&service=api&q=hours",
+                    Some(&browser.cookie),
+                )
+                .await,
+            )
+            .await;
+            assert!(text.ends_with(" api - two hours ago\n"), "{text}");
+            assert_eq!(text.lines().count(), 1, "{text}");
+
+            // Nothing matches: an empty file, not an error.
+            let response = app
+                .get(
+                    "/stacks/notes/logs/download?q=nothing",
+                    Some(&browser.cookie),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body(response).await, "");
+
+            // What the tab says of a bad pattern, as a 400; an unknown format; another
+            // source; an unknown stack.
+            let response = app
+                .get(
+                    "/stacks/notes/logs/download?q=%28unclosed&regex=on",
+                    Some(&browser.cookie),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                body(response)
+                    .await
+                    .starts_with("invalid regular expression")
+            );
+            for uri in [
+                "/stacks/notes/logs/download?format=csv",
+                "/stacks/notes/logs/download?source=deploy",
+            ] {
+                let response = app.get(uri, Some(&browser.cookie)).await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            }
+            let response = app
+                .get("/stacks/gone/logs/download", Some(&browser.cookie))
+                .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            // Signed out: to the sign-in page, like every other page.
+            let response = app.get("/stacks/notes/logs/download", None).await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        }
+
+        #[tokio::test]
+        async fn a_download_spans_pages_and_ends_at_its_cap_with_a_line_saying_so() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let cap = LogDownload::CAP as usize;
+            // More than one page of the store, and more than the cap.
+            let extra = 7;
+            let total = cap + extra;
+            assert!(total > crate::store::LogQuery::MAX_LIMIT as usize);
+            let records: Vec<LogRecord> = (0..total)
+                .map(|n| record(1_800, "api", Some(1), &format!("line {n}")))
+                .collect();
+            seed(&app, records).await;
+
+            // Grep matches every record, so each page is filtered in Rust as well.
+            for uri in [
+                "/stacks/notes/logs/download",
+                "/stacks/notes/logs/download?q=line",
+            ] {
+                let text = body(app.get(uri, Some(&browser.cookie)).await).await;
+                let lines: Vec<&str> = text.lines().collect();
+                assert_eq!(lines.len(), cap + 1, "{uri}");
+                assert!(lines[0].ends_with(" line 0"), "{uri}");
+                assert!(
+                    lines[cap - 1].ends_with(&format!(" line {}", cap - 1)),
+                    "{uri}"
+                );
+                assert!(
+                    lines[cap].starts_with("-- cut: a download holds at most ")
+                        && lines[cap].contains(" on are not included"),
+                    "{}",
+                    lines[cap]
+                );
+            }
+            // Under the cap, every record and no cut line.
+            let text = body(
+                app.get(
+                    "/stacks/notes/logs/download?q=line+1",
+                    Some(&browser.cookie),
+                )
+                .await,
+            )
+            .await;
+            assert!(!text.contains("-- cut"), "{text}");
+            assert!(text.lines().count() > 1);
+        }
+
+        #[tokio::test]
+        async fn the_tab_offers_both_formats_with_its_filters_and_states_the_cap() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let html = body(
+                app.get(
+                    "/stacks/notes/logs?level=warn&q=slow&follow=off",
+                    Some(&browser.cookie),
+                )
+                .await,
+            )
+            .await;
+            assert!(
+                html.contains(r#"<a class="log-chip" href="/stacks/notes/logs/download?level=warn&#38;q=slow" download>text</a>"#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<a class="log-chip" href="/stacks/notes/logs/download?level=warn&#38;q=slow&#38;format=jsonl" download>JSON lines</a>"#),
+                "{html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    "at most {}</span>",
+                    crate::web::ui::Count(u64::from(LogDownload::CAP))
+                )),
+                "{html}"
+            );
+            assert!(!html.contains("style="), "{html}");
+            // The deploy source has no download.
+            let html = body(
+                app.get("/stacks/notes/logs?source=deploy", Some(&browser.cookie))
+                    .await,
+            )
+            .await;
+            assert!(!html.contains("/logs/download"), "{html}");
+        }
+    }
+
     /// The follow stream of the newest page (task gfn).
     mod following {
         use axum::http::header;

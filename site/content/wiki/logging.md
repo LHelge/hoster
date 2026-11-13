@@ -101,6 +101,16 @@ with a stack column and a stack selector (every stack, one, or `hoster` for host
 records that name no stack), over the last 15 minutes unless you pick another range. It does
 not follow new records; reload it, or follow on the stack's tab.
 
+**Downloading.** The stack's **Logs** tab has a **download** button for the containers'
+records: every record the current filters select over the whole range, oldest first, not only
+the page shown, as a file named after the stack, the start of the range and its length
+(`blog-2026-11-12T10-00Z-1h.log`). **text** writes one line per record,
+`<time> <service> <level or -> <message>`, with line breaks in a message written as `\n` and
+`\r` so that one record stays one line for `grep`. **JSON lines** writes one object per record
+with its time, stack, service, generation, stream, level, message and fields. A download holds
+at most 100,000 records; one that reaches that ends with a line saying from which time on the
+rest was left out, so narrow the range or the filters and download again from there.
+
 **Backups and rollback.** `hoster backup db` does not include `logs.db`, and a restored server
 starts with empty logs ([[backup]]). `hoster rollback` undoes the log store's schema too
 ([[install#updates-and-rollback|Updates and rollback]]).
