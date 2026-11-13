@@ -685,3 +685,31 @@ clear which filters people type rather than click.
 **Owner's interim answer (2026-11-12).** A now: controls plus grep. Whether to add B later is
 open and tracked by epic `ddf`.
 
+## OQ-44: An exact per-address connection cap under load
+
+**Problem.** ADR-0065 caps connections at 256 per IPv4 address or IPv6 /64. `Admission` checks
+the count in the connection filter, at accept, and the slot is taken a moment later in the
+connection's own task (`src/proxy/admission.rs`). It does not count in the filter because a
+slot taken there leaks for good whenever Pingora drops the stream before the app gets it. So a
+burst from one address gets past the cap by however far the accept loop runs ahead of the
+connections' tasks: about 3 on an idle machine (the spike), 18–24 in full local test runs, 80
+on a loaded CI runner. ADR-0065 does not say how much overshoot it accepts. The total cap
+still bounds it. Raised 2026-11-13 when `a_burst_from_one_address_overshoots_its_cap_by_little`
+failed in CI; that test now runs alone (`.config/nextest.toml`) and measures the idle figure.
+
+**Options.**
+
+- **A. Accept a bounded overshoot.** Amend ADR-0065 to say the per-address cap is checked, not
+  enforced, at accept, and that a burst can overshoot it by what the accept loop runs ahead;
+  the total cap is the hard bound. No code change.
+- **B. Reserve in the filter.** The filter counts a pending reservation for the address, and
+  the connection's task turns it into its slot. A reservation not taken within a short timeout
+  (for example one second) expires, so a stream Pingora drops in between frees it. The cap is
+  exact, at the cost of a pending map and its expiry, and a dropped stream holds its
+  reservation until it expires.
+
+**Recommendation.** A. One address holding a few dozen connections past 256 during a burst
+costs descriptors that the total cap already guards, and B adds state to the hottest path in
+the proxy for a margin no client can exploit beyond what the total cap allows. Revisit B if
+the System page's refusal counts show one address regularly crowding others out.
+
