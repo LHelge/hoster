@@ -1,0 +1,14 @@
+{#- One message of a stored logs view's follow stream (src/web/logs.rs, LogRecords): rows
+    appended to the record list (#log-records), or the row the stream closes with. The
+    partials remove the page's "no records" notice and every row but the newest LogFollow::KEEP;
+    htmx finds their targets before it appends, so the list holds at most KEEP rows plus one
+    message's between two messages. -#}
+{%- for row in rows %}
+{%- include "log_record.html" %}
+{%- endfor %}
+{%- if let Some(notice) = notice %}
+{%- let (time, shown) = self.now() %}
+      <li class="log-record log-marker log-closing"><time datetime="{{ time }}" title="{{ time }}">{{ shown }}</time><span class="log-msg">{{ notice }}</span></li>
+{%- endif %}
+<hx-partial hx-target="#log-empty" hx-swap="delete"></hx-partial>
+<hx-partial hx-target="#log-records > li:nth-last-child(n+{{ self.beyond() }})" hx-swap="delete"></hx-partial>

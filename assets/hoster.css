@@ -766,6 +766,9 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .dot.lvl-error { background: var(--fail); }
 .dot.lvl-warn { background: var(--warn); }
 .dot.lvl-info { background: var(--text-2); }
+/* The follow switch's dots. */
+.dot.follow-on { background: var(--ok); }
+.dot.follow-off { background: var(--muted); }
 .log-toolbar input { min-height: 30px; padding: 4px 8px; font: 12px/1.4 var(--mono); }
 /* Grep: a prompt, the field and the `.*` toggle, a checkbox shown as a pressed button. */
 .log-grep { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1 1 18rem; }

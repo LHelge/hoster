@@ -22,6 +22,12 @@
 //! level filter hides the records without a level (text lines), and the toolbar says how many.
 //! A pattern that does not compile is shown beside the field, with no records.
 //!
+//! A mount with a stream ([`LogMount::stream`], the stack tab) follows on the newest end of the
+//! range: the record list connects to [`LogFollow`], which appends what the recorder commits
+//! after the page, by record id, with the page's options. `follow=off` switches it off (the
+//! switch's links keep it), and paging back into history stops it; "newer" and "newest" turn it
+//! back on.
+//!
 //! hoster's own records that name the stack are listed under the service `hoster`, with a chip
 //! of its own. A JSON line's level is shown; a text line has none (ADR-0067 §3), and a
 //! `stderr` line is set apart as on the live log. The marker record for dropped lines (§7) is
@@ -29,21 +35,29 @@
 //! size cap, or a young server), the view says from when its data starts. When the store
 //! cannot be read, it says so and the mount's live log links stay (§10).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::convert::Infallible;
+use std::fmt;
+use std::future::Future;
+use std::ops::Range;
+use std::pin::Pin;
+use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
+use askama::Template;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use futures_util::stream::{self, StreamExt};
 use serde::Deserialize;
-
-use std::fmt;
-use std::ops::Range;
-use std::str::FromStr;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use super::containers::{LogEntry as LiveLine, LogSince, SinceLink};
 use super::system::LogStoreState;
 use super::ui::Count;
 use crate::store::{
-    self, Level, LogPage, LogQuery, LogStore, PageAt, RecordKey, ServiceSeen, Stream, TextFilter,
-    Timestamp,
+    self, Level, LogEntry, LogHead, LogPage, LogQuery, LogStore, PageAt, RecordKey, ServiceSeen,
+    Stream, TextFilter, Timestamp,
 };
 
 /// Whose records the view shows.
@@ -79,33 +93,69 @@ impl LogScope {
     }
 }
 
-/// The log store as the pages read it: the [`LogStoreState`] hoster opened at start.
+/// The log store as the pages read it: the [`LogStoreState`] hoster opened at start, and the
+/// recorder's announcement of what it committed, which follow streams wait on.
 #[derive(Debug, Clone)]
-pub struct LogReader(LogStoreState);
-
-impl From<LogStoreState> for LogReader {
-    fn from(state: LogStoreState) -> Self {
-        Self(state)
-    }
+pub struct LogReader {
+    state: LogStoreState,
+    /// The newest committed ids, sent after every commit (ADR-0067 §6).
+    head: watch::Receiver<LogHead>,
+    /// Cancelled when the admin app stops: follow streams end then, so they do not hold its
+    /// graceful shutdown open.
+    closing: CancellationToken,
 }
 
 impl Default for LogReader {
     /// No log store (tests that do not read logs).
     fn default() -> Self {
-        Self(LogStoreState::Unavailable("it was not opened".to_owned()))
+        let (_, head) = watch::channel(LogHead::default());
+        Self::new(
+            LogStoreState::Unavailable("it was not opened".to_owned()),
+            head,
+        )
     }
 }
 
 impl LogReader {
+    /// The store in `state`, whose recorder announces its commits on `head`.
+    pub fn new(state: LogStoreState, head: watch::Receiver<LogHead>) -> Self {
+        Self {
+            state,
+            head,
+            closing: CancellationToken::new(),
+        }
+    }
+
+    /// The same reader, whose follow streams end when `token` is cancelled.
+    pub fn closing_with(self, token: CancellationToken) -> Self {
+        Self {
+            closing: token,
+            ..self
+        }
+    }
+
+    /// The open store, or why there is none.
+    fn store(&self) -> Result<&LogStore, String> {
+        match &self.state {
+            LogStoreState::Open(store) => Ok(store),
+            LogStoreState::Unavailable(error) => {
+                Err(format!("The log store is unavailable: {error}"))
+            }
+        }
+    }
+
+    /// The newest committed record id.
+    fn head(&self) -> i64 {
+        self.head.borrow().record
+    }
+
     /// What one page shows: its records, the services of its range, where the data starts and
     /// what a level filter hides.
     async fn read(&self, plan: &Plan) -> Result<Read, String> {
-        let store: &LogStore = match &self.0 {
-            LogStoreState::Open(store) => store,
-            LogStoreState::Unavailable(error) => {
-                return Err(format!("The log store is unavailable: {error}"));
-            }
-        };
+        let store = self.store()?;
+        // Read before the page: a record committed in between is on the page or followed
+        // after it, never neither.
+        let head = self.head();
         let query = &plan.query;
         let records = async {
             match plan.invalid {
@@ -131,6 +181,7 @@ impl LogReader {
                 page,
                 oldest,
                 unleveled,
+                head,
             })
         };
         read.await.map_err(|err| {
@@ -148,6 +199,8 @@ struct Read {
     oldest: Option<Timestamp>,
     /// The records without a level the level filter hides, when that was counted.
     unleveled: Option<u64>,
+    /// The newest committed record id before the page was read.
+    head: i64,
 }
 
 /// The store query one page runs, and what was wrong with its options.
@@ -275,6 +328,10 @@ pub struct LogParams {
     q: Option<String>,
     /// `on`: `q` is a regular expression.
     regex: Option<String>,
+    /// `off`: the newest page does not follow new records. Following is on otherwise.
+    follow: Option<String>,
+    /// The follow stream's cursor: the newest record id the page has seen.
+    from: Option<String>,
 }
 
 impl LogParams {
@@ -360,7 +417,17 @@ impl LogParams {
         }
     }
 
-    /// The options every link keeps: all but the page cursor, and only those given.
+    /// Whether the newest page follows new records: unless switched off.
+    fn follows(&self) -> bool {
+        !Self::text(&self.follow).is_some_and(|v| v.eq_ignore_ascii_case("off"))
+    }
+
+    /// The follow stream's cursor, when given and a record id.
+    fn from(&self) -> Option<i64> {
+        Self::text(&self.from).and_then(|id| id.parse().ok())
+    }
+
+    /// The options every link keeps: all but the page and stream cursors, and only those given.
     fn filters(&self) -> Vec<(&'static str, String)> {
         let level = self.level().0;
         [
@@ -369,6 +436,7 @@ impl LogParams {
             ("level", (level != LevelFilter::All).then(|| level.as_str())),
             ("q", self.q()),
             ("regex", self.regex().then_some("on")),
+            ("follow", (!self.follows()).then_some("off")),
         ]
         .into_iter()
         .filter_map(|(key, value)| Some((key, value?.to_owned())))
@@ -392,6 +460,9 @@ pub struct LogMount {
     pub services: Vec<String>,
     /// Containers whose live log (`/containers/{name}/logs`) the toolbar links.
     pub live: Vec<LiveLink>,
+    /// Where the newest page's follow stream is ([`LogFollow`]); `None` where the view does
+    /// not follow.
+    pub stream: Option<String>,
 }
 
 /// A link to one container's live log.
@@ -506,6 +577,98 @@ impl LogRow {
     }
 }
 
+/// How records become rows: the same on a page and in its follow stream.
+#[derive(Debug, Clone)]
+struct Rows {
+    /// The services in chip order, which picks their colours.
+    services: Vec<String>,
+    /// The generations seen of each stack's service: a row names its own when there are
+    /// several.
+    generations: HashMap<(Option<String>, String), BTreeSet<u32>>,
+    /// Rows name their stack.
+    stack_column: bool,
+    /// Rows show the date as well as the time of day.
+    dated: bool,
+    /// What grep marks in the messages.
+    text: Option<TextFilter>,
+}
+
+impl Rows {
+    /// Rows for `services` (in chip order), with the generations in `seen`.
+    fn new(services: Vec<String>, seen: &[ServiceSeen]) -> Self {
+        let generations = seen
+            .iter()
+            .map(|s| {
+                (
+                    (s.stack.clone(), s.service.clone()),
+                    s.generations.iter().copied().collect(),
+                )
+            })
+            .collect();
+        Self {
+            services,
+            generations,
+            stack_column: false,
+            dated: false,
+            text: None,
+        }
+    }
+
+    /// The colour class of `service`'s chip and rows.
+    fn class(&self, service: &str) -> &'static str {
+        if service == LogsView::HOSTER {
+            return LogsView::HOSTER_CLASS;
+        }
+        let n = self.services.iter().position(|s| s == service).unwrap_or(0);
+        LogsView::PALETTE[n % LogsView::PALETTE.len()]
+    }
+
+    /// Notes the generation of `entry`, which a stream sees after the page was read.
+    fn learn(&mut self, entry: &LogEntry) {
+        let record = &entry.record;
+        if let Some(generation) = record.generation {
+            self.generations
+                .entry((record.stack.clone(), record.service.clone()))
+                .or_default()
+                .insert(generation);
+        }
+    }
+
+    fn row(&self, entry: &LogEntry) -> LogRow {
+        let record = &entry.record;
+        let message = LiveLine::printable(&record.message);
+        let time = LogsView::utc(record.time);
+        let shown = if self.dated {
+            time[5..23].replacen('T', " ", 1)
+        } else {
+            time[11..23].to_owned()
+        };
+        let several = self
+            .generations
+            .get(&(record.stack.clone(), record.service.clone()))
+            .is_some_and(|g| g.len() > 1);
+        LogRow {
+            shown,
+            time,
+            stack: self
+                .stack_column
+                .then(|| record.stack.clone().unwrap_or_else(|| "—".to_owned())),
+            service: record.service.clone(),
+            generation: record.generation.filter(|_| several),
+            class: self.class(&record.service),
+            stderr: record.stream == Stream::Stderr,
+            level: record.level,
+            marks: match (&self.text, record.marker) {
+                (Some(text), false) => text.find_all(&message),
+                _ => Vec::new(),
+            },
+            message,
+            cut: record.cut,
+            marker: record.marker,
+        }
+    }
+}
+
 /// The scan stopped at its cap before the page was full.
 #[derive(Debug)]
 pub struct Stopped {
@@ -591,6 +754,30 @@ pub struct LogsView {
     pub empty: bool,
     /// For an empty page under level or grep: what they are, and the view without them.
     pub cleared: Option<(String, String)>,
+    /// The follow switch, at the newest end of the range of a view that follows.
+    pub follow: Option<Follow>,
+}
+
+/// The follow switch of the newest page, and its stream while it is on.
+#[derive(Debug)]
+pub struct Follow {
+    /// The stream the record list connects to; `None` when switched off.
+    pub stream: Option<String>,
+    /// The view following.
+    pub on: String,
+    /// The view not following.
+    pub off: String,
+}
+
+impl Follow {
+    pub fn following(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    /// The most rows the list keeps while following, as the page says it.
+    pub fn keeps(&self) -> Count {
+        Count(LogFollow::KEEP as u64)
+    }
 }
 
 impl LogsView {
@@ -663,12 +850,16 @@ impl LogsView {
             Err(error) => (Read::default(), Some(error)),
         };
         let services = Self::services(&mount.services, &read.seen);
-        let class = |service: &str| {
-            if service == Self::HOSTER {
-                return Self::HOSTER_CLASS;
-            }
-            let n = services.iter().position(|s| s == service).unwrap_or(0);
-            Self::PALETTE[n % Self::PALETTE.len()]
+        let today = Self::utc(now.into())[..10].to_owned();
+        let rows = Rows {
+            stack_column: mount.scope.stack_column(),
+            dated: !read
+                .page
+                .entries
+                .iter()
+                .all(|e| Self::utc(e.record.time).starts_with(&today)),
+            text: query.text.clone(),
+            ..Rows::new(services.clone(), &read.seen)
         };
         let mut chips = vec![Chip {
             label: "all".to_owned(),
@@ -680,62 +871,11 @@ impl LogsView {
             label: service.clone(),
             href: links.to(&[("service", Some(service))]),
             current: params.service() == Some(service.as_str()),
-            class: class(service),
+            class: rows.class(service),
         }));
 
-        let generations: HashMap<(Option<&str>, &str), usize> = read
-            .seen
-            .iter()
-            .map(|s| {
-                (
-                    (s.stack.as_deref(), s.service.as_str()),
-                    s.generations.len(),
-                )
-            })
-            .collect();
-        let stack_column = mount.scope.stack_column();
-        let today = Self::utc(now.into())[..10].to_owned();
-        let all_today = read
-            .page
-            .entries
-            .iter()
-            .all(|e| Self::utc(e.record.time).starts_with(&today));
-        let rows: Vec<LogRow> = read
-            .page
-            .entries
-            .iter()
-            .map(|entry| {
-                let record = &entry.record;
-                let message = LiveLine::printable(&record.message);
-                let time = Self::utc(record.time);
-                let shown = if all_today {
-                    time[11..23].to_owned()
-                } else {
-                    time[5..23].replacen('T', " ", 1)
-                };
-                let several = generations
-                    .get(&(record.stack.as_deref(), record.service.as_str()))
-                    .is_some_and(|n| *n > 1);
-                LogRow {
-                    shown,
-                    time,
-                    stack: stack_column
-                        .then(|| record.stack.clone().unwrap_or_else(|| "—".to_owned())),
-                    service: record.service.clone(),
-                    generation: record.generation.filter(|_| several),
-                    class: class(&record.service),
-                    stderr: record.stream == Stream::Stderr,
-                    level: record.level,
-                    marks: match (&query.text, record.marker) {
-                        (Some(text), false) => text.find_all(&message),
-                        _ => Vec::new(),
-                    },
-                    message,
-                    cut: record.cut,
-                    marker: record.marker,
-                }
-            })
-            .collect();
+        let stack_column = rows.stack_column;
+        let rendered: Vec<LogRow> = read.page.entries.iter().map(|e| rows.row(e)).collect();
 
         let page = &read.page;
         let first = page.entries.first().map(|e| e.key().to_string());
@@ -756,9 +896,10 @@ impl LogsView {
         let older = first
             .filter(|_| page.older && !(stopped.is_some() && reading_older))
             .map(|key| links.to(&[("before", Some(&key))]));
+        // Paging towards the newest page turns following back on.
         let newer = last
             .filter(|_| page.newer && !(stopped.is_some() && !reading_older))
-            .map(|key| links.to(&[("after", Some(&key))]));
+            .map(|key| links.to(&[("after", Some(&key)), ("follow", None)]));
         let paged = query.page != PageAt::Newest;
         let (level, _) = params.level();
         let levels = LevelFilter::CHIPS
@@ -776,7 +917,7 @@ impl LogsView {
                 all: links.to(&[("level", None)]),
             })
             .filter(|note| note.count != Some(0));
-        let empty = rows.is_empty() && !paged && unreadable.is_none() && invalid.is_none();
+        let empty = rendered.is_empty() && !paged && unreadable.is_none() && invalid.is_none();
         let cleared = (empty && params.filtered()).then(|| {
             let mut active = Vec::new();
             if level != LevelFilter::All {
@@ -806,6 +947,35 @@ impl LogsView {
                 current: params.since() == label,
             })
             .collect();
+        // The newest end of the range follows new records, where the mount has a stream.
+        let at_newest = match query.page {
+            PageAt::Newest => true,
+            PageAt::After(_) => !page.newer && stopped.is_none(),
+            PageAt::Before(_) => false,
+        };
+        let follow = mount
+            .stream
+            .as_ref()
+            .filter(|_| at_newest && unreadable.is_none() && invalid.is_none())
+            .map(|stream| {
+                // Past every record on the page, and every one committed before it was read.
+                let newest = page.entries.iter().map(|e| e.id).max().unwrap_or(0);
+                let cursor = newest.max(read.head).to_string();
+                let stream = Links {
+                    action: stream.clone(),
+                    filters: links.filters.clone(),
+                };
+                Follow {
+                    stream: params
+                        .follows()
+                        .then(|| stream.to(&[("from", Some(&cursor))])),
+                    on: links.to(&[("follow", None)]),
+                    off: links.to(&[("follow", Some("off"))]),
+                }
+            });
+        // While following, the list drops its oldest rows, which "older" would skip: the view
+        // switched off (the newest page again) has it.
+        let older = older.filter(|_| follow.as_ref().is_none_or(|f| !f.following()));
         Self {
             keep: links
                 .filters
@@ -827,10 +997,11 @@ impl LogsView {
             stack_column,
             empty,
             cleared,
-            rows,
+            follow,
+            rows: rendered,
             older,
             newer,
-            newest: paged.then(|| links.to(&[])),
+            newest: paged.then(|| links.to(&[("follow", None)])),
             starts_at,
             problem,
             unreadable,
@@ -862,6 +1033,11 @@ impl LogsView {
         humantime::format_rfc3339_millis(time.into()).to_string()
     }
 
+    /// The follow stream the record list connects to, while following.
+    pub fn stream(&self) -> Option<&str> {
+        self.follow.as_ref().and_then(|f| f.stream.as_deref())
+    }
+
     /// The records the page shows, for its footer.
     pub fn count(&self) -> usize {
         self.rows.iter().filter(|r| !r.marker).count()
@@ -879,6 +1055,226 @@ impl LogsView {
 
     fn at_level(&self, level: Level) -> usize {
         self.rows.iter().filter(|r| r.level == Some(level)).count()
+    }
+}
+
+/// The follow stream of the newest page (ADR-0067 §6, ADR-0044): the records the recorder
+/// commits after the page's newest, by record id, with the page's scope and options, as
+/// `text/event-stream`.
+///
+/// It reads the store once each time the recorder announces a commit past its cursor, and
+/// sends what matched as one message of rows ([`LogRecords`]), appended to the list, with the
+/// last id read as the event ID, so the SSE extension resumes after it on a reconnect. A
+/// burst is read [`LogFollow::CHUNK`] records at a time, one message each, without waiting
+/// for the next commit. Every message also trims the list to its newest [`LogFollow::KEEP`]
+/// rows and removes the page's "no records" notice.
+///
+/// It ends with a named `end` event, after a closing row, when the store cannot be read, when
+/// the mount's `ends` resolves (the stack was removed, the session ended), when the recorder
+/// stops or when the admin app shuts down. When the browser goes away, axum drops the stream
+/// and nothing is left of it.
+#[derive(Debug)]
+pub struct LogFollow {
+    store: LogStore,
+    head: watch::Receiver<LogHead>,
+    closing: CancellationToken,
+    query: LogQuery,
+    rows: Rows,
+    /// The last record id read.
+    cursor: i64,
+}
+
+impl LogFollow {
+    /// The most records one message carries.
+    pub const CHUNK: u32 = 200;
+    /// The most rows the list keeps while following; older ones are removed.
+    pub const KEEP: usize = 1_000;
+    /// The named event after the last message; the page closes the connection on it.
+    const END: &str = "end";
+    /// How often an idle stream sends a comment, so a closed connection is noticed.
+    const KEEP_ALIVE: Duration = Duration::from_secs(15);
+
+    /// The stream of `mount` with the options of `params`, from the record id `last_event_id`
+    /// (a reconnect), else the `from` the page gave, else the newest committed one.
+    pub async fn open(
+        reader: &LogReader,
+        mount: &LogMount,
+        params: &LogParams,
+        last_event_id: Option<&str>,
+    ) -> Result<Self, String> {
+        let store = reader.store()?.clone();
+        let now = SystemTime::now();
+        let Plan {
+            mut query, invalid, ..
+        } = LogsView::plan(&mount.scope, params, now);
+        if let Some(invalid) = invalid {
+            return Err(invalid);
+        }
+        let seen = store
+            .services_in(query.range.clone(), &query.scope)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "reading the log store failed");
+                format!("Cannot read the log store: {:#}", anyhow::Error::from(err))
+            })?;
+        // Every record from the start of the range on, however far its time is ahead.
+        query.range.end = Timestamp::from_millis(i64::MAX);
+        query.limit = Self::CHUNK;
+        let cursor = last_event_id
+            .and_then(|id| id.trim().parse().ok())
+            .or(params.from())
+            .unwrap_or_else(|| reader.head());
+        Ok(Self {
+            store,
+            head: reader.head.clone(),
+            closing: reader.closing.clone(),
+            rows: Rows {
+                stack_column: mount.scope.stack_column(),
+                text: query.text.clone(),
+                ..Rows::new(LogsView::services(&mount.services, &seen), &seen)
+            },
+            query,
+            cursor,
+        })
+    }
+
+    /// The response for `opened`: its stream until `ends` resolves with the closing row's
+    /// text, or the error as the one row of a stream that ends at once.
+    pub fn respond(
+        opened: Result<Self, String>,
+        ends: impl Future<Output = String> + Send + 'static,
+    ) -> Response {
+        let events = match opened {
+            Ok(follow) => follow.stream(ends).boxed(),
+            Err(error) => stream::iter(Self::closing(&error)).map(Ok).boxed(),
+        };
+        Sse::new(events)
+            .keep_alive(KeepAlive::new().interval(Self::KEEP_ALIVE))
+            .into_response()
+    }
+
+    /// The closing row and the `end` event.
+    fn closing(notice: &str) -> Vec<Event> {
+        LogRecords::notice(notice)
+            .event(None)
+            .into_iter()
+            .chain([Event::default().event(Self::END).data("")])
+            .collect()
+    }
+
+    fn stream(
+        self,
+        ends: impl Future<Output = String> + Send + 'static,
+    ) -> impl futures_util::Stream<Item = Result<Event, Infallible>> + Send + 'static {
+        let ends: Pin<Box<dyn Future<Output = String> + Send>> = Box::pin(ends);
+        // `more`: the last read stopped at its limit, so the next one does not wait.
+        stream::unfold(Some((self, ends, false)), |state| async move {
+            let (mut follow, mut ends, mut more) = state?;
+            loop {
+                if !more {
+                    let cursor = follow.cursor;
+                    let mut head = follow.head.clone();
+                    let committed = async move {
+                        head.wait_for(|head| head.record > cursor).await.map(|_| ())
+                    };
+                    let notice = tokio::select! {
+                        committed = committed => committed.err().map(|_| {
+                            "The log recorder stopped: reload the page to follow again.".to_owned()
+                        }),
+                        notice = &mut ends => Some(notice),
+                        () = follow.closing.cancelled() => {
+                            Some("hoster is shutting down: reload the page once it is back.".to_owned())
+                        }
+                    };
+                    if let Some(notice) = notice {
+                        return Some((Self::closing(&notice), None));
+                    }
+                }
+                let head = follow.head.borrow().record;
+                let tail = match follow
+                    .store
+                    .records_after(&follow.query, follow.cursor, head)
+                    .await
+                {
+                    Ok(tail) => tail,
+                    Err(err) => {
+                        tracing::error!(error = %err, "following the log store failed");
+                        let notice =
+                            format!("Cannot read the log store: {:#}", anyhow::Error::from(err));
+                        return Some((Self::closing(&notice), None));
+                    }
+                };
+                follow.cursor = tail.through;
+                more = tail.more;
+                if tail.entries.is_empty() {
+                    continue;
+                }
+                let mut entries = tail.entries;
+                for entry in &entries {
+                    follow.rows.learn(entry);
+                }
+                // In page order within the message; commit order between messages.
+                entries.sort_by_key(LogEntry::key);
+                let chunk = LogRecords {
+                    rows: entries.iter().map(|e| follow.rows.row(e)).collect(),
+                    stack_column: follow.rows.stack_column,
+                    notice: None,
+                };
+                let event = chunk.event(Some(follow.cursor));
+                return Some((event.into_iter().collect(), Some((follow, ends, more))));
+            }
+        })
+        .flat_map(stream::iter)
+        .map(Ok)
+    }
+}
+
+/// One message of a follow stream: rows appended to the record list, or the row it closes
+/// with, and the partials that trim the list and remove its "no records" notice.
+#[derive(Debug, Template)]
+#[template(path = "log_records.html")]
+struct LogRecords {
+    rows: Vec<LogRow>,
+    stack_column: bool,
+    /// The closing row's text.
+    notice: Option<String>,
+}
+
+impl LogRecords {
+    fn notice(message: &str) -> Self {
+        Self {
+            rows: Vec::new(),
+            stack_column: false,
+            notice: Some(message.to_owned()),
+        }
+    }
+
+    /// The `nth-last-child` argument that matches every row but the newest [`LogFollow::KEEP`].
+    fn beyond(&self) -> usize {
+        LogFollow::KEEP + 1
+    }
+
+    /// The current time as the closing row shows it.
+    fn now(&self) -> (String, String) {
+        let time = LogsView::utc(Timestamp::now());
+        let shown = time[11..23].to_owned();
+        (time, shown)
+    }
+
+    /// The message as an unnamed SSE event with `id`, or `None` when it cannot be rendered.
+    fn event(&self, id: Option<i64>) -> Option<Event> {
+        let html = match self.render() {
+            Ok(html) => html,
+            Err(err) => {
+                tracing::error!(error = %err, "rendering log records failed");
+                return None;
+            }
+        };
+        let event = Event::default().data(html);
+        Some(match id {
+            Some(id) => event.id(id.to_string()),
+            None => event,
+        })
     }
 }
 

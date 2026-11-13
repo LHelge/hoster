@@ -1,0 +1,13 @@
+{#- One record of the stored logs view (src/web/logs.rs, LogRow `row`), on a page
+    (logs_view.html) and in its follow stream (log_records.html); `stack_column` says whether
+    rows name their stack. -#}
+      {%- if row.marker %}
+      <li class="log-record log-marker"><time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time><span class="log-msg">{{ row.message }}</span></li>
+      {%- else %}
+      <li class="log-record {{ row.class }}{% if row.stderr %} log-stderr{% endif %}{% if let Some(level) = row.level %} log-{{ level }}{% endif %}"{% if row.stderr %} title="stderr"{% endif %}>
+        <time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time>
+        {%- if stack_column %}<span class="log-stack">{{ row.stack.as_deref().unwrap_or_default() }}</span>{% endif %}
+        <span class="log-svc">{{ row.service }}{% if let Some(generation) = row.generation %} <span class="log-gen">g{{ generation }}</span>{% endif %}</span>
+        <span class="log-lvl">{% if let Some(level) = row.level %}{{ level }}{% else %}<span class="visually-hidden">no level</span>{% endif %}</span>
+        <span class="log-msg">{% if row.stderr %}<span class="visually-hidden">stderr: </span>{% endif %}{% for span in row.spans() %}{% if span.mark %}<mark>{{ span.text }}</mark>{% else %}{{ span.text }}{% endif %}{% endfor %}{% if row.cut %} <span class="log-cut" title="The line was longer than the store keeps and was cut.">[cut]</span>{% endif %}</span></li>
+      {%- endif %}

@@ -544,6 +544,147 @@ mod queries {
     }
 
     #[tokio::test]
+    async fn records_after_an_id_follow_commit_order_with_the_filters() {
+        let (_dir, store) = mixed().await;
+        let notes = LogQuery::new(everything(), LogScope::Stack("notes".into()));
+        let tail = store.records_after(&notes, 0, 6).await.unwrap();
+        let ids: Vec<i64> = tail.entries.iter().map(|e| e.id).collect();
+        assert_eq!(ids, [1, 2, 5, 6]);
+        assert_eq!(tail.through, 6);
+        assert!(!tail.more);
+
+        // Nothing new: the cursor stays.
+        let none = store.records_after(&notes, 6, 6).await.unwrap();
+        assert_eq!(
+            none,
+            LogTail {
+                through: 6,
+                ..LogTail::default()
+            }
+        );
+
+        // Ids, not times: a late record stamped before the others still follows them.
+        let late = record(500, Some("notes"), "api", "late");
+        store
+            .append(&LogBatch {
+                records: vec![late],
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        let next = store.records_after(&notes, 6, 7).await.unwrap();
+        assert_eq!(next.entries.len(), 1);
+        assert_eq!(next.entries[0].record.message, "late");
+        assert_eq!(next.through, 7);
+
+        // Filters SQL applies, and those matched in Rust; the cursor passes every id examined,
+        // matching or not (SQL never returns `late`, which has no level).
+        let mut failed = notes.clone();
+        failed.levels = vec![Level::Error, Level::Warn];
+        failed.text = Some(TextFilter::substring("request"));
+        let tail = store.records_after(&failed, 0, 7).await.unwrap();
+        assert_eq!(tail.entries.iter().map(|e| e.id).collect::<Vec<_>>(), [6]);
+        assert_eq!(tail.through, 7);
+        assert!(!tail.more);
+
+        // The range still bounds it.
+        let mut recent = notes.clone();
+        recent.range = at(2_000)..at(1_000_000_000);
+        let tail = store.records_after(&recent, 0, 7).await.unwrap();
+        assert_eq!(
+            tail.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [2, 5, 6]
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn records_after_an_id_stop_at_the_limit_and_resume() {
+        let records = (0..5).map(|i| record(i, Some("s"), "a", "line")).collect();
+        let (_dir, store) = seed(records).await;
+        let mut query = LogQuery::new(everything(), LogScope::All);
+        query.limit = 2;
+        let mut seen = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let tail = store.records_after(&query, cursor, 5).await.unwrap();
+            assert!(tail.entries.len() <= 2);
+            seen.extend(tail.entries.iter().map(|e| e.id));
+            cursor = tail.through;
+            if !tail.more {
+                break;
+            }
+        }
+        assert_eq!(seen, [1, 2, 3, 4, 5]);
+
+        // With a filter matched in Rust, the limit counts matches.
+        query.text = Some(TextFilter::substring("line"));
+        let tail = store.records_after(&query, 0, 5).await.unwrap();
+        assert_eq!(tail.entries.len(), 2);
+        assert_eq!(tail.through, 2);
+        assert!(tail.more);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_quiet_scope_beside_a_busy_one_moves_its_cursor_to_the_head() {
+        let busy = (0..100)
+            .map(|i| record(i, Some("b"), "x", "busy"))
+            .collect();
+        let (_dir, store) = seed(busy).await;
+        let quiet = LogQuery::new(everything(), LogScope::Stack("a".into()));
+        let tail = store.records_after(&quiet, 0, 100).await.unwrap();
+        assert_eq!(
+            tail,
+            LogTail {
+                through: 100,
+                ..LogTail::default()
+            }
+        );
+
+        store
+            .append(&LogBatch {
+                records: vec![record(200, Some("a"), "y", "quiet")],
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        let tail = store
+            .records_after(&quiet, tail.through, 101)
+            .await
+            .unwrap();
+        assert_eq!(tail.entries.len(), 1);
+        assert_eq!(tail.entries[0].record.message, "quiet");
+        assert_eq!(tail.through, 101);
+        assert!(!tail.more);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn one_call_examines_a_bounded_window_of_ids() {
+        let cap = i64::from(LogQuery::SCAN_CAP);
+        let mut records: Vec<LogRecord> = (0..cap + 10)
+            .map(|i| record(i as u64, Some("b"), "x", "busy"))
+            .collect();
+        records.push(record(1, Some("a"), "y", "quiet"));
+        let (_dir, store) = seed(records).await;
+        let head = cap + 11;
+        let quiet = LogQuery::new(everything(), LogScope::Stack("a".into()));
+        let first = store.records_after(&quiet, 0, head).await.unwrap();
+        assert!(first.entries.is_empty());
+        assert_eq!(first.through, cap);
+        assert!(first.more, "the head is beyond the window");
+        let second = store
+            .records_after(&quiet, first.through, head)
+            .await
+            .unwrap();
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.through, head);
+        assert!(!second.more);
+        store.close().await;
+    }
+
+    #[tokio::test]
     async fn a_range_before_the_data_is_an_empty_page() {
         let (_dir, store) = open().await;
         assert_eq!(store.oldest_record_time().await.unwrap(), None);

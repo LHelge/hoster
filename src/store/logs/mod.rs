@@ -37,8 +37,8 @@ use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 
 pub use health::{LogFileFacts, RowCounts};
 pub use query::{
-    InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, Page, PageAt, RecordKey,
-    RequestCounts, RequestEntry, RequestQuery, ServiceSeen, StatusFilter, TextFilter,
+    InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, LogTail, Page, PageAt,
+    RecordKey, RequestCounts, RequestEntry, RequestQuery, ServiceSeen, StatusFilter, TextFilter,
 };
 pub use retention::{Removed, Retention, Sweep, SweepReport};
 pub use types::{

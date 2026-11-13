@@ -928,7 +928,11 @@ async fn the_stack_header_has_the_status_deployments_actions_and_tabs() {
         html.contains(r#"<a href="https://docs.hoster.lhelge.se/wiki/logging/">"#),
         "{html}"
     );
-    assert!(!html.contains("hx-sse:connect"), "{html}");
+    // It follows the stack's new records from the newest committed one.
+    assert!(
+        html.contains(r#"hx-sse:connect="/stacks/notes/logs/stream?from=0""#),
+        "{html}"
+    );
     let missing = app.get("/stacks/nope/logs", Some(&browser.cookie)).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
@@ -3175,7 +3179,14 @@ mod stored_logs {
             .collect();
         seed(&app, records).await;
 
+        // Following hides "older"; switched off, the newest page links it.
         let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
+        assert!(!html.contains(">older</a>"), "{html}");
+        let html = body(
+            app.get("/stacks/notes/logs?follow=off", Some(&browser.cookie))
+                .await,
+        )
+        .await;
         let newest = messages(&html);
         assert_eq!(newest.len(), total - extra);
         assert_eq!(newest[0], format!("line {extra}"));
@@ -3188,7 +3199,10 @@ mod stored_logs {
             .and_then(|rest| rest.split('"').next())
             .expect("an older link")
             .replace("&#38;", "&");
-        assert!(older.starts_with("/stacks/notes/logs?before="), "{older}");
+        assert!(
+            older.starts_with("/stacks/notes/logs?follow=off&before="),
+            "{older}"
+        );
 
         let html = body(app.get(&older, Some(&browser.cookie)).await).await;
         let page = messages(&html);
@@ -3242,5 +3256,287 @@ mod stored_logs {
         seed(&app, vec![gone]).await;
         let response = app.get("/stacks/gone/logs", Some(&browser.cookie)).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The follow stream of the newest page (task gfn).
+    mod following {
+        use axum::http::header;
+        use tokio_util::sync::CancellationToken;
+
+        use super::*;
+        use crate::orchestrator::UiEvent;
+        use crate::store::{Event, EventId, EventKind, Severity};
+        use crate::web::logs::LogFollow;
+
+        /// Appends `records` as the recorder would, and announces the commit.
+        async fn commit(app: &TestApp, records: Vec<LogRecord>) {
+            let head = app
+                .logs
+                .append(&LogBatch {
+                    records,
+                    ..LogBatch::default()
+                })
+                .await
+                .unwrap();
+            app.log_head.send_replace(head);
+        }
+
+        async fn open(app: &TestApp, browser: &Browser, query: &str) -> Body {
+            let response = app
+                .get(
+                    &format!("/stacks/notes/logs/stream?{query}"),
+                    Some(&browser.cookie),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/event-stream"
+            );
+            response.into_body()
+        }
+
+        async fn read_until(stream: &mut Body, text: &mut String, needle: &str) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !text.contains(needle) {
+                    let frame = stream
+                        .frame()
+                        .await
+                        .expect("the stream ended early")
+                        .unwrap();
+                    if let Ok(data) = frame.into_data() {
+                        text.push_str(std::str::from_utf8(&data).unwrap());
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("no {needle:?} in {text:?}"));
+        }
+
+        /// Reads until the stream ends; the text it sent.
+        async fn read_to_end(stream: &mut Body, text: &mut String) {
+            read_until(stream, text, "event: end").await;
+            let rest = tokio::time::timeout(Duration::from_secs(5), stream.frame())
+                .await
+                .expect("the stream ends after its end event");
+            assert!(rest.is_none(), "{rest:?}");
+        }
+
+        /// The messages of the rows in `text`, in order.
+        fn rows(text: &str) -> Vec<String> {
+            messages(&text.replace("\ndata: ", ""))
+        }
+
+        #[tokio::test]
+        async fn new_records_follow_the_page_in_order_without_duplicates() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            commit(
+                &app,
+                vec![
+                    record(120, "api", Some(1), "on the page"),
+                    record(60, "web", Some(1), "also on the page"),
+                ],
+            )
+            .await;
+            let html = body(app.get("/stacks/notes/logs", Some(&browser.cookie)).await).await;
+            assert!(
+                html.contains(r#"hx-sse:connect="/stacks/notes/logs/stream?from=2""#),
+                "{html}"
+            );
+            assert!(html.contains(r#"<ol id="log-records""#), "{html}");
+            assert!(
+                html.contains(r#"href="/stacks/notes/logs?follow=off""#),
+                "{html}"
+            );
+
+            let mut stream = open(&app, &browser, "from=2").await;
+            let mut other = record(1, "web", Some(1), "another stack's");
+            other.stack = Some("blog".into());
+            // Committed late but stamped early: it still follows, by id.
+            commit(
+                &app,
+                vec![
+                    record(1, "api", Some(1), "first new"),
+                    other,
+                    record(200, "web", Some(1), "late"),
+                ],
+            )
+            .await;
+            let mut text = String::new();
+            read_until(&mut stream, &mut text, "id: 5").await;
+            commit(&app, vec![record(0, "api", Some(1), "second new")]).await;
+            read_until(&mut stream, &mut text, "id: 6").await;
+            assert_eq!(rows(&text), ["late", "first new", "second new"]);
+            // Each message trims the list and drops the "no records" notice.
+            assert!(
+                text.contains(
+                    r##"hx-target="#log-records > li:nth-last-child(n+1001)" hx-swap="delete""##
+                ),
+                "{text}"
+            );
+            assert!(text.contains(r##"hx-target="#log-empty""##), "{text}");
+        }
+
+        #[tokio::test]
+        async fn the_stream_applies_the_page_filters() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut stream = open(&app, &browser, "service=api&level=error&q=boom&from=0").await;
+            let mut error = record(3, "api", Some(1), "boom: disk full");
+            error.level = Some(Level::Error);
+            let mut info = record(2, "api", Some(1), "boom but fine");
+            info.level = Some(Level::Info);
+            let mut other = record(1, "web", Some(1), "boom elsewhere");
+            other.level = Some(Level::Error);
+            let mut quiet = record(0, "api", Some(1), "disk full again");
+            quiet.level = Some(Level::Error);
+            commit(&app, vec![error, info, other, quiet]).await;
+            let mut marked = record(0, "api", Some(1), "BOOM again");
+            marked.level = Some(Level::Error);
+            commit(&app, vec![marked]).await;
+            let mut text = String::new();
+            read_until(&mut stream, &mut text, "id: 5").await;
+            assert_eq!(
+                rows(&text),
+                ["<mark>boom</mark>: disk full", "<mark>BOOM</mark> again"]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_burst_arrives_in_order_over_several_messages() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut stream = open(&app, &browser, "from=0").await;
+            let burst = 2 * LogFollow::CHUNK + 50;
+            commit(
+                &app,
+                (0..burst)
+                    .map(|i| record(10, "api", Some(1), &format!("line {i}")))
+                    .collect(),
+            )
+            .await;
+            let mut text = String::new();
+            read_until(&mut stream, &mut text, &format!("id: {burst}\n")).await;
+            let expected: Vec<String> = (0..burst).map(|i| format!("line {i}")).collect();
+            assert_eq!(rows(&text), expected);
+            assert_eq!(text.matches("\nid: ").count(), 3, "{text}");
+        }
+
+        #[tokio::test]
+        async fn a_reconnect_resumes_after_the_last_event_id() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            commit(
+                &app,
+                vec![
+                    record(3, "api", Some(1), "seen"),
+                    record(2, "api", Some(1), "missed"),
+                ],
+            )
+            .await;
+            let request = Request::get("/stacks/notes/logs/stream?from=0")
+                .header(header::COOKIE, &browser.cookie)
+                .header("last-event-id", "1")
+                .body(Body::empty())
+                .unwrap();
+            let mut stream = app.send(request).await.into_body();
+            let mut text = String::new();
+            read_until(&mut stream, &mut text, "id: 2").await;
+            assert_eq!(rows(&text), ["missed"]);
+        }
+
+        #[tokio::test]
+        async fn the_stream_holds_nothing_once_the_browser_leaves() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let idle = app.log_head.receiver_count();
+            let mut stream = open(&app, &browser, "from=0").await;
+            commit(&app, vec![record(1, "api", Some(1), "one")]).await;
+            let mut text = String::new();
+            read_until(&mut stream, &mut text, "id: 1").await;
+            assert!(app.log_head.receiver_count() > idle);
+            drop(stream);
+            assert_eq!(app.log_head.receiver_count(), idle);
+        }
+
+        #[tokio::test]
+        async fn the_stream_ends_when_the_stack_is_removed() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut stream = open(&app, &browser, "from=0").await;
+            app.stacks
+                .stacks
+                .lock()
+                .unwrap()
+                .retain(|s| s.name != "notes");
+            app.stacks
+                .events
+                .send(UiEvent::Event(Event {
+                    id: EventId::from(1),
+                    at: Timestamp::now(),
+                    kind: EventKind::StackRemoved,
+                    severity: Severity::Info,
+                    stack: Some("notes".into()),
+                    subject: None,
+                    message: "Removed notes".into(),
+                    meta: None,
+                }))
+                .unwrap();
+            let mut text = String::new();
+            read_to_end(&mut stream, &mut text).await;
+            assert!(text.contains("The stack was removed."), "{text}");
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_store_ends_the_stream_with_one_error_row() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut stream = open(&app, &browser, "from=0").await;
+            app.logs.close().await;
+            app.log_head.send_modify(|head| head.record += 1);
+            let mut text = String::new();
+            read_to_end(&mut stream, &mut text).await;
+            assert_eq!(
+                text.matches("Cannot read the log store").count(),
+                1,
+                "{text}"
+            );
+            assert!(text.contains("log-closing"), "{text}");
+        }
+
+        #[tokio::test]
+        async fn the_stream_ends_when_the_app_stops() {
+            let mut app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let stop = CancellationToken::new();
+            app.app.logs = app.app.logs.clone().closing_with(stop.clone());
+            let mut stream = open(&app, &browser, "from=0").await;
+            stop.cancel();
+            let mut text = String::new();
+            read_to_end(&mut stream, &mut text).await;
+            assert!(text.contains("hoster is shutting down"), "{text}");
+        }
+
+        #[tokio::test]
+        async fn the_stream_ends_when_the_session_ends() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut stream = open(&app, &browser, "from=0").await;
+            app.store.remove_all_sessions().await.unwrap();
+            let mut text = String::new();
+            read_to_end(&mut stream, &mut text).await;
+            assert!(text.contains("Signed out"), "{text}");
+        }
+
+        #[tokio::test]
+        async fn an_unknown_stack_has_no_stream() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let response = app
+                .get("/stacks/nope/logs/stream", Some(&browser.cookie))
+                .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 }

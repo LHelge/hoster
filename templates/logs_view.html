@@ -1,6 +1,8 @@
 {#- The stored logs view of a LogsView `view` (src/web/logs.rs): the toolbar of chips and GET
-    options, then one page of records, oldest first. Shared by the stack logs tab and the
-    Telemetry page's Logs tab. -#}
+    options, then one page of records, oldest first, and while following the rows its stream
+    appends (log_records.html). Shared by the stack logs tab and the Telemetry page's Logs
+    tab. -#}
+{%- let stack_column = view.stack_column %}
 <section class="log-view" aria-label="Logs">
   <div class="log-toolbar">
     <nav class="log-choices" aria-label="Services">
@@ -14,6 +16,13 @@
       <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
       {%- endfor %}
     </nav>
+    {%- if let Some(follow) = view.follow %}
+    <nav class="log-choices log-follow" aria-label="Follow new records">
+      <span class="log-label">follow</span>
+      <a class="log-chip" href="{{ follow.on }}"{% if follow.following() %} aria-current="page"{% endif %}><span class="dot follow-on" aria-hidden="true"></span>on</a>
+      <a class="log-chip" href="{{ follow.off }}"{% if !follow.following() %} aria-current="page"{% endif %}><span class="dot follow-off" aria-hidden="true"></span>off</a>
+    </nav>
+    {%- endif %}
     <form class="log-options" method="get" action="{{ view.action }}">
       {%- for (name, value) in view.keep %}
       <input type="hidden" name="{{ name }}" value="{{ value }}">
@@ -58,29 +67,25 @@
     <p class="log-pages log-stopped">Searched back to <time datetime="{{ stopped.at }}">{{ stopped.at }}</time>: one search reads at most {{ stopped.cap() }} records. <a href="{{ stopped.href }}">search older</a></p>
     {%- endif %}{% endif %}
     {%- if let Some((active, clear)) = view.cleared %}
-    <p class="log-empty">No records match {{ active }} in {% if view.stopped.is_some() %}the records searched{% else %}this range{% endif %}. <a href="{{ clear }}">clear filters</a></p>
+    <p class="log-empty" id="log-empty">No records match {{ active }} in {% if view.stopped.is_some() %}the records searched{% else %}this range{% endif %}. <a href="{{ clear }}">clear filters</a></p>
     {%- else if view.empty %}
-    <p class="log-empty">No records in this range. Apps that write one JSON object per line get levels and fields; see <a href="https://docs.hoster.lhelge.se/wiki/logging/">logging from an app</a>.</p>
-    {%- else %}
+    <p class="log-empty" id="log-empty">No records in this range. Apps that write one JSON object per line get levels and fields; see <a href="https://docs.hoster.lhelge.se/wiki/logging/">logging from an app</a>.</p>
+    {%- endif %}
+    {%- let stream = view.stream() %}
+    {%- if !view.empty || stream.is_some() %}
     {%- if view.older.is_some() || view.newest.is_some() %}
     <p class="log-pages">
       {%- if let Some(href) = view.older %}<a href="{{ href }}">older</a>{% endif %}
       {%- if let Some(href) = view.newest %}<a href="{{ href }}">newest</a>{% endif %}</p>
     {%- endif %}
-    <ol class="log log-records{% if view.stack_column %} log-stacks{% endif %}" tabindex="0" aria-label="Records, oldest first">
+    <ol id="log-records" class="log log-records{% if view.stack_column %} log-stacks{% endif %}" tabindex="0" aria-label="Records, oldest first"{% if let Some(url) = stream %} hx-sse:connect="{{ url }}" hx-swap="beforeend" hx-sse:close="end"{% endif %}>
       {%- for row in view.rows %}
-      {%- if row.marker %}
-      <li class="log-record log-marker"><time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time><span class="log-msg">{{ row.message }}</span></li>
-      {%- else %}
-      <li class="log-record {{ row.class }}{% if row.stderr %} log-stderr{% endif %}{% if let Some(level) = row.level %} log-{{ level }}{% endif %}"{% if row.stderr %} title="stderr"{% endif %}>
-        <time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time>
-        {%- if view.stack_column %}<span class="log-stack">{{ row.stack.as_deref().unwrap_or_default() }}</span>{% endif %}
-        <span class="log-svc">{{ row.service }}{% if let Some(generation) = row.generation %} <span class="log-gen">g{{ generation }}</span>{% endif %}</span>
-        <span class="log-lvl">{% if let Some(level) = row.level %}{{ level }}{% else %}<span class="visually-hidden">no level</span>{% endif %}</span>
-        <span class="log-msg">{% if row.stderr %}<span class="visually-hidden">stderr: </span>{% endif %}{% for span in row.spans() %}{% if span.mark %}<mark>{{ span.text }}</mark>{% else %}{{ span.text }}{% endif %}{% endfor %}{% if row.cut %} <span class="log-cut" title="The line was longer than the store keeps and was cut.">[cut]</span>{% endif %}</span></li>
-      {%- endif %}
+      {%- include "log_record.html" %}
       {%- endfor %}
     </ol>
+    {%- if let Some(follow) = view.follow %}{% if follow.following() %}
+    <p class="log-pages log-following">Following: new records are added as hoster stores them, about once a second. The list keeps the newest {{ follow.keeps() }}; switch follow off to page back through older ones.</p>
+    {%- endif %}{% endif %}
     {%- if let Some(href) = view.newer %}
     <p class="log-pages"><a href="{{ href }}">newer</a></p>
     {%- endif %}
