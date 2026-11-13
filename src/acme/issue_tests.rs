@@ -540,6 +540,7 @@ async fn pebble_issues_over_http01_and_the_certificate_is_served() {
         traffic: Default::default(),
         admission: Default::default(),
         logs: crate::logs::LogSink::disconnected(),
+        receiver: crate::proxy::ReceiverRoute::new("/nonexistent/otlp.sock".into()),
     };
     let (shutdown, rx) = watch::channel(None);
     let mut running = Proxy::new(&proxy_config, state).spawn(rx).unwrap();

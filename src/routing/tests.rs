@@ -239,6 +239,31 @@ fn reserved_comes_from_the_configured_admin_host() {
     });
 }
 
+/// ADR-0069 §3: `host.containers.internal` is reserved in every set, the stack editor's check
+/// (`Reserved::default()`) included, and never routed by the table.
+#[test]
+fn the_otlp_receivers_host_cannot_be_routed() {
+    let a = stack("a", &[("web", "host.containers.internal", "/v1")]);
+    for reserved in [Reserved::default(), admin()] {
+        let err = RouteClaims::check(&a, [], &reserved).unwrap_err();
+        let [collision] = err.collisions.as_slice() else {
+            panic!("{err}");
+        };
+        assert_eq!(collision.owner, Owner::Reserved(Reserved::OTLP_RECEIVER));
+        assert_eq!(
+            collision.to_string(),
+            "route `host.containers.internal/v1` of service `web` of stack `a` uses host \
+             `host.containers.internal`, which is reserved for hoster (the OTLP receiver: \
+             containers reach hoster by this name)"
+        );
+        let table = RouteTable::build(&DesiredState::default(), &reserved).unwrap();
+        assert!(table.known_host("host.containers.internal").is_none());
+    }
+    // Reserving another host keeps it.
+    let err = RouteClaims::check(&a, [], &admin().with_host(host("x.example.com"), "x"));
+    assert!(err.is_err());
+}
+
 #[test]
 fn reapplying_a_stack_does_not_collide_with_its_previous_version() {
     let old = stack("a", &[("web", "example.com", "/")]);

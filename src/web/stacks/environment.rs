@@ -2,9 +2,11 @@
 //! variable the active revision's stack file gives a service, and the stack's secrets, in one
 //! table under the header and tab bar every stack page shares.
 //!
-//! Plain variables (`env`, plus the `PORT` hoster adds for a routed service, ADR-0051) show their
-//! values: they are in the stack file anyway, and they change only through it, by applying a new
-//! revision, so the tab has no edit for them. Secrets
+//! Plain variables (`env`, plus the `PORT` hoster adds for a routed service, ADR-0051, and the
+//! `OTEL_*` variables it adds to every service, ADR-0069 §5) show their values: they are in the
+//! stack file or follow from it, and they change only through it, by applying a new revision,
+//! so the tab has no edit for them. The one exception is the service's OTLP token in
+//! `OTEL_EXPORTER_OTLP_HEADERS`, which is masked like a secret (ADR-0029). Secrets
 //! (`secrets = { ENV = "<stack>/<name>" }`) show the secret's name in place of a value, never the
 //! value: the store is write-only (ADR-0029), and no page, partial or error message here ever
 //! contains one. A referenced secret that is not set is flagged; a stored one the active revision
@@ -36,8 +38,9 @@ use super::frame::{StackHeader, Tab};
 use super::list::Ago;
 use super::{DeploymentView, Outcome, StackView, Stacks, When};
 use crate::orchestrator::{SecretChange, StackSecret, StackStatus};
+use crate::otlp::{ExporterEnv, ResourceAttributes};
 use crate::secrets::SecretValue;
-use crate::stack::{SecretUse, Stack};
+use crate::stack::{Name, SecretUse, Stack};
 use crate::web::auth::Session;
 use crate::web::pages::{Layout, Page, Section, Shell};
 
@@ -242,12 +245,11 @@ struct SecretCell {
 /// What a row sets: a plain variable's value, or a secret by name.
 #[derive(Debug)]
 enum EnvValue {
-    /// A plain variable from the stack file's `env`.
+    /// A plain variable from the stack file's `env`, or one hoster adds.
     Var {
         value: String,
-        /// Added by hoster rather than the stack file's `env`: `PORT` for a routed service
-        /// with one container port (ADR-0051).
-        injected: bool,
+        /// Why hoster added it, when the stack file's `env` does not set it.
+        injected: Option<Injected>,
     },
     /// A secret from the store, referenced through `secrets` or a config file, or only stored.
     Secret {
@@ -275,15 +277,82 @@ impl EnvValue {
         }
     }
 
-    fn injected(&self) -> bool {
-        matches!(self, EnvValue::Var { injected: true, .. })
+    /// Why hoster added the variable, for the note beside its value.
+    fn injected(&self) -> Option<Injected> {
+        match self {
+            EnvValue::Var { injected, .. } => *injected,
+            EnvValue::Secret { .. } => None,
+        }
     }
 }
 
-/// The type pill: `var`, `secret` or `secret file`.
+/// A variable hoster adds to a service's environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Injected {
+    /// `PORT` for a routed service with one container port (ADR-0051).
+    Port,
+    /// The four hashed `OTEL_*` variables (ADR-0069 §5).
+    Otel,
+    /// `OTEL_RESOURCE_ATTRIBUTES`, set per deployment.
+    Resource,
+    /// `OTEL_EXPORTER_OTLP_HEADERS`: the service's token, shown masked like a secret
+    /// (ADR-0029).
+    Token,
+}
+
+impl Injected {
+    /// The variables hoster adds at container create, outside the config hash, with what the
+    /// tab shows as their values: never the token, and the generation by name, since each
+    /// deployment has its own.
+    fn at_create(stack: &Name) -> [(&'static str, String, Self); 2] {
+        [
+            (
+                ExporterEnv::HEADERS,
+                ExporterEnv::HEADERS_MASKED.to_owned(),
+                Injected::Token,
+            ),
+            (
+                ExporterEnv::RESOURCE_ATTRIBUTES,
+                format!(
+                    "{}={stack},{}=<generation>",
+                    ResourceAttributes::NAMESPACE,
+                    ResourceAttributes::GENERATION
+                ),
+                Injected::Resource,
+            ),
+        ]
+    }
+
+    /// Why hoster added a variable of `container_env` the stack file's `env` does not set.
+    fn of(key: &str) -> Self {
+        if key == "PORT" {
+            Injected::Port
+        } else {
+            Injected::Otel
+        }
+    }
+}
+
+/// The note beside the value, after "added by hoster: ".
+impl std::fmt::Display for Injected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Injected::Port => "the route's port",
+            Injected::Otel => "OpenTelemetry export to hoster",
+            Injected::Resource => "the stack and each deployment's generation",
+            Injected::Token => "the service's OTLP token, never shown",
+        })
+    }
+}
+
+/// The type pill: `var`, `secret` or `secret file`; the masked token is a `secret`.
 impl std::fmt::Display for EnvValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            EnvValue::Var {
+                injected: Some(Injected::Token),
+                ..
+            } => "secret",
             EnvValue::Var { .. } => "var",
             EnvValue::Secret { file: true, .. } => "secret file",
             EnvValue::Secret { .. } => "secret",
@@ -334,15 +403,29 @@ impl EnvTable {
             Ok(definition) => {
                 for (service, spec) in &definition.services {
                     let mut rows_of_service = Vec::new();
-                    for (key, value) in spec.container_env() {
+                    for (key, value) in spec.container_env(service) {
                         rows_of_service.push(EnvRow {
                             value: EnvValue::Var {
-                                injected: !spec.env.contains_key(&key),
+                                injected: (!spec.env.contains_key(&key))
+                                    .then(|| Injected::of(&key)),
                                 value,
                             },
                             key: Some(key),
                             service: Some(service.to_string()),
                         });
+                    }
+                    // Added at container create (ADR-0069 §5), unless the stack file sets them.
+                    for (key, value, injected) in Injected::at_create(&definition.name) {
+                        if !spec.sets(key) {
+                            rows_of_service.push(EnvRow {
+                                key: Some(key.to_owned()),
+                                service: Some(service.to_string()),
+                                value: EnvValue::Var {
+                                    value,
+                                    injected: Some(injected),
+                                },
+                            });
+                        }
                     }
                     // Every use of a secret: as a variable, or as a config file (ADR-0057),
                     // whose row is keyed by the file's path.

@@ -5,7 +5,8 @@
 //! kept as JSON, bytes as base64); a span's resource attributes are kept the same way, for
 //! display. Times are the payload's, except that a time that is absent or later than the time
 //! hoster received the export becomes the time received: retention deletes by these times, so
-//! a time in the future would keep a row past it.
+//! a time in the future would keep a row past it. A log record's generation is the one its
+//! resource names in `hoster.generation`, which hoster injects (see `env.rs`).
 
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1 as trace;
 use serde_json::{Map, Value, json};
 
+use super::ResourceAttributes;
 use crate::logs::{OtlpSeverity, ParsedLine};
 use crate::secrets::ServiceIdentity;
 use crate::store::{
@@ -48,17 +50,20 @@ impl Origin {
         &self,
         export: ExportLogsServiceRequest,
     ) -> impl Iterator<Item = LogRecord> + '_ {
-        export
-            .resource_logs
-            .into_iter()
-            .flat_map(|resource| resource.scope_logs)
-            .flat_map(|scope| scope.log_records)
-            .map(|record| {
-                LogRecord::from(Exported {
-                    origin: self,
-                    item: record,
+        export.resource_logs.into_iter().flat_map(move |resource| {
+            let generation = Generation::from(&resource.resource).0;
+            resource
+                .scope_logs
+                .into_iter()
+                .flat_map(|scope| scope.log_records)
+                .map(move |record| {
+                    LogRecord::from(Exported {
+                        origin: self,
+                        generation,
+                        item: record,
+                    })
                 })
-            })
+        })
     }
 
     /// The export's spans, in the payload's order, each with its resource's attributes; an
@@ -93,10 +98,30 @@ impl Origin {
     }
 }
 
-/// A log record with the export it came in.
+/// A log record with the export it came in and the generation its resource names.
 struct Exported<'a, T> {
     origin: &'a Origin,
+    generation: Option<u32>,
     item: T,
+}
+
+/// The deployment generation a resource names in hoster's own attribute, which hoster injects
+/// through `OTEL_RESOURCE_ATTRIBUTES` ([`ResourceAttributes`]). Display data from the payload:
+/// `None` when absent or not a number, and a wrong one is harmless, since the stack and
+/// service come from the token. A key given twice counts with its last value.
+struct Generation(Option<u32>);
+
+impl From<&Option<Resource>> for Generation {
+    fn from(resource: &Option<Resource>) -> Self {
+        Self(
+            resource
+                .iter()
+                .flat_map(|resource| resource.attributes.iter().rev())
+                .find(|kv| kv.key == ResourceAttributes::GENERATION)
+                .and_then(|kv| kv.value.clone())
+                .and_then(|value| ResourceAttributes::generation(&Json::from(value).0)),
+        )
+    }
 }
 
 /// A span with the export it came in and its resource's attributes as JSON text.
@@ -116,7 +141,11 @@ impl From<Exported<'_, logs::LogRecord>> for LogRecord {
     /// The body is the message (a string as it is, anything else as JSON, the event name when
     /// there is none), cut like a container's line; the attributes are the fields.
     fn from(exported: Exported<'_, logs::LogRecord>) -> Self {
-        let Exported { origin, item } = exported;
+        let Exported {
+            origin,
+            generation,
+            item,
+        } = exported;
         let nanos = match item.time_unix_nano {
             0 => item.observed_time_unix_nano,
             nanos => nanos,
@@ -135,7 +164,7 @@ impl From<Exported<'_, logs::LogRecord>> for LogRecord {
             time: Timestamp::from(origin.time(nanos)),
             stack: Some(origin.stack.clone()),
             service: origin.service.clone(),
-            generation: None,
+            generation,
             stream: Stream::Otlp,
             level: Option::from(OtlpSeverity {
                 number: item.severity_number,

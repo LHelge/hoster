@@ -1318,7 +1318,8 @@ fn volumes_with_start_first_warn() {
 
 #[test]
 fn container_env_adds_port_for_one_container_port_only() {
-    let env = |source: &str| app(&parse(source).unwrap().stack).container_env();
+    let env =
+        |source: &str| app(&parse(source).unwrap().stack).container_env(&"app".parse().unwrap());
     assert_eq!(env(MINIMAL)["PORT"], "8080");
 
     // `env` wins over the injected value.
@@ -1348,7 +1349,54 @@ fn container_env_adds_port_for_one_container_port_only() {
 
     // No routes: nothing.
     let unrouted = "version = 1\nname = \"demo\"\n[services.app]\nimage = \"ghcr.io/acme/app\"\n";
-    assert!(env(unrouted).is_empty());
+    assert!(!env(unrouted).contains_key("PORT"));
+}
+
+/// ADR-0069 §5: the four hashed `OTEL_*` variables, for every service, routed or not; a stack
+/// file that sets one as `env` or as a secret keeps it, variable by variable.
+#[test]
+fn container_env_points_every_service_at_the_otlp_receiver() {
+    let env =
+        |source: &str| app(&parse(source).unwrap().stack).container_env(&"app".parse().unwrap());
+    let unrouted = "version = 1\nname = \"demo\"\n[services.app]\nimage = \"ghcr.io/acme/app\"\n";
+    let injected = [
+        (
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "http://host.containers.internal",
+        ),
+        ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+        ("OTEL_METRICS_EXPORTER", "none"),
+        ("OTEL_SERVICE_NAME", "app"),
+    ];
+    for source in [unrouted, MINIMAL] {
+        let env = env(source);
+        for (key, value) in injected {
+            assert_eq!(env[key], value, "{key}");
+        }
+        // The two that change per deployment are added at container create, never here.
+        assert!(!env.contains_key("OTEL_EXPORTER_OTLP_HEADERS"));
+        assert!(!env.contains_key("OTEL_RESOURCE_ATTRIBUTES"));
+    }
+    // Nothing else for a service without routes.
+    let mut keys = injected.map(|(key, _)| key);
+    keys.sort_unstable();
+    assert_eq!(
+        env(unrouted).keys().map(String::as_str).collect::<Vec<_>>(),
+        keys
+    );
+
+    for (key, _) in injected {
+        // Set as `env`: the stack file's value, the others still injected.
+        let own = format!("{unrouted}env = {{ {key} = \"mine\" }}\n");
+        let own = env(&own);
+        assert_eq!(own[key], "mine", "{key}");
+        assert_eq!(own.len(), injected.len(), "{key}");
+        // Set as a secret: no plain value under that name at all.
+        let secret = format!("{unrouted}[services.app.secrets]\n{key} = \"demo/otel\"\n");
+        let secret = env(&secret);
+        assert!(!secret.contains_key(key), "{key}");
+        assert_eq!(secret.len(), injected.len() - 1, "{key}");
+    }
 }
 
 #[test]

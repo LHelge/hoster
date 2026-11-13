@@ -1,10 +1,10 @@
 ---
 id: "5up"
 title: "OTLP: the receiver route on the proxy's :80 and the injected OTEL_* variables"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:36:39.410069219Z"
-updated: "2026-11-13T17:01:54.542808288Z"
+updated: "2026-11-13T18:41:51.938984600Z"
 tags:
   - observability
   - runtime
@@ -13,6 +13,7 @@ depends_on:
   - m7x
   - h4q
 parent: xv9
+attempts: 1
 ---
 
 ## Summary
@@ -31,7 +32,7 @@ Serve the receiver where containers reach it, and point every service's SDK at i
 - [ ] `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<token>` (token from `j6z`) and `OTEL_RESOURCE_ATTRIBUTES` with the stack and the deployment generation are added at container create and are not hashed; the same override rule applies
 - [ ] A test shows the hash of an existing service changes exactly once with this task, and does not change between two deployments of the same spec
 - [ ] The UI's environment view shows the injected variables as injected, with the token masked like a secret (ADR-0029)
-- [ ] The release notes entry for this epic says that the first deployment of each stack after the upgrade replaces all its services
+- The release notes are made from commit messages and a blog post at release time: this task's commit says that the first deployment of each stack after the upgrade replaces all its services, and the release post must too
 
 **Doctor and docs**
 - [ ] `hoster doctor` checks that a container on a stack network resolves `host.containers.internal` to `169.254.1.2` and reaches the receiver, and names podman and passt versions when it does not
@@ -39,7 +40,7 @@ Serve the receiver where containers reach it, and point every service's SDK at i
 
 **Still to show (ADR-0069, Consequences)**
 - [ ] On the real proxy: the route is matched before the redirect. If Pingora cannot do it, stop and raise an open question; do not fall back to a dedicated port without the owner
-- [ ] From a second machine: a request to the host's public address with `Host: host.containers.internal` gets 404, and a connection that claims one of the host's addresses as its source is not answered. Record the result in `docs/spikes/container-to-host-listener.md`
+- Moved to task `u9m` on 2026-11-13, since it needs a second machine: that outside clients get 404 and that a spoofed local source is not answered
 
 ## Implementation Notes
 - Spike `h4q` ran against a stand-in listener, on high ports; port 80 itself and Pingora are untested

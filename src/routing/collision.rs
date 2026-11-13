@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use super::upstream::UnixUpstream;
 use crate::config::Config;
+use crate::otlp::OtlpReceiver;
 use crate::stack::{Counted, FieldPath, Host, Name, NormalizedPrefix, Stack};
 
 /// The service that declares a route.
@@ -45,7 +46,11 @@ impl fmt::Display for Owner {
 /// A reserved host may also carry the Unix socket hoster serves it from (the admin app);
 /// `RouteTable::build` then injects a `/` route to it. A host reserved without a socket is only
 /// kept out of the stacks' reach and is not routed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Every set, the default one too, reserves `host.containers.internal`, the name containers
+/// reach the OTLP receiver by (ADR-0069 §3). It is not in the route table: only the proxy's
+/// `:80` serves it, to local peers.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reserved {
     hosts: BTreeMap<Host, ReservedHost>,
 }
@@ -56,9 +61,29 @@ struct ReservedHost {
     upstream: Option<Arc<UnixUpstream>>,
 }
 
+impl Default for Reserved {
+    fn default() -> Self {
+        let otlp = OtlpReceiver::HOST
+            .parse()
+            .expect("the receiver's host is a valid route host");
+        Self {
+            hosts: BTreeMap::from([(
+                otlp,
+                ReservedHost {
+                    purpose: Self::OTLP_RECEIVER,
+                    upstream: None,
+                },
+            )]),
+        }
+    }
+}
+
 impl Reserved {
     /// The purpose of the admin host.
     const ADMIN_UI: &'static str = "admin UI";
+    /// The purpose of `host.containers.internal`, as a collision names it.
+    pub const OTLP_RECEIVER: &'static str =
+        "the OTLP receiver: containers reach hoster by this name";
 
     /// Reserves `host` for `purpose`, e.g. "admin UI", without routing it. Keeps a socket an
     /// earlier [`with_unix_host`](Self::with_unix_host) gave the same host.

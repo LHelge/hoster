@@ -485,45 +485,37 @@ impl WebApp {
         // Follow streams end when the app stops, so a graceful stop does not wait for them.
         app.logs = app.logs.closing_with(token.clone());
         let router = app.router();
-        let shutdown = token.clone().cancelled_owned();
-        let (task, socket) = match &listen {
-            Listen::Unix(path) => {
-                let listener = AdminSocket::bind(path)
-                    .await
-                    .with_context(|| format!("binding the admin socket {}", path.display()))?;
-                let task = tokio::spawn(async move {
-                    axum::serve(listener, router)
-                        .with_graceful_shutdown(shutdown)
-                        .await
-                });
-                (task, Some(path.clone()))
-            }
+        let server = match &listen {
+            Listen::Unix(path) => WebServer::unix(router, path, "admin app", token).await?,
             Listen::Tcp(addr) => {
                 let listener = TcpListener::bind(addr)
                     .await
                     .with_context(|| format!("binding the admin app to {addr}"))?;
                 tracing::warn!(%addr, "admin app on loopback TCP: for local development only");
+                let shutdown = token.clone().cancelled_owned();
                 let task = tokio::spawn(async move {
                     axum::serve(listener, router)
                         .with_graceful_shutdown(shutdown)
                         .await
                 });
-                (task, None)
+                WebServer {
+                    what: "admin app",
+                    task: Some(task),
+                    socket: None,
+                    token,
+                }
             }
         };
         tracing::info!(%listen, "admin app listening");
-        Ok(WebServer {
-            task: Some(task),
-            socket,
-            token,
-        })
+        Ok(server)
     }
 }
 
-/// The admin app's 0600 Unix socket (ADR-0031).
-struct AdminSocket;
+/// A 0600 Unix socket in the state directory that hoster serves an app on: the admin app's
+/// (ADR-0031) or the OTLP receiver's (ADR-0069 §3).
+struct AppSocket;
 
-impl AdminSocket {
+impl AppSocket {
     /// Binds `path`, replacing a stale socket left by a previous run. Refuses to take over a
     /// socket another process still accepts on, and anything that is not a socket.
     ///
@@ -570,13 +562,15 @@ impl AdminSocket {
         if let Err(err) = std::fs::remove_file(path)
             && err.kind() != io::ErrorKind::NotFound
         {
-            tracing::warn!(path = %path.display(), error = %err, "could not remove the admin socket");
+            tracing::warn!(path = %path.display(), error = %err, "could not remove an app socket");
         }
     }
 }
 
-/// A running admin app.
+/// A running app: the admin app, or the OTLP receiver.
 pub struct WebServer {
+    /// What it serves, for errors.
+    what: &'static str,
     /// `None` once the server has stopped.
     task: Option<JoinHandle<io::Result<()>>>,
     /// The Unix socket to remove after stopping.
@@ -585,6 +579,31 @@ pub struct WebServer {
 }
 
 impl WebServer {
+    /// Serves `router` as `what` on a 0600 Unix socket at `path`, replacing a stale socket
+    /// (never a live one), in a background task until `token` is cancelled.
+    pub async fn unix(
+        router: Router,
+        path: &Path,
+        what: &'static str,
+        token: CancellationToken,
+    ) -> anyhow::Result<Self> {
+        let listener = AppSocket::bind(path)
+            .await
+            .with_context(|| format!("binding the {what} socket {}", path.display()))?;
+        let shutdown = token.clone().cancelled_owned();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown)
+                .await
+        });
+        Ok(WebServer {
+            what,
+            task: Some(task),
+            socket: Some(path.to_owned()),
+            token,
+        })
+    }
+
     /// Stops the server. The serving task stops accepting once the root token is cancelled
     /// (this cancels it too, in case it was not); `graceful` waits for in-flight requests.
     /// Otherwise the serving task is aborted without waiting: connections axum already spawned
@@ -602,12 +621,12 @@ impl WebServer {
         let result = task.await;
         self.task = None;
         if let Some(path) = self.socket.take() {
-            AdminSocket::remove(&path);
+            AppSocket::remove(&path);
         }
         match result {
-            Ok(served) => served.context("serving the admin app"),
+            Ok(served) => served.with_context(|| format!("serving the {}", self.what)),
             Err(err) if err.is_cancelled() => Ok(()),
-            Err(err) => Err(anyhow::anyhow!("the admin app task panicked: {err}")),
+            Err(err) => Err(anyhow::anyhow!("the {} task panicked: {err}", self.what)),
         }
     }
 }

@@ -62,6 +62,28 @@ pub struct RoutingProxy {
 }
 
 impl RoutingProxy {
+    /// The upstream of `route`, with `defaults` for the timeouts the route does not set: its
+    /// loopback port, or hoster's own app (or the OTLP receiver) on a Unix socket.
+    pub(super) fn peer(route: &RouteEntry, defaults: Timeouts) -> Result<Box<HttpPeer>> {
+        let mut peer = match &route.target {
+            Target::Loopback(upstream) => HttpPeer::new(upstream.addr, false, String::new()),
+            Target::Unix(upstream) => {
+                let path: &Path = upstream.as_ref().as_ref();
+                let path = path
+                    .to_str()
+                    .or_err(ErrorType::SocketError, "non-UTF-8 socket path")?;
+                HttpPeer::new_uds(path, false, String::new())?
+            }
+            Target::Unavailable { .. } => {
+                return Error::e_explain(ErrorType::InternalError, "unavailable route has no peer");
+            }
+        };
+        defaults
+            .overridden_by(&route.timeouts)
+            .apply(&mut peer.options);
+        Ok(Box::new(peer))
+    }
+
     /// A proxy reading `routes`, which the orchestrator replaces as deploys happen, holding
     /// clients to `limits`, counting requests in `traffic` and offering their rows to `logs`.
     pub fn new(
@@ -172,24 +194,7 @@ impl ProxyHttp for RoutingProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let route = ctx.route()?;
-        let mut peer = match &route.target {
-            Target::Loopback(upstream) => HttpPeer::new(upstream.addr, false, String::new()),
-            Target::Unix(upstream) => {
-                let path: &Path = upstream.as_ref().as_ref();
-                let path = path
-                    .to_str()
-                    .or_err(ErrorType::SocketError, "non-UTF-8 admin socket path")?;
-                HttpPeer::new_uds(path, false, String::new())?
-            }
-            Target::Unavailable { .. } => {
-                return Error::e_explain(ErrorType::InternalError, "unavailable route has no peer");
-            }
-        };
-        self.defaults
-            .overridden_by(&route.timeouts)
-            .apply(&mut peer.options);
-        Ok(Box::new(peer))
+        Self::peer(ctx.route()?, self.defaults)
     }
 
     async fn upstream_request_filter(
@@ -198,12 +203,7 @@ impl ProxyHttp for RoutingProxy {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        let forwarding = Forwarding {
-            host: &ctx.host,
-            client: Forwarding::client_ip(session),
-            https: session.digest().is_some_and(|d| d.ssl_digest.is_some()),
-        };
-        forwarding.apply(ctx.route()?, upstream_request)
+        Forwarding::new(session, &ctx.host).apply(ctx.route()?, upstream_request)
     }
 
     /// Notes when the response header arrived. What follows it (a body, an event stream, an
@@ -499,9 +499,18 @@ pub(super) struct Forwarding<'a> {
     https: bool,
 }
 
-impl Forwarding<'_> {
+impl<'a> Forwarding<'a> {
+    /// The forwarding of a request `session` serves, sent for `host`.
+    pub(super) fn new(session: &Session, host: &'a str) -> Self {
+        Self {
+            host,
+            client: Self::client_ip(session),
+            https: session.digest().is_some_and(|d| d.ssl_digest.is_some()),
+        }
+    }
+
     /// The client's IP address, when it connected over TCP.
-    fn client_ip(session: &Session) -> Option<IpAddr> {
+    pub(super) fn client_ip(session: &Session) -> Option<IpAddr> {
         session
             .client_addr()
             .and_then(|addr| addr.as_inet())
@@ -558,7 +567,7 @@ impl Forwarding<'_> {
     /// HTTP/1 absolute-form target verbatim unless it is replaced, and the upstream is an
     /// origin server, not a proxy. A target that is not valid UTF-8 is forwarded untouched,
     /// or refused with 400 if its prefix would have to be stripped.
-    fn apply(&self, route: &RouteEntry, req: &mut RequestHeader) -> Result<()> {
+    pub(super) fn apply(&self, route: &RouteEntry, req: &mut RequestHeader) -> Result<()> {
         let target = req.uri.path_and_query().map_or("/", |pq| pq.as_str());
         let upstream = route.upstream_path(target);
         let stripped = upstream != target;
@@ -660,7 +669,7 @@ impl ErrorPage {
 
     /// The page for a request that failed while proxying, or `None` when the client is gone.
     /// Upstream timeouts are 504, every other upstream failure (refused, reset) 502.
-    fn for_error(e: &Error) -> Option<Self> {
+    pub(super) fn for_error(e: &Error) -> Option<Self> {
         use ErrorType::*;
         let status = match (e.etype(), e.esource()) {
             (HTTPStatus(code), _) => StatusCode::from_u16(*code).ok()?,
@@ -673,6 +682,11 @@ impl ErrorPage {
             (_, ErrorSource::Internal | ErrorSource::Unset) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Some(status.into())
+    }
+
+    /// The page's status.
+    pub(super) fn status(&self) -> StatusCode {
+        self.status
     }
 
     pub(super) fn body(&self) -> Bytes {

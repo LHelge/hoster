@@ -1243,7 +1243,76 @@ async fn secrets_are_injected_at_create_and_port_only_for_one_container_port() {
 
     // Two distinct container ports, or none: no `PORT`.
     assert!(!h.spec_of("hoster-notes-multi-g1").env.contains_key("PORT"));
-    assert!(h.spec_of("hoster-notes-worker-g1").env.is_empty());
+    let worker = h.spec_of("hoster-notes-worker-g1");
+    assert!(!worker.env.contains_key("PORT"));
+
+    // ADR-0069 §5: every service gets the `OTEL_*` variables, the token as a secret.
+    let mut keys: Vec<_> = worker.env.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_PROTOCOL",
+            "OTEL_METRICS_EXPORTER",
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "OTEL_SERVICE_NAME",
+        ]
+    );
+    assert_eq!(worker.env["OTEL_SERVICE_NAME"], "worker");
+    assert_eq!(
+        worker.env["OTEL_RESOURCE_ATTRIBUTES"],
+        "service.namespace=notes,hoster.generation=1"
+    );
+    let token = h
+        .secrets
+        .token_key()
+        .token(&"notes".parse().unwrap(), &"api".parse().unwrap())
+        .to_string();
+    assert_eq!(
+        api.secrets["OTEL_EXPORTER_OTLP_HEADERS"].expose(),
+        format!("Authorization=Bearer%20{token}")
+    );
+    assert!(!api.env.contains_key("OTEL_EXPORTER_OTLP_HEADERS"));
+    assert!(!format!("{api:?}").contains(&token));
+    assert!(
+        events
+            .iter()
+            .all(|e| !e.message.as_deref().unwrap_or("").contains(&token))
+    );
+}
+
+/// A stack file that sets an injected `OTEL_*` name as `env` or as a secret keeps its own,
+/// for the variables added at create as for the hashed ones.
+#[tokio::test]
+async fn a_stack_file_overrides_the_injected_otel_variables_one_by_one() {
+    let h = harness().await;
+    h.set_secret("notes/otel-headers", "x-api-key=mine").await;
+    h.apply(
+        r#"
+version = 1
+name = "notes"
+
+[services.worker]
+image = "ghcr.io/acme/notes-worker"
+env = { OTEL_RESOURCE_ATTRIBUTES = "team=a", OTEL_SERVICE_NAME = "notes-worker" }
+secrets = { OTEL_EXPORTER_OTLP_HEADERS = "notes/otel-headers" }
+"#,
+    )
+    .await;
+    let deployed = h.deploy(&[("worker", 1)]).await;
+    assert_eq!(h.finish(&deployed).await.state, S::Live);
+    let worker = h.spec_of("hoster-notes-worker-g1");
+    assert_eq!(worker.env["OTEL_RESOURCE_ATTRIBUTES"], "team=a");
+    assert_eq!(worker.env["OTEL_SERVICE_NAME"], "notes-worker");
+    assert_eq!(
+        worker.secrets["OTEL_EXPORTER_OTLP_HEADERS"].expose(),
+        "x-api-key=mine"
+    );
+    assert_eq!(
+        worker.env["OTEL_EXPORTER_OTLP_ENDPOINT"],
+        "http://host.containers.internal"
+    );
 }
 
 #[tokio::test]
@@ -2705,8 +2774,12 @@ async fn config_files_go_to_the_runtime_with_their_container() {
             ),
         ]
     );
-    // File secrets are not environment variables.
-    assert!(spec.secrets.is_empty() && !spec.env.contains_key("token"));
+    // File secrets are not environment variables; the only secret one is the OTLP token.
+    assert_eq!(
+        spec.secrets.keys().collect::<Vec<_>>(),
+        ["OTEL_EXPORTER_OTLP_HEADERS"]
+    );
+    assert!(!spec.env.contains_key("token"));
     let debug = format!("{spec:?}");
     for content in ["t0ken-value", "$2y$hash", "scrape_interval"] {
         assert!(!debug.contains(content), "{content} in {debug}");

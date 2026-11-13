@@ -16,7 +16,6 @@ mod logs;
 mod machine;
 mod notify;
 mod orchestrator;
-#[allow(dead_code, reason = "mounted on the proxy's :80 by task 5up")]
 mod otlp;
 mod ports;
 mod proxy;

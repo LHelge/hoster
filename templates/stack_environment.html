@@ -27,7 +27,7 @@
           {%- if let Some((ago, at)) = secret.changed %}<span class="env-changed">set <time datetime="{{ at }}" title="{{ at }}">{{ ago }}</time></span>
           {%- else %} {{ crate::web::Tone::Warn.pill("not set") }}{% endif %}</td>
         {%- else %}
-        <td><code class="wrap env-value">{{ row.value.text() }}</code>{% if row.value.injected() %}<span class="env-changed">added by hoster: the route's port</span>{% endif %}</td>
+        <td><code class="wrap env-value">{{ row.value.text() }}</code>{% if let Some(why) = row.value.injected() %}<span class="env-changed">added by hoster: {{ why }}</span>{% endif %}</td>
         {%- endif %}
         <td>{% if let Some(service) = row.service %}<span class="mono env-service">{{ service }}</span>{% else %}<span class="mono env-service muted">no service</span>{% endif %}</td>
         <td><span class="tag{% if row.value.secret().is_none() %} tag-neutral{% endif %} env-type">{{ row.value }}</span></td>

@@ -10,6 +10,11 @@
 //! `timedatectl`) behind [`Commands`] — so tests inject fakes for each. [`Doctor::diagnose`] runs every check
 //! and returns a [`Report`], which renders as text ([`Display`](fmt::Display)) or JSON
 //! ([`Serialize`]). Nothing here needs root; it runs as the service user.
+//!
+//! One check runs a container: `otlp_path` (ADR-0069 §3, see `receiver.rs`) has a throwaway
+//! busybox container on a stack network post to the OTLP receiver, through the podman socket
+//! the `podman_socket` check found. It is advisory and runs only when that socket answers;
+//! the probe sits behind [`ContainerPath`] so tests fake it.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -22,6 +27,12 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde::Serialize;
+
+mod receiver;
+
+#[cfg(test)]
+pub(crate) use self::receiver::ReceiverPath;
+use self::receiver::{ContainerPath, PodmanPath, Verdict};
 
 use crate::config::{Config, ConfigError, PortRange};
 use crate::installation::Installation;
@@ -91,6 +102,8 @@ pub struct Doctor {
     /// The versioned binary layout it should run from (ADR-0052); `None` without `$HOME`.
     installation: Option<Installation>,
     commands: Box<dyn Commands>,
+    /// Runs the `otlp_path` probe container.
+    container_path: Box<dyn ContainerPath>,
 }
 
 impl Doctor {
@@ -117,6 +130,7 @@ impl Doctor {
             exe: std::env::current_exe().ok(),
             installation: Installation::from_env(),
             commands: Box::new(commands),
+            container_path: Box::new(PodmanPath),
         })
     }
 
@@ -129,6 +143,8 @@ impl Doctor {
             Ok(config) => Self::check_log_store(&config.state_dir).await,
             Err(_) => Outcome::Skip("needs a valid configuration".to_owned()),
         };
+        let configured = config.ok().and_then(|c| c.podman_socket.as_deref());
+        let otlp_path = self.check_otlp_path(configured).await;
         Report {
             checks: vec![
                 Check::required("user", self.check_user()),
@@ -157,6 +173,7 @@ impl Doctor {
                 // A manual install still works; it just cannot update itself.
                 Check::advisory("binary_layout", self.check_binary_layout()),
                 Check::advisory("log_store", log_store),
+                Check::advisory("otlp_path", otlp_path),
             ],
         }
     }
@@ -335,6 +352,40 @@ impl Doctor {
                 ping.describe()
             )),
             Err(e) => Outcome::fail(format!("{}: /_ping failed: {e}", socket.display()), hint),
+        }
+    }
+
+    /// A container on a stack network resolves `host.containers.internal` to `169.254.1.2`
+    /// and reaches the OTLP receiver (ADR-0069 §3). Runs only when the podman socket answers;
+    /// a failure names the podman and pasta versions.
+    async fn check_otlp_path(&self, configured: Option<&Path>) -> Outcome {
+        if !matches!(self.check_podman_socket(configured), Outcome::Pass(_)) {
+            return Outcome::Skip("needs the podman socket".to_owned());
+        }
+        let configured = configured.map(|path| vec![path.to_path_buf()]);
+        let sockets = configured.as_deref().unwrap_or(&self.sockets);
+        let Some(socket) = sockets.iter().find(|s| s.exists()) else {
+            return Outcome::Skip("needs the podman socket".to_owned());
+        };
+        let pasta = self
+            .commands
+            .stdout("pasta", &["--version"])
+            .ok()
+            .and_then(|out| out.lines().next().map(str::to_owned))
+            .unwrap_or_else(|| "pasta version unknown".to_owned());
+        match self.container_path.probe(socket).await {
+            Ok(seen) => match seen.verdict(&pasta) {
+                Verdict::Reached { network } => Outcome::Pass(format!(
+                    "a container on {network} resolves {} to {} and reaches the OTLP receiver",
+                    crate::otlp::OtlpReceiver::HOST,
+                    crate::otlp::OtlpReceiver::HOST_ADDRESS,
+                )),
+                Verdict::Failed { detail, hint } => Outcome::fail(detail, hint),
+            },
+            Err(err) => Outcome::fail(
+                format!("cannot run the probe container: {err} ({pasta})"),
+                "the check pulls busybox from Docker Hub and runs it on a stack network",
+            ),
         }
     }
 
@@ -862,6 +913,16 @@ mod tests {
         }
     }
 
+    /// The `otlp_path` probe, answering what it was given.
+    struct FakePath(Result<receiver::Seen, String>);
+
+    #[async_trait::async_trait]
+    impl ContainerPath for FakePath {
+        async fn probe(&self, _socket: &Path) -> Result<receiver::Seen, String> {
+            self.0.clone()
+        }
+    }
+
     /// A temporary host: a fake /proc/sys, no podman socket, port 0 to bind.
     struct Fixture {
         dir: tempfile::TempDir,
@@ -891,6 +952,12 @@ mod tests {
                 exe: Some(installation.current_link().join("hoster")),
                 installation: Some(installation),
                 commands: Box::new(commands),
+                container_path: Box::new(FakePath(Ok(receiver::Seen {
+                    address: Some("169.254.1.2".parse().unwrap()),
+                    status: Some(401),
+                    network: "hoster-shop".to_owned(),
+                    ..receiver::Seen::default()
+                }))),
             };
             let fixture = Self { dir, doctor };
             fixture.sysctl("net/ipv4/ip_unprivileged_port_start", "80\n");
@@ -1452,6 +1519,55 @@ mod tests {
         assert!(report.ok(), "{report}");
         assert!(report.checks().iter().all(|c| c.status == Status::Pass));
         assert!(report.to_string().ends_with("all required checks passed"));
+    }
+
+    #[tokio::test]
+    async fn otlp_path_needs_the_podman_socket_and_names_versions_when_it_fails() {
+        let mut fx = Fixture::with_commands(
+            FakeCommands::healthy().with("pasta --version", "pasta 2026_10_02.4b2e1f8\n"),
+        );
+        assert_eq!(status(fx.doctor.check_otlp_path(None).await), "skip");
+        fx.podman(&fx.doctor.sockets[0], OK_PING);
+        let Outcome::Pass(detail) = fx.doctor.check_otlp_path(None).await else {
+            panic!("the fake probe reached the receiver");
+        };
+        assert_eq!(
+            detail,
+            "a container on hoster-shop resolves host.containers.internal to 169.254.1.2 and \
+             reaches the OTLP receiver"
+        );
+        fx.doctor.container_path = Box::new(FakePath(Ok(receiver::Seen {
+            address: Some("169.254.1.2".parse().unwrap()),
+            status: Some(404),
+            version: "5.4.2".to_owned(),
+            network: "hoster-shop".to_owned(),
+            ..receiver::Seen::default()
+        })));
+        let Outcome::Fail { detail, .. } = fx.doctor.check_otlp_path(None).await else {
+            panic!("a 404 is a failure");
+        };
+        assert!(
+            detail.ends_with("(podman 5.4.2, pasta 2026_10_02.4b2e1f8)"),
+            "{detail}"
+        );
+        fx.doctor.container_path = Box::new(FakePath(Err("cannot pull busybox".to_owned())));
+        let Outcome::Fail { detail, hint } = fx.doctor.check_otlp_path(None).await else {
+            panic!("a probe that cannot run is a failure");
+        };
+        assert!(detail.contains("cannot pull busybox"), "{detail}");
+        assert!(hint.contains("busybox"), "{hint}");
+        // Advisory: it only warns in the report.
+        let report = fx
+            .doctor
+            .diagnose(&Err(ConfigError::NotFound(PathBuf::from("/nope"))))
+            .await;
+        let check = report
+            .checks()
+            .iter()
+            .find(|c| c.name == "otlp_path")
+            .unwrap();
+        assert_eq!(check.status, Status::Warn);
+        assert!(!check.required);
     }
 
     #[tokio::test]

@@ -66,7 +66,6 @@ impl From<&SecretKey> for TokenKey {
 
 impl TokenKey {
     /// The token of `service` in `stack`.
-    #[allow(dead_code, reason = "injected into containers by task 5up")]
     pub fn token(&self, stack: &Name, service: &Name) -> ServiceToken {
         let mac = self.mac(stack, service).finalize().into_bytes().into();
         ServiceToken {
