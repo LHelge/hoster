@@ -2964,7 +2964,9 @@ mod stored_logs {
             "{html}"
         );
         assert!(
-            html.contains(r#"<span class="log-total">4</span> records"#),
+            html.contains(
+                r#"<span class="log-total">4</span> lines shown · 1 errors · 1 warnings"#
+            ),
             "{html}"
         );
         // The store reaches back past the hour, so there is no "starts at" notice.
@@ -3010,6 +3012,126 @@ mod stored_logs {
         assert!(html.contains("flash-error"), "{html}");
         assert!(html.contains("is not a start time"), "{html}");
         assert_eq!(messages(&html).len(), 5, "{html}");
+    }
+
+    #[tokio::test]
+    async fn level_and_grep_filter_the_tab_and_mark_matches() {
+        let app = TestApp::new().await;
+        let browser = app.sign_in().await;
+        let mut error = record(240, "api", Some(1), "<script>alert(1)</script> &amp; Error");
+        error.level = Some(Level::Error);
+        let mut warn = record(180, "api", Some(1), "slow response");
+        warn.level = Some(Level::Warn);
+        let mut info = record(120, "api", Some(1), "GET /api/users 200");
+        info.level = Some(Level::Info);
+        info.fields = Some(r#"{"user":{"id":42}}"#.into());
+        let mut trace = record(90, "api", Some(1), "entering handler");
+        trace.level = Some(Level::Trace);
+        seed(
+            &app,
+            vec![
+                error,
+                warn,
+                info,
+                trace,
+                record(60, "storage", Some(1), "plain text error line"),
+            ],
+        )
+        .await;
+        let get = |uri: &'static str| {
+            let app = &app;
+            let cookie = browser.cookie.clone();
+            async move {
+                let response = app.get(uri, Some(&cookie)).await;
+                assert_eq!(response.status(), StatusCode::OK, "{uri}");
+                body(response).await
+            }
+        };
+
+        // warn+ lists warn and error; the text line is hidden, and the toolbar says so.
+        let html = get("/stacks/notes/logs?level=warn").await;
+        assert_eq!(
+            messages(&html),
+            [
+                "&#60;script&#62;alert(1)&#60;/script&#62; &#38;amp; Error",
+                "slow response"
+            ],
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a class="log-chip" href="/stacks/notes/logs?level=warn" aria-current="page"><span class="dot lvl-warn" aria-hidden="true"></span>warn+</a>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains("1 record without a level (a text line) is hidden by the level filter."),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="hidden" name="level" value="warn">"#),
+            "{html}"
+        );
+        assert_eq!(
+            messages(&get("/stacks/notes/logs?level=error").await).len(),
+            1
+        );
+        assert_eq!(
+            messages(&get("/stacks/notes/logs?level=debug").await),
+            ["entering handler"]
+        );
+        assert_eq!(messages(&get("/stacks/notes/logs").await).len(), 5);
+
+        // Grep ignores case and is marked in the escaped message, never inside an entity.
+        let html = get("/stacks/notes/logs?q=error").await;
+        assert_eq!(
+            messages(&html),
+            [
+                "&#60;script&#62;alert(1)&#60;/script&#62; &#38;amp; <mark>Error</mark>",
+                "plain text <mark>error</mark> line"
+            ],
+            "{html}"
+        );
+        assert!(!html.contains("<script>"), "{html}");
+        let html = get("/stacks/notes/logs?q=amp").await;
+        assert!(html.contains("&#38;<mark>amp</mark>; Error"), "{html}");
+        // Fields match too; the message has nothing to mark.
+        assert_eq!(
+            messages(&get("/stacks/notes/logs?q=user.id%3D42").await),
+            ["GET /api/users 200"]
+        );
+        // A regular expression, combined with a level and a service.
+        let html =
+            get("/stacks/notes/logs?q=%5E%28GET%7Cslow%29&regex=on&level=warn&service=api").await;
+        assert_eq!(messages(&html), ["<mark>slow</mark> response"], "{html}");
+        assert!(
+            html.contains(r#"name="regex" value="on" checked"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"href="/stacks/notes/logs?level=warn&#38;q=%5E%28GET%7Cslow%29&#38;regex=on""#
+            ),
+            "the all chip keeps the filters: {html}"
+        );
+
+        // An invalid pattern is shown beside the field, with no records; never a 500.
+        let html = get("/stacks/notes/logs?q=%28unclosed&regex=on").await;
+        assert!(messages(&html).is_empty(), "{html}");
+        assert!(html.contains(r#"aria-invalid="true""#), "{html}");
+        assert!(
+            html.contains(
+                r#"<span class="field-error" id="log-grep-error">invalid regular expression"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("No records"), "{html}");
+
+        // No match: the empty state names the filters and clears them.
+        let html = get("/stacks/notes/logs?q=nothing&level=error&service=api").await;
+        assert!(
+            html.contains(r#"No records match level error and grep “nothing” in this range. <a href="/stacks/notes/logs?service=api">clear filters</a>"#),
+            "{html}"
+        );
+        assert!(!html.contains("style="), "{html}");
     }
 
     #[tokio::test]

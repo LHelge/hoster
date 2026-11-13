@@ -55,13 +55,18 @@ fn seen(service: &str, generations: &[u32]) -> ServiceSeen {
 
 fn view(scope: LogScope, query: &str, read: Result<Read, String>) -> LogsView {
     let params = params(query);
-    let (store_query, problem) = LogsView::query(&scope, &params, noon());
-    LogsView::new(mount(scope), &params, noon(), &store_query, read, problem)
+    let plan = LogsView::plan(&scope, &params, noon());
+    LogsView::new(mount(scope), &params, noon(), plan, read)
+}
+
+/// The store query and the problem of `query`.
+fn plan(query: &str) -> Plan {
+    LogsView::plan(&LogScope::Stack("notes".into()), &params(query), noon())
 }
 
 #[test]
 fn the_range_defaults_to_an_hour_and_takes_presets_durations_and_times() {
-    let (query, problem) = LogsView::query(
+    let Plan { query, problem, .. } = LogsView::plan(
         &LogScope::Stack("notes".into()),
         &LogParams::default(),
         noon(),
@@ -80,7 +85,10 @@ fn the_range_defaults_to_an_hour_and_takes_presets_durations_and_times() {
     assert_eq!(query.limit, LogsView::PAGE_SIZE);
     assert!(query.services.is_empty());
 
-    let start = |q: &str| LogsView::query(&LogScope::Stack("n".into()), &params(q), noon());
+    let start = |q: &str| {
+        let plan = LogsView::plan(&LogScope::Stack("n".into()), &params(q), noon());
+        (plan.query, plan.problem)
+    };
     assert_eq!(
         start("since=7d").0.range.start,
         Timestamp::from(noon() - Duration::from_secs(7 * 86_400))
@@ -197,6 +205,7 @@ fn rows_show_the_generation_only_where_a_service_has_several() {
             scan_stopped: None,
         },
         oldest: Some(Timestamp::from(noon() - Duration::from_secs(1_800))),
+        unleveled: None,
     };
     let view = view(LogScope::Stack("notes".into()), "service=", Ok(read));
     let rows: Vec<_> = view
@@ -299,7 +308,7 @@ fn across_stacks_rows_name_their_stack() {
     assert_eq!(all.rows[0].stack.as_deref(), Some("—"));
     assert_eq!(all.rows[0].class, "svc-hoster");
     assert_eq!(all.rows[1].stack.as_deref(), Some("notes"));
-    let (query, _) = LogsView::query(
+    let Plan { query, .. } = LogsView::plan(
         &LogScope::All {
             stack: Some("notes".into()),
         },
@@ -329,4 +338,296 @@ async fn a_store_that_was_not_opened_is_unreadable() {
         view.unreadable.as_deref(),
         Some("The log store is unavailable: it was not opened")
     );
+}
+
+#[test]
+fn level_chips_pick_a_level_or_from_warn_up() {
+    let levels = |q: &str| plan(q).query.levels;
+    assert!(levels("").is_empty());
+    assert!(levels("level=all").is_empty());
+    assert_eq!(levels("level=error"), [Level::Error]);
+    assert_eq!(levels("level=warn"), [Level::Warn, Level::Error]);
+    assert_eq!(levels("level=warn%2B"), [Level::Warn, Level::Error]);
+    assert_eq!(levels("level=info"), [Level::Info]);
+    assert_eq!(levels("level=debug"), [Level::Trace, Level::Debug]);
+    let bad = plan("level=loud");
+    assert!(bad.query.levels.is_empty());
+    assert!(bad.problem.unwrap().contains("`loud` is not a level"));
+
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "level=warn&service=api",
+        Ok(Read {
+            unleveled: Some(3),
+            ..Read::default()
+        }),
+    );
+    let chips: Vec<_> = view
+        .levels
+        .iter()
+        .map(|c| (c.label.as_str(), c.class, c.current))
+        .collect();
+    assert_eq!(
+        chips,
+        [
+            ("all", "lvl-all", false),
+            ("error", "lvl-error", false),
+            ("warn+", "lvl-warn", true),
+            ("info", "lvl-info", false),
+            ("debug", "lvl-debug", false),
+        ]
+    );
+    assert_eq!(view.levels[0].href, "/stacks/notes/logs?service=api");
+    assert_eq!(
+        view.levels[1].href,
+        "/stacks/notes/logs?service=api&level=error"
+    );
+    // The service chips and the form keep the level.
+    assert_eq!(view.chips[0].href, "/stacks/notes/logs?level=warn");
+    assert_eq!(
+        view.keep,
+        [("service", "api".to_owned()), ("level", "warn".to_owned())]
+    );
+    let note = view.unleveled.expect("text lines are hidden");
+    assert_eq!(note.count, Some(3));
+    assert!(note.says().starts_with("3 records without a level"));
+    assert_eq!(note.all, "/stacks/notes/logs?service=api");
+}
+
+#[test]
+fn the_hidden_count_is_read_only_when_it_is_cheap() {
+    assert!(!plan("").counts_unleveled());
+    assert!(plan("level=error").counts_unleveled());
+    assert!(!plan("level=error&q=x").counts_unleveled());
+    // Without a count the note still says text lines are hidden; with none hidden, no note.
+    let uncounted = view(
+        LogScope::Stack("notes".into()),
+        "level=error&q=x",
+        Ok(Read::default()),
+    );
+    assert_eq!(uncounted.unleveled.unwrap().count, None);
+    let none = view(
+        LogScope::Stack("notes".into()),
+        "level=error",
+        Ok(Read {
+            unleveled: Some(0),
+            ..Read::default()
+        }),
+    );
+    assert!(none.unleveled.is_none());
+    let all = view(LogScope::Stack("notes".into()), "", Ok(Read::default()));
+    assert!(all.unleveled.is_none());
+}
+
+#[test]
+fn grep_is_a_substring_unless_regex_is_on() {
+    assert!(plan("").query.text.is_none());
+    assert!(plan("q=").query.text.is_none(), "an empty q is no filter");
+    // Spaces are searched for, not trimmed away.
+    let spaces = plan("q=%20%20").query.text.unwrap();
+    assert!(matches!(&spaces, TextFilter::Substring(s) if s == "  "));
+    let substring = plan("q=a.c").query.text.unwrap();
+    assert!(matches!(&substring, TextFilter::Substring(s) if s == "a.c"));
+    let regex = plan("q=a.c&regex=on").query.text.unwrap();
+    assert!(matches!(regex, TextFilter::Regex(_)));
+    let invalid = plan("q=(unclosed&regex=on");
+    assert!(invalid.query.text.is_none());
+    assert!(
+        invalid
+            .invalid
+            .unwrap()
+            .starts_with("invalid regular expression")
+    );
+    // A pattern too large to compile is invalid too, not slow.
+    assert!(plan(r"q=(%3F:\w{100}){100}&regex=on").invalid.is_some());
+}
+
+#[test]
+fn every_link_keeps_level_and_grep() {
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "q=a%20b&regex=on&level=error&since=6h",
+        Ok(Read {
+            page: LogPage {
+                entries: vec![entry(1, Duration::from_secs(60), "api", 1)],
+                older: true,
+                newer: true,
+                scan_stopped: None,
+            },
+            ..Read::default()
+        }),
+    );
+    let all = "since=6h&level=error&q=a+b&regex=on";
+    assert_eq!(view.chips[0].href, format!("/stacks/notes/logs?{all}"));
+    assert!(
+        view.older
+            .unwrap()
+            .starts_with(&format!("/stacks/notes/logs?{all}&before="))
+    );
+    assert!(
+        view.newer
+            .unwrap()
+            .starts_with(&format!("/stacks/notes/logs?{all}&after="))
+    );
+    assert_eq!(view.newest, None);
+    assert_eq!(
+        view.presets[0].href,
+        "/stacks/notes/logs?level=error&q=a+b&regex=on&since=5m"
+    );
+    // The form edits q, regex and since; it keeps the level.
+    assert_eq!(view.keep, [("level", "error".to_owned())]);
+    assert_eq!(view.q, "a b");
+    assert!(view.regex);
+}
+
+#[test]
+fn matches_are_marked_in_the_message_as_runs() {
+    let mut first = entry(1, Duration::from_secs(60), "api", 1);
+    first.record.message = "<script>Error &amp; error</script>".into();
+    let mut marker = entry(2, Duration::from_secs(30), "api", 1);
+    marker.record.marker = true;
+    marker.record.message = "dropped 3 error lines".into();
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "q=ERROR",
+        Ok(Read {
+            page: LogPage {
+                entries: vec![first, marker, entry(3, Duration::from_secs(10), "api", 1)],
+                ..LogPage::default()
+            },
+            ..Read::default()
+        }),
+    );
+    let spans: Vec<_> = view.rows[0]
+        .spans()
+        .into_iter()
+        .map(|s| (s.text, s.mark))
+        .collect();
+    assert_eq!(
+        spans,
+        [
+            ("<script>", false),
+            ("Error", true),
+            (" &amp; ", false),
+            ("error", true),
+            ("</script>", false),
+        ]
+    );
+    assert!(view.rows[1].marks.is_empty(), "notices are not marked");
+    // A record that matched in its fields only is listed whole.
+    assert_eq!(
+        view.rows[2]
+            .spans()
+            .into_iter()
+            .map(|s| (s.text, s.mark))
+            .collect::<Vec<_>>(),
+        [("line 3", false)]
+    );
+}
+
+#[test]
+fn an_invalid_pattern_is_beside_the_field_with_no_records_and_no_empty_state() {
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "q=(&regex=on",
+        Ok(Read::default()),
+    );
+    assert!(view.invalid.is_some());
+    assert!(view.rows.is_empty());
+    assert!(!view.empty);
+    assert!(view.cleared.is_none());
+}
+
+#[test]
+fn an_empty_filtered_page_names_its_filters_and_clears_them() {
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "service=api&level=warn&q=boom",
+        Ok(Read::default()),
+    );
+    assert!(view.empty);
+    let (active, clear) = view.cleared.unwrap();
+    assert_eq!(active, "level warn+ and grep “boom”");
+    assert_eq!(clear, "/stacks/notes/logs?service=api");
+    let unfiltered = super::LogsView::new(
+        mount(LogScope::Stack("notes".into())),
+        &params("service=api"),
+        noon(),
+        plan("service=api"),
+        Ok(Read::default()),
+    );
+    assert!(unfiltered.empty && unfiltered.cleared.is_none());
+}
+
+#[test]
+fn a_stopped_scan_says_how_far_back_and_searches_older_from_there() {
+    let stopped_at = RecordKey {
+        time: Timestamp::from(noon() - Duration::from_secs(3_000)),
+        id: 41,
+    };
+    let read = |entries| Read {
+        page: LogPage {
+            entries,
+            older: true,
+            newer: false,
+            scan_stopped: Some(stopped_at),
+        },
+        ..Read::default()
+    };
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "q=needle",
+        Ok(read(vec![entry(50, Duration::from_secs(60), "api", 1)])),
+    );
+    let stopped = view.stopped.as_ref().unwrap();
+    assert!(stopped.older);
+    assert_eq!(stopped.at, "2026-11-13T11:10:00Z");
+    assert_eq!(
+        stopped.href,
+        format!(
+            "/stacks/notes/logs?q=needle&before={}.41",
+            stopped_at.time.as_millis()
+        )
+    );
+    assert_eq!(stopped.cap().to_string(), "50,000");
+    assert_eq!(view.older, None, "search older replaces older");
+
+    // Reading newer records, it offers to search newer.
+    let after = super::LogsView::new(
+        mount(LogScope::Stack("notes".into())),
+        &params("q=needle&after=1.1"),
+        noon(),
+        plan("q=needle&after=1.1"),
+        Ok(read(Vec::new())),
+    );
+    let stopped = after.stopped.unwrap();
+    assert!(!stopped.older);
+    assert!(stopped.href.contains("&after="), "{}", stopped.href);
+}
+
+#[test]
+fn the_footer_counts_errors_and_warnings_shown() {
+    let mut error = entry(1, Duration::from_secs(60), "api", 1);
+    error.record.level = Some(Level::Error);
+    let mut warn = entry(2, Duration::from_secs(50), "api", 1);
+    warn.record.level = Some(Level::Warn);
+    let mut marker = entry(4, Duration::from_secs(30), "api", 1);
+    marker.record.marker = true;
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "",
+        Ok(Read {
+            page: LogPage {
+                entries: vec![
+                    error,
+                    warn,
+                    entry(3, Duration::from_secs(40), "api", 1),
+                    marker,
+                ],
+                ..LogPage::default()
+            },
+            ..Read::default()
+        }),
+    );
+    assert_eq!((view.count(), view.errors(), view.warnings()), (3, 1, 1));
 }
