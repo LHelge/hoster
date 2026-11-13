@@ -24,6 +24,7 @@ fn mount(scope: LogScope) -> LogMount {
         action: "/stacks/notes/logs".into(),
         services: vec!["api".into(), "storage".into()],
         live: Vec::new(),
+        stream: Some("/stacks/notes/logs/stream".into()),
     }
 }
 
@@ -206,8 +207,14 @@ fn rows_show_the_generation_only_where_a_service_has_several() {
         },
         oldest: Some(Timestamp::from(noon() - Duration::from_secs(1_800))),
         unleveled: None,
+        head: 4,
     };
-    let view = view(LogScope::Stack("notes".into()), "service=", Ok(read));
+    // Not following, so the page links older ones.
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "service=&follow=off",
+        Ok(read),
+    );
     let rows: Vec<_> = view
         .rows
         .iter()
@@ -238,7 +245,7 @@ fn rows_show_the_generation_only_where_a_service_has_several() {
     let first = Timestamp::from(noon() - 4 * minute).as_millis();
     assert_eq!(
         view.older.as_deref(),
-        Some(format!("/stacks/notes/logs?before={first}.1").as_str())
+        Some(format!("/stacks/notes/logs?follow=off&before={first}.1").as_str())
     );
     assert_eq!(view.newer, None);
     assert_eq!(view.newest, None);
@@ -274,6 +281,131 @@ fn an_older_page_links_newer_and_newest_and_dates_rows_of_other_days() {
     assert_eq!(view.older, None);
     assert_eq!(view.starts_at, None, "the store reaches the start");
     assert!(!view.empty);
+}
+
+/// A page of `entries` (ids), the store's head at `head`.
+fn read_of(ids: &[i64], head: i64, newer: bool) -> Result<Read, String> {
+    Ok(Read {
+        page: LogPage {
+            entries: ids
+                .iter()
+                .map(|id| entry(*id, Duration::from_secs(60), "api", 1))
+                .collect(),
+            older: false,
+            newer,
+            scan_stopped: None,
+        },
+        head,
+        ..Read::default()
+    })
+}
+
+#[test]
+fn the_newest_page_follows_from_past_its_rows_and_the_head() {
+    let stack = || LogScope::Stack("notes".into());
+    let view_of = |query: &str, read| view(stack(), query, read);
+
+    // From the newest of the page's ids and the head, with the page's options.
+    let view = view_of("level=warn&q=a+b", read_of(&[3, 7], 5, false));
+    let follow = view.follow.as_ref().expect("the newest page follows");
+    assert_eq!(
+        view.stream(),
+        Some("/stacks/notes/logs/stream?level=warn&q=a+b&from=7")
+    );
+    assert_eq!(follow.on, "/stacks/notes/logs?level=warn&q=a+b");
+    assert_eq!(follow.off, "/stacks/notes/logs?level=warn&q=a+b&follow=off");
+    let view = view_of("", read_of(&[3], 9, false));
+    assert_eq!(view.stream(), Some("/stacks/notes/logs/stream?from=9"));
+
+    // Following hides "older", which would skip the rows the list drops; off shows it.
+    let mut read = read_of(&[3], 3, false);
+    read.as_mut().unwrap().page.older = true;
+    assert_eq!(view_of("", read).older, None);
+    let mut read = read_of(&[3], 3, false);
+    read.as_mut().unwrap().page.older = true;
+    assert!(view_of("follow=off", read).older.is_some());
+    let view = view_of("", read_of(&[], 0, false));
+    assert!(view.empty);
+    assert_eq!(view.stream(), Some("/stacks/notes/logs/stream?from=0"));
+
+    // Switched off: the switch stays, the other links keep it off.
+    let view = view_of("follow=off", read_of(&[3], 3, false));
+    let follow = view.follow.as_ref().unwrap();
+    assert!(!follow.following());
+    assert_eq!(view.stream(), None);
+    assert_eq!(follow.on, "/stacks/notes/logs");
+    assert!(
+        view.levels[1].href.ends_with("follow=off&level=error"),
+        "{}",
+        view.levels[1].href
+    );
+
+    // Paged back into history: no switch. "newer" and "newest" turn it back on.
+    let view = view_of("follow=off&before=1.1", read_of(&[3], 3, true));
+    assert!(view.follow.is_none());
+    let key = Timestamp::from(noon() - Duration::from_secs(60)).as_millis();
+    assert_eq!(
+        view.newer.as_deref(),
+        Some(format!("/stacks/notes/logs?after={key}.3").as_str())
+    );
+    assert_eq!(view.newest.as_deref(), Some("/stacks/notes/logs"));
+
+    // Paged forward to the end of the range: it follows again.
+    let view = view_of("after=1.1", read_of(&[3], 3, true));
+    assert!(view.follow.is_none(), "there is more");
+    let view = view_of("after=1.1", read_of(&[3], 4, false));
+    assert_eq!(view.stream(), Some("/stacks/notes/logs/stream?from=4"));
+
+    // Nothing to follow when the store cannot be read or the pattern does not compile.
+    assert!(view_of("", Err("no".into())).follow.is_none());
+    assert!(
+        view_of("q=(&regex=on", read_of(&[], 0, false))
+            .follow
+            .is_none()
+    );
+}
+
+#[test]
+fn a_mount_without_a_stream_does_not_follow() {
+    let params = params("");
+    let plan = LogsView::plan(&LogScope::All { stack: None }, &params, noon());
+    let mount = LogMount {
+        stream: None,
+        ..mount(LogScope::All { stack: None })
+    };
+    let view = LogsView::new(mount, &params, noon(), plan, read_of(&[1], 1, false));
+    assert!(view.follow.is_none());
+}
+
+#[test]
+fn followed_rows_render_as_the_page_does() {
+    let rows = Rows {
+        stack_column: false,
+        dated: false,
+        text: Some(TextFilter::substring("line")),
+        ..Rows::new(vec!["api".into()], &[seen("api", &[1])])
+    };
+    let mut rows = rows;
+    let first = entry(1, Duration::from_secs(1), "api", 1);
+    assert_eq!(rows.row(&first).generation, None);
+    // A new generation appears while following: rows name theirs from then on.
+    let second = entry(2, Duration::ZERO, "api", 2);
+    rows.learn(&second);
+    let row = rows.row(&second);
+    assert_eq!(row.generation, Some(2));
+    let html = LogRecords {
+        rows: vec![row],
+        stack_column: false,
+        notice: None,
+    }
+    .render()
+    .unwrap();
+    assert!(html.contains(r#"<li class="log-record svc-0">"#), "{html}");
+    assert!(html.contains("<mark>line</mark> 2"), "{html}");
+    assert!(
+        html.contains(r#"<span class="log-gen">g2</span>"#),
+        "{html}"
+    );
 }
 
 #[test]
@@ -446,7 +578,7 @@ fn grep_is_a_substring_unless_regex_is_on() {
 fn every_link_keeps_level_and_grep() {
     let view = view(
         LogScope::Stack("notes".into()),
-        "q=a%20b&regex=on&level=error&since=6h",
+        "q=a%20b&regex=on&level=error&since=6h&follow=off",
         Ok(Read {
             page: LogPage {
                 entries: vec![entry(1, Duration::from_secs(60), "api", 1)],
@@ -457,7 +589,7 @@ fn every_link_keeps_level_and_grep() {
             ..Read::default()
         }),
     );
-    let all = "since=6h&level=error&q=a+b&regex=on";
+    let all = "since=6h&level=error&q=a+b&regex=on&follow=off";
     assert_eq!(view.chips[0].href, format!("/stacks/notes/logs?{all}"));
     assert!(
         view.older
@@ -467,15 +599,19 @@ fn every_link_keeps_level_and_grep() {
     assert!(
         view.newer
             .unwrap()
-            .starts_with(&format!("/stacks/notes/logs?{all}&after="))
+            .starts_with("/stacks/notes/logs?since=6h&level=error&q=a+b&regex=on&after="),
+        "newer turns following back on"
     );
     assert_eq!(view.newest, None);
     assert_eq!(
         view.presets[0].href,
-        "/stacks/notes/logs?level=error&q=a+b&regex=on&since=5m"
+        "/stacks/notes/logs?level=error&q=a+b&regex=on&follow=off&since=5m"
     );
-    // The form edits q, regex and since; it keeps the level.
-    assert_eq!(view.keep, [("level", "error".to_owned())]);
+    // The form edits q, regex and since; it keeps the level and the switch.
+    assert_eq!(
+        view.keep,
+        [("level", "error".to_owned()), ("follow", "off".to_owned())]
+    );
     assert_eq!(view.q, "a b");
     assert!(view.regex);
 }

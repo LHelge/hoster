@@ -7,22 +7,35 @@
 //! replaced and removed containers are listed too, with their generation where a service has
 //! more than one in the range.
 //!
+//! The newest page follows the stack's new records (`/stacks/{name}/logs/stream`, see
+//! [`LogFollow`]) unless switched off with `follow=off`; paging back into history stops it,
+//! and the "newer" and "newest" links back to the newest page start it again. The stream ends
+//! when the stack is removed or the session ends.
+//!
 //! The toolbar also links each of the stack's containers to its live log
 //! (`/containers/{name}/logs`, ADR-0044), which streams straight from podman: it shows a line
 //! before the recorder has committed it, and it is what is left when the store cannot be read
 //! (ADR-0067 §10). An unknown stack is a 404, even when the store still holds records under
 //! its name.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use askama::Template;
 use axum::Extension;
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use tokio::sync::broadcast;
 
 use super::Stacks;
 use super::frame::{StackHeader, Tab};
 use super::overview::{LogCandidate, StackContainers, StackView};
+use crate::orchestrator::{StackStatus, UiEvent};
+use crate::store::EventKind;
+use crate::web::auth::{Auth, Session};
 use crate::web::containers::Containers;
-use crate::web::logs::{LiveLink, LogMount, LogParams, LogReader, LogScope, LogsView};
+use crate::web::logs::{LiveLink, LogFollow, LogMount, LogParams, LogReader, LogScope, LogsView};
 use crate::web::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 
 impl Stacks {
@@ -58,13 +71,7 @@ impl Stacks {
                 )
             }
         };
-        let mount = LogMount {
-            scope: LogScope::Stack(name.clone()),
-            action: format!("{}/logs", StackView::url(&name)),
-            services: status.services.iter().map(|s| s.name.clone()).collect(),
-            live,
-        };
-        let view = LogsView::load(&reader, mount, &params).await;
+        let view = LogsView::load(&reader, Self::log_mount(&status, live), &params).await;
         if let Some(message) = view.problem.clone().or(listing) {
             layout = layout.with_flash(Flash {
                 kind: FlashKind::Error,
@@ -77,6 +84,86 @@ impl Stacks {
             view,
         })
         .into_response()
+    }
+
+    /// `GET /stacks/{name}/logs/stream?from=…&…`: the newest page's follow stream, with the
+    /// options of the page; a `Last-Event-ID` header (sent by the SSE extension on reconnect)
+    /// resumes after that record. An unknown stack is a 404.
+    pub async fn logs_stream(
+        State(auth): State<Arc<Auth>>,
+        Extension(stacks): Extension<Stacks>,
+        Extension(reader): Extension<LogReader>,
+        Extension(session): Extension<Session>,
+        Path(name): Path<String>,
+        Query(params): Query<LogParams>,
+        headers: HeaderMap,
+    ) -> Response {
+        // Subscribed before the stack is looked up, so a removal in between is seen.
+        let events = stacks.subscribe();
+        let status = match stacks.find(&name).await {
+            Ok(status) => status,
+            Err(outcome) => return outcome.into_response(),
+        };
+        let last = headers.get("last-event-id").and_then(|id| id.to_str().ok());
+        let opened = LogFollow::open(
+            &reader,
+            &Self::log_mount(&status, Vec::new()),
+            &params,
+            last,
+        )
+        .await;
+        let ends = async move {
+            tokio::select! {
+                ended = auth.session_ended(&session, Self::SESSION_CHECK) => match ended {
+                    Ok(()) => "Signed out: sign in again to follow the log.".to_owned(),
+                    Err(err) => {
+                        tracing::error!(error = %err, "checking the session of a log stream failed");
+                        "Cannot check the session: reload the page to follow the log.".to_owned()
+                    }
+                },
+                () = stacks.removal(events, name) => "The stack was removed.".to_owned(),
+            }
+        };
+        LogFollow::respond(opened, ends)
+    }
+
+    /// How often a follow stream checks that its session is still signed in.
+    const SESSION_CHECK: Duration = if cfg!(test) {
+        Duration::from_millis(20)
+    } else {
+        Duration::from_secs(30)
+    };
+
+    /// The stored logs view of the stack in `status`, linking the live logs of `live`.
+    fn log_mount(status: &StackStatus, live: Vec<LiveLink>) -> LogMount {
+        let action = format!("{}/logs", StackView::url(&status.name));
+        LogMount {
+            scope: LogScope::Stack(status.name.clone()),
+            stream: Some(format!("{action}/stream")),
+            action,
+            services: status.services.iter().map(|s| s.name.clone()).collect(),
+            live,
+        }
+    }
+
+    /// Resolves once the stack called `name` is removed, as `events` (subscribed while it
+    /// still existed) tell; never when the orchestrator is gone.
+    async fn removal(&self, mut events: broadcast::Receiver<UiEvent>, name: String) {
+        loop {
+            let check = match events.recv().await {
+                Ok(UiEvent::Event(event)) => {
+                    event.kind == EventKind::StackRemoved
+                        && event.stack.as_deref() == Some(name.as_str())
+                }
+                Ok(_) => false,
+                // It may have missed the removal.
+                Err(broadcast::error::RecvError::Lagged(_)) => true,
+                Err(broadcast::error::RecvError::Closed) => return std::future::pending().await,
+            };
+            if check && self.find(&name).await.is_err() {
+                return;
+            }
+        }
     }
 }
 

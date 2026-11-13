@@ -1050,6 +1050,7 @@ impl Startup for Supervisor {
                     self.admission.clone(),
                     Arc::new(logs),
                     log_store,
+                    self.log_sink.head(),
                 )?
                 .start(listen, self.teardown.token.child_token())
                 .await?;

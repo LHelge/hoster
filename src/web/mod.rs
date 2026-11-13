@@ -52,6 +52,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use tokio::net::{TcpListener, UnixListener};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -66,7 +67,7 @@ use crate::runtime::ContainerRuntime;
 use crate::secrets::SecretStore;
 use crate::stack::StackSchema;
 use crate::stats::Stats;
-use crate::store::Store;
+use crate::store::{LogHead, Store};
 use crate::supervisor::ShutdownRequest;
 use crate::update::{GithubReleases, SystemdUserService, Updater};
 
@@ -181,7 +182,8 @@ impl WebApp {
     /// `instance` name (ADR-0058), the `secrets` the notification API key is kept in, and
     /// `shutdown`, which the System page requests after a self-update (ADR-0052), and the proxy's
     /// `admission`, whose descriptor use the System page shows (ADR-0065), the log store's
-    /// figures `logs`, which it shows too, and the `log_store` the logs views read (ADR-0067).
+    /// figures `logs`, which it shows too, and the `log_store` the logs views read (ADR-0067),
+    /// whose recorder announces its commits on `log_head` for the views' follow streams.
     /// Fails when the
     /// credentials are missing. Deploy webhook tokens are verified against GitHub's key set for
     /// the configured audience (ADR-0047).
@@ -205,6 +207,7 @@ impl WebApp {
         admission: Admission,
         logs: Arc<dyn LogFacts>,
         log_store: LogStoreState,
+        log_head: watch::Receiver<LogHead>,
     ) -> anyhow::Result<Self> {
         let installation = Installation::from_env()
             .context("HOME is not set, so the binary layout ~/.local/lib/hoster cannot be found")?;
@@ -257,7 +260,7 @@ impl WebApp {
             notifications,
         );
         app.settings = app.settings.with_updates(updates);
-        app.logs = LogReader::from(log_store);
+        app.logs = LogReader::new(log_store, log_head);
         Ok(app)
     }
 
@@ -316,6 +319,7 @@ impl WebApp {
             .route("/stacks/{name}/events", get(Stacks::events))
             .layer(Extension(self.stats.clone()))
             .route("/stacks/{name}/logs", get(Stacks::logs))
+            .route("/stacks/{name}/logs/stream", get(Stacks::logs_stream))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))
             .route(
@@ -471,7 +475,10 @@ impl WebApp {
         listen: Listen,
         token: CancellationToken,
     ) -> anyhow::Result<WebServer> {
-        let router = self.router();
+        let mut app = self;
+        // Follow streams end when the app stops, so a graceful stop does not wait for them.
+        app.logs = app.logs.closing_with(token.clone());
+        let router = app.router();
         let shutdown = token.clone().cancelled_owned();
         let (task, socket) = match &listen {
             Listen::Unix(path) => {

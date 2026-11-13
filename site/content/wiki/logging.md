@@ -90,7 +90,9 @@ against the 1 GiB cap, how far back it reaches, and what was lost since hoster s
 rate cap, a full queue or a failed write). `hoster doctor` checks that `logs.db` exists with
 mode `0600` and opens. A stack's **Logs** tab reads the store: every service's records merged
 oldest to newest, hoster's own records about the stack under `hoster`, over a range of 5
-minutes to 7 days, with older and newer pages. It links each container's live log, which still
+minutes to 7 days, with older and newer pages. The newest page follows new records as they
+are stored, about once a second, until you switch **follow** off or page back. It links each
+container's live log, which still
 streams straight from podman, so it shows a line before it is stored and works when the store
 is unavailable.
 

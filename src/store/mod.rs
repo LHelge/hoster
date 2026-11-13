@@ -49,7 +49,7 @@ use thiserror::Error;
 )]
 pub use logs::{
     InvalidPattern, Level, LevelCounts, LogBatch, LogCursor, LogEntry, LogFileFacts, LogHead,
-    LogPage, LogQuery, LogRecord, LogScope, LogStore, Page, PageAt, RecordKey, Removed,
+    LogPage, LogQuery, LogRecord, LogScope, LogStore, LogTail, Page, PageAt, RecordKey, Removed,
     RequestCounts, RequestEntry, RequestId, RequestQuery, RequestRow, Retention, RowCounts,
     ServiceSeen, StatusFilter, Stream, Sweep, SweepReport, TextFilter, UnknownLogText,
 };

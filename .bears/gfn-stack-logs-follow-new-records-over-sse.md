@@ -1,16 +1,17 @@
 ---
 id: gfn
 title: "Stack logs: follow new records over SSE"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T13:26:20.988302866Z"
-updated: "2026-11-12T13:26:20.988302866Z"
+updated: "2026-11-13T09:16:58.284880354Z"
 tags:
   - web
   - observability
 depends_on:
   - yn7
 parent: psq
+attempts: 1
 ---
 
 ## Summary

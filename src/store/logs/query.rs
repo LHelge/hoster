@@ -236,6 +236,19 @@ impl LogQuery {
             })
     }
 
+    /// `SELECT <the record columns> FROM <table> WHERE …` with every filter SQL applies.
+    fn select_from(&self, table: &str) -> QueryBuilder<Sqlite> {
+        let mut sql = QueryBuilder::new(format!(
+            "SELECT id, time, stack, service, generation, stream, level, message, fields, cut, \
+             marker FROM {table}"
+        ));
+        Self::push_where(&mut sql, &self.range, &self.scope);
+        Self::push_in(&mut sql, "service", self.services.clone());
+        Self::push_in(&mut sql, "level", self.levels.iter().map(|l| l.as_str()));
+        Self::push_in(&mut sql, "stream", self.streams.iter().map(|s| s.as_str()));
+        sql
+    }
+
     /// The narrowing by range and scope that every read of either table starts with.
     fn push_where(sql: &mut QueryBuilder<Sqlite>, range: &Range<Timestamp>, scope: &LogScope) {
         sql.push(" WHERE time >= ")
@@ -283,15 +296,7 @@ impl Paged for LogQuery {
     }
 
     fn select(&self) -> QueryBuilder<Sqlite> {
-        let mut sql = QueryBuilder::new(
-            "SELECT id, time, stack, service, generation, stream, level, message, fields, cut, \
-             marker FROM log_records",
-        );
-        Self::push_where(&mut sql, &self.range, &self.scope);
-        Self::push_in(&mut sql, "service", self.services.clone());
-        Self::push_in(&mut sql, "level", self.levels.iter().map(|l| l.as_str()));
-        Self::push_in(&mut sql, "stream", self.streams.iter().map(|s| s.as_str()));
-        sql
+        self.select_from("log_records")
     }
 
     fn decode(row: EntryRow) -> Result<LogEntry, UnknownLogText> {
@@ -440,6 +445,18 @@ impl<T> Default for Page<T> {
 /// A page of `log_records`.
 pub type LogPage = Page<LogEntry>;
 
+/// The records committed after an id that a query matches: what a follow stream sends next
+/// ([`LogStore::records_after`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LogTail {
+    /// In id order, which is commit order.
+    pub entries: Vec<LogEntry>,
+    /// Where the next read starts: past every id examined, matching or not.
+    pub through: i64,
+    /// It stopped at its limit or its window before the head: more may follow at once.
+    pub more: bool,
+}
+
 /// A service with records in a range: see [`LogStore::services_in`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSeen {
@@ -479,6 +496,63 @@ impl LogStore {
     /// for the recorder.
     pub async fn records(&self, query: &LogQuery) -> Result<LogPage> {
         self.page(query).await
+    }
+
+    /// The records with an id above `after`, up to `head` (the newest committed id, from the
+    /// recorder's announcement), that `query` matches, in id order: for following the store as
+    /// the recorder commits (ADR-0067 §4, "the id serves … following"). The query's range,
+    /// scope and filters apply, its page does not. One call returns at most the query's limit
+    /// of records and examines at most [`SCAN_CAP`] ids past `after`; the cursor it returns is
+    /// past every id it examined, matching or not, so a quiet scope beside a busy one does not
+    /// read the same rows again. Reads by id, never by the `(stack, time)` index, so a read
+    /// finds only what was committed since `after`.
+    pub async fn records_after(&self, query: &LogQuery, after: i64, head: i64) -> Result<LogTail> {
+        let limit = query.limit() as usize;
+        let in_rust = query.filters_in_rust();
+        // The ids this call examines: a bounded window, whatever the filters let through.
+        let end = head.min(after.saturating_add(i64::from(SCAN_CAP)));
+        let mut tail = LogTail {
+            through: after,
+            ..LogTail::default()
+        };
+        while tail.through < end {
+            let rows = if in_rust {
+                <LogQuery as Paged>::CHUNK
+            } else {
+                u32::try_from(limit - tail.entries.len()).unwrap_or(u32::MAX)
+            };
+            // `NOT INDEXED` keeps the planner on the rowid range instead of the time index,
+            // which would read the whole range for the few new rows.
+            let mut sql = query.select_from("log_records NOT INDEXED");
+            sql.push(" AND id > ")
+                .push_bind(tail.through)
+                .push(" AND id <= ")
+                .push_bind(end)
+                .push(" ORDER BY id LIMIT ")
+                .push_bind(i64::from(rows));
+            let chunk: Vec<EntryRow> = sql.build_query_as().fetch_all(&self.reads).await?;
+            let fetched = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
+            for row in chunk {
+                let entry = LogEntry::try_from(row)
+                    .map_err(|e| StoreError::Database(sqlx::Error::Decode(Box::new(e))))?;
+                tail.through = entry.id;
+                if !in_rust || query.matches_record(&entry.record) {
+                    tail.entries.push(entry);
+                    if tail.entries.len() == limit {
+                        // Rows after this one are read next time.
+                        tail.more = tail.through < head;
+                        return Ok(tail);
+                    }
+                }
+            }
+            if fetched < rows {
+                // Nothing else in the window matches.
+                break;
+            }
+        }
+        tail.through = tail.through.max(end);
+        tail.more = tail.through < head;
+        Ok(tail)
     }
 
     /// One page of what `query` matches, with the shared scan.

@@ -62,6 +62,9 @@ pub struct TestApp {
     pub notifications: Notifications,
     /// The log store the logs views read (ADR-0067); empty until a test appends.
     pub logs: crate::store::LogStore,
+    /// The recorder's announcement of its commits, which follow streams wait on; a test that
+    /// appends to `logs` sends the head `append` returns.
+    pub log_head: tokio::sync::watch::Sender<crate::store::LogHead>,
     pub app: WebApp,
     _dir: TempDir,
 }
@@ -150,7 +153,9 @@ impl TestApp {
             instance.clone(),
             notifications.clone(),
         );
-        app.logs = crate::web::logs::LogReader::from(crate::web::LogStoreState::Open(logs.clone()));
+        let (log_head, head) = tokio::sync::watch::channel(crate::store::LogHead::default());
+        app.logs =
+            crate::web::logs::LogReader::new(crate::web::LogStoreState::Open(logs.clone()), head);
         TestApp {
             github,
             store,
@@ -166,6 +171,7 @@ impl TestApp {
             mailer,
             notifications,
             logs,
+            log_head,
             app,
             _dir: dir,
         }
