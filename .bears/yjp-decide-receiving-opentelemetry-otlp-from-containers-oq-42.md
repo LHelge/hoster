@@ -1,15 +1,16 @@
 ---
 id: yjp
 title: "Decide: receiving OpenTelemetry (OTLP) from containers (OQ-42)"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T13:14:26.591091139Z"
-updated: "2026-11-12T13:14:26.591091139Z"
+updated: "2026-11-13T17:03:38.231402342Z"
 tags:
   - decision
 depends_on:
   - h4q
 parent: xv9
+attempts: 1
 ---
 
 ## Summary

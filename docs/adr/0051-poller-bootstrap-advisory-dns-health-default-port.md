@@ -1,6 +1,6 @@
 # ADR-0051: Poller deploys on first sighting of a never-run service; DNS check is advisory; default health path is `/healthz`; `PORT` is injected; no host redirects in v1
 
-- Status: Accepted (resolves OQ-34; amends ADR-0043, ADR-0036 and ADR-0038)
+- Status: Accepted (resolves OQ-34; amends ADR-0043, ADR-0036 and ADR-0038); `OTEL_*` variables are injected beside `PORT` since ADR-0069
 - Date: 2026-11-07
 
 ## Context

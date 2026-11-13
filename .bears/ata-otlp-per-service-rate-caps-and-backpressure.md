@@ -13,7 +13,7 @@ parent: xv9
 ---
 
 ## Summary
-OQ-42 answer 7: no sampling, a rate cap per service. A chatty or broken exporter must not fill `logs.db` or starve the recorder for everyone else.
+ADR-0069 §7: no sampling, a rate cap per service. Checked against ADR-0069 on 2026-11-13. A chatty or broken exporter must not fill `logs.db` or starve the recorder for everyone else.
 
 ## Acceptance Criteria
 - [ ] Token-bucket caps per (stack, service) for spans per second and log records per second (constants), applied in the handler before the recorder
@@ -26,5 +26,5 @@ OQ-42 answer 7: no sampling, a rate cap per service. A chatty or broken exporter
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, tests pass
 
 ## References
-- OQ-42 (question 7), the ADR from `yjp`, ADR-0067 (§7)
+- ADR-0069 (§7), ADR-0067 (§7)
 - The receiver task `m7x`, the System page card task `uw9`

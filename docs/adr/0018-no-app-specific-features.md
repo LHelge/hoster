@@ -1,6 +1,6 @@
 # ADR-0018: No app-specific features
 
-- Status: Accepted
+- Status: Accepted; OTLP is decoded by the receiver of ADR-0069
 - Date: 2026-11-07
 
 ## Context

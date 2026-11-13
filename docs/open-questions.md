@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-38, OQ-40, OQ-42 and OQ-43 are open (OQ-42 has the owner's answers and the spike's findings, and waits for its ADR; OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38, OQ-40 and OQ-43 are open (OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -47,7 +47,7 @@ Index:
 | [OQ-35](#oq-35-ambiguous-podman-object-names-across-stacks) | ~~Ambiguous podman object names across stacks~~ **Resolved → ADR-0063 (reject at apply, label check kept)** | — |
 | [OQ-38](#oq-38-client-supplied-forwarding-headers-at-the-edge) | Client-supplied forwarding headers at the edge (`X-Forwarded-For` appended, `Forwarded` and `X-Real-IP` passed through) | — |
 | [OQ-41](#oq-41-persisted-structured-container-logs) | ~~Persisted, structured container logs~~ **Resolved → ADR-0067 (separate `logs.db`, 7 days, 1 GiB)** | — |
-| [OQ-42](#oq-42-receiving-opentelemetry-otlp-from-containers) | Receiving OpenTelemetry (OTLP) from containers | `xv9`, `qnh` |
+| [OQ-42](#oq-42-receiving-opentelemetry-otlp-from-containers) | ~~Receiving OpenTelemetry (OTLP) from containers~~ **Resolved → ADR-0069 (receiver on the proxy's `:80`, derived tokens, trace per request)** | — |
 | [OQ-43](#oq-43-a-filter-language-for-the-telemetry-query-box) | A filter language for the Telemetry query box | `ddf` |
 
 ---
@@ -589,106 +589,7 @@ signed URLs.
 
 ## OQ-42: Receiving OpenTelemetry (OTLP) from containers
 
-**Problem.** JSON on stdout (OQ-41) gives logs. It cannot give a trace waterfall: that needs
-spans with start, end, parent and a shared trace id, which apps emit through an OpenTelemetry
-SDK over OTLP. `tracing` does so with `tracing-opentelemetry` and
-`opentelemetry-appender-tracing`; most languages have SDKs; most third-party images
-(databases) emit nothing. hoster has no receiver, and containers have no path to the host
-(ADR-0046). Raised 2026-11-12; blocks epics `xv9` and `qnh`. It builds on OQ-41's store.
-
-**Questions and options.**
-
-1. **Whether.**
-   - A. No. stdout JSON only; correlate by a request id the proxy adds.
-   - B. An OTLP receiver in hoster that stores into the OQ-41 store and shows it in the UI. Not
-     an OpenTelemetry Collector (no pipelines, no export). Amends ADR-0018, 0044, 0045, 0046.
-   - C. Document running an existing backend (Jaeger, OpenObserve) as a stack. Needs the same
-     container-to-receiver path, and its UI sits outside hoster's.
-2. **How a container reaches the receiver.** Needs a spike under rootless podman with per-stack
-   networks (ADR-0006, ADR-0007).
-   - A. A hoster listener the container reaches as `host.containers.internal`.
-   - B. A public route that hairpins through the proxy, as stacks reach each other today
-     (ADR-0046). Works everywhere; telemetry leaves and re-enters through TLS.
-   - C. A Unix socket mounted into the container. Few SDKs can export OTLP/HTTP to one.
-3. **Identity.** A per-service bearer token, injected as `OTEL_EXPORTER_OTLP_HEADERS` together
-   with `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES`. hoster
-   takes stack and service from the token and ignores what the payload claims.
-   - A. Injected into every service. Changes every config hash once (ADR-0029), so every stack
-     redeploys.
-   - B. Opt-in per service in the stack file.
-4. **Protocol.** A. OTLP/HTTP protobuf only (three Axum handlers, `opentelemetry-proto` types).
-   B. gRPC as well (nginx's OTel module speaks only gRPC, as far as known; unverified).
-5. **Signals.** Logs, traces, metrics. Metrics overlap ADR-0062 and ADR-0066, which measure
-   from outside, and need series caps.
-6. **Trace context at the edge.** Whether the proxy starts a trace per request and sends
-   `traceparent` upstream, and whether a client-supplied `traceparent` is honoured (compare
-   OQ-38) or replaced.
-7. **Volume.** Span retention shorter than logs, head sampling, per-service rate caps.
-8. **The proxy's spans.** Added 2026-11-12 from `docs/design/Telemetry.dc.html`, which shows a
-   server span and an upstream client span from the proxy for every request, so an app that
-   sends nothing still has a 2-span trace ("app not instrumented").
-   - A. Derived when a trace is read, from the request row (ADR-0067 §5), which then also stores
-     the trace id, both span ids and the time the upstream request started. No extra writes.
-   - B. Two rows per request written to the spans table beside the request row. One shape for
-     every span, three writes per request instead of one.
-   - C. No proxy spans; a trace holds only what apps send.
-
-   Agent's recommendation: A. The row already holds everything but the ids, and the proxy's
-   write path stays one row per request.
-
-**Recommendation.** Decide after the owner has tried OTel output from `aphid-server` against a
-local Jaeger or Aspire Dashboard. Then 1B, 2A if the spike shows it works without host-wide
-changes and 2B otherwise, 3B, 4A, logs and traces only, the proxy always starts the trace and
-replaces a client's `traceparent`, spans kept 3 days with a rate cap per service.
-
-**Owner's answers (2026-11-12).** Not yet an ADR: question 2 waits for spike `h4q`, and the ADR
-is written once it has run (task `yjp`).
-
-1. **B**: build the receiver, without waiting for a trial.
-2. **A if the spike shows it works** without host-wide changes and without exposing other host
-   services, **otherwise B**.
-3. **A**: injected into every service, against the recommendation. The ADR has to say how the
-   one-time redeploy of every stack is handled, for example by keeping hoster's injected
-   variables out of the config hash (ADR-0029; check how `PORT` of ADR-0051 is treated).
-4. **A**: OTLP/HTTP protobuf only.
-5. Logs and traces; no metrics.
-6. The proxy always starts the trace and replaces a client's `traceparent`.
-7. Spans kept 3 days, a rate cap per service, no sampling.
-8. Open (added after the answers above). On 2026-11-12 the owner chose not to split the edge
-   part (questions 6 and 8) into an ADR of its own, so the trace pages (`qnh`) wait for this
-   ADR and the receiver (`xv9`).
-
-**Spike findings for question 2 (2026-11-13, `h4q`).** Full note:
-[spikes/container-to-host-listener.md](spikes/container-to-host-listener.md). Run on podman
-6.1.4 with pasta; other versions from release notes.
-
-- **2A works with no host-wide change, but not on loopback.** `host.containers.internal` is
-  `169.254.1.2`, which pasta delivers to the host's interface address. The listener must bind
-  the wildcard or that address, so its port is open on the public address. Binding to the `lo`
-  device does not help. hoster can refuse every peer that is not one of the host's own
-  addresses (reasoned, not tested from a second machine), and needs the token anyway: every
-  container arrives from the host's own address.
-- **The problem statement above is wrong on one point:** containers already have a path to
-  the host. Anything listening on the wildcard or the interface address (sshd, for one) is
-  reachable as `host.containers.internal` today. Services on `127.0.0.1`, hoster's upstream
-  ports included, are not. 2A exposes nothing new to containers.
-- **2B does not work as written.** From a container the host's public address is the rootless
-  namespace itself, so a public route is refused on any host with its public address on its
-  interface. That also contradicts ADR-0046 (proposed task `kf3`). It works when the hostname
-  is pinned to `169.254.1.2` with an extra-hosts entry on the container, at the cost of TLS, a
-  CA bundle in every image and the connection caps of ADR-0065 shared by all containers.
-- **2C** cannot be configured through `OTEL_EXPORTER_OTLP_ENDPOINT` (the specification allows
-  only `http` and `https`), so it rules out answer 3.
-
-- **A third form, 2A′, came up after the first results:** the receiver as a route on the
-  proxy's existing `:80`, matched by `Host: host.containers.internal` and a peer that is one of
-  the host's own addresses, 404 otherwise. No new port, no TLS, no firewall rule. It worked
-  with a stand-in listener, not yet on the real proxy. Local peers need their own treatment
-  in the caps of ADR-0065 and should stay out of the request log.
-
-Agent's recommendation: 2A′, with the token as identity. The owner preferred it over a
-dedicated port (2026-11-13); it is not yet a decision, which `yjp` records. Plain 2A with a
-firewall rule for its port is the fallback if the proxy cannot make the check.
+**Resolved → [ADR-0069](adr/0069-otlp-receiver-and-edge-trace-context.md)** (2026-11-13): an OTLP/HTTP receiver for logs and traces on the proxy's `:80` as `host.containers.internal`, a derived token per service, variables injected into every service, and a trace started by the proxy for every request
 
 ## OQ-43: A filter language for the Telemetry query box
 
