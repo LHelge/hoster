@@ -9,9 +9,12 @@ image = "ghcr.io/lhelge/hoster-docs"   # pushed by release.yml, no tag
 track = "latest"                       # poller fallback if the release's webhook never arrives
 
 # aphid-server (site/Dockerfile) listens on $PORT, which hoster sets to the route's port, and
-# answers hoster's default health probe (GET /healthz). JSON logs get levels and fields in the UI.
+# answers hoster's default health probe (GET /healthz). It exports its access log and a span per
+# request over OTLP to hoster's receiver, so it prints nothing on stdout (aphid-server 0.5.1 or
+# later): both would store every line twice. Apply this only on a hoster that has the receiver
+# (ADR-0069); on an older one use "json", or the site has no logs at all.
 [services.web.env]
-APHID_LOG_FORMAT = "json"
+APHID_LOG_FORMAT = "none"
 
 [[services.web.routes]]
 host = "docs.hoster.lhelge.se"

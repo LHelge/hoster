@@ -67,9 +67,9 @@ building the image. The deploy step is the same `LHelge/hoster/actions/deploy`
 deploy history shows the short commit SHA. The build step is aphid's GitHub Action:
 
 ```yaml
-- uses: LHelge/aphid@v0.5.0
+- uses: LHelge/aphid@v0.5.1
   with:
-    version: v0.5.0     # the aphid binary; defaults to the latest release
+    version: v0.5.1     # the aphid binary; defaults to the latest release
     config: aphid.toml
     output: dist
     precompress: true   # also write .br and .gz siblings for aphid-server

@@ -25,7 +25,7 @@ env:
   CARGO_TERM_COLOR: always
   # aphid, for the documentation site (site/). The `LHelge/aphid@` refs below and the
   # aphid-server tag in site/Dockerfile must name the same version; the site job checks both.
-  APHID_VERSION: v0.5.0
+  APHID_VERSION: v0.5.1
   RUSTFLAGS: -D warnings
   # git-cliff for the release notes, pinned by version and by the SHA-512 of its x86_64 tarball.
   GIT_CLIFF_VERSION: 2.14.2
@@ -259,7 +259,7 @@ jobs:
           fi
 
       # Fails on a broken [[wiki-link]].
-      - uses: LHelge/aphid@v0.5.0
+      - uses: LHelge/aphid@v0.5.1
         with:
           version: ${{ env.APHID_VERSION }}
           config: site/aphid.toml

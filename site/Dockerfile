@@ -3,7 +3,7 @@
 # aphid-server listens on $PORT (8080), answers /healthz for hoster's default probe and serves
 # 404.html for missing pages. Keep the tag equal to APHID_VERSION in release.yml (its `site` job
 # checks it), so the server matches the aphid that built the site.
-FROM ghcr.io/lhelge/aphid-server:0.5.0
+FROM ghcr.io/lhelge/aphid-server:0.5.1
 
 COPY dist /site
 # The stack file JSON Schema at the URL stack files name in `#:schema` (aphid copies static/ to
