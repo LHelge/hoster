@@ -464,6 +464,19 @@ Every routed host is served over HTTPS only, and port 80 redirects to it. hoster
 subdomains, is the app's choice, and the app can send the header itself. (hoster's own admin
 host sends it.)
 
+**Headers the app receives** ([ADR-0010](https://github.com/LHelge/hoster/blob/main/docs/adr/0010-prefix-preservation-and-forwarded-headers.md), [ADR-0069](https://github.com/LHelge/hoster/blob/main/docs/adr/0069-otlp-receiver-and-edge-trace-context.md)).
+hoster is the edge, so it sets these on every request it forwards and overwrites what a client
+sent under the same names:
+
+| Header | Value |
+|---|---|
+| `Host` | Unchanged, as the client sent it. |
+| `X-Forwarded-For` | The client's own list, if it sent one, with the address hoster saw appended; only the last entry is hoster's. |
+| `X-Forwarded-Proto` | `https`. |
+| `X-Forwarded-Host` | The host as the client sent it, port included. |
+| `X-Forwarded-Prefix` | The route's `prefix`, whether or not it is stripped; not set for `/`. |
+| `traceparent` | `00-<trace id>-<span id>-01`: a W3C trace context that hoster starts for the request. The trace id is the request's id in the stack's request log, and the span id is hoster's span for the upstream request, so an app's OpenTelemetry SDK continues hoster's trace (§2.2.5). A `traceparent` and `tracestate` the client sent are removed, never passed on. |
+
 **Validation (a deploy or apply fails as a whole):**
 
 - Duplicate (host, prefix) inside the stack → error.

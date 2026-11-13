@@ -131,8 +131,10 @@ async fn slow(Path(ms): Path<u64>) -> &'static str {
     "late"
 }
 
-async fn ws(upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(|mut socket| async move {
+/// Echoes text frames; the `101` answer tells which `traceparent` the upgrade request carried.
+async fn ws(headers: axum::http::HeaderMap, upgrade: WebSocketUpgrade) -> Response {
+    let traceparent = headers.get("traceparent").cloned();
+    let mut response = upgrade.on_upgrade(|mut socket| async move {
         while let Some(Ok(message)) = socket.recv().await {
             if let Message::Text(text) = message
                 && socket.send(Message::Text(text)).await.is_err()
@@ -140,7 +142,13 @@ async fn ws(upgrade: WebSocketUpgrade) -> Response {
                 break;
             }
         }
-    })
+    });
+    if let Some(traceparent) = traceparent {
+        response
+            .headers_mut()
+            .insert("x-seen-traceparent", traceparent);
+    }
+    response
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2437,6 +2445,62 @@ async fn a_routed_request_is_offered_as_a_request_row() {
     assert_ne!(again.request_id, row.request_id, "one id per request");
 }
 
+/// Every request routed to a stack starts a trace (ADR-0069 §8): the upstream gets the proxy's
+/// `traceparent` in place of the client's, with the row's request id as the trace id and the
+/// row's client span as the parent, and the client's `tracestate` is dropped.
+#[tokio::test]
+async fn a_routed_request_sends_the_proxys_traceparent_upstream() {
+    use crate::store::MicroTimestamp;
+    use std::time::SystemTime;
+
+    let h = Harness::start().await;
+    let before = MicroTimestamp::from(SystemTime::now());
+    let reply = h
+        .request(
+            "GET /api/traced HTTP/1.1\r\nHost: app.example.com\r\n\
+             Traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\r\n\
+             Tracestate: vendor=evil\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+    assert_eq!(reply.status, 200);
+    let row = h.next_request().await;
+    let server_span = row.server_span.expect("a server span");
+    let client_span = row.client_span.expect("a client span");
+    assert_ne!(server_span, client_span);
+    assert_eq!(
+        echoed(&reply, "traceparent"),
+        [format!("00-{}-{client_span}-01", row.request_id)]
+    );
+    assert!(echoed(&reply, "tracestate").is_empty());
+    let start = row.upstream_start.expect("the upstream request started");
+    assert!(
+        before <= start && start <= MicroTimestamp::from(SystemTime::now()),
+        "{row:?}"
+    );
+
+    // Without one from the client, too; and a new trace for every request.
+    let reply = h.get("app.example.com", "/plain").await;
+    let again = h.next_request().await;
+    assert_eq!(
+        echoed(&reply, "traceparent"),
+        [format!(
+            "00-{}-{}-01",
+            again.request_id,
+            again.client_span.unwrap()
+        )]
+    );
+    assert_ne!(again.server_span, row.server_span);
+}
+
+/// hoster's own reserved hosts are not stacks: no trace is started for them.
+#[tokio::test]
+async fn reserved_hosts_get_no_traceparent() {
+    let h = Harness::start().await;
+    let reply = h.get("admin.example.com", "/whoami").await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert!(echoed(&reply, "traceparent").is_empty());
+}
+
 /// A request whose upstream cannot be reached: the status the client got, no response header
 /// from the upstream, marked as an upstream failure. A service in its stop-first gap is the
 /// stack's too, answered by hoster without an upstream failure.
@@ -2450,6 +2514,9 @@ async fn failed_and_gapped_requests_are_rows_of_their_stack() {
     assert_eq!(row.status, 502);
     assert_eq!(row.to_header, None);
     assert!(row.upstream_failed);
+    // The connection failed before a request was sent: a server span and nothing upstream.
+    assert!(row.server_span.is_some());
+    assert_eq!((row.client_span, row.upstream_start), (None, None));
 
     assert_eq!(h.get("gap.example.com", "/rows/gap").await.status, 503);
     let row = h.next_request().await;
@@ -2457,6 +2524,8 @@ async fn failed_and_gapped_requests_are_rows_of_their_stack() {
     assert_eq!(row.status, 503);
     assert_eq!(row.to_header, None);
     assert!(!row.upstream_failed);
+    assert!(row.server_span.is_some());
+    assert_eq!((row.client_span, row.upstream_start), (None, None));
 }
 
 /// What hoster answers without a stack is not stored: an unknown host, an unknown prefix, a
@@ -2498,8 +2567,12 @@ async fn a_websocket_is_one_row_when_it_closes() {
               Sec-WebSocket-Version: 13\r\n\r\n",
         )
         .await;
-    let (status, _) = client.head().await;
+    let (status, headers) = client.head().await;
     assert_eq!(status, 101);
+    let seen = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-seen-traceparent"))
+        .map(|(_, value)| value.clone());
     let held = Duration::from_millis(300);
     tokio::time::sleep(held).await;
     assert_eq!(
@@ -2514,6 +2587,15 @@ async fn a_websocket_is_one_row_when_it_closes() {
     assert_eq!(row.path, "/api/ws");
     assert!(row.total >= held, "{row:?}");
     assert!(row.to_header.is_some_and(|header| header < held), "{row:?}");
+    // The upgrade request carried the trace like any other.
+    assert_eq!(
+        seen,
+        Some(format!(
+            "00-{}-{}-01",
+            row.request_id,
+            row.client_span.unwrap()
+        ))
+    );
 }
 
 /// The proxy never waits for the store: with the recorder's channel full, requests are

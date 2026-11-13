@@ -31,6 +31,7 @@ mod plain;
 mod receiver;
 mod resolver;
 mod router;
+mod trace;
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
