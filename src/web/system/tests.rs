@@ -525,10 +525,12 @@ mod log_store {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
 
-    use super::super::logs::FollowerCounts;
+    use super::super::logs::{FollowerCounts, OtlpCounts};
     use super::*;
     use crate::logs::{Drops, LogSink};
+    use crate::otlp::Capped;
     use crate::runtime::ContainerId;
+    use crate::secrets::ServiceIdentity;
     use crate::store::{
         LogBatch, LogRecord, LogStore, Removed, RequestId, RequestRow, RowCounts, Stream,
         SweepReport, Timestamp,
@@ -547,6 +549,24 @@ mod log_store {
 
         fn capped(&self) -> BTreeMap<ContainerId, u64> {
             self.capped.clone()
+        }
+    }
+
+    /// The OTLP receiver's limits with fixed counts, by `(stack, service)`.
+    struct Otlp(Vec<(&'static str, &'static str, Capped)>);
+
+    impl OtlpCounts for Otlp {
+        fn capped(&self) -> Vec<(ServiceIdentity, Capped)> {
+            self.0
+                .iter()
+                .map(|(stack, service, capped)| {
+                    let identity = ServiceIdentity {
+                        stack: stack.parse().unwrap(),
+                        service: service.parse().unwrap(),
+                    };
+                    (identity, *capped)
+                })
+                .collect()
         }
     }
 
@@ -640,6 +660,7 @@ mod log_store {
                 followed: 2,
                 capped: BTreeMap::new(),
             }),
+            Arc::new(Otlp(Vec::new())),
             Arc::new(crate::runtime::FakeRuntime::new()),
         );
         let html = page(Arc::new(logs)).await;
@@ -688,6 +709,24 @@ mod log_store {
                 followed: 1,
                 capped,
             }),
+            Arc::new(Otlp(vec![
+                (
+                    "notes",
+                    "api",
+                    Capped {
+                        records: 12,
+                        spans: 3,
+                    },
+                ),
+                (
+                    "shop",
+                    "web",
+                    Capped {
+                        records: 0,
+                        spans: 4_200,
+                    },
+                ),
+            ])),
             Arc::new(crate::runtime::FakeRuntime::new()),
         );
         let html = page(Arc::new(logs)).await;
@@ -702,6 +741,13 @@ mod log_store {
             "{card}"
         );
         assert!(card.contains("<dd>1 channel full"), "{card}");
+        // OTLP's per-service caps by stack and service, most first, leaving out the zeros.
+        assert!(
+            card.contains(
+                "<dt>OTLP rate cap</dt>\n    <dd>shop/web 4,200 spans · notes/api 12 records · 3 spans <span"
+            ),
+            "{card}"
+        );
         // Causes that lost nothing are left out.
         assert!(!card.contains("failed commits"), "{card}");
         assert!(!card.contains("Nothing."), "{card}");
@@ -771,6 +817,7 @@ mod log_store {
                 followed: 0,
                 capped: BTreeMap::new(),
             }),
+            Arc::new(Otlp(Vec::new())),
             Arc::new(crate::runtime::FakeRuntime::new()),
         );
         let html = page(Arc::new(logs)).await;

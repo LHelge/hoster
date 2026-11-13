@@ -30,6 +30,7 @@ use crate::logs::{LogFollowers, LogRecorder, LogSink};
 use crate::machine::Machine;
 use crate::notify::Notifier;
 use crate::orchestrator::{HosterEvents, Orchestrator, Settings, TagResolver};
+use crate::otlp::OtlpLimits;
 use crate::ports::PortAllocator;
 use crate::proxy::{Admission, FileLimit, Proxy, ProxyEvents, ProxyState, ProxyThread};
 use crate::registry::{Poller, RegistryClient, StoredCredentials, UpdateChecker};
@@ -472,6 +473,9 @@ pub struct Supervisor {
     /// Where producers offer log records and request rows: the log recorder's channel, or a
     /// disconnected sink that drops and counts when there is no log store.
     log_sink: LogSink,
+    /// The OTLP receiver's per-service rate and concurrency caps (ADR-0069 §7): the receiver
+    /// holds services to them, the System page shows what they dropped.
+    otlp_limits: OtlpLimits,
     /// The secret store (ADR-0029), opened with the state store; its key is generated on the
     /// first start.
     secrets: Option<SecretStore>,
@@ -510,6 +514,7 @@ impl Supervisor {
             logs: None,
             logs_error: None,
             log_sink: LogSink::disconnected(),
+            otlp_limits: OtlpLimits::default(),
             secrets: None,
             registry: None,
             certs: None,
@@ -1032,6 +1037,7 @@ impl Startup for Supervisor {
                     log_store.clone(),
                     self.log_sink.clone(),
                     Arc::new(followers),
+                    Arc::new(self.otlp_limits.clone()),
                     runtime.clone(),
                 );
                 let web = WebApp::from_config(

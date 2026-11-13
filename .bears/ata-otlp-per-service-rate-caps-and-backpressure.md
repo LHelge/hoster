@@ -1,15 +1,16 @@
 ---
 id: ata
 title: "OTLP: per-service rate caps and backpressure"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T19:36:39.399541882Z"
-updated: "2026-11-12T19:36:39.399541882Z"
+updated: "2026-11-13T18:03:37.675837743Z"
 tags:
   - observability
 depends_on:
   - m7x
 parent: xv9
+attempts: 1
 ---
 
 ## Summary

@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 use super::map::Origin;
-use super::{OtlpReceiver, RpcStatus};
+use super::{OtlpLimits, OtlpReceiver, RpcStatus};
 use crate::logs::{LogSink, Tap};
 use crate::secrets::{KnownServices, SecretKey, ServiceIdentity, TokenKey};
 use crate::stack::Name;
@@ -76,7 +76,7 @@ impl Fixture {
                 .collect(),
         );
         let (sink, tap) = LogSink::tapped(capacity);
-        let receiver = OtlpReceiver::new(key.clone(), Arc::new(known), sink);
+        let receiver = OtlpReceiver::new(key.clone(), Arc::new(known), sink, OtlpLimits::default());
         Self { key, receiver, tap }
     }
 
@@ -793,6 +793,152 @@ async fn what_the_sink_drops_is_reported_as_partial_success() {
         "1 dropped: the log store is busy; 1 without a valid trace or span id"
     );
     assert_eq!(fixture.tap.drain_spans().len(), 2);
+}
+
+/// Paused time: the buckets refill only when the test advances the clock.
+#[tokio::test(start_paused = true)]
+async fn what_is_over_the_rate_cap_is_partial_success_and_marked_once_per_gap() {
+    let burst =
+        usize::try_from(OtlpLimits::RECORDS_PER_SECOND * OtlpLimits::BURST_SECONDS).unwrap();
+    let mut fixture = Fixture::new(2 * burst);
+    let records = (0..burst + 3).map(|n| record(&n.to_string())).collect();
+    let response = fixture
+        .export("/v1/logs", logs_export(records).encode_to_vec())
+        .await
+        .logs();
+    let partial = response.partial_success.expect("partial success");
+    assert_eq!(partial.rejected_log_records, 3);
+    assert_eq!(
+        partial.error_message,
+        "3 dropped: over this service's rate cap of 1000 a second"
+    );
+    let kept = fixture.tap.drain();
+    assert_eq!(kept.len(), burst);
+    assert!(kept.iter().all(|(record, _)| !record.marker));
+
+    // Spans have their own bucket: still full.
+    let spans = (0..10).map(|_| span(ROOT, None)).collect();
+    let response = fixture
+        .export("/v1/traces", traces_export(spans).encode_to_vec())
+        .await
+        .traces();
+    assert_eq!(response.partial_success, None);
+    assert_eq!(fixture.tap.drain_spans().len(), 10);
+
+    // A second later the next export fits whole: the gap ends with one marker before it.
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let response = fixture
+        .export(
+            "/v1/logs",
+            logs_export(vec![record("back")]).encode_to_vec(),
+        )
+        .await
+        .logs();
+    assert_eq!(response.partial_success, None);
+    let records: Vec<LogRecord> = fixture.tap.drain().into_iter().map(|(r, _)| r).collect();
+    assert_eq!(records.len(), 2, "{records:?}");
+    let marker = &records[0];
+    assert!(marker.marker);
+    assert_eq!(
+        (
+            marker.stack.as_deref(),
+            marker.service.as_str(),
+            marker.stream
+        ),
+        (Some("shop"), "web", Stream::Otlp)
+    );
+    assert_eq!(marker.level, Some(Level::Warn));
+    assert_eq!(
+        marker.message,
+        "3 log records dropped: more than 1000 log records a second over OTLP"
+    );
+    assert_eq!(records[1].message, "back");
+    assert_eq!(
+        fixture.receiver.0.limits.capped()[0].1,
+        super::Capped {
+            records: 3,
+            spans: 0
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn spans_over_the_rate_cap_are_reported_with_the_invalid_ones() {
+    let burst = usize::try_from(OtlpLimits::SPANS_PER_SECOND * OtlpLimits::BURST_SECONDS).unwrap();
+    let mut fixture = Fixture::new(2 * burst);
+    let mut spans: Vec<trace::Span> = (0..burst + 2).map(|_| span(ROOT, None)).collect();
+    spans.push(trace::Span {
+        trace_id: Vec::new(),
+        ..span(CHILD, None)
+    });
+    let response = fixture
+        .export("/v1/traces", traces_export(spans).encode_to_vec())
+        .await
+        .traces();
+    let partial = response.partial_success.expect("partial success");
+    assert_eq!(partial.rejected_spans, 3);
+    assert_eq!(
+        partial.error_message,
+        "2 dropped: over this service's rate cap of 1000 a second; 1 without a valid trace or span id"
+    );
+    assert_eq!(fixture.tap.drain_spans().len(), burst);
+}
+
+#[tokio::test]
+async fn requests_over_the_concurrency_cap_are_429_with_retry_after() {
+    let fixture = Fixture::new(16);
+    let web = ServiceIdentity {
+        stack: name("shop"),
+        service: name("web"),
+    };
+    let limits = &fixture.receiver.0.limits;
+    let mut held: Vec<_> = (0..OtlpLimits::MAX_IN_FLIGHT)
+        .map(|_| limits.enter(&web, tokio::time::Instant::now()).unwrap())
+        .collect();
+    let body = logs_export(vec![record("one")]).encode_to_vec();
+    let answer = fixture.export("/v1/logs", body.clone()).await;
+    assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(answer.headers[header::RETRY_AFTER], "1");
+    let status = answer.error();
+    assert_eq!(status.code, RpcStatus::UNAVAILABLE);
+    assert!(!status.message.contains("shop"), "{}", status.message);
+    let answer = fixture.export("/v1/traces", Vec::new()).await;
+    assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
+
+    // The token is checked first: an unknown caller learns nothing about the cap.
+    let answer = fixture
+        .post(
+            "/v1/logs",
+            &[("content-type", "application/x-protobuf")],
+            body.clone(),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+
+    // Another service is not held up.
+    let bearer = fixture.bearer("shop", "worker");
+    let answer = fixture
+        .post(
+            "/v1/logs",
+            &[
+                ("authorization", &bearer),
+                ("content-type", "application/x-protobuf"),
+            ],
+            body.clone(),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK);
+
+    // One request finishes: the next is served, and leaves its slot free again.
+    held.pop();
+    assert_eq!(
+        fixture.export("/v1/logs", body.clone()).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        fixture.export("/v1/logs", body).await.status,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
