@@ -14,6 +14,12 @@
 //! <message>`, line breaks in the message written as `\n` and `\r`), and `jsonl`, one JSON
 //! object per record. The file name is built from the stack's name and the resolved range
 //! only, never from a parameter as given.
+//!
+//! The access log (`source=access`) downloads its request rows the same way, planned as its
+//! page is ([`AccessPlan`]): `text` is then one line per request in a common-log-like format
+//! (`<client> - - [<time>] "<method> <path>" <status> <bytes> <host> <service> <total ms>ms
+//! <request id>`, the path's `"`, `\` and line breaks escaped), `jsonl` one object per row
+//! with every column. The deploy source has no download.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -26,8 +32,12 @@ use axum::response::{IntoResponse, Response};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 
+use super::access::AccessPlan;
 use super::{Links, LogParams, LogReader, LogScope, LogSource, LogsView, Plan};
-use crate::store::{LogEntry, LogQuery, LogStore, PageAt, RecordKey, Timestamp};
+use crate::store::{
+    LogEntry, LogQuery, LogStore, PageAt, RecordKey, RequestEntry, RequestQuery, StoreError,
+    Timestamp,
+};
 use crate::web::ui::Count;
 
 /// The file format of a download (`format`).
@@ -106,14 +116,57 @@ impl LogFormat {
         }
     }
 
-    /// The closing line of a download cut at [`LogDownload::CAP`]: the record at `from` and
-    /// those after it are left out.
-    fn cut(self, from: Timestamp) -> String {
+    /// `entry`, a request row, as one line of the file, its line break included.
+    fn request(self, entry: &RequestEntry) -> String {
+        let request = &entry.request;
+        let time = LogsView::utc(request.time);
+        match self {
+            LogFormat::Text => {
+                let path = Self::one_line(&request.path.replace('\\', "\\\\").replace('"', "\\\""));
+                let method = Self::one_line(&request.method);
+                format!(
+                    "{} - - [{time}] \"{method} {path}\" {} {} {} {} {}ms {}\n",
+                    request.client,
+                    request.status,
+                    request.bytes,
+                    Self::one_line(&request.host),
+                    request.service,
+                    request.total.as_millis(),
+                    request.request_id,
+                )
+            }
+            LogFormat::Jsonl => {
+                let millis =
+                    |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+                let line = serde_json::json!({
+                    "time": time,
+                    "stack": request.stack,
+                    "service": request.service,
+                    "host": request.host,
+                    "prefix": request.prefix,
+                    "method": request.method,
+                    "path": request.path,
+                    "status": request.status,
+                    "to_header_ms": request.to_header.map(millis),
+                    "total_ms": millis(request.total),
+                    "bytes": request.bytes,
+                    "client": request.client.to_string(),
+                    "upstream_failed": request.upstream_failed,
+                    "request_id": request.request_id.to_string(),
+                });
+                format!("{line}\n")
+            }
+        }
+    }
+
+    /// The closing line of a download cut at [`LogDownload::CAP`]: the row at `from` and
+    /// those after it are left out; `rows` names them (`records`, `requests`).
+    fn cut(self, from: Timestamp, rows: &str) -> String {
         let from = LogsView::utc(from);
         let cap = LogDownload::CAP;
         match self {
             LogFormat::Text => format!(
-                "-- cut: a download holds at most {} records; those from {from} on are not \
+                "-- cut: a download holds at most {} {rows}; those from {from} on are not \
                  included\n",
                 Count(u64::from(cap))
             ),
@@ -233,11 +286,98 @@ impl IntoResponse for Refused {
     }
 }
 
-/// A download of one stack's records: see the module.
+/// What a download reads, page by page.
+#[derive(Debug)]
+enum Rows {
+    /// The containers' records.
+    Records(LogQuery),
+    /// The access log's request rows.
+    Requests(RequestQuery),
+}
+
+/// One page of a download: each row's time and line, and the key to read on after when there
+/// may be more.
+type Lines = (Vec<(Timestamp, String)>, Option<RecordKey>);
+
+impl Rows {
+    /// What the rows are called in the cut line.
+    fn noun(&self) -> &'static str {
+        match self {
+            Rows::Records(_) => "records",
+            Rows::Requests(_) => "requests",
+        }
+    }
+
+    fn range(&self) -> &std::ops::Range<Timestamp> {
+        match self {
+            Rows::Records(query) => &query.range,
+            Rows::Requests(query) => &query.range,
+        }
+    }
+
+    /// From the start of the range on, a full page at a time.
+    fn rewind(&mut self) {
+        let start = PageAt::After(RecordKey {
+            time: self.range().start,
+            id: i64::MIN,
+        });
+        match self {
+            Rows::Records(query) => {
+                query.page = start;
+                query.limit = LogQuery::MAX_LIMIT;
+            }
+            Rows::Requests(query) => {
+                query.page = start;
+                query.limit = LogQuery::MAX_LIMIT;
+            }
+        }
+    }
+
+    /// The next page as `format` writes it; reading on from the last row read: the last row,
+    /// or where a capped scan stopped.
+    async fn next(&mut self, store: &LogStore, format: LogFormat) -> Result<Lines, StoreError> {
+        match self {
+            Rows::Records(query) => {
+                let page = store.records(query).await?;
+                let next = page
+                    .scan_stopped
+                    .or_else(|| page.entries.last().map(LogEntry::key))
+                    .filter(|_| page.newer);
+                if let Some(next) = next {
+                    query.page = PageAt::After(next);
+                }
+                let lines = page
+                    .entries
+                    .iter()
+                    .map(|e| (e.record.time, format.record(e)))
+                    .collect();
+                Ok((lines, next))
+            }
+            Rows::Requests(query) => {
+                let page = store.requests(query).await?;
+                let next = page
+                    .scan_stopped
+                    .or_else(|| page.entries.last().map(RequestEntry::key))
+                    .filter(|_| page.newer);
+                if let Some(next) = next {
+                    query.page = PageAt::After(next);
+                }
+                let lines = page
+                    .entries
+                    .iter()
+                    .map(|e| (e.request.time, format.request(e)))
+                    .collect();
+                Ok((lines, next))
+            }
+        }
+    }
+}
+
+/// A download of one stack's records or request rows: see the module.
 #[derive(Debug)]
 pub struct LogDownload {
     store: LogStore,
-    query: LogQuery,
+    rows: Rows,
     format: LogFormat,
     file_name: String,
 }
@@ -246,7 +386,8 @@ impl LogDownload {
     /// The most records one download holds; fewer under test, so a test can reach it.
     pub const CAP: u32 = if cfg!(test) { 1_500 } else { 100_000 };
 
-    /// The download of `stack`'s records the options of `params` select, in `format`.
+    /// The download of `stack`'s records, or request rows for the access log, that the
+    /// options of `params` select, in `format`.
     pub fn open(
         reader: &LogReader,
         stack: &str,
@@ -254,30 +395,40 @@ impl LogDownload {
         format: LogFormat,
     ) -> Result<Self, Refused> {
         let scope = LogScope::Stack(stack.to_owned());
-        if params.source(&scope).0 != LogSource::Containers {
+        let source = params.source(&scope).0;
+        if source == LogSource::Deploy {
             return Err(Refused::Invalid(
-                "Only the containers' records can be downloaded.".to_owned(),
+                "The deployment events cannot be downloaded; the containers' records and the \
+                 access log can."
+                    .to_owned(),
             ));
         }
         let store = reader.store().map_err(Refused::Unavailable)?.clone();
         let now = SystemTime::now();
         let params = &params.clone().scoped(&scope);
-        let Plan {
-            mut query, invalid, ..
-        } = LogsView::plan(&scope, params, now);
+        let (mut rows, invalid) = match source {
+            LogSource::Access => {
+                let AccessPlan { query, shared } = AccessPlan::new(&scope, params, now);
+                (Rows::Requests(query), shared.invalid)
+            }
+            _ => {
+                let Plan { query, invalid, .. } = LogsView::plan(&scope, params, now);
+                (Rows::Records(query), invalid)
+            }
+        };
         if let Some(invalid) = invalid {
             return Err(Refused::Invalid(invalid));
         }
         // The whole range, oldest first, whatever page the view shows.
-        query.page = PageAt::After(RecordKey {
-            time: query.range.start,
-            id: i64::MIN,
-        });
-        query.limit = LogQuery::MAX_LIMIT;
-        let file_name = Self::file_name(stack, &query.range, format);
+        rows.rewind();
+        let name = match source {
+            LogSource::Access => format!("{stack}-access"),
+            _ => stack.to_owned(),
+        };
+        let file_name = Self::file_name(&name, rows.range(), format);
         Ok(Self {
             store,
-            query,
+            rows,
             format,
             file_name,
         })
@@ -336,8 +487,8 @@ impl LogDownload {
             loop {
                 let download = &mut state.download;
                 let format = download.format;
-                let page = match download.store.records(&download.query).await {
-                    Ok(page) => page,
+                let (lines, next) = match download.rows.next(&download.store, format).await {
+                    Ok(lines) => lines,
                     Err(err) => {
                         tracing::error!(error = %err, "downloading from the log store failed");
                         let error =
@@ -346,23 +497,17 @@ impl LogDownload {
                     }
                 };
                 let mut chunk = String::new();
-                for entry in &page.entries {
+                for (time, line) in lines {
                     if state.sent == Self::CAP {
-                        chunk.push_str(&format.cut(entry.record.time));
+                        chunk.push_str(&format.cut(time, download.rows.noun()));
                         return Some((Bytes::from(chunk), None));
                     }
-                    chunk.push_str(&format.record(entry));
+                    chunk.push_str(&line);
                     state.sent += 1;
                 }
-                // On from the last row read: the last record, or where a capped scan stopped.
-                let next = page
-                    .scan_stopped
-                    .or_else(|| page.entries.last().map(LogEntry::key))
-                    .filter(|_| page.newer);
-                let Some(next) = next else {
+                if next.is_none() {
                     return (!chunk.is_empty()).then(|| (Bytes::from(chunk), None));
-                };
-                download.query.page = PageAt::After(next);
+                }
                 if !chunk.is_empty() {
                     return Some((Bytes::from(chunk), Some(state)));
                 }
@@ -493,14 +638,15 @@ mod tests {
     fn the_cut_line_says_the_cap_and_from_when() {
         let from = Timestamp::from_millis(1_794_571_200_000);
         assert_eq!(
-            LogFormat::Text.cut(from),
+            LogFormat::Text.cut(from, "records"),
             format!(
                 "-- cut: a download holds at most {} records; those from \
                  2026-11-13T12:00:00.000Z on are not included\n",
                 Count(u64::from(LogDownload::CAP))
             )
         );
-        let value: serde_json::Value = serde_json::from_str(&LogFormat::Jsonl.cut(from)).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&LogFormat::Jsonl.cut(from, "records")).unwrap();
         assert_eq!(value["cut"]["limit"], LogDownload::CAP);
         assert_eq!(value["cut"]["from"], "2026-11-13T12:00:00.000Z");
     }

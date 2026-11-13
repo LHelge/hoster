@@ -920,15 +920,17 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 }
 .log-stacks .log-record { --log-cols: max-content 12ch 12ch 5ch minmax(0, 1fr); }
 .log-record.log-fielded { display: block; }
-.log-fielded > details > summary {
+.log-fielded > details > summary, .log-request > details > summary {
   display: grid;
   grid-template-columns: var(--log-cols);
   gap: 0 14px;
   list-style: none;
   cursor: pointer;
 }
-.log-fielded > details > summary::-webkit-details-marker { display: none; }
-.log-fielded > details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.log-fielded > details > summary::-webkit-details-marker,
+.log-request > details > summary::-webkit-details-marker { display: none; }
+.log-fielded > details > summary:focus-visible,
+.log-request > details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* Closed, the row ends in a sign that it opens on fields. */
 .log-fielded > details:not([open]) > summary .log-msg::after { content: " {…}"; color: var(--muted); }
 .log-target { color: var(--muted); }
@@ -950,6 +952,27 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .log-error .log-lvl, .log-error .log-msg { color: var(--fail); }
 .log-info .log-lvl { color: var(--text-2); }
 .log-cut { color: var(--muted); font-style: italic; }
+/* A request row of the access log: time, service, method, path, status, duration, bytes and
+   client; it always opens, on the rest of the row. Status tones are the traffic charts'. */
+.log-record.log-request { --log-cols: max-content 12ch 7ch minmax(0, 1fr) 3ch 9ch 9ch 16ch; display: block; }
+.log-stacks .log-record.log-request { --log-cols: max-content 12ch 12ch 7ch minmax(0, 1fr) 3ch 9ch 9ch 16ch; }
+.req-method { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.req-path { white-space: normal; }
+.req-status { font-weight: 600; }
+.req-num { color: var(--text-2); text-align: end; white-space: nowrap; }
+.req-client { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.req-2xx { color: var(--ok); }
+.req-3xx { color: var(--progress); }
+.req-4xx { color: var(--warn); }
+.req-5xx { color: var(--fail); }
+.req-other { color: var(--muted); }
+.dot.req-all, .dot.req-other { background: var(--muted); }
+.dot.req-2xx { background: var(--ok); }
+.dot.req-3xx { background: var(--progress); }
+.dot.req-4xx { background: var(--warn); }
+.dot.req-5xx { background: var(--fail); }
+.log-slower { display: inline-flex; align-items: center; gap: 6px; }
+.log-slower input { width: 7rem; }
 .log-marker { grid-template-columns: max-content minmax(0, 1fr); color: var(--muted); font-style: italic; }
 .log-starts, .log-pages { margin: 0; padding: 6px 12px; color: var(--muted); font: 12px/1.4 var(--mono); }
 .log-starts { border-bottom: 1px solid var(--divider); }
@@ -968,6 +991,11 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
   .log-fields { grid-template-columns: minmax(0, 1fr); }
   .log-fields dd { margin-bottom: 4px; }
   .log-record .log-msg { grid-column: 1 / -1; }
+  /* A request: time, service, method and status on the first line, the path on its own, then
+     duration, bytes and client. */
+  .log-record.log-request, .log-stacks .log-record.log-request { --log-cols: max-content max-content max-content max-content; }
+  .log-request .req-path { grid-column: 1 / -1; grid-row: 2; }
+  .log-request .req-num { text-align: start; }
 }
 
 /* ---- Stack pages: the apply page, its plan and pre-flight, problems and the diff ------------

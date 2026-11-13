@@ -1097,6 +1097,50 @@ mod request_queries {
         store.close().await;
     }
 
+    /// The access log's follow stream reads by id in bounded windows, as records are followed.
+    #[tokio::test]
+    async fn rows_after_an_id_follow_commit_order_with_the_filters() {
+        let (_dir, store) = mixed().await;
+        let notes = RequestQuery::new(everything(), LogScope::Stack("notes".into()));
+        let tail = store.requests_after(&notes, 0, 6).await.unwrap();
+        let paths: Vec<&str> = tail
+            .entries
+            .iter()
+            .map(|e| e.request.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["/", "/missing", "/api/users/7", "/api/users", "/login"]
+        );
+        assert_eq!((tail.through, tail.more), (6, false));
+
+        // Committed late but stamped early: it still follows, by id.
+        store
+            .append(&LogBatch {
+                requests: vec![request(500, "notes", "web", "/late", 503)],
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+        let mut failed = notes.clone();
+        failed.status = Some(StatusFilter::Class(5));
+        failed.path = Some(TextFilter::substring("late"));
+        let tail = store.requests_after(&failed, 6, 7).await.unwrap();
+        assert_eq!(tail.entries.len(), 1);
+        assert_eq!(tail.entries[0].request.path, "/late");
+        assert_eq!(tail.through, 7);
+
+        // Nothing past the head is read, and the limit leaves more for the next call.
+        let mut one = notes.clone();
+        one.limit = 1;
+        let tail = store.requests_after(&one, 0, 3).await.unwrap();
+        assert_eq!(tail.entries.len(), 1);
+        assert_eq!((tail.through, tail.more), (1, true));
+        let none = store.requests_after(&notes, 7, 7).await.unwrap();
+        assert!(none.entries.is_empty() && none.through == 7 && !none.more);
+        store.close().await;
+    }
+
     #[tokio::test]
     async fn a_request_is_found_by_its_id() {
         let (_dir, store) = mixed().await;

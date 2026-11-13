@@ -1,10 +1,10 @@
 ---
 id: bq6
 title: "Stack logs: access-log source"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T13:27:00.855409220Z"
-updated: "2026-11-12T13:27:00.855409220Z"
+updated: "2026-11-13T13:44:02.273968027Z"
 tags:
   - web
   - observability
@@ -14,6 +14,7 @@ depends_on:
   - z7r
   - qr7
 parent: psq
+attempts: 1
 ---
 
 ## Summary

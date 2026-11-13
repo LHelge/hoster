@@ -53,7 +53,7 @@ pub use logs::{
     InvalidPattern, Level, LevelCounts, LogBatch, LogCursor, LogEntry, LogFileFacts, LogHead,
     LogPage, LogQuery, LogRecord, LogScope, LogStore, LogTail, Page, PageAt, RecordKey, Removed,
     RequestCounts, RequestEntry, RequestId, RequestQuery, RequestRow, Retention, RowCounts,
-    ServiceSeen, StatusFilter, Stream, Sweep, SweepReport, TextFilter, UnknownLogText,
+    ServiceSeen, StatusFilter, Stream, Sweep, SweepReport, Tail, TextFilter, UnknownLogText,
 };
 pub use notifications::{
     DeliveryOutcome, LastDelivery, NotificationSettings, NotifiedProblem, NotifierStep, ProblemKey,

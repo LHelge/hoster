@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use sqlx::{QueryBuilder, Sqlite};
 
-use super::{LogQuery, LogScope, Page, PageAt, Paged, RecordKey, TextFilter};
+use super::{LogQuery, LogScope, Page, PageAt, Paged, RecordKey, Tail, TextFilter};
 use crate::store::logs::{LogStore, RequestId, RequestRow, UnknownLogText};
 use crate::store::{Result, StoreError, Timestamp};
 
@@ -110,8 +110,7 @@ impl RequestQuery {
 }
 
 const COLUMNS: &str = "SELECT id, time, host, prefix, stack, service, method, path, status, \
-                       header_ms, total_ms, bytes, client, upstream_failed, request_id \
-                       FROM requests";
+                       header_ms, total_ms, bytes, client, upstream_failed, request_id FROM";
 
 impl Paged for RequestQuery {
     type Row = Row;
@@ -129,8 +128,10 @@ impl Paged for RequestQuery {
         self.path.is_some()
     }
 
-    fn select(&self) -> QueryBuilder<Sqlite> {
-        let mut sql = QueryBuilder::new(COLUMNS);
+    const TABLE: &'static str = "requests";
+
+    fn select_from(&self, from: &str) -> QueryBuilder<Sqlite> {
+        let mut sql = QueryBuilder::new(format!("{COLUMNS} {from}"));
         LogQuery::push_where(&mut sql, &self.range, &self.scope);
         LogQuery::push_in(&mut sql, "service", self.services.clone());
         if let Some(status) = self.status {
@@ -260,6 +261,19 @@ impl LogStore {
         self.page(query).await
     }
 
+    /// The request rows with an id above `after`, up to `head` (the recorder's announced
+    /// [`LogHead::request`](crate::store::LogHead)), that `query` matches, in id order: the
+    /// access log's follow stream. Bounded as [`LogStore::records_after`] is: at most the
+    /// query's limit of rows, and at most [`SCAN_CAP`](super::SCAN_CAP) ids past `after`.
+    pub async fn requests_after(
+        &self,
+        query: &RequestQuery,
+        after: i64,
+        head: i64,
+    ) -> Result<Tail<RequestEntry>> {
+        self.after(query, after, head).await
+    }
+
     /// The requests of `query`'s range, scope and services, and how many of them were 4xx and
     /// 5xx: what the page's other filters choose among. Counted with the index, no scan cap.
     pub async fn request_counts(&self, query: &RequestQuery) -> Result<RequestCounts> {
@@ -285,7 +299,7 @@ impl LogStore {
     /// it, or for an id the proxy never gave. A container record that logged a request id
     /// links here.
     pub async fn request(&self, id: RequestId) -> Result<Option<RequestEntry>> {
-        let mut sql = QueryBuilder::<Sqlite>::new(COLUMNS);
+        let mut sql = QueryBuilder::<Sqlite>::new(format!("{COLUMNS} requests"));
         sql.push(" WHERE request_id = ").push_bind(id.to_string());
         let row: Option<Row> = sql.build_query_as().fetch_optional(&self.reads).await?;
         row.map(RequestEntry::try_from)

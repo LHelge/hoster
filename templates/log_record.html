@@ -1,8 +1,32 @@
 {#- One record of the stored logs view (src/web/logs.rs, LogRow `row`), on a page
     (logs_view.html) and in its follow stream (log_records.html); `stack_column` says whether
     rows name their stack. A record with fields is the summary of a <details> that opens on
-    them (RecordDetail); one without has no expander. -#}
-      {%- if row.marker %}
+    them (RecordDetail); one without has no expander. A request row of the access log
+    (RequestCells) has its own columns and always opens. -#}
+      {%- if let Some(req) = row.request %}
+      <li class="log-record log-request {{ row.class }}"><details><summary>
+        <time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time>
+        {%- if stack_column %}<span class="log-stack">{{ row.stack.as_deref().unwrap_or_default() }}</span>{% endif %}
+        <span class="log-svc">{{ row.service }}</span>
+        <span class="req-method">{{ req.method }}</span>
+        <span class="log-msg req-path">{% for span in row.spans() %}{% if span.mark %}<mark>{{ span.text }}</mark>{% else %}{{ span.text }}{% endif %}{% endfor %}{% if req.path_cut %}<span class="log-cut" title="The path is longer; open the row for all of it.">…</span>{% endif %}</span>
+        <span class="req-status {{ req.tone }}"{% if req.status == "-" %} title="No response was sent"{% endif %}>{{ req.status }}</span>
+        <span class="req-num" title="Total duration">{{ req.total }}</span>
+        <span class="req-num" title="Response bytes">{{ req.bytes }}</span>
+        <span class="req-client" title="{{ req.client }}">{{ req.client }}</span></summary>
+        <div class="log-expanded">
+          <dl class="log-fields">
+            <dt>time</dt><dd><time datetime="{{ row.time }}">{{ row.time }}</time></dd>
+            <dt>host</dt><dd>{{ req.host }}</dd>
+            <dt>route</dt><dd>{{ req.prefix }}</dd>
+            <dt>path</dt><dd>{{ req.path }}</dd>
+            <dt>to header</dt><dd>{{ req.to_header }}</dd>
+            <dt>upstream</dt><dd>{% if req.upstream_failed %}<span class="req-5xx">failed</span>{% else %}ok{% endif %}</dd>
+            <dt>request id</dt><dd><a href="{{ req.records }}" title="The containers' records that mention this id">{{ req.request_id }}</a></dd>
+            {#- The waterfall epic (qnh) adds the request's trace link here. #}
+          </dl>
+        </div></details></li>
+      {%- else if row.marker %}
       <li class="log-record log-marker"><time datetime="{{ row.time }}" title="{{ row.time }}">{{ row.shown }}</time><span class="log-msg">{{ row.message }}</span></li>
       {%- else %}
       <li class="log-record {{ row.class }}{% if row.stderr %} log-stderr{% endif %}{% if let Some(level) = row.level %} log-{{ level }}{% endif %}{% if row.detail.is_some() %} log-fielded{% endif %}"{% if row.stderr %} title="stderr"{% endif %}>
