@@ -226,6 +226,11 @@ impl<const N: usize> HexId<N> {
         Self(bytes)
     }
 
+    /// Whether this id may go into W3C trace context, which forbids an id of all zeros.
+    pub fn is_valid(&self) -> bool {
+        self.0.iter().any(|&byte| byte != 0)
+    }
+
     /// The text a [`FromStr`] error names, by length.
     fn what() -> &'static str {
         match N {

@@ -1,10 +1,10 @@
 ---
 id: buj
 title: "Trace context at the proxy: a W3C trace per request, traceparent sent upstream"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T19:34:46.999621895Z"
-updated: "2026-11-13T17:02:07.411535533Z"
+updated: "2026-11-13T18:52:50.864683135Z"
 tags:
   - proxy
   - observability
@@ -13,6 +13,7 @@ depends_on:
   - yjp
   - aqy
 parent: xv9
+attempts: 1
 ---
 
 ## Summary
