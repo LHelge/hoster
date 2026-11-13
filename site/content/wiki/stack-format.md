@@ -440,14 +440,17 @@ so an app whose OpenTelemetry SDK reads its environment exports to hoster withou
 - **`host.containers.internal`** is the name rootless podman gives the host in every
   container's `/etc/hosts` (`169.254.1.2`). hoster's proxy serves the receiver there on port 80
   to connections from the host's own addresses, which is where containers arrive from, and to
-  nothing else. The name is reserved: no route can use it (§2.3). It needs podman 5.3 or later
-  with passt 2024_08_14 or later; `hoster doctor` checks it from a container (`otlp_path`).
+  nothing else. The name is reserved: no route can use it (§2.3). It needs passt 2024_08_14 or
+  later beside the podman 5.4 hoster requires; `hoster doctor` checks it from a container (`otlp_path`).
 - **Upgrading** to the hoster release that adds these variables changes every service's config
   hash once, because the four hashed variables are new. The first deployment of each stack
   after the upgrade replaces all of its services, by their update strategy, even where nothing
   else changed. Nothing redeploys by itself.
 - An app that logs to stdout and also exports logs is stored twice, once per stream; pick one.
   Third-party images without an SDK ignore the variables.
+
+What the receiver accepts and keeps, its limits, and how to set up an app are in
+[[tracing|Traces and logs over OTLP]].
 
 ## 2.3 Route
 

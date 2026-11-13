@@ -9,7 +9,9 @@ an SDK or point the app at a log server: print one JSON object per line and host
 level, the message and the other fields from it. Plain text works too; it just has no level.
 
 This page covers what hoster reads from a line, what it keeps and for how long, and how to get
-JSON lines out of a few common loggers.
+JSON lines out of a few common loggers. An app with an OpenTelemetry SDK can send its logs, and
+its traces, over OTLP instead: see [[tracing|Traces and logs over OTLP]]. Use one or the other
+for logs, not both, or every event is stored twice.
 
 # How a line is read
 
@@ -176,6 +178,10 @@ event's fields to the top level; hoster reads both shapes.
 [services.docs.env]
 APHID_LOG_FORMAT = "json"
 ```
+
+From version 0.4.0 it also exports over OTLP, and so stores each line twice unless one of the
+two is turned off: the lines on stdout with `APHID_LOG_FORMAT = "none"` (0.5.1 or later), or
+the export ([[tracing#aphid-server|Traces and logs over OTLP]]).
 
 ## Node (pino)
 

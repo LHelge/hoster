@@ -1,16 +1,17 @@
 ---
 id: gv2
 title: "Docs: sending traces and logs from an app over OTLP"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T19:36:46.443048830Z"
-updated: "2026-11-12T19:36:46.443048830Z"
+updated: "2026-11-13T19:00:01.073607193Z"
 tags:
   - docs
   - observability
 depends_on:
   - "5up"
 parent: xv9
+attempts: 1
 ---
 
 ## Summary
