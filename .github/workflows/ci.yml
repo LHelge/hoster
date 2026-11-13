@@ -59,6 +59,21 @@ jobs:
       - name: node --test
         run: node --test 'assets/*.test.mjs'
 
+  # The composite actions in actions/, which app repositories use from a release tag.
+  actions:
+    name: GitHub actions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # ubuntu-latest ships shellcheck.
+      - name: shellcheck
+        run: shellcheck actions/*/*.sh
+
+      # deploy.sh against a local stub of GitHub's token endpoint and /hooks/deploy.
+      - name: actions/deploy
+        run: actions/deploy/test.sh
+
   # The documentation site (site/, published by release.yml). aphid fails the build on a broken
   # [[wiki-link]], so a moved or renamed page breaks the PR rather than the site.
   site:
