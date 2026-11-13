@@ -44,6 +44,9 @@ fn entry(id: i64, ago: Duration, service: &str, generation: u32) -> LogEntry {
             fields: None,
             cut: false,
             marker: false,
+            trace_id: None,
+            span_id: None,
+            received: None,
         },
     }
 }

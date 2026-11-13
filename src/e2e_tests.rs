@@ -208,6 +208,7 @@ impl Hoster {
             traffic: Default::default(),
             admission: Default::default(),
             logs: crate::logs::LogSink::disconnected(),
+            receiver: crate::proxy::ReceiverRoute::new(PathBuf::from("/nonexistent/otlp.sock")),
         };
         let (shutdown, rx) = watch::channel(None);
         let mut proxy = Proxy::new(&config, state).spawn(rx).unwrap();

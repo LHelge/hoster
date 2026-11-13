@@ -34,6 +34,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::otlp::ExporterEnv;
+
 pub use check::StackCheck;
 pub use deploy::{DeployAuth, DeployCaller};
 pub use diagnostic::{Diagnostic, FieldPath, Location, StackError};
@@ -198,20 +200,33 @@ impl Service {
         env.chain(files)
     }
 
-    /// The plain environment hoster gives the container: `env`, plus `PORT=<container port>`
-    /// for a routed service with exactly one distinct container port across its routes, unless
-    /// `env` sets `PORT` itself (ADR-0051). A secret mapped to `PORT` also counts as setting it,
-    /// so the container never gets the name twice. Secrets are added at container create, never
+    /// The plain environment hoster gives the container of the service called `name`: `env`,
+    /// plus `PORT=<container port>` for a routed service with exactly one distinct container
+    /// port across its routes (ADR-0051), plus the four `OTEL_*` variables that point an
+    /// OpenTelemetry SDK at hoster's receiver (ADR-0069 §5). Every added variable is left out
+    /// when the stack file [`sets`](Self::sets) its name, as `env` or as a secret, so the
+    /// container never gets a name twice. This is what the config hash covers; secrets and the
+    /// two `OTEL_*` variables that change per deployment are added at container create, never
     /// here.
-    pub fn container_env(&self) -> BTreeMap<String, String> {
+    pub fn container_env(&self, name: &Name) -> BTreeMap<String, String> {
         let mut env = self.env.clone();
         let ports: BTreeSet<u16> = self.routes.iter().map(|r| r.port).collect();
-        if let [port] = ports.into_iter().collect::<Vec<_>>()[..]
-            && !self.secrets.contains_key("PORT")
-        {
-            env.entry("PORT".into()).or_insert_with(|| port.to_string());
+        let port = match ports.into_iter().collect::<Vec<_>>()[..] {
+            [port] => Some(("PORT", port.to_string())),
+            _ => None,
+        };
+        for (key, value) in port.into_iter().chain(ExporterEnv::hashed(name)) {
+            if !self.sets(key) {
+                env.insert(key.to_owned(), value);
+            }
         }
         env
+    }
+
+    /// Whether the stack file gives the container `key` itself, as `env` or as a secret, so
+    /// hoster adds no value of its own under that name.
+    pub fn sets(&self, key: &str) -> bool {
+        self.env.contains_key(key) || self.secrets.contains_key(key)
     }
 }
 

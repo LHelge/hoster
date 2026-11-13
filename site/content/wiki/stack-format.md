@@ -131,7 +131,7 @@ name = "notes"       # required; stack name
 | `auto_update` | string | no | `"off"` (default), `"digest"`, `"patch"` or `"minor"`: whether hoster applies this image's updates by itself (§2.2.4, [ADR-0061](https://github.com/LHelge/hoster/blob/main/docs/adr/0061-third-party-image-updates.md)). Only for third-party images with a tag; `"patch"` and `"minor"` need a tag that reads as a version. Not part of the config hash, so changing it redeploys nothing. |
 | `command` | array of string | no | Overrides the image `CMD`. |
 | `entrypoint` | array of string | no | Overrides the image `ENTRYPOINT`. |
-| `env` | table string → string | no | Plain, non-secret environment variables. For a routed service with exactly one distinct container port, hoster adds `PORT=<that port>` unless `env` (or `secrets`) sets `PORT` itself ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). A service whose routes use two or more different container ports, or that has no routes, gets no `PORT`; set what it needs in `env`. The injected value is part of the service's config hash, so changing the route's `port` redeploys the service. |
+| `env` | table string → string | no | Plain, non-secret environment variables. For a routed service with exactly one distinct container port, hoster adds `PORT=<that port>` unless `env` (or `secrets`) sets `PORT` itself ([ADR-0051](https://github.com/LHelge/hoster/blob/main/docs/adr/0051-poller-bootstrap-advisory-dns-health-default-port.md)). A service whose routes use two or more different container ports, or that has no routes, gets no `PORT`; set what it needs in `env`. The injected value is part of the service's config hash, so changing the route's `port` redeploys the service. Every service also gets the `OTEL_*` variables that point an OpenTelemetry SDK at hoster (§2.2.5); a name set here or in `secrets` replaces hoster's value. |
 | `secrets` | table string → string | no | Env var name → secret name `<stack>/<name>` in hoster's encrypted secret store ([ADR-0029](https://github.com/LHelge/hoster/blob/main/docs/adr/0029-secret-store-and-config-aware-idempotency.md)). The value never appears in the stack file. Values are injected as environment variables at container create; a deployment that references a secret which is not set is rejected, naming the secret (never its value). Replacing a secret changes its version, which is part of the service's config hash. |
 | `volumes` | table string → string | no | Volume name → mount path. Named podman volumes `hoster-<stack>-<volume>` only, kept on stack removal ([ADR-0030](https://github.com/LHelge/hoster/blob/main/docs/adr/0030-named-volumes-and-documented-backups.md)). Host bind mounts are not expressible ([ADR-0019](https://github.com/LHelge/hoster/blob/main/docs/adr/0019-no-container-runtime-access-for-apps.md)). hoster creates each volume on first use, labelled `hoster.managed=true` and `hoster.stack=<stack>`, and refuses to mount an existing one labelled for another stack. Because names may contain `-`, apply also rejects a volume whose podman name another stack already uses (stack `a-b` volume `c` and stack `a` volume `b-c` are both `hoster-a-b-c`), including a volume kept from a removed stack ([ADR-0063](https://github.com/LHelge/hoster/blob/main/docs/adr/0063-reject-cross-stack-podman-name-collisions.md)). Validation warns when a service with volumes uses `update = "start-first"`, since old and new containers would mount the volume at the same time during a deploy ([ADR-0039](https://github.com/LHelge/hoster/blob/main/docs/adr/0039-per-service-update-strategy.md)). |
 | `files` | table path → file | no | Config files hoster writes into each container before it starts: absolute container path → `{ content = "…" }` or `{ secret = "<stack>/<name>" }`, with optional `mode` and `owner`. See §2.2.1 ([ADR-0057](https://github.com/LHelge/hoster/blob/main/docs/adr/0057-config-files-in-stack-files.md)). Needs podman 5.4 or later. A file's content, mode and owner are part of the service's config hash, so changing one redeploys the service. |
@@ -412,6 +412,46 @@ packages inside, and a minor version can still break your app if the image doesn
 own versioning. `"minor"` means trusting the image's maintainers; prefer `"patch"` or `"digest"`
 for anything holding data, and keep backups ([[backup]]).
 
+## 2.2.5 OpenTelemetry export ([ADR-0069](https://github.com/LHelge/hoster/blob/main/docs/adr/0069-otlp-receiver-and-edge-trace-context.md))
+
+hoster receives OpenTelemetry logs and traces from its containers, over OTLP/HTTP with protobuf
+bodies, and keeps them with the stack's logs. Every service gets these environment variables,
+so an app whose OpenTelemetry SDK reads its environment exports to hoster without any setup:
+
+| Variable | Value | In the config hash |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://host.containers.internal` | yes |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | yes |
+| `OTEL_METRICS_EXPORTER` | `none` (hoster takes no metrics) | yes |
+| `OTEL_SERVICE_NAME` | the service's name | yes |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `Authorization=Bearer%20<token>`, the service's own token | no |
+| `OTEL_RESOURCE_ATTRIBUTES` | `service.namespace=<stack>,hoster.generation=<generation>` | no |
+
+- **Per variable, the stack file wins.** A name the service sets in `env` or `secrets` is left
+  as the stack file has it, and hoster adds the others. Set `OTEL_SDK_DISABLED = "true"` in
+  `env` to keep an SDK from exporting at all.
+- **The token** names the service and is checked by hoster on every export; the stack and
+  service a record or span is stored under come from it, never from what the payload says. It
+  is the same for every deployment of the service, shown masked on the stack's environment tab,
+  and added when the container is created, like a secret.
+- **`hoster.generation`** is the deployment generation of the container. It changes with every
+  deployment, so it is added when the container is created and is not hashed; hoster shows it
+  beside the records it came with.
+- **`host.containers.internal`** is the name rootless podman gives the host in every
+  container's `/etc/hosts` (`169.254.1.2`). hoster's proxy serves the receiver there on port 80
+  to connections from the host's own addresses, which is where containers arrive from, and to
+  nothing else. The name is reserved: no route can use it (§2.3). It needs passt 2024_08_14 or
+  later beside the podman 5.4 hoster requires; `hoster doctor` checks it from a container (`otlp_path`).
+- **Upgrading** to the hoster release that adds these variables changes every service's config
+  hash once, because the four hashed variables are new. The first deployment of each stack
+  after the upgrade replaces all of its services, by their update strategy, even where nothing
+  else changed. Nothing redeploys by itself.
+- An app that logs to stdout and also exports logs is stored twice, once per stream; pick one.
+  Third-party images without an SDK ignore the variables.
+
+What the receiver accepts and keeps, its limits, and how to set up an app are in
+[[tracing|Traces and logs over OTLP]].
+
 ## 2.3 Route
 
 | Field | Type | Required | Default | Rules |
@@ -427,11 +467,27 @@ Every routed host is served over HTTPS only, and port 80 redirects to it. hoster
 subdomains, is the app's choice, and the app can send the header itself. (hoster's own admin
 host sends it.)
 
+**Headers the app receives** ([ADR-0010](https://github.com/LHelge/hoster/blob/main/docs/adr/0010-prefix-preservation-and-forwarded-headers.md), [ADR-0069](https://github.com/LHelge/hoster/blob/main/docs/adr/0069-otlp-receiver-and-edge-trace-context.md)).
+hoster is the edge, so it sets these on every request it forwards and overwrites what a client
+sent under the same names:
+
+| Header | Value |
+|---|---|
+| `Host` | Unchanged, as the client sent it. |
+| `X-Forwarded-For` | The client's own list, if it sent one, with the address hoster saw appended; only the last entry is hoster's. |
+| `X-Forwarded-Proto` | `https`. |
+| `X-Forwarded-Host` | The host as the client sent it, port included. |
+| `X-Forwarded-Prefix` | The route's `prefix`, whether or not it is stripped; not set for `/`. |
+| `traceparent` | `00-<trace id>-<span id>-01`: a W3C trace context that hoster starts for the request. The trace id is the request's id in the stack's request log, and the span id is hoster's span for the upstream request, so an app's OpenTelemetry SDK continues hoster's trace (§2.2.5). A `traceparent` and `tracestate` the client sent are removed, never passed on. |
+
 **Validation (a deploy or apply fails as a whole):**
 
 - Duplicate (host, prefix) inside the stack → error.
 - (host, prefix) owned by another stack → error ([ADR-0012](https://github.com/LHelge/hoster/blob/main/docs/adr/0012-reject-cross-stack-route-collisions.md)).
 - More than one service of the same stack on the same (host, prefix) → error, same as a duplicate.
+- A host hoster keeps for itself → error, at any prefix: the admin host, and
+  `host.containers.internal`, the name containers reach hoster's OpenTelemetry receiver by
+  (§2.2.5).
 - Durations parse as humantime strings: `"500ms"`, `"30s"`, `"5m"`.
 
 ## 2.4 Health check (ADR-0038, ADR-0056)

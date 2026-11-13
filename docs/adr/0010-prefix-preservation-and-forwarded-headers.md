@@ -1,6 +1,6 @@
 # ADR-0010: Preserve path prefixes by default, strip_prefix opt-in, always set X-Forwarded-Prefix, keep Host
 
-- Status: Accepted
+- Status: Accepted; `traceparent` is replaced and sent upstream since ADR-0069
 - Date: 2026-11-07
 
 ## Context

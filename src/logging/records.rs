@@ -20,7 +20,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use super::ACCESS_TARGET;
 use crate::logs::{LogSink, ParsedLine, RateCap};
-use crate::store::{self, LogRecord, Stream, Timestamp};
+use crate::store::{self, LogRecord, SpanId, Stream, Timestamp, TraceId};
 
 /// Where hoster's own events go once the log store's recorder runs: a handle the layer checks
 /// on every event, connected to the recorder's [`LogSink`] after logging is up and disconnected
@@ -116,6 +116,9 @@ impl HosterRecords {
                 fields: None,
                 cut: false,
                 marker: true,
+                trace_id: None,
+                span_id: None,
+                received: None,
             });
         }
         if admission.keep {
@@ -174,6 +177,7 @@ where
             .and_then(Value::as_str)
             .map(str::to_owned);
         let event_generation = object.get("generation").and_then(generation_of);
+        let event_trace = trace_of(&object);
         object.insert("level".into(), metadata.level().as_str().into());
         object.insert("target".into(), metadata.target().into());
 
@@ -207,6 +211,13 @@ where
                 span.get("generation").and_then(generation_of)
             })
         });
+        // A request's trace, from the event or the nearest span that names one; the span id
+        // comes with it from the same place (ADR-0069 §8).
+        let (trace_id, span_id) = event_trace
+            .or_else(|| spans.iter().find_map(trace_of))
+            .map_or((None, None), |(trace_id, span_id)| {
+                (Some(trace_id), span_id)
+            });
         if !spans.is_empty() {
             spans.reverse();
             object.insert(
@@ -227,6 +238,9 @@ where
             fields: parsed.fields,
             cut: false,
             marker: false,
+            trace_id,
+            span_id,
+            received: None,
         };
         self.0.offer(&sink, record);
     }
@@ -239,6 +253,20 @@ fn generation_of(value: &Value) -> Option<u32> {
         Value::String(s) => s.parse().ok(),
         _ => None,
     }
+}
+
+/// The `trace_id` and `span_id` fields of an event or a span, when its `trace_id` is a valid
+/// W3C trace id; the span id only when it is a valid one too.
+fn trace_of(fields: &Map<String, Value>) -> Option<(TraceId, Option<SpanId>)> {
+    let id = |name: &str| fields.get(name).and_then(Value::as_str);
+    let trace_id = id("trace_id")?
+        .parse::<TraceId>()
+        .ok()
+        .filter(TraceId::is_valid)?;
+    let span_id = id("span_id")
+        .and_then(|span| span.parse::<SpanId>().ok())
+        .filter(SpanId::is_valid);
+    Some((trace_id, span_id))
 }
 
 /// Fields as `tracing-subscriber`'s JSON formatter writes them: numbers and booleans as JSON,
@@ -405,6 +433,56 @@ mod tests {
                 {"name": "service", "stack": "blog", "service": "web", "generation": 7},
             ])
         );
+    }
+
+    /// An event inside a request carries the request's trace id and the proxy's span id, from
+    /// its own fields or the nearest span that has them (ADR-0069 §8).
+    #[test]
+    fn trace_and_span_ids_come_from_the_event_or_its_span() {
+        let (_records, mut tap, subscriber) = recording();
+        let trace = "0af7651916cd43dd8448eb211c80319c";
+        let span = "b7ad6b7169203331";
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("outside a request");
+            let request = tracing::info_span!("request", trace_id = trace, span_id = span);
+            let _r = request.enter();
+            let _s = LogSpan::service("blog", "web", 7).entered();
+            tracing::warn!("upstream reset");
+            tracing::warn!(
+                trace_id = "4bf92f3577b34da6a3ce929d0e0e4736",
+                "an event naming its own trace"
+            );
+            tracing::warn!(
+                trace_id = "00000000000000000000000000000000",
+                "an invalid one"
+            );
+        });
+        let records = drain(&mut tap);
+        let found: Vec<_> = records
+            .iter()
+            .map(|r| {
+                (
+                    r.message.as_str(),
+                    r.trace_id.map(|id| id.to_string()),
+                    r.span_id.map(|id| id.to_string()),
+                )
+            })
+            .collect();
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(
+            found,
+            [
+                ("outside a request", None, None),
+                ("upstream reset", some(trace), some(span)),
+                (
+                    "an event naming its own trace",
+                    some("4bf92f3577b34da6a3ce929d0e0e4736"),
+                    None
+                ),
+                ("an invalid one", some(trace), some(span)),
+            ]
+        );
+        assert_eq!(records[1].stack.as_deref(), Some("blog"));
     }
 
     #[test]

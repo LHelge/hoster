@@ -15,6 +15,7 @@ mod recorder;
 
 pub use cap::RateCap;
 pub use follower::LogFollowers;
+pub use line::OtlpSeverity;
 pub use line::ParsedLine;
 #[cfg(test)]
 pub use recorder::Tap;

@@ -16,6 +16,7 @@ mod logs;
 mod machine;
 mod notify;
 mod orchestrator;
+mod otlp;
 mod ports;
 mod proxy;
 mod registry;

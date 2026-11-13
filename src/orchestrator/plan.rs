@@ -18,7 +18,8 @@ pub type SecretVersions = BTreeMap<String, SecretVersion>;
 
 /// SHA-256 over a service's resolved spec, everything but the image digest: the second half of
 /// the idempotency key (ADR-0029). It covers the container environment including the injected
-/// `PORT` (ADR-0051), the *versions* of the secrets it references (never their values),
+/// `PORT` (ADR-0051) and the four hashed `OTEL_*` variables (ADR-0069 §5; adding them changed
+/// every service's hash once), the *versions* of the secrets it references (never their values),
 /// command, volumes, config files (ADR-0057), runtime options and limits (ADR-0059), update
 /// strategy, health and routes. It leaves out `depends_on`
 /// (ADR-0056 Decision 1): changing it reorders starts and never recreates a container.
@@ -26,8 +27,8 @@ pub type SecretVersions = BTreeMap<String, SecretVersion>;
 pub struct ConfigHash(String);
 
 impl ConfigHash {
-    /// The hash of `service` with the secret versions `secrets`.
-    pub fn new(service: &Service, secrets: &SecretVersions) -> Self {
+    /// The hash of the service called `name`, `service`, with the secret versions `secrets`.
+    pub fn new(name: &Name, service: &Service, secrets: &SecretVersions) -> Self {
         let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let opt_millis = |d: Option<Duration>| d.map(millis);
         let health = service.health.as_ref().map(|h| {
@@ -80,7 +81,7 @@ impl ConfigHash {
             "image": format!("{}/{}", service.image.registry(), service.image.repository()),
             "command": service.command,
             "entrypoint": service.entrypoint,
-            "env": service.container_env(),
+            "env": service.container_env(name),
             "secrets": secret_refs,
             "volumes": service.volumes,
             "health": health,
@@ -288,7 +289,7 @@ impl Plan {
                 service: name.to_string(),
                 message,
             })?;
-            let config = ConfigHash::new(service, secrets);
+            let config = ConfigHash::new(name, service, secrets);
             match current {
                 Some(p) if p.digest == digest.as_ref() && p.config_hash == config.as_ref() => {
                     plan.unchanged.push(p.clone());
@@ -536,7 +537,7 @@ update = "stop-first"
             service: service.into(),
             generation,
             digest: digest(d),
-            config_hash: ConfigHash::new(&stack.services[&name], &SecretVersions::new())
+            config_hash: ConfigHash::new(&name, &stack.services[&name], &SecretVersions::new())
                 .to_string(),
             ports: PortMap::new(),
         }
@@ -650,7 +651,8 @@ update = "stop-first"
     }
 
     fn hash(stack: &Stack, service: &str, secrets: &SecretVersions) -> ConfigHash {
-        ConfigHash::new(&stack.services[&service.parse::<Name>().unwrap()], secrets)
+        let name = service.parse::<Name>().unwrap();
+        ConfigHash::new(&name, &stack.services[&name], secrets)
     }
 
     #[test]
@@ -662,6 +664,89 @@ update = "stop-first"
         let c = stack(&STACK.replace("port = 8080", "port = 8081"));
         assert_ne!(hash(&a, "api", &none), hash(&c, "api", &none));
         assert_eq!(hash(&a, "api", &none).as_ref().len(), 64);
+    }
+
+    /// ADR-0069 §5: the injected `OTEL_*` variables are hashed, so every existing service's
+    /// hash changes once with the upgrade that adds them, and the first deployment after it
+    /// replaces the service. From then on two deployments of the same spec hash the same.
+    #[test]
+    fn config_hash_changes_once_for_the_injected_otel_variables() {
+        let none = SecretVersions::new();
+        let s = stack(STACK);
+        // The hashes of STACK's services before the variables were injected.
+        let before = [
+            (
+                "api",
+                "08cd366b6cfd1fac82df5fff38fc10f5265faa655f1cf9714e77b4e1728acacb",
+            ),
+            (
+                "storage",
+                "e77545e8b51f5194bee9dce401c2cafdaa064c2893d6c2985f29e8bd905c93af",
+            ),
+        ];
+        // And with them, as `config_hash_is_stable_for_existing_specs` pins them.
+        let after = [
+            (
+                "api",
+                "4bce81af92a232529921c7cb06c4d660a465d6be8910de2dec81b75e664327c9",
+            ),
+            (
+                "storage",
+                "75733cf2464ce45746038a29981be28119daeeca9163852cb21bd0141b7afe46",
+            ),
+        ];
+        for ((service, old), (_, new)) in before.into_iter().zip(after) {
+            let hash = hash(&s, service, &none);
+            assert_ne!(hash.as_ref(), old, "{service}");
+            assert_eq!(hash.as_ref(), new, "{service}");
+            assert_eq!(hash, self::hash(&stack(STACK), service, &none), "{service}");
+        }
+
+        // A service deployed before the upgrade is replaced by the first deployment after it…
+        let running_before: Vec<ServicePointer> = before
+            .iter()
+            .zip([1, 9])
+            .map(|((service, old), d)| ServicePointer {
+                config_hash: (*old).to_owned(),
+                ..pointer(&s, service, d, 1)
+            })
+            .collect();
+        let requested = DigestSet::from([("api".into(), digest(1))]);
+        let plan = Plan::new(&s, &pins(), &requested, &running_before, &none).unwrap();
+        assert_eq!(plan.changes.len(), 2);
+        // …and the next deployment of the same spec, now running the new hashes, changes
+        // nothing.
+        let changed: Vec<_> = plan.changes.iter().map(|c| c.config.to_string()).collect();
+        let running_after = [pointer(&s, "api", 1, 2), pointer(&s, "storage", 9, 2)];
+        assert_eq!(
+            changed,
+            running_after.each_ref().map(|p| p.config_hash.clone())
+        );
+        assert!(
+            Plan::new(&s, &pins(), &requested, &running_after, &none)
+                .unwrap()
+                .is_noop()
+        );
+    }
+
+    #[test]
+    fn config_hash_covers_the_injected_otel_variables_unless_the_stack_sets_them() {
+        let none = SecretVersions::new();
+        let injected = stack(STACK);
+        // The service's name is in its environment, so two services of the same spec differ.
+        let renamed = stack(&STACK.replace("[services.api", "[services.web"));
+        assert_ne!(hash(&injected, "api", &none), hash(&renamed, "web", &none));
+        // Setting a variable to the injected value is the same container environment.
+        let explicit = stack(&STACK.replace(
+            "image = \"ghcr.io/acme/notes-api\"",
+            "image = \"ghcr.io/acme/notes-api\"\nenv = { OTEL_METRICS_EXPORTER = \"none\" }",
+        ));
+        assert_eq!(hash(&injected, "api", &none), hash(&explicit, "api", &none));
+        let other = stack(&STACK.replace(
+            "image = \"ghcr.io/acme/notes-api\"",
+            "image = \"ghcr.io/acme/notes-api\"\nenv = { OTEL_METRICS_EXPORTER = \"otlp\" }",
+        ));
+        assert_ne!(hash(&injected, "api", &none), hash(&other, "api", &none));
     }
 
     #[test]
@@ -1108,11 +1193,13 @@ depends_on = ["app"]
         ];
         assert_eq!(
             hashes,
+            // Changed once by ADR-0069 §5, which hashes the injected `OTEL_*` variables (see
+            // `config_hash_changes_once_for_the_injected_otel_variables`).
             [
-                "08cd366b6cfd1fac82df5fff38fc10f5265faa655f1cf9714e77b4e1728acacb",
-                "e77545e8b51f5194bee9dce401c2cafdaa064c2893d6c2985f29e8bd905c93af",
-                "89bc79f29dd74ae38632e12d5a7de45f0c4a85e016fd4b5c0a456ae88ccb6cf4",
-                "cdd26fd4b5dc8e035961957016b2d79abe397481273f1bfb9d8b83e41375a1f8",
+                "4bce81af92a232529921c7cb06c4d660a465d6be8910de2dec81b75e664327c9",
+                "75733cf2464ce45746038a29981be28119daeeca9163852cb21bd0141b7afe46",
+                "6ac6b1a11cb936101aada64ff06e9ba6422e1b2ba4da9efd7dcd6e16a4b6a57b",
+                "b7b97c7a04647fd97d57bc8d32201da1119945cc89491c6793e807c5da694b17",
             ]
         );
     }

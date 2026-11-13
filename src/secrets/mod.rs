@@ -13,6 +13,9 @@
 //! deploy engine (at container create) and the registry credentials (for pulls and token
 //! requests) call [`SecretStore::reveal`]. [`SecretValue`] never prints its contents, so values
 //! cannot slip into logs through `Debug`.
+//!
+//! The store also hands out the [`TokenKey`] that makes and verifies each service's OTLP bearer
+//! token ([`ServiceToken`], ADR-0069 §4). It is derived from the same key, under its own label.
 
 use std::fmt;
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -30,6 +33,15 @@ use thiserror::Error;
 
 use crate::config::Credentials;
 use crate::store::{Event, NewEvent, SealedSecret, SecretEntry, Store, StoreError, Timestamp};
+
+mod token;
+
+#[allow(
+    unused_imports,
+    reason = "named by tests only; the OTLP receiver handles it through `verify`'s result"
+)]
+pub use token::TokenError;
+pub use token::{KnownServices, ServiceIdentity, ServiceToken, TokenKey};
 
 /// The systemd credential that supplies the key instead of the key file (ADR-0029).
 pub const KEY_CREDENTIAL: &str = "secret_key";
@@ -313,6 +325,7 @@ impl fmt::Debug for SecretKey {
 pub struct SecretStore {
     store: Store,
     cipher: Arc<XChaCha20Poly1305>,
+    tokens: TokenKey,
 }
 
 impl fmt::Debug for SecretStore {
@@ -347,7 +360,13 @@ impl SecretStore {
         Self {
             store,
             cipher: Arc::new(XChaCha20Poly1305::new(&key.0.into())),
+            tokens: TokenKey::from(key),
         }
+    }
+
+    /// The key of the services' OTLP tokens (ADR-0069 §4), derived from the store's key.
+    pub fn token_key(&self) -> &TokenKey {
+        &self.tokens
     }
 
     /// Sets (or replaces) the secret `name` without recording it. Returns its new version.

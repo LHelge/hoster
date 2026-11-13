@@ -1,6 +1,6 @@
 # ADR-0068: hoster's own log events at info and above are recorded in the log store
 
-- Status: Accepted (amends ADR-0067)
+- Status: Accepted (amends ADR-0067); records inside a request carry its trace id since ADR-0069
 - Date: 2026-11-12
 
 ## Context

@@ -1,6 +1,7 @@
 //! The log store (ADR-0067, amended by ADR-0068): `<state_dir>/logs.db`, a second SQLite file
 //! beside `hoster.db` holding what managed containers print, hoster's own events at info and
-//! above, and one row per proxied request.
+//! above, one row per proxied request, and the log records and spans containers export over
+//! OTLP (ADR-0069 §6).
 //!
 //! [`LogStore`] owns its own WAL-mode pool and its own reversible migrations
 //! (`migrations_logs/` at the crate root, ADR-0052), so log bursts never share a writer with deploy
@@ -38,12 +39,13 @@ use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 pub use health::{LogFileFacts, RowCounts};
 pub use query::{
     InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, LogTail, Page, PageAt,
-    RecordKey, RequestCounts, RequestEntry, RequestQuery, ServiceSeen, StatusFilter, Tail,
-    TextFilter,
+    RecordKey, RequestCounts, RequestEntry, RequestQuery, RootQuery, ServiceSeen, StatusFilter,
+    Tail, TextFilter,
 };
 pub use retention::{Removed, Retention, Sweep, SweepReport};
 pub use types::{
-    Level, LogBatch, LogCursor, LogHead, LogRecord, RequestId, RequestRow, Stream, UnknownLogText,
+    HexId, Level, LogBatch, LogCursor, LogHead, LogRecord, MicroTimestamp, RequestId, RequestRow,
+    Span, SpanId, SpanKind, SpanStatus, Stream, TraceId, UnknownLogText,
 };
 
 use super::{Migrations, Result, SchemaVersion, Store, StoreError};
@@ -73,7 +75,8 @@ impl LogStore {
     const WRITE_CONNECTIONS: u32 = 2;
     /// Concurrent logs pages.
     const READ_CONNECTIONS: u32 = 4;
-    /// Rows per multi-row `INSERT`: at 14 columns, far under SQLite's 32766 bound parameters.
+    /// Rows per multi-row `INSERT`: at 17 columns at most, far under SQLite's 32766 bound
+    /// parameters.
     const ROWS_PER_INSERT: usize = 500;
 
     /// Opens (creating if needed) `logs.db` under `state_dir` and migrates it to the current
@@ -249,7 +252,8 @@ impl LogStore {
         for chunk in batch.records.chunks(Self::ROWS_PER_INSERT) {
             let mut insert = QueryBuilder::<Sqlite>::new(
                 "INSERT INTO log_records \
-                 (time, stack, service, generation, stream, level, message, fields, cut, marker) ",
+                 (time, stack, service, generation, stream, level, message, fields, cut, marker, \
+                 trace_id, span_id, received) ",
             );
             insert.push_values(chunk, |mut row, record| {
                 row.push_bind(record.time.as_millis())
@@ -261,14 +265,18 @@ impl LogStore {
                     .push_bind(record.message.as_str())
                     .push_bind(record.fields.as_deref())
                     .push_bind(record.cut)
-                    .push_bind(record.marker);
+                    .push_bind(record.marker)
+                    .push_bind(record.trace_id.map(|id| id.to_string()))
+                    .push_bind(record.span_id.map(|id| id.to_string()))
+                    .push_bind(record.received);
             });
             insert.build().execute(&mut *tx).await?;
         }
         for chunk in batch.requests.chunks(Self::ROWS_PER_INSERT) {
             let mut insert = QueryBuilder::<Sqlite>::new(
                 "INSERT INTO requests (time, host, prefix, stack, service, method, path, status, \
-                 header_ms, total_ms, bytes, client, upstream_failed, request_id) ",
+                 header_ms, total_ms, bytes, client, upstream_failed, request_id, server_span_id, \
+                 client_span_id, upstream_start) ",
             );
             insert.push_values(chunk, |mut row, request| {
                 row.push_bind(request.time.as_millis())
@@ -284,7 +292,34 @@ impl LogStore {
                     .push_bind(i64::try_from(request.bytes).unwrap_or(i64::MAX))
                     .push_bind(request.client.to_string())
                     .push_bind(request.upstream_failed)
-                    .push_bind(request.request_id.to_string());
+                    .push_bind(request.request_id.to_string())
+                    .push_bind(request.server_span.map(|id| id.to_string()))
+                    .push_bind(request.client_span.map(|id| id.to_string()))
+                    .push_bind(request.upstream_start);
+            });
+            insert.build().execute(&mut *tx).await?;
+        }
+        for chunk in batch.spans.chunks(Self::ROWS_PER_INSERT) {
+            let mut insert = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO spans (trace_id, span_id, parent_span_id, stack, service, name, kind, \
+                 start, duration, status, status_message, attributes, resource, events, received) ",
+            );
+            insert.push_values(chunk, |mut row, span| {
+                row.push_bind(span.trace_id.to_string())
+                    .push_bind(span.span_id.to_string())
+                    .push_bind(span.parent.map(|id| id.to_string()))
+                    .push_bind(span.stack.as_str())
+                    .push_bind(span.service.as_str())
+                    .push_bind(span.name.as_str())
+                    .push_bind(span.kind.as_str())
+                    .push_bind(span.start)
+                    .push_bind(Self::micros(span.duration))
+                    .push_bind(span.status.as_str())
+                    .push_bind(span.status_message.as_deref())
+                    .push_bind(span.attributes.as_deref())
+                    .push_bind(span.resource.as_deref())
+                    .push_bind(span.events.as_deref())
+                    .push_bind(span.received);
             });
             insert.build().execute(&mut *tx).await?;
         }
@@ -365,6 +400,11 @@ impl LogStore {
     /// A duration as whole milliseconds, saturating.
     pub(super) fn millis(duration: Duration) -> i64 {
         i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+    }
+
+    /// A duration as whole microseconds, saturating.
+    pub(super) fn micros(duration: Duration) -> i64 {
+        i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
     }
 
     /// The pool, for tests elsewhere in the crate that check what was written before the query

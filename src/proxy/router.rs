@@ -18,6 +18,10 @@
 //! [`LogSink::try_request`], which never waits: when the recorder's channel is full the row is
 //! dropped and counted. Each request gets a [`RequestId`] when it arrives, kept in its
 //! [`RequestCtx`].
+//!
+//! A request routed to a stack also gets an [`EdgeTrace`] (ADR-0069 §8): its trace id is the
+//! request id, its `traceparent` replaces the client's on the way upstream, and its span ids go
+//! into the request row. Requests to hoster's own reserved hosts have none.
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -35,6 +39,7 @@ use pingora::{Error, ErrorSource, ErrorType, OkOrErr, OrErr, Result};
 
 use super::DownstreamLimits;
 use super::resolver::Sni;
+use super::trace::EdgeTrace;
 use crate::config::Timeouts;
 use crate::logging::{ACCESS_TARGET, UNROUTED_TARGET};
 use crate::logs::LogSink;
@@ -62,6 +67,28 @@ pub struct RoutingProxy {
 }
 
 impl RoutingProxy {
+    /// The upstream of `route`, with `defaults` for the timeouts the route does not set: its
+    /// loopback port, or hoster's own app (or the OTLP receiver) on a Unix socket.
+    pub(super) fn peer(route: &RouteEntry, defaults: Timeouts) -> Result<Box<HttpPeer>> {
+        let mut peer = match &route.target {
+            Target::Loopback(upstream) => HttpPeer::new(upstream.addr, false, String::new()),
+            Target::Unix(upstream) => {
+                let path: &Path = upstream.as_ref().as_ref();
+                let path = path
+                    .to_str()
+                    .or_err(ErrorType::SocketError, "non-UTF-8 socket path")?;
+                HttpPeer::new_uds(path, false, String::new())?
+            }
+            Target::Unavailable { .. } => {
+                return Error::e_explain(ErrorType::InternalError, "unavailable route has no peer");
+            }
+        };
+        defaults
+            .overridden_by(&route.timeouts)
+            .apply(&mut peer.options);
+        Ok(Box::new(peer))
+    }
+
     /// A proxy reading `routes`, which the orchestrator replaces as deploys happen, holding
     /// clients to `limits`, counting requests in `traffic` and offering their rows to `logs`.
     pub fn new(
@@ -90,6 +117,8 @@ pub struct RequestCtx {
     arrived: Timestamp,
     /// The request's id in the log store, made when it arrived.
     request_id: RequestId,
+    /// The request's trace, for a request routed to a stack.
+    trace: Option<EdgeTrace>,
     /// How long after `started` the upstream's response header was ready for the client: the
     /// request's latency in the statistics. `None` until then, and for a request hoster
     /// answers itself.
@@ -110,6 +139,7 @@ impl Default for RequestCtx {
             started: Instant::now(),
             arrived: Timestamp::now(),
             request_id: RequestId::random(),
+            trace: None,
             header_after: None,
             host: String::new(),
             route: None,
@@ -145,6 +175,13 @@ impl ProxyHttp for RoutingProxy {
             return Ok(true);
         }
         ctx.route = table.lookup(&ctx.host, req.uri.path()).cloned();
+        if ctx
+            .route
+            .as_ref()
+            .is_some_and(|route| matches!(route.owner, Owner::Route(_)))
+        {
+            ctx.trace = Some(EdgeTrace::start(ctx.request_id));
+        }
         let timeouts = match &ctx.route {
             Some(route) => self.defaults.overridden_by(&route.timeouts),
             None => self.defaults,
@@ -172,24 +209,7 @@ impl ProxyHttp for RoutingProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let route = ctx.route()?;
-        let mut peer = match &route.target {
-            Target::Loopback(upstream) => HttpPeer::new(upstream.addr, false, String::new()),
-            Target::Unix(upstream) => {
-                let path: &Path = upstream.as_ref().as_ref();
-                let path = path
-                    .to_str()
-                    .or_err(ErrorType::SocketError, "non-UTF-8 admin socket path")?;
-                HttpPeer::new_uds(path, false, String::new())?
-            }
-            Target::Unavailable { .. } => {
-                return Error::e_explain(ErrorType::InternalError, "unavailable route has no peer");
-            }
-        };
-        self.defaults
-            .overridden_by(&route.timeouts)
-            .apply(&mut peer.options);
-        Ok(Box::new(peer))
+        Self::peer(ctx.route()?, self.defaults)
     }
 
     async fn upstream_request_filter(
@@ -198,12 +218,11 @@ impl ProxyHttp for RoutingProxy {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        let forwarding = Forwarding {
-            host: &ctx.host,
-            client: Forwarding::client_ip(session),
-            https: session.digest().is_some_and(|d| d.ssl_digest.is_some()),
-        };
-        forwarding.apply(ctx.route()?, upstream_request)
+        Forwarding::new(session, &ctx.host).apply(ctx.route()?, upstream_request)?;
+        match &mut ctx.trace {
+            Some(trace) => trace.send_upstream(upstream_request),
+            None => Ok(()),
+        }
     }
 
     /// Notes when the response header arrived. What follows it (a body, an event stream, an
@@ -279,7 +298,8 @@ impl ProxyHttp for RoutingProxy {
     /// All three come from one [`AccessRecord`], so they agree on the timings.
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
         let record = AccessRecord::new(session, &ctx.host, ctx.route.as_ref(), ctx.started, e)
-            .header_after(ctx.header_after);
+            .header_after(ctx.header_after)
+            .trace(ctx.trace);
         record.emit();
         if let Some(row) = record.request_row(ctx.arrived, ctx.request_id) {
             // Dropped and counted when the recorder's channel is full; never waits.
@@ -317,6 +337,8 @@ pub(super) struct AccessRecord<'a> {
     error: Option<&'a Error>,
     /// hoster answered the request on purpose without a route.
     answered: bool,
+    /// The request's trace, if it was routed to a stack.
+    trace: Option<EdgeTrace>,
 }
 
 impl<'a> AccessRecord<'a> {
@@ -342,6 +364,7 @@ impl<'a> AccessRecord<'a> {
             client: Forwarding::client_ip(session),
             error,
             answered: false,
+            trace: None,
         }
     }
 
@@ -351,6 +374,11 @@ impl<'a> AccessRecord<'a> {
             header_after,
             ..self
         }
+    }
+
+    /// The record of a request with `trace`, if it has one.
+    pub(super) fn trace(self, trace: Option<EdgeTrace>) -> Self {
+        Self { trace, ..self }
     }
 
     /// The record of a request hoster answered although it matched no route (an ACME
@@ -387,6 +415,10 @@ impl<'a> AccessRecord<'a> {
         };
         let client = self.client.map(tracing::field::display);
         let error = self.error.map(tracing::field::display);
+        // The names hoster's own records take a request's trace from (ADR-0069 §8).
+        let ids = self.trace.as_ref().and_then(EdgeTrace::server);
+        let trace_id = ids.map(|(trace_id, _)| tracing::field::display(trace_id));
+        let span_id = ids.map(|(_, span_id)| tracing::field::display(span_id));
         // The target of an event is fixed where it is written.
         macro_rules! line {
             ($target:expr) => {
@@ -405,6 +437,8 @@ impl<'a> AccessRecord<'a> {
                     bytes = self.bytes,
                     client,
                     error,
+                    trace_id,
+                    span_id,
                     "request"
                 )
             };
@@ -430,7 +464,7 @@ impl<'a> AccessRecord<'a> {
     ///
     /// The host is the table's spelling (lowercase, no port), so the rows of one route share
     /// it. A request whose response header never went out (the client left first) has status
-    /// 0, as Pingora reports it.
+    /// 0, as Pingora reports it. The span ids and the upstream start are the [`EdgeTrace`]'s.
     pub(super) fn request_row(
         &self,
         arrived: Timestamp,
@@ -440,7 +474,7 @@ impl<'a> AccessRecord<'a> {
         let Owner::Route(owner) = &route.owner else {
             return None;
         };
-        Some(RequestRow {
+        let mut row = RequestRow {
             time: arrived,
             host: RouteTable::normalize_host(self.host).into_owned(),
             prefix: route.prefix_str.clone(),
@@ -458,7 +492,14 @@ impl<'a> AccessRecord<'a> {
                 .unwrap_or(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)),
             upstream_failed: self.upstream_failed(),
             request_id,
-        })
+            server_span: None,
+            client_span: None,
+            upstream_start: None,
+        };
+        if let Some(trace) = &self.trace {
+            trace.record_in(&mut row);
+        }
+        Some(row)
     }
 }
 
@@ -496,9 +537,18 @@ pub(super) struct Forwarding<'a> {
     https: bool,
 }
 
-impl Forwarding<'_> {
+impl<'a> Forwarding<'a> {
+    /// The forwarding of a request `session` serves, sent for `host`.
+    pub(super) fn new(session: &Session, host: &'a str) -> Self {
+        Self {
+            host,
+            client: Self::client_ip(session),
+            https: session.digest().is_some_and(|d| d.ssl_digest.is_some()),
+        }
+    }
+
     /// The client's IP address, when it connected over TCP.
-    fn client_ip(session: &Session) -> Option<IpAddr> {
+    pub(super) fn client_ip(session: &Session) -> Option<IpAddr> {
         session
             .client_addr()
             .and_then(|addr| addr.as_inet())
@@ -555,7 +605,7 @@ impl Forwarding<'_> {
     /// HTTP/1 absolute-form target verbatim unless it is replaced, and the upstream is an
     /// origin server, not a proxy. A target that is not valid UTF-8 is forwarded untouched,
     /// or refused with 400 if its prefix would have to be stripped.
-    fn apply(&self, route: &RouteEntry, req: &mut RequestHeader) -> Result<()> {
+    pub(super) fn apply(&self, route: &RouteEntry, req: &mut RequestHeader) -> Result<()> {
         let target = req.uri.path_and_query().map_or("/", |pq| pq.as_str());
         let upstream = route.upstream_path(target);
         let stripped = upstream != target;
@@ -657,7 +707,7 @@ impl ErrorPage {
 
     /// The page for a request that failed while proxying, or `None` when the client is gone.
     /// Upstream timeouts are 504, every other upstream failure (refused, reset) 502.
-    fn for_error(e: &Error) -> Option<Self> {
+    pub(super) fn for_error(e: &Error) -> Option<Self> {
         use ErrorType::*;
         let status = match (e.etype(), e.esource()) {
             (HTTPStatus(code), _) => StatusCode::from_u16(*code).ok()?,
@@ -670,6 +720,11 @@ impl ErrorPage {
             (_, ErrorSource::Internal | ErrorSource::Unset) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Some(status.into())
+    }
+
+    /// The page's status.
+    pub(super) fn status(&self) -> StatusCode {
+        self.status
     }
 
     pub(super) fn body(&self) -> Bytes {
@@ -983,6 +1038,7 @@ mod tests {
             ..route("/api", false)
         };
         let error = Error::new(ErrorType::ReadTimedout).into_up();
+        let trace = EdgeTrace::start(RequestId::from([0xab; 16]));
         let (buffer, subscriber) = subscriber(LogFormat::Json, capture::GLOBAL_FILTER);
         tracing::subscriber::with_default(subscriber, || {
             AccessRecord {
@@ -997,6 +1053,7 @@ mod tests {
                 client: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
                 error: Some(&error),
                 answered: false,
+                trace: Some(trace),
             }
             .emit();
             let bare = AccessRecord {
@@ -1011,6 +1068,7 @@ mod tests {
                 client: None,
                 error: None,
                 answered: false,
+                trace: None,
             };
             // Every line is a `debug` one; without a route it goes to the unrouted target, which
             // the filter leaves at `info`.
@@ -1037,6 +1095,9 @@ mod tests {
             line["error"].as_str().unwrap().contains("ReadTimedout"),
             "{line}"
         );
+        let (trace_id, span_id) = trace.server().unwrap();
+        assert_eq!(line["trace_id"], trace_id.to_string());
+        assert_eq!(line["span_id"], span_id.to_string());
 
         let bare = lines[1].as_object().unwrap();
         for absent in [
@@ -1048,6 +1109,8 @@ mod tests {
             "status",
             "client",
             "error",
+            "trace_id",
+            "span_id",
         ] {
             assert!(!bare.contains_key(absent), "{absent}: {bare:?}");
         }
@@ -1069,6 +1132,7 @@ mod tests {
             client: None,
             error: None,
             answered: false,
+            trace: None,
         };
         // Without an upstream response header (hoster's own answer) the whole request counts.
         assert_eq!(
@@ -1108,6 +1172,7 @@ mod tests {
             client: Some(IpAddr::V6("2001:db8::1".parse().unwrap())),
             error: None,
             answered: false,
+            trace: None,
         };
         let id = RequestId::from([0xab; 16]);
         let at = Timestamp::from_millis(1_700_000_000_000);
@@ -1130,10 +1195,25 @@ mod tests {
                 client: IpAddr::V6("2001:db8::1".parse().unwrap()),
                 upstream_failed: false,
                 request_id: id,
+                server_span: None,
+                client_span: None,
+                upstream_start: None,
             }
         );
         assert_eq!(record(Some(&reserved)).request_row(at, id), None);
         assert_eq!(record(None).request_row(at, id), None);
+
+        // A traced request's row has its server span; it never went upstream, so no more.
+        let trace = EdgeTrace::start(id);
+        let (trace_id, server_span) = trace.server().unwrap();
+        assert_eq!(trace_id, id, "the trace id is the request id");
+        let row = record(Some(&stacked))
+            .trace(Some(trace))
+            .request_row(at, id)
+            .unwrap();
+        assert_eq!(row.server_span, Some(server_span));
+        assert_eq!(row.client_span, None);
+        assert_eq!(row.upstream_start, None);
     }
 
     #[test]

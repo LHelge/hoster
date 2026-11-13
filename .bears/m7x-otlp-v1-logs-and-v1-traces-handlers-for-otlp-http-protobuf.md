@@ -1,10 +1,10 @@
 ---
 id: m7x
 title: "OTLP: /v1/logs and /v1/traces handlers for OTLP/HTTP protobuf"
-status: open
+status: done
 priority: P2
 created: "2026-11-12T19:36:20.222913703Z"
-updated: "2026-11-12T19:36:20.222913703Z"
+updated: "2026-11-13T17:49:33.061384459Z"
 tags:
   - observability
   - web
@@ -12,18 +12,19 @@ depends_on:
   - aqy
   - j6z
 parent: xv9
+attempts: 1
 ---
 
 ## Summary
-The receiver itself: Axum handlers for `POST /v1/logs` and `POST /v1/traces` that decode OTLP/HTTP protobuf (OQ-42 answer 4: no gRPC, no JSON encoding), authenticate by token, map the payload to log records and spans, and hand them to the recorder. A receiver with storage, not a Collector: no pipelines, no export, no metrics (answer 5). This task builds the router; which listener serves it is the next task.
+The receiver itself: Axum handlers for `POST /v1/logs` and `POST /v1/traces` that decode OTLP/HTTP protobuf (OQ-42 answer 4: no gRPC, no JSON encoding), authenticate by token, map the payload to log records and spans, and hand them to the recorder. A receiver with storage, not a Collector: no pipelines, no export, no metrics (answer 5). This task builds the router; which listener serves it is task `5up`. Checked against ADR-0069 on 2026-11-13.
 
 ## Acceptance Criteria
 - [ ] Requests with `Content-Type: application/x-protobuf` decode with the `opentelemetry-proto` types (prost); `Content-Encoding: gzip` is accepted (SDKs default to it); other content types get 415
-- [ ] `Authorization: Bearer <token>` resolves to stack and service; missing or unknown is 401 with no body detail
+- [ ] `Authorization: Bearer <token>` is verified by the token type of `j6z` (MAC recomputed, constant-time compare, stack and service must exist) and gives stack and service; missing, malformed or unknown is 401 with no body detail
 - [ ] Stack and service come from the token; `service.name` and other resource attributes from the payload are kept as resource attributes for display, but never decide where data is stored
 - [ ] A body size limit (a constant, before and after decompression) gives 413; a malformed body gives 400
 - [ ] Success answers per the OTLP spec with an `Export*ServiceResponse`; records dropped by a full channel or a rate cap are reported as `partial_success` with the rejected count, not as an error that makes SDKs retry forever
-- [ ] `/v1/metrics` answers 404 (or the spec's "unimplemented") so SDKs with metrics on fail cleanly
+- [ ] `/v1/metrics` answers 404 (ADR-0069 §2)
 - [ ] The handlers never await the store: they decode, map and `try_*` the recorder
 
 ## Implementation Notes
@@ -37,5 +38,5 @@ The receiver itself: Axum handlers for `POST /v1/logs` and `POST /v1/traces` tha
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, tests pass
 
 ## References
-- OQ-42 (questions 1, 4, 5), the ADR from `yjp`, ADR-0045
+- ADR-0069 (§1, §2, §4, §6), ADR-0045
 - `src/web/mod.rs` (router patterns), `src/web/webhook.rs` (an unauthenticated-by-session endpoint)

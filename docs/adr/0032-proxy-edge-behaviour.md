@@ -1,6 +1,6 @@
 # ADR-0032: Proxy edge behaviour for unknown hosts, Host/SNI mismatch and errors
 
-- Status: Accepted (resolves OQ-19); connections beyond the caps are refused at accept since ADR-0065
+- Status: Accepted (resolves OQ-19); connections beyond the caps are refused at accept since ADR-0065; `host.containers.internal` on `:80` is the OTLP receiver for local peers since ADR-0069
 - Date: 2026-11-07
 
 ## Decision

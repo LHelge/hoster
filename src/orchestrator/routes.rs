@@ -26,6 +26,7 @@ use crate::routing::{
     DesiredStack, DesiredState, Reserved, RouteClaims, RouteTable, ServiceState, Upstream,
 };
 use crate::runtime::ContainerRuntime;
+use crate::secrets::KnownServices;
 use crate::stack::{Name, Stack};
 use crate::store::{PortMap, ServicePointer, StackRevision};
 
@@ -67,6 +68,14 @@ impl Routes {
     /// published routes come from.
     pub(super) fn definitions(&self) -> impl Iterator<Item = &Stack> {
         self.committed.stacks().map(|d| d.stack().as_ref())
+    }
+
+    /// Whether `stack` is committed and its definition has `service`. A stack only applied,
+    /// never deployed, has none yet; a removed stack has none any more.
+    pub(super) fn has_service(&self, stack: &Name, service: &Name) -> bool {
+        self.committed
+            .get(stack)
+            .is_some_and(|desired| desired.stack().services.contains_key(service))
     }
 
     /// Replaces the whole desired state (startup) and publishes it. Returns the version now
@@ -338,5 +347,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             stack = stack.with_live(service, upstreams);
         }
         stack
+    }
+}
+
+/// The OTLP receiver's existence check of a token's stack and service (ADR-0069 §4): the
+/// committed desired state, read under the orchestrator's lock, never the store.
+impl<R: ContainerRuntime> KnownServices for Orchestrator<R> {
+    fn contains(&self, stack: &Name, service: &Name) -> bool {
+        self.lock().routes.has_service(stack, service)
     }
 }

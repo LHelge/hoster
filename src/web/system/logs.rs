@@ -4,8 +4,9 @@
 //!
 //! [`LogFacts`] reads the figures when the page renders. [`LocalLogs`] reads them from the
 //! store, the recorder's [`LogSink`] (channel full, failed commits, the last retention pass),
-//! the follower registry (lines the per-container rate cap dropped) and [`HosterRecords`]
-//! (hoster's own events the cap dropped). The counters live in memory and start at zero with
+//! the follower registry (lines the per-container rate cap dropped), [`HosterRecords`]
+//! (hoster's own events the cap dropped) and [`OtlpLimits`] (log records and spans the OTLP
+//! receiver's per-service rate caps dropped, ADR-0069 §7). The counters live in memory and start at zero with
 //! hoster; nothing here is persisted. When `logs.db` could not be opened at start, the card
 //! says so with the error and the rest of the page is unaffected.
 
@@ -18,7 +19,9 @@ use super::host::Fact;
 use crate::logging::HosterRecords;
 use crate::logs::{Drops, LogFollowers, LogSink};
 use crate::machine::Memory;
+use crate::otlp::{Capped, OtlpLimits};
 use crate::runtime::{ContainerId, ContainerRuntime};
+use crate::secrets::ServiceIdentity;
 use crate::store::{LogStore, Retention, RowCounts, SweepReport, Timestamp};
 use crate::web::containers::ContainerSource;
 use crate::web::ui::{Count, Load, Meter, Percent, Uptime};
@@ -67,6 +70,8 @@ pub struct LogFigures {
     pub capped: Vec<(String, u64)>,
     /// hoster's own events the rate cap dropped.
     pub hoster_capped: u64,
+    /// What the OTLP receiver's per-service rate caps dropped, by `stack/service`, most first.
+    pub otlp_capped: Vec<(String, Capped)>,
     /// Why a figure is missing.
     pub problem: Option<String>,
 }
@@ -87,12 +92,14 @@ impl LogFigures {
             last_hour: Some(RowCounts {
                 records: 18_204,
                 requests: 3_311,
+                spans: 0,
             }),
             sweep: Some(SweepReport {
                 started: Timestamp::from(now - Duration::from_secs(1_800)),
                 expired: Removed {
                     records: 2_410,
                     requests: 512,
+                    spans: 0,
                 },
                 capped: Removed::default(),
                 file_bytes: 912 * 1024 * 1024,
@@ -109,6 +116,13 @@ impl LogFigures {
                 ("wiki-app-1".into(), 5),
             ],
             hoster_capped: 0,
+            otlp_capped: vec![(
+                "shop/web".into(),
+                Capped {
+                    records: 0,
+                    spans: 4_200,
+                },
+            )],
             problem: None,
         }
     }
@@ -205,7 +219,9 @@ impl LogFigures {
         let mut rows = Vec::new();
         let full = Self::parts(&[
             (self.drops.records, "container lines"),
+            (self.drops.otlp_records, "OTLP records"),
             (self.drops.requests, "request rows"),
+            (self.drops.spans, "spans"),
         ]);
         if let Some(full) = full {
             rows.push(Fact {
@@ -241,6 +257,28 @@ impl LogFigures {
                 name: "line-rate cap",
                 value: Some(shown.join(" · ")),
                 note: Some("lines over the per-container rate".into()),
+            });
+        }
+        if !self.otlp_capped.is_empty() {
+            let mut shown: Vec<String> = self
+                .otlp_capped
+                .iter()
+                .take(Self::TOP_CAPPED)
+                .map(|(name, capped)| {
+                    let parts =
+                        Self::parts(&[(capped.records, "records"), (capped.spans, "spans")]);
+                    format!("{name} {}", parts.unwrap_or_default())
+                })
+                .collect();
+            let rest = &self.otlp_capped[self.otlp_capped.len().min(Self::TOP_CAPPED)..];
+            if !rest.is_empty() {
+                let items: u64 = rest.iter().map(|(_, capped)| capped.total()).sum();
+                shown.push(format!("+{} more ({})", rest.len(), Count(items)));
+            }
+            rows.push(Fact {
+                name: "OTLP rate cap",
+                value: Some(shown.join(" · ")),
+                note: Some("records and spans over the per-service rate".into()),
             });
         }
         let hoster = Self::parts(&[
@@ -329,11 +367,25 @@ impl<R: ContainerRuntime> FollowerCounts for LogFollowers<R> {
     }
 }
 
+/// What the OTLP receiver's per-service rate caps dropped.
+pub trait OtlpCounts: Send + Sync + 'static {
+    /// Dropped since hoster started, per service that lost any; a removed service's counts go
+    /// once it has been idle a while.
+    fn capped(&self) -> Vec<(ServiceIdentity, Capped)>;
+}
+
+impl OtlpCounts for OtlpLimits {
+    fn capped(&self) -> Vec<(ServiceIdentity, Capped)> {
+        OtlpLimits::capped(self)
+    }
+}
+
 /// The log store of this hoster and the counters of its pipeline.
 pub struct LocalLogs {
     state: LogStoreState,
     sink: LogSink,
     followers: Arc<dyn FollowerCounts>,
+    otlp: Arc<dyn OtlpCounts>,
     /// Names the rate-capped containers.
     containers: Arc<dyn ContainerSource>,
 }
@@ -344,20 +396,34 @@ impl LocalLogs {
     /// The period the "last hour" figures count.
     const HOUR: Duration = Duration::from_secs(3_600);
 
-    /// The figures of `state`, with the recorder's counters behind `sink`, the rate cap's of
-    /// `followers`, and container names from `containers`.
+    /// The figures of `state`, with the recorder's counters behind `sink`, the rate caps' of
+    /// `followers` and `otlp`, and container names from `containers`.
     pub fn new(
         state: LogStoreState,
         sink: LogSink,
         followers: Arc<dyn FollowerCounts>,
+        otlp: Arc<dyn OtlpCounts>,
         containers: Arc<dyn ContainerSource>,
     ) -> Self {
         Self {
             state,
             sink,
             followers,
+            otlp,
             containers,
         }
+    }
+
+    /// The OTLP-capped services as `stack/service`, most dropped first.
+    fn otlp_capped(&self) -> Vec<(String, Capped)> {
+        let mut capped: Vec<(String, Capped)> = self
+            .otlp
+            .capped()
+            .into_iter()
+            .map(|(identity, capped)| (format!("{}/{}", identity.stack, identity.service), capped))
+            .collect();
+        capped.sort_by(|a, b| b.1.total().cmp(&a.1.total()).then_with(|| a.0.cmp(&b.0)));
+        capped
     }
 
     /// The capped containers by name (their short id when the runtime does not know them),
@@ -420,6 +486,7 @@ impl LogFacts for LocalLogs {
             drops: self.sink.drops(),
             capped: self.named(self.followers.capped()).await,
             hoster_capped: HosterRecords::global().capped(),
+            otlp_capped: self.otlp_capped(),
             problem,
         }))
     }

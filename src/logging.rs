@@ -44,9 +44,12 @@
 //!
 //! A record's stack and generation are the event's `stack` and `generation` fields, or those of
 //! the nearest enclosing span that has them ([`LogSpan`]); a span's generation is taken only for
-//! its own stack. Its level, message and fields are what the log store's line parser makes of
-//! the object the JSON formatter writes for the event, less its `timestamp` (the record's time):
-//! the other fields, `target` and `spans`.
+//! its own stack. Its trace and span ids are the `trace_id` and `span_id` fields of the event or
+//! of the nearest enclosing span with a valid `trace_id` (ADR-0069 §8): code that logs inside a
+//! request passes the request's trace id and the proxy's server span id under those names, as
+//! the proxy's access line does. Its level, message and fields are what the log store's line
+//! parser makes of the object the JSON formatter writes for the event, less its `timestamp`
+//! (the record's time): the other fields, `target` and `spans`.
 //!
 //! The layer only offers records to the recorder's channel ([`LogSink::try_record`]): logging is
 //! up before the log store, so the supervisor [`connect`](HosterRecords::connect)s the sink once
