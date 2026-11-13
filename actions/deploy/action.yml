@@ -1,0 +1,70 @@
+name: Deploy to hoster
+description: >-
+  Deploy image digests to a hoster stack through its deploy webhook, authenticated with the job's
+  GitHub Actions OIDC token. No secret is needed.
+author: LHelge
+
+# Use it from a release tag of hoster, the one the server runs:
+#
+#   - uses: LHelge/hoster/actions/deploy@v0.8.0
+#     with:
+#       url: https://hoster.example.com
+#       stack: notes
+#       images: |
+#         api=${{ steps.push.outputs.digest }}
+#
+# The job needs `permissions: id-token: write`, and the stack file a `[deploy]` rule that allows
+# the repository, ref and environment. See https://docs.hoster.lhelge.se/wiki/deploying-from-ci/.
+
+inputs:
+  url:
+    description: >-
+      hoster's admin URL, e.g. `https://hoster.example.com`. A trailing `/hooks/deploy` is
+      accepted too.
+    required: true
+  audience:
+    description: >-
+      The `aud` of the OIDC token. Defaults to `url`, which is hoster's own default; set it only
+      when `[webhook] audience` is set in hoster.toml.
+    required: false
+    default: ""
+  stack:
+    description: The stack's `name`.
+    required: true
+  images:
+    description: >-
+      One `service=digest` per line, e.g. `api=sha256:…`. Every service listed deploys together,
+      as one deployment.
+    required: true
+  tag:
+    description: >-
+      Shown in the deploy history. Defaults to the tag name on a tag push, otherwise the short
+      commit SHA.
+    required: false
+    default: ""
+
+outputs:
+  result:
+    description: "`accepted` (a deployment started or was queued) or `noop` (already running these digests)."
+    value: ${{ steps.deploy.outputs.result }}
+  deployment-id:
+    description: The deployment's id.
+    value: ${{ steps.deploy.outputs.deployment-id }}
+  deployment-url:
+    description: The deployment's page in hoster's admin UI.
+    value: ${{ steps.deploy.outputs.deployment-url }}
+
+runs:
+  using: composite
+  steps:
+    - id: deploy
+      shell: bash
+      # Inputs reach the script only as environment variables, never spliced into its source.
+      # Not named HOSTER_*: hoster reads those as config overrides, and may run in the same job.
+      env:
+        DEPLOY_URL: ${{ inputs.url }}
+        DEPLOY_AUDIENCE: ${{ inputs.audience }}
+        DEPLOY_STACK: ${{ inputs.stack }}
+        DEPLOY_IMAGES: ${{ inputs.images }}
+        DEPLOY_TAG: ${{ inputs.tag }}
+      run: bash "$GITHUB_ACTION_PATH/deploy.sh"
