@@ -130,6 +130,7 @@ impl DeployLog {
             level,
             step: Some(step),
             message: text.to_owned(),
+            request: None,
         }
     }
 }
@@ -164,6 +165,7 @@ impl SourceTail for DeployTail {
         Ok(SourceRead {
             more: page.scan_stopped.or(last.filter(|_| page.newer)),
             entries: page.entries,
+            through: None,
         })
     }
 }

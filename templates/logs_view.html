@@ -28,6 +28,14 @@
       {%- endfor %}
     </nav>
     {%- endif %}
+    {%- if !view.statuses.is_empty() %}
+    <nav class="log-choices log-statuses" aria-label="Statuses">
+      <span class="log-label">status</span>
+      {%- for chip in view.statuses %}
+      <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
+      {%- endfor %}
+    </nav>
+    {%- endif %}
     {%- if !view.fields.is_empty() %}
     <nav class="log-choices log-field-filters" aria-label="Field filters">
       <span class="log-label">fields</span>
@@ -49,7 +57,7 @@
       {%- for (format, href) in download.links %}
       <a class="log-chip" href="{{ href }}" download>{{ format.label() }}</a>
       {%- endfor %}
-      <span class="log-label" id="log-download-hint">every record these filters select in the range, oldest first, at most {{ download.cap() }}</span>
+      <span class="log-label" id="log-download-hint">every {% if view.requests.is_some() %}request{% else %}record{% endif %} these filters select in the range, oldest first, at most {{ download.cap() }}</span>
     </nav>
     {%- endif %}
     <form class="log-options" method="get" action="{{ view.action }}">
@@ -73,6 +81,10 @@
         <span class="field-error" id="log-grep-error">{{ error }}</span>
         {%- endif %}
       </span>
+      {%- if let Some(slower) = view.slower %}
+      <label class="log-slower"><span class="log-label">slower than</span>
+        <input type="text" name="slower" value="{{ slower }}" placeholder="500ms" aria-label="Slower than: a total duration such as 500ms"></label>
+      {%- endif %}
       <span class="log-since" role="group" aria-label="Since">
         <span class="log-label">since</span>
         {%- for preset in view.presets %}
@@ -136,7 +148,11 @@
     {%- endif %}{% endif %}
     {%- endif %}
     {%- endif %}
+    {%- if let Some(foot) = view.requests %}
+    <p class="log-foot"><span><span class="log-total">{{ view.count() }}</span> requests shown · {{ foot.rows }} in the range{% if view.chips.len() > 1 && !view.chips[0].current %} of this service{% endif %}: <span class="req-4xx">{{ foot.client_errors }} 4xx</span> · <span class="req-5xx">{{ foot.server_errors }} 5xx</span></span></p>
+    {%- else %}
     <p class="log-foot"><span><span class="log-total">{{ view.count() }}</span> lines shown · {{ view.errors() }} errors · {{ view.warnings() }} warnings</span>
       <span class="log-key"><span class="log-key-swatch" aria-hidden="true"></span>stderr</span></p>
+    {%- endif %}
   </div>
 </section>

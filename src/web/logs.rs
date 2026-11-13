@@ -54,6 +54,10 @@
 //! A mount with a download ([`LogMount::download`], the stack tab) offers the records its
 //! options select over the whole range as a file, in each [`LogFormat`]: [`LogDownload`]
 //! (`logs/download.rs`) plans the same store query and reads it page by page.
+//!
+//! The stack scope's `access` source (`logs/access.rs`, [`LogsView::access`]) lists the
+//! proxy's request rows from the same store, as a source other than the records does, with
+//! columns, status chips and a footer of its own, and follows them by row id ([`AccessTail`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
@@ -75,8 +79,10 @@ use tokio_util::sync::CancellationToken;
 use super::containers::{LogEntry as LiveLine, LogSince, SinceLink};
 use super::system::LogStoreState;
 use super::ui::Count;
+mod access;
 mod download;
 
+pub use access::{AccessTail, RequestCells, RequestFoot};
 pub use download::{Download, FormatParam, LogDownload, Refused};
 
 use crate::store::{
@@ -150,19 +156,23 @@ pub enum LogSource {
     /// The log store's records of the containers, and hoster's own.
     #[default]
     Containers,
+    /// The proxy's request rows of the stack's routes in the log store (`logs/access.rs`).
+    Access,
     /// The stack's deployment events, read from `hoster.db` rather than the log store, so not
     /// bound by its retention (`web/stacks/logs/deploy.rs`).
     Deploy,
 }
 
 impl LogSource {
-    /// The switch, in order. The access log (task bq6) slots in between.
-    pub const SWITCH: [LogSource; 2] = [LogSource::Containers, LogSource::Deploy];
+    /// The switch, in order.
+    pub const SWITCH: [LogSource; 3] =
+        [LogSource::Containers, LogSource::Access, LogSource::Deploy];
 
     /// The `source` parameter, and what its switch says.
     pub fn as_str(self) -> &'static str {
         match self {
             LogSource::Containers => "containers",
+            LogSource::Access => "access",
             LogSource::Deploy => "deploy",
         }
     }
@@ -170,8 +180,11 @@ impl LogSource {
     /// Whether it takes the GET parameter `name`.
     fn takes(self, name: &str) -> bool {
         match self {
-            LogSource::Containers => true,
-            LogSource::Deploy => !matches!(name, "service" | "level" | "field"),
+            LogSource::Containers => !matches!(name, "status" | "slower"),
+            LogSource::Access => !matches!(name, "level" | "field"),
+            LogSource::Deploy => {
+                !matches!(name, "service" | "level" | "field" | "status" | "slower")
+            }
         }
     }
 
@@ -179,6 +192,7 @@ impl LogSource {
     pub fn grep_label(self) -> &'static str {
         match self {
             LogSource::Containers => "Grep: text in the message or fields",
+            LogSource::Access => "Grep: text in the path",
             LogSource::Deploy => "Grep: text in the message",
         }
     }
@@ -188,6 +202,9 @@ impl LogSource {
         match self {
             LogSource::Containers => {
                 "new records are added as hoster stores them, about once a second"
+            }
+            LogSource::Access => {
+                "new requests are added as hoster stores them, about once a second"
             }
             LogSource::Deploy => "new deployment events are added as the deployments log them",
         }
@@ -266,6 +283,11 @@ impl LogReader {
     /// The newest committed record id.
     fn head(&self) -> i64 {
         self.head.borrow().record
+    }
+
+    /// The newest committed request row id.
+    fn request_head(&self) -> i64 {
+        self.head.borrow().request
     }
 
     /// What one page shows: its records, the services of its range, where the data starts and
@@ -601,6 +623,10 @@ pub struct LogParams {
     field: Vec<String>,
     /// Across stacks, the stack picked ([`LogScope::All`]); the stack tab fixes it by its path.
     stack: Option<String>,
+    /// The access log's status filter: `4xx`, `5xx` or one code ([`StatusFilter`]).
+    status: Option<String>,
+    /// The access log's minimum total duration, e.g. `500ms`.
+    slower: Option<String>,
     /// The range without a `since`, set by the scope ([`LogParams::scoped`]); not a parameter.
     default_since: Option<String>,
 }
@@ -621,6 +647,8 @@ impl From<Vec<(String, String)>> for LogParams {
                 "follow" => &mut params.follow,
                 "from" => &mut params.from,
                 "stack" => &mut params.stack,
+                "status" => &mut params.status,
+                "slower" => &mut params.slower,
                 "field" => {
                     params.field.push(value);
                     continue;
@@ -785,6 +813,8 @@ impl LogParams {
             ("service", self.service()),
             ("since", Self::text(&self.since)),
             ("level", (level != LevelFilter::All).then(|| level.as_str())),
+            ("status", Self::text(&self.status)),
+            ("slower", Self::text(&self.slower)),
             ("q", self.q()),
             ("regex", self.regex().then_some("on")),
         ]
@@ -982,6 +1012,9 @@ pub struct LogRow {
     pub target: Option<String>,
     /// What the row opens on; `None` for a record without fields, which does not open.
     pub detail: Option<RecordDetail>,
+    /// The access log's cells: a request row has them in place of a level, and its message is
+    /// the path as the collapsed row shows it.
+    pub request: Option<RequestCells>,
 }
 
 /// What a record with fields shows when opened, beside the time ([`LogRow::time`]) and the cut
@@ -1168,6 +1201,7 @@ impl Rows {
             marker: record.marker,
             target: None,
             detail: None,
+            request: None,
         };
         if !record.marker {
             self.detail(record, &mut row);
@@ -1204,6 +1238,7 @@ impl Rows {
             marker: false,
             target: entry.step.as_deref().map(LiveLine::printable),
             detail: None,
+            request: entry.request.clone(),
         }
     }
 
@@ -1362,6 +1397,8 @@ pub struct SourceEntry {
     /// The step the entry is about, shown dimmed before the message.
     pub step: Option<String>,
     pub message: String,
+    /// A request row's cells (the access log), the path as its `message`.
+    pub request: Option<RequestCells>,
 }
 
 /// What a source other than the log store shows for an empty range.
@@ -1472,8 +1509,14 @@ pub struct LogsView {
     pub empty_note: Option<EmptyNote>,
     /// The follow switch, at the newest end of the range of a view that follows.
     pub follow: Option<Follow>,
-    /// The download button, where the mount has one: the containers' records only.
+    /// The download button, where the mount has one and the source can be downloaded.
     pub download: Option<Download>,
+    /// The access log's status chips; empty for the other sources.
+    pub statuses: Vec<Chip>,
+    /// The access log's minimum duration field as typed; `None` for the other sources.
+    pub slower: Option<String>,
+    /// The access log's footer: the requests of the range, and how many were 4xx and 5xx.
+    pub requests: Option<RequestFoot>,
 }
 
 /// The follow switch of the newest page, and its stream while it is on.
@@ -1512,7 +1555,7 @@ impl LogsView {
     /// The service hoster's own records are listed under.
     const HOSTER: &str = "hoster";
     /// The options the form edits rather than keeps as hidden fields.
-    const EDITED: [&str; 4] = ["stack", "since", "q", "regex"];
+    const EDITED: [&str; 5] = ["stack", "since", "q", "regex", "slower"];
     /// The most records the Telemetry page's tab counts; more are shown as this many and a `+`,
     /// so the count reads at most this many index entries.
     pub const COUNT_CAP: u32 = 100_000;
@@ -1688,6 +1731,9 @@ impl LogsView {
             .map(|action| Download::of(action, &links));
         Self {
             download,
+            statuses: Vec::new(),
+            slower: None,
+            requests: None,
             source: LogSource::Containers,
             sources: Self::sources(&mount.scope, params, &mount.action, LogSource::Containers),
             stacks: Self::stacks(&mount.scope, &mount.stacks, &read.stacks),
@@ -1806,6 +1852,31 @@ impl LogsView {
         read: Result<Page<SourceEntry>, String>,
         empty: EmptyNote,
     ) -> Self {
+        let start = plan.range.start;
+        Self::listed(mount, params, now, source, plan, read, empty, |page| {
+            // Past every entry on the page: from the start of the range when it has none.
+            page.entries
+                .last()
+                .map(|e| e.key)
+                .unwrap_or(RecordKey { time: start, id: 0 })
+        })
+    }
+
+    /// [`LogsView::listing`], its follow stream starting at the `cursor` of the page read.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "listing's arguments and the cursor, which only the access log sets"
+    )]
+    fn listed(
+        mount: LogMount,
+        params: &LogParams,
+        now: SystemTime,
+        source: LogSource,
+        plan: SourcePlan,
+        read: Result<Page<SourceEntry>, String>,
+        empty: EmptyNote,
+        cursor: impl FnOnce(&Page<SourceEntry>) -> RecordKey,
+    ) -> Self {
         let links = Links::of(&mount.action, &mount.scope, params, source);
         let (page, unreadable) = match read {
             Ok(page) => (page, None),
@@ -1829,17 +1900,7 @@ impl LogsView {
             &links,
             params,
             unreadable.is_none() && invalid.is_none(),
-            || {
-                // Past every entry on the page: from the start of the range when it has none.
-                page.entries
-                    .last()
-                    .map(|e| e.key)
-                    .unwrap_or(RecordKey {
-                        time: plan.range.start,
-                        id: 0,
-                    })
-                    .to_string()
-            },
+            || cursor(&page).to_string(),
         );
         let paged = plan.page != PageAt::Newest;
         let empty_page = rendered.is_empty() && !paged && unreadable.is_none() && invalid.is_none();
@@ -1860,6 +1921,9 @@ impl LogsView {
         } = paging;
         Self {
             download: None,
+            statuses: Vec::new(),
+            slower: None,
+            requests: None,
             source,
             sources: Self::sources(&mount.scope, params, &mount.action, source),
             stacks: Self::stacks(&mount.scope, &mount.stacks, &[]),
@@ -2133,6 +2197,11 @@ pub trait SourceTail: Send + 'static {
 
     /// The entries after `cursor` the page's options match, in page order, at most `limit`.
     async fn after(&mut self, cursor: RecordKey, limit: u32) -> Result<SourceRead, String>;
+
+    /// Where a stream opened without a cursor starts: at `now`.
+    fn start(&self, now: Timestamp) -> RecordKey {
+        RecordKey { time: now, id: 0 }
+    }
 }
 
 /// What one read of a [`SourceTail`] found.
@@ -2141,6 +2210,9 @@ pub struct SourceRead {
     pub entries: Vec<SourceEntry>,
     /// Where to read on from at once, when the read stopped at its limit or its scan cap.
     pub more: Option<RecordKey>,
+    /// Where the next read starts, for a source that says so itself (one that reads by id,
+    /// not in key order); after the newest entry and `more` otherwise.
+    pub through: Option<RecordKey>,
 }
 
 /// The follow stream of the newest page of a source other than the log store: what its
@@ -2174,10 +2246,7 @@ impl<T: SourceTail> SourceFollow<T> {
         let cursor = last_event_id
             .and_then(|id| id.trim().parse().ok())
             .or_else(|| LogParams::text(&params.from).and_then(|key| key.parse().ok()))
-            .unwrap_or(RecordKey {
-                time: Timestamp::from(now),
-                id: 0,
-            });
+            .unwrap_or_else(|| tail.start(Timestamp::from(now)));
         Ok(Self {
             tail,
             closing: reader.closing.clone(),
@@ -2237,10 +2306,13 @@ impl<T: SourceTail> SourceFollow<T> {
                     Err(notice) => return Some((LogFollow::closing(&notice), None)),
                 };
                 let entries = read.entries;
-                if let Some(last) = entries.last() {
+                if let Some(through) = read.through {
+                    follow.cursor = through;
+                }
+                if let Some(last) = entries.last().filter(|_| read.through.is_none()) {
                     follow.cursor = follow.cursor.max(last.key);
                 }
-                if let Some(on) = read.more {
+                if let Some(on) = read.more.filter(|_| read.through.is_none()) {
                     follow.cursor = follow.cursor.max(on);
                 }
                 more = read.more.is_some();

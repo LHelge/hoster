@@ -3423,6 +3423,359 @@ mod stored_logs {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// The `access` source (task bq6): the proxy's request rows of the stack.
+    mod access_source {
+        use std::net::IpAddr;
+
+        use super::*;
+        use crate::store::{LogHead, RequestId, RequestRow};
+
+        pub(in crate::web::stacks::tests) fn request(
+            ago_secs: u64,
+            service: &str,
+            path: &str,
+            status: u16,
+        ) -> RequestRow {
+            RequestRow {
+                time: Timestamp::now() - Duration::from_secs(ago_secs),
+                host: "notes.example.com".into(),
+                prefix: "/".into(),
+                stack: "notes".into(),
+                service: service.into(),
+                method: "GET".into(),
+                path: path.into(),
+                status,
+                to_header: Some(Duration::from_millis(4)),
+                total: Duration::from_millis(12),
+                bytes: 2048,
+                client: IpAddr::from([203, 0, 113, 7]),
+                upstream_failed: false,
+                request_id: RequestId::from([ago_secs as u8; 16]),
+            }
+        }
+
+        /// Appends `requests` as the recorder would, and announces the commit.
+        pub(in crate::web::stacks::tests) async fn commit(
+            app: &TestApp,
+            requests: Vec<RequestRow>,
+        ) -> LogHead {
+            let head = app
+                .logs
+                .append(&LogBatch {
+                    requests,
+                    ..LogBatch::default()
+                })
+                .await
+                .unwrap();
+            app.log_head.send_replace(head);
+            head
+        }
+
+        /// The paths of the request rows, in page order, as the closed rows show them.
+        pub(in crate::web::stacks::tests) fn paths(html: &str) -> Vec<String> {
+            html.split(r#"<span class="log-msg req-path">"#)
+                .skip(1)
+                .map(|rest| {
+                    let cell = rest.split(r#"<span class="req-status"#).next().unwrap();
+                    cell.trim_end().strip_suffix("</span>").unwrap().to_owned()
+                })
+                .collect()
+        }
+
+        /// notes: `web` and `api` over the last minute, a slow failed `POST`, a hostile path, a
+        /// long one; blog's request and one two hours ago are not shown.
+        async fn seed(app: &TestApp) {
+            let mut failed = request(40, "api", "/api/users", 502);
+            failed.method = "POST".into();
+            failed.total = Duration::from_millis(1_500);
+            failed.to_header = None;
+            failed.upstream_failed = true;
+            failed.bytes = 0;
+            let mut other = request(35, "app", "/posts", 200);
+            other.stack = "blog".into();
+            let mut long = request(20, "web", &format!("/{}", "a".repeat(300)), 200);
+            long.client = "2001:db8::7".parse().unwrap();
+            commit(
+                app,
+                vec![
+                    request(7_200, "web", "/old", 200),
+                    request(50, "web", "/", 200),
+                    failed,
+                    other,
+                    request(30, "web", r#"/missing"><script>x</script>"#, 404),
+                    long,
+                ],
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn the_access_source_lists_the_stacks_requests() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            seed(&app).await;
+            let get = async |path: &str| body(app.get(path, Some(&browser.cookie)).await).await;
+
+            let html = get("/stacks/notes/logs?source=access").await;
+            let long = format!("/{}", "a".repeat(159));
+            assert_eq!(
+                paths(&html),
+                [
+                    "/",
+                    "/api/users",
+                    "/missing&#34;&#62;&#60;script&#62;x&#60;/script&#62;",
+                    &format!(
+                        r#"{long}<span class="log-cut" title="The path is longer; open the row for all of it.">…</span>"#
+                    ),
+                ],
+                "{html}"
+            );
+            assert!(!html.contains("<script>x"), "{html}");
+            // The failed POST: method, toned status, duration, bytes and client.
+            assert!(
+                html.contains(r#"<span class="req-method">POST</span>"#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<span class="req-status req-5xx">502</span>"#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<span class="req-status req-4xx">404</span>"#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<span class="req-num" title="Total duration">1.5 s</span>"#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<span class="req-num" title="Response bytes">2.0 KiB</span>"#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<span class="req-client" title="203.0.113.7">203.0.113.7</span>"#),
+                "{html}"
+            );
+            assert!(html.contains(">2001:db8::7</span>"), "{html}");
+            // Opened: host, route, the whole path, to header, upstream and the request id,
+            // which links the containers' records that mention it.
+            assert!(
+                html.contains("<dt>host</dt><dd>notes.example.com</dd>"),
+                "{html}"
+            );
+            assert!(html.contains("<dt>route</dt><dd>/</dd>"), "{html}");
+            assert!(
+                html.contains(&format!("<dt>path</dt><dd>/{}</dd>", "a".repeat(300))),
+                "{html}"
+            );
+            assert!(html.contains("<dt>to header</dt><dd>-</dd>"), "{html}");
+            assert!(
+                html.contains(r#"<dt>upstream</dt><dd><span class="req-5xx">failed</span></dd>"#),
+                "{html}"
+            );
+            let id = RequestId::from([40; 16]).to_string();
+            assert!(
+                html.contains(&format!(
+                    r#"<a href="/stacks/notes/logs?q={id}" title="The containers' records that mention this id">{id}</a>"#
+                )),
+                "{html}"
+            );
+            // The switch, the toolbar of the source, and no levels, fields or live logs.
+            assert!(
+                html.contains(
+                    r#"<a href="/stacks/notes/logs?source=access" aria-current="page">access</a>"#
+                ),
+                "{html}"
+            );
+            assert!(!html.contains(r#"aria-label="Levels""#), "{html}");
+            assert!(!html.contains("Live container logs"), "{html}");
+            assert!(
+                html.contains(r#"aria-label="Grep: text in the path""#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<input type="text" name="slower" value="""#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<a class="log-chip" href="/stacks/notes/logs?source=access&#38;status=5xx"><span class="dot req-5xx" aria-hidden="true"></span>5xx</a>"#),
+                "{html}"
+            );
+            // The footer: the range's requests, 4xx and 5xx.
+            assert!(
+                html.contains(r#"<span class="log-total">4</span> requests shown · 4 in the range: <span class="req-4xx">1 4xx</span> · <span class="req-5xx">1 5xx</span>"#),
+                "{html}"
+            );
+            // Following from the newest row committed.
+            assert!(
+                html.contains("hx-sse:connect=\"/stacks/notes/logs/stream?source=access&#38;from="),
+                "{html}"
+            );
+            let from = html
+                .split("stream?source=access&#38;from=")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap();
+            // Past the newest row committed (blog's and the old one included): by id.
+            assert!(from.ends_with(".6"), "{from}");
+            // The download offers the requests.
+            assert!(
+                html.contains(
+                    r#"href="/stacks/notes/logs/download?source=access&#38;format=jsonl""#
+                ),
+                "{html}"
+            );
+            // The containers' switch keeps nothing of the source's own options.
+            let html =
+                get("/stacks/notes/logs?source=access&status=5xx&slower=1s&service=api").await;
+            assert!(
+                html.contains(r#"<a href="/stacks/notes/logs?service=api">containers</a>"#),
+                "{html}"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_access_filters_narrow_the_rows() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            seed(&app).await;
+            let get = async |path: &str| body(app.get(path, Some(&browser.cookie)).await).await;
+            let base = "/stacks/notes/logs?source=access";
+
+            let html = get(&format!("{base}&service=api")).await;
+            assert_eq!(paths(&html), ["/api/users"], "{html}");
+            // The footer counts the service picked.
+            assert!(html.contains("1 in the range of this service: "), "{html}");
+            let html = get(&format!("{base}&status=4xx")).await;
+            assert_eq!(paths(&html).len(), 1, "{html}");
+            let html = get(&format!("{base}&status=200")).await;
+            assert_eq!(paths(&html).len(), 2, "{html}");
+            // A single code gets a chip of its own.
+            assert!(
+                html.contains(r#"href="/stacks/notes/logs?source=access&#38;status=200" aria-current="page"><span class="dot req-2xx" aria-hidden="true"></span>200</a>"#),
+                "{html}"
+            );
+            let html = get(&format!("{base}&slower=1s")).await;
+            assert_eq!(paths(&html), ["/api/users"], "{html}");
+            let html = get(&format!("{base}&q=USERS")).await;
+            assert_eq!(paths(&html), ["/api/<mark>users</mark>"], "{html}");
+
+            // Nothing left: what filtered, and the view without them.
+            let html = get(&format!("{base}&status=5xx&slower=2s")).await;
+            assert!(
+                html.contains(r#"No records match status 5xx and slower than 2s in this range. <a href="/stacks/notes/logs?source=access">clear filters</a>"#),
+                "{html}"
+            );
+            // An empty range.
+            let html = get(&format!("{base}&since=5s")).await;
+            assert!(
+                html.contains(r#"No requests to the stack&#39;s routes in this range. <a href="/stacks/notes">overview</a>"#),
+                "{html}"
+            );
+            // Options that do not parse are dropped, and said.
+            let html = get(&format!("{base}&status=teapot&slower=soon")).await;
+            assert_eq!(paths(&html).len(), 4, "{html}");
+            assert!(html.contains("`teapot` is not a status filter"), "{html}");
+            // Level and field filters are not the access log's.
+            let html = get(&format!("{base}&level=error&field=a%3Db")).await;
+            assert_eq!(paths(&html).len(), 4, "{html}");
+            assert!(!html.contains("level=error"), "{html}");
+        }
+
+        #[tokio::test]
+        async fn access_pages_go_back_by_key() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            commit(
+                &app,
+                (0..250)
+                    .map(|i| request(1_000 - i, "web", &format!("/{i}"), 200))
+                    .collect(),
+            )
+            .await;
+            let html = body(
+                app.get(
+                    "/stacks/notes/logs?source=access&follow=off",
+                    Some(&browser.cookie),
+                )
+                .await,
+            )
+            .await;
+            let shown = paths(&html);
+            assert_eq!(shown.len(), 200, "{html}");
+            assert_eq!(shown[0], "/50");
+            let older = html
+                .split(r#"<a href=""#)
+                .find(|rest| rest.contains("before="))
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("{html}"))
+                .replace("&#38;", "&");
+            let html = body(app.get(&older, Some(&browser.cookie)).await).await;
+            let shown = paths(&html);
+            assert_eq!(shown.len(), 50, "{html}");
+            assert_eq!(shown[0], "/0");
+        }
+
+        #[tokio::test]
+        async fn the_access_log_downloads_as_text_and_json_lines() {
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            seed(&app).await;
+            let response = app
+                .get(
+                    "/stacks/notes/logs/download?source=access&status=5xx",
+                    Some(&browser.cookie),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let disposition = response.headers()[axum::http::header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(disposition.contains("notes-access-"), "{disposition}");
+            let text = body(response).await;
+            let id = RequestId::from([40; 16]);
+            assert_eq!(text.lines().count(), 1, "{text}");
+            assert!(text.starts_with("203.0.113.7 - - ["), "{text}");
+            assert!(
+                text.ends_with(&format!(
+                    "] \"POST /api/users\" 502 0 notes.example.com api 1500ms {id}\n"
+                )),
+                "{text}"
+            );
+
+            let text = body(
+                app.get(
+                    "/stacks/notes/logs/download?source=access&format=jsonl",
+                    Some(&browser.cookie),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(text.lines().count(), 4, "{text}");
+            let hostile: serde_json::Value =
+                serde_json::from_str(text.lines().nth(2).unwrap()).unwrap();
+            assert_eq!(hostile["path"], r#"/missing"><script>x</script>"#);
+            assert_eq!(hostile["status"], 404);
+            assert_eq!(hostile["to_header_ms"], 4);
+            assert_eq!(hostile["client"], "203.0.113.7");
+
+            // The text line escapes what would break it.
+            let text = body(
+                app.get(
+                    "/stacks/notes/logs/download?source=access&status=404",
+                    Some(&browser.cookie),
+                )
+                .await,
+            )
+            .await;
+            assert!(
+                text.contains(r#""GET /missing\"><script>x</script>" 404"#),
+                "{text}"
+            );
+        }
+    }
+
     /// The download of the tab's records (task gz9).
     mod download {
         use axum::http::header;
@@ -4139,6 +4492,62 @@ mod stored_logs {
                 assert_eq!(rows(&text).len(), 1, "{text}");
                 assert!(text.contains("id: "), "{text}");
             }
+        }
+
+        /// The `access` source (task bq6) follows the request rows by id.
+        #[tokio::test]
+        async fn following_appends_new_request_rows() {
+            use super::access_source::{commit, paths, request};
+
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            commit(&app, vec![request(60, "web", "/on-the-page", 200)]).await;
+            let html = body(
+                app.get(
+                    "/stacks/notes/logs?source=access&status=5xx",
+                    Some(&browser.cookie),
+                )
+                .await,
+            )
+            .await;
+            let from = html
+                .split("stream?source=access&#38;status=5xx&#38;from=")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("{html}"))
+                .to_owned();
+            let mut stream = open(
+                &app,
+                &browser,
+                &format!("source=access&status=5xx&from={from}"),
+            )
+            .await;
+            let mut other = request(1, "app", "/blog-failed", 500);
+            other.stack = "blog".into();
+            // Committed late but stamped early: it still follows, by id.
+            commit(
+                &app,
+                vec![
+                    request(2, "api", "/first-failed", 502),
+                    request(1, "web", "/fine", 200),
+                    other,
+                    request(300, "web", "/late-failed", 503),
+                ],
+            )
+            .await;
+            let mut text = String::new();
+            read_until(&mut stream, &mut text, "id: ").await;
+            read_until(&mut stream, &mut text, "/late-failed").await;
+            commit(&app, vec![request(0, "api", "/second-failed", 500)]).await;
+            read_until(&mut stream, &mut text, "/second-failed").await;
+            let rows = paths(&text.replace("\ndata: ", ""));
+            assert_eq!(
+                rows,
+                ["/late-failed", "/first-failed", "/second-failed"],
+                "{text}"
+            );
+            // The event id carries the row id the stream read through.
+            assert!(text.contains(".6\n"), "{text}");
         }
 
         #[tokio::test]

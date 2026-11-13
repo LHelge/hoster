@@ -19,13 +19,16 @@
 //! its name.
 //!
 //! A source switch above the toolbar picks where the records come from (`source`,
-//! [`LogSource`]): the containers (the default, everything above) or the stack's deployment
-//! events ([`deploy`]), which take the range, grep, paging and following but no service, level
-//! or field filters, and link no live logs.
+//! [`LogSource`]): the containers (the default, everything above), the access log of the
+//! stack's routes (the proxy's request rows in the log store, `web/logs/access.rs`, with
+//! service, status, path and duration filters), or the stack's deployment events ([`deploy`]),
+//! which take the range, grep, paging and following but no service, level or field filters.
+//! Only the containers link live logs.
 //!
-//! The containers' toolbar has a download button (`/stacks/{name}/logs/download`, see
-//! [`LogDownload`]): every record the tab's options select over the whole range, oldest first,
-//! as a text or JSON lines file, up to [`LogDownload::CAP`] records.
+//! The containers' and the access log's toolbars have a download button
+//! (`/stacks/{name}/logs/download`, see [`LogDownload`]): every record or request the tab's
+//! options select over the whole range, oldest first, as a text or JSON lines file, up to
+//! [`LogDownload::CAP`] of them.
 
 mod deploy;
 
@@ -47,8 +50,8 @@ use crate::store::EventKind;
 use crate::web::auth::{Auth, Session};
 use crate::web::containers::Containers;
 use crate::web::logs::{
-    FormatParam, LiveLink, LogDownload, LogFollow, LogMount, LogParams, LogReader, LogScope,
-    LogSource, LogsView, Refused, SourceFollow,
+    AccessTail, EmptyNote, FormatParam, LiveLink, LogDownload, LogFollow, LogMount, LogParams,
+    LogReader, LogScope, LogSource, LogsView, Refused, SourceFollow,
 };
 use crate::web::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 use deploy::DeployLog;
@@ -69,7 +72,29 @@ impl Stacks {
             Ok(status) => status,
             Err(outcome) => return outcome.page(layout),
         };
-        if let (LogSource::Deploy, _) = params.source(&LogScope::Stack(name.clone())) {
+        let (source, _) = params.source(&LogScope::Stack(name.clone()));
+        if source == LogSource::Access {
+            let empty = EmptyNote {
+                text: "No requests to the stack's routes in this range.".to_owned(),
+                link: "overview".to_owned(),
+                href: StackView::url(&name),
+            };
+            let mount = Self::log_mount(&status, Vec::new());
+            let view = LogsView::access(&reader, mount, &params, empty).await;
+            if let Some(message) = view.problem.clone() {
+                layout = layout.with_flash(Flash {
+                    kind: FlashKind::Error,
+                    message,
+                });
+            }
+            return Page(StackLogsPage {
+                layout,
+                header: stacks.header(&status, Tab::Logs).await,
+                view,
+            })
+            .into_response();
+        }
+        if source == LogSource::Deploy {
             let mount = Self::log_mount(&status, Vec::new());
             let view = DeployLog::new(stacks.clone(), name)
                 .view(mount, &params)
@@ -158,6 +183,12 @@ impl Stacks {
             LogSource::Containers => {
                 let opened = LogFollow::open(&reader, &mount, &params, last).await;
                 LogFollow::respond(opened, ends)
+            }
+            LogSource::Access => {
+                let opened = AccessTail::open(&reader, &mount, &params).and_then(|tail| {
+                    SourceFollow::open(&reader, &mount, &params, source, last, tail)
+                });
+                SourceFollow::respond(opened, ends)
             }
             LogSource::Deploy => {
                 let tail = tail.tail(&params, deploy_events);
