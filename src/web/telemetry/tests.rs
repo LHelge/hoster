@@ -276,6 +276,88 @@ async fn filters_take_the_stack_tabs_parameters() {
     );
 }
 
+/// The links of the severity histogram's bars, oldest first, unescaped.
+fn bar_links(html: &str) -> Vec<String> {
+    html.split(r#"<a class="chart-bar" href=""#)
+        .skip(1)
+        .map(|rest| rest.split('"').next().unwrap().replace("&#38;", "&"))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_severity_histogram_counts_the_range_by_level_and_follows_the_filters() {
+    let app = seeded().await;
+    let browser = app.sign_in().await;
+    let get = |uri: String| {
+        let app = &app;
+        let cookie = browser.cookie.clone();
+        async move { body(app.get(&uri, Some(&cookie)).await).await }
+    };
+
+    let html = get("/telemetry/logs".into()).await;
+    assert!(
+        html.contains(r#"Log records by severity <span class="card-count">· 30s buckets</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"aria-label="Log records by severity for all stacks over the last 15m in 30s buckets: 5 records, error 1, warn 0, debug/info 1, no level 3; most errors "#
+        ),
+        "{html}"
+    );
+    for key in ["error 1", "warn 0", "debug/info 1", "no level 3"] {
+        assert!(
+            html.contains(&format!("</span>{key}</li>")),
+            "{key}: {html}"
+        );
+    }
+    // A bar per 30 seconds; each narrows the range to its bucket, the newest only from its
+    // start so it keeps the newest records.
+    let links = bar_links(&html);
+    assert!((30..=32).contains(&links.len()), "{links:?}");
+    assert!(
+        links
+            .iter()
+            .all(|l| l.starts_with("/telemetry/logs?since="))
+    );
+    let (newest, older) = links.split_last().unwrap();
+    assert!(!newest.contains("before="), "{newest}");
+    assert!(older.iter().all(|l| l.contains("&before=")), "{older:?}");
+    // The bucket of the record five minutes ago lists it alone.
+    let bucket = older
+        .iter()
+        .find(|l| {
+            let since = l.split("since=").nth(1).unwrap().split('&').next().unwrap();
+            let since = humantime::parse_rfc3339(&since.replace("%3A", ":")).unwrap();
+            let ago = std::time::SystemTime::now().duration_since(since).unwrap();
+            (Duration::from_secs(300)..Duration::from_secs(330)).contains(&ago)
+        })
+        .unwrap();
+    assert_eq!(messages(&get(bucket.clone()).await), ["Listening on :8080"]);
+
+    // A level filter draws its levels only; a stack and service narrow the counts.
+    let html = get("/telemetry/logs?level=error".into()).await;
+    assert!(html.contains(": 1 record, error 1; most errors"), "{html}");
+    assert!(!html.contains("</span>no level"), "{html}");
+    let html = get("/telemetry/logs?stack=notes&service=api".into()).await;
+    assert!(
+        html.contains("for notes, service api over the last 15m in 30s buckets: 2 records,"),
+        "{html}"
+    );
+    assert!(bar_links(&html)[0].starts_with("/telemetry/logs?stack=notes&service=api&since="));
+    // Grep and field filters do not narrow it, and it says so.
+    let html = get("/telemetry/logs?q=started".into()).await;
+    assert!(
+        html.contains(" · unfiltered by grep and fields</span>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("not narrowed by grep or field filters: 5 records"),
+        "{html}"
+    );
+    assert!(!html.contains("style="), "no inline styles");
+}
+
 #[test]
 fn rates_have_one_decimal_below_ten() {
     let rate = |count| {

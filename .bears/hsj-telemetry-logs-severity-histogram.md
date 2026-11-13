@@ -1,10 +1,10 @@
 ---
 id: hsj
 title: "Telemetry logs: severity histogram"
-status: open
+status: done
 priority: P3
 created: "2026-11-12T19:35:08.992860862Z"
-updated: "2026-11-12T19:35:08.992860862Z"
+updated: "2026-11-13T14:03:00.865978749Z"
 tags:
   - web
   - observability
@@ -12,6 +12,7 @@ tags:
 depends_on:
   - ckc
 parent: psq
+attempts: 1
 ---
 
 ## Summary

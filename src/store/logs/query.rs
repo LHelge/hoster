@@ -743,13 +743,15 @@ impl LogStore {
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
-    /// Records per `bucket`-long period since the epoch and level in `range` and `scope`, for
-    /// the severity histogram, oldest bucket first. Buckets without records are left out. Reads
-    /// what the index narrows to, with no message scan; a zero `bucket` counts per millisecond.
+    /// Records per `bucket`-long period since the epoch and level that `query` narrows to by
+    /// range, scope, services and streams, for the severity histogram, oldest bucket first: its
+    /// levels, text and field filters and its page are not applied (every level is counted, so
+    /// the caller can draw what a level filter keeps). Buckets without records are left out.
+    /// Reads what the index narrows to, with no message scan; a zero `bucket` counts per
+    /// millisecond.
     pub async fn count_by_level(
         &self,
-        range: Range<Timestamp>,
-        scope: &LogScope,
+        query: &LogQuery,
         bucket: Duration,
     ) -> Result<Vec<LevelCounts>> {
         let length = i64::try_from(bucket.as_millis()).unwrap_or(i64::MAX).max(1);
@@ -760,7 +762,9 @@ impl LogStore {
             .push(") % ")
             .push_bind(length)
             .push(") AS bucket, level, count(*) FROM log_records");
-        LogQuery::push_where(&mut sql, &range, scope);
+        LogQuery::push_where(&mut sql, &query.range, &query.scope);
+        LogQuery::push_in(&mut sql, "service", query.services.clone());
+        LogQuery::push_in(&mut sql, "stream", query.streams.iter().map(|s| s.as_str()));
         sql.push(" GROUP BY bucket, level ORDER BY bucket");
         let rows: Vec<(Timestamp, Option<String>, i64)> =
             sql.build_query_as().fetch_all(&self.reads).await?;

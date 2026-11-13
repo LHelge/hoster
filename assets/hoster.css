@@ -660,6 +660,16 @@ th:has(> .pill-long), td:has(> .pill-long) { min-width: 11rem; }
 .chart-4xx { fill: var(--warn); background: var(--warn); }
 .chart-5xx { fill: var(--fail); background: var(--fail); }
 .chart-other { fill: var(--muted); background: var(--muted); }
+/* The severity histogram of the Telemetry logs (src/web/charts/severity.rs): half height, its
+   bars links. Debug/info and records without a level are the muted tone mixed into the card, so
+   warn and error stand out; no level the fainter of the two. */
+.chart-levels .chart-y, .chart-levels .chart-plot { height: 90px; }
+.chart-lvl-none { fill: color-mix(in srgb, var(--muted) 30%, var(--surface)); background: color-mix(in srgb, var(--muted) 30%, var(--surface)); }
+.chart-lvl-info { fill: color-mix(in srgb, var(--muted) 65%, var(--surface)); background: color-mix(in srgb, var(--muted) 65%, var(--surface)); }
+.chart-lvl-warn { fill: var(--warn); background: var(--warn); }
+.chart-lvl-error { fill: var(--fail); background: var(--fail); }
+a.chart-bar:focus { outline: none; }
+a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent); stroke-width: 2px; }
 .chart-line { fill: none; stroke-width: 2px; stroke-linejoin: round; stroke-linecap: round; }
 .chart-p50 { stroke: var(--p50); background: var(--p50); }
 .chart-p95 { stroke: var(--p95); background: var(--p95); }
