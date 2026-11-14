@@ -1,4 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tempfile::TempDir;
 
@@ -1077,12 +1079,17 @@ async fn snapshot_while_writing_is_consistent_and_restorable() {
     store.add_revision("app", "x").await.unwrap();
     store.kv_set("before", "1").await.unwrap();
 
+    // The writer runs until it is told to stop, so a slow machine cannot let it finish before
+    // a snapshot starts; `writes` counts what it has committed.
+    let stop = Arc::new(AtomicBool::new(false));
+    let writes = Arc::new(AtomicUsize::new(0));
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let writer = {
-        let store = store.clone();
+        let (store, stop, writes) = (store.clone(), Arc::clone(&stop), Arc::clone(&writes));
         tokio::spawn(async move {
             let mut started = Some(started_tx);
-            for i in 0..300 {
+            let mut i = 0;
+            while !stop.load(Ordering::Relaxed) {
                 store
                     .kv_set(&format!("k{}", i % 10), &i.to_string())
                     .await
@@ -1090,25 +1097,29 @@ async fn snapshot_while_writing_is_consistent_and_restorable() {
                 if i % 50 == 0 {
                     store.add_revision("app", &format!("v{i}")).await.unwrap();
                 }
+                writes.fetch_add(1, Ordering::Relaxed);
                 if i == 20 {
                     let _ = started.take().unwrap().send(());
                 }
+                i += 1;
             }
         })
     };
 
-    // Snapshot only once the writer is under way, and keep going while it writes.
+    // Snapshot once the writer is under way, until at least one snapshot saw a write commit
+    // while it ran.
     let backup = Store::open_read_only(&state).await.unwrap();
     started_rx.await.unwrap();
     let mut snapshots = Vec::new();
     let mut during_writes = 0;
-    while snapshots.len() < 5 || (!writer.is_finished() && snapshots.len() < 50) {
+    while snapshots.len() < 5 || (during_writes == 0 && snapshots.len() < 200) {
         let dest = dir.path().join(format!("snap-{}.db", snapshots.len()));
-        let writing = !writer.is_finished();
+        let before = writes.load(Ordering::Relaxed);
         backup.snapshot(&dest).await.unwrap();
-        during_writes += usize::from(writing && !writer.is_finished());
+        during_writes += usize::from(writes.load(Ordering::Relaxed) != before);
         snapshots.push(dest);
     }
+    stop.store(true, Ordering::Relaxed);
     writer.await.unwrap();
     backup.close().await;
     assert!(during_writes > 0, "no snapshot overlapped the writes");
