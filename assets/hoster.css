@@ -874,7 +874,11 @@ a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent)
 .switch input:checked + .switch-track::after { left: 14px; background: var(--inset); }
 .switch:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* Positioned, so the absolutely positioned `.visually-hidden` spans in its rows ("no level",
+   "stderr: ") are clipped by it and scroll with it; otherwise they sit at their place in the
+   log's full height and stretch the page far below the box. */
 .log {
+  position: relative;
   min-height: 12rem;
   max-height: 70vh;
   overflow: auto;
@@ -1113,7 +1117,7 @@ a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent)
 .live-ok { color: var(--ok); }
 .live-warn { color: var(--warn); }
 .live-fail { color: var(--fail); }
-.live-check .live-problems { max-height: 16rem; padding: 0; overflow-y: auto; }
+.live-check .live-problems { position: relative; max-height: 16rem; padding: 0; overflow-y: auto; }
 .live-problems a.problem-at { color: var(--link); }
 /* Help beside the editor (src/web/stacks/editor_help.rs): snippets and the field reference, each
    a card that opens. Their content scrolls inside, so the sticky aside stays usable. */
@@ -1123,7 +1127,7 @@ a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent)
 .editor-help > summary::after { content: "+"; color: var(--muted); font: 600 14px/1 var(--mono); }
 .editor-help[open] > summary::after { content: "−"; }
 .editor-help:not([open]) > summary { border-bottom: 0; }
-.help-scroll { display: flex; flex-direction: column; gap: 18px; max-height: 60vh; padding: 14px 18px; overflow-y: auto; }
+.help-scroll { position: relative; display: flex; flex-direction: column; gap: 18px; max-height: 60vh; padding: 14px 18px; overflow-y: auto; }
 .snippet-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .snippet-head h3, .ref-table h3 { margin: 0; font-size: 13px; }
 .snippet-insert { min-height: 28px; padding: 0 10px; font: 500 12px/1.2 var(--mono); }
