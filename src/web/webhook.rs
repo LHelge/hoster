@@ -13,6 +13,12 @@
 //! looks the same), `413`/`400`/`422` for payload problems. Bodies never say more than the
 //! caller needs: the reasons behind a `401` or `403` go to the log and, for a valid token, to
 //! the stack page's list of refused attempts, with the token's claims but never the token.
+//!
+//! `GET /hooks/deploy/{stack}/deployments/{id}` (ADR-0070) lets the same job follow the
+//! deployment it started: the token is verified the same way but its `jti` is neither checked
+//! nor used up, the caller must pass the stack's `[deploy]` rule, and only a deployment the
+//! caller's workflow run started is shown (`200` with its state); every other id is the same
+//! `404`. A refused read goes to the log only, not to the stack page.
 
 mod oidc;
 
@@ -21,7 +27,7 @@ use std::sync::Arc;
 
 use axum::Extension;
 use axum::body::{Body, to_bytes};
-use axum::extract::Request;
+use axum::extract::{Path, Request};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -30,9 +36,9 @@ use serde_json::json;
 pub use self::oidc::OidcVerifier;
 use self::oidc::{Claims, TokenError};
 use super::stacks::StackControl;
-use crate::orchestrator::{DeployOutcome, OrchestratorError, WebhookDeploy};
+use crate::orchestrator::{DeployOutcome, OrchestratorError, WebhookDeploy, WebhookRead};
 use crate::stack::{DeployCaller, Digest, Name};
-use crate::store::{DeploymentState, Store};
+use crate::store::{Deployment, DeploymentId, DeploymentState, Store, Timestamp};
 
 /// The webhook handler's collaborators.
 #[derive(Clone)]
@@ -43,6 +49,8 @@ struct Inner {
     /// Where used token ids are kept.
     store: Store,
     stacks: Arc<dyn StackControl>,
+    /// The admin UI's origin, for the deployment links in answers.
+    origin: String,
 }
 
 impl Webhook {
@@ -52,11 +60,17 @@ impl Webhook {
     /// sends `github.ref_name`, which for a branch such as `feature/x` is no OCI tag.
     const MAX_TAG: usize = 256;
 
-    pub fn new(verifier: OidcVerifier, store: Store, stacks: Arc<dyn StackControl>) -> Self {
+    pub fn new(
+        verifier: OidcVerifier,
+        store: Store,
+        stacks: Arc<dyn StackControl>,
+        origin: String,
+    ) -> Self {
         Self(Arc::new(Inner {
             verifier,
             store,
             stacks,
+            origin,
         }))
     }
 
@@ -103,8 +117,82 @@ impl Webhook {
         }
     }
 
+    /// `GET /hooks/deploy/{stack}/deployments/{id}`: a deployment the caller's run started.
+    pub async fn deployment(
+        Extension(hook): Extension<Webhook>,
+        Path((stack, id)): Path<(String, String)>,
+        headers: HeaderMap,
+    ) -> Response {
+        let claims = match hook.verified(&headers).await {
+            Ok(claims) => claims,
+            Err(answer) => return answer.into_response(),
+        };
+        let Ok(deployment) = id.parse::<DeploymentId>() else {
+            return Answer::unknown_deployment().into_response();
+        };
+        let read = WebhookRead {
+            stack,
+            deployment,
+            caller: DeployCaller::from(&claims),
+            repository: claims.repository.clone(),
+            run_id: claims.run_id.clone(),
+        };
+        match hook.0.stacks.webhook_deployment(&read).await {
+            Ok(deployment) => Answer::status(&deployment, &hook.0.origin).into_response(),
+            Err(OrchestratorError::UnknownDeployment(_)) => {
+                Answer::unknown_deployment().into_response()
+            }
+            Err(err) => {
+                let answer = Answer::from(&err);
+                if answer.status == StatusCode::FORBIDDEN {
+                    tracing::warn!(
+                        stack = read.stack,
+                        reason = %err,
+                        repository = claims.repository,
+                        repository_id = claims.repository_id,
+                        git_ref = claims.git_ref,
+                        run_id = claims.run_id,
+                        "webhook deployment read refused"
+                    );
+                } else {
+                    tracing::error!(stack = read.stack, error = %err, "webhook deployment read failed");
+                }
+                answer.into_response()
+            }
+        }
+    }
+
     /// Verifies the bearer token and uses up its `jti`.
     async fn authenticate(&self, headers: &HeaderMap) -> Result<Claims, Answer> {
+        let claims = self.verified(headers).await?;
+        match self
+            .0
+            .store
+            .claim_token(&claims.jti, claims.usable_until)
+            .await
+        {
+            Ok(true) => Ok(claims),
+            Ok(false) => {
+                tracing::warn!(
+                    jti = claims.jti,
+                    repository = claims.repository,
+                    run_id = claims.run_id,
+                    "webhook token replayed"
+                );
+                Err(Answer::unauthorized())
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "cannot record the webhook token id");
+                Err(Answer::error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error",
+                ))
+            }
+        }
+    }
+
+    /// Verifies the bearer token, leaving its `jti` as it is: a read may reuse a token.
+    async fn verified(&self, headers: &HeaderMap) -> Result<Claims, Answer> {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -131,30 +219,7 @@ impl Webhook {
                 return Err(Answer::unauthorized());
             }
         };
-        match self
-            .0
-            .store
-            .claim_token(&claims.jti, claims.usable_until)
-            .await
-        {
-            Ok(true) => Ok(claims),
-            Ok(false) => {
-                tracing::warn!(
-                    jti = claims.jti,
-                    repository = claims.repository,
-                    run_id = claims.run_id,
-                    "webhook token replayed"
-                );
-                Err(Answer::unauthorized())
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "cannot record the webhook token id");
-                Err(Answer::error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error",
-                ))
-            }
-        }
+        Ok(claims)
     }
 
     /// Logs a refused attempt that carried a valid token, and records it on its stack.
@@ -293,6 +358,30 @@ impl Answer {
 
     fn unauthorized() -> Self {
         Self::error(StatusCode::UNAUTHORIZED, "invalid token")
+    }
+
+    /// The one answer for every deployment a read may not see, so ids cannot be probed.
+    fn unknown_deployment() -> Self {
+        Self::error(StatusCode::NOT_FOUND, "no such deployment")
+    }
+
+    /// `deployment` as CI reads it (ADR-0070), linked under the admin `origin`.
+    fn status(deployment: &Deployment, origin: &str) -> Self {
+        let time = |at: Timestamp| humantime::format_rfc3339_seconds(at.into()).to_string();
+        let id = deployment.id.to_string();
+        Self {
+            status: StatusCode::OK,
+            body: json!({
+                "deployment_id": id,
+                "stack": deployment.stack,
+                "state": deployment.state.to_string(),
+                "terminal": deployment.state.is_terminal(),
+                "reason": deployment.error,
+                "created_at": time(deployment.created_at),
+                "finished_at": deployment.finished_at.map(time),
+                "url": format!("{origin}/stacks/{}/deployments/{id}", deployment.stack),
+            }),
+        }
     }
 }
 

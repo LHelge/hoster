@@ -690,3 +690,168 @@ async fn an_unreachable_key_set_answers_503() {
     assert_eq!(response.status(), 503);
     assert!(app.stacks.calls().is_empty());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Reading a deployment (ADR-0070)
+// ---------------------------------------------------------------------------------------------
+
+/// `GET /hooks/deploy/{stack}/deployments/{id}` with `token`.
+fn read(token: Option<&str>, stack: &str, id: &str) -> Request<Body> {
+    let mut request = Request::get(format!("/hooks/deploy/{stack}/deployments/{id}"));
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    request.body(Body::empty()).unwrap()
+}
+
+/// A webhook deployment of `notes` in `state`, started by run `run_id` of `acme/notes`.
+fn from_run(id: i64, state: DeploymentState, run_id: &str) -> crate::store::Deployment {
+    let mut deployment = crate::web::stacks::tests::deployment(id, state);
+    deployment.source = crate::store::DeploymentSource::Webhook;
+    deployment.provenance = Some(Provenance {
+        repository: "acme/notes".into(),
+        sha: "0f3c5e1a9d2b7c4e8f6a1b3d5c7e9f0a2b4c6d8e".into(),
+        git_ref: "refs/tags/v1.4.2".into(),
+        run_id: run_id.into(),
+        actor: "octocat".into(),
+        tag: Some("v1.4.2".into()),
+    });
+    deployment
+}
+
+/// [`app`] with `deployments` stored.
+async fn app_with(deployments: Vec<crate::store::Deployment>) -> (TestApp, Signer) {
+    let (app, signer) = app().await;
+    app.stacks
+        .deployments
+        .lock()
+        .unwrap()
+        .extend(deployments.into_iter().map(|d| (d, Vec::new())));
+    (app, signer)
+}
+
+#[tokio::test]
+async fn the_token_a_deploy_used_reads_the_deployment_its_run_started() {
+    let (app, signer) = app_with(vec![from_run(8, DeploymentState::Live, "123456")]).await;
+    let token = signer.sign(&claims("deploy-then-read"));
+    let deployed = app
+        .send(hook(Some(&token), ci_body(&digest(1), "v1.4.2")))
+        .await;
+    assert_eq!(deployed.status(), 202);
+    // The same token, already used up for the deploy, reads; twice, as a poll does.
+    for _ in 0..2 {
+        let response = app.send(read(Some(&token), "notes", "8")).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(header(&response, "cache-control"), "no-store");
+        let body = json_body(response).await;
+        assert_eq!(body["deployment_id"], "8");
+        assert_eq!(body["stack"], "notes");
+        assert_eq!(body["state"], "Live");
+        assert_eq!(body["terminal"], true);
+        assert_eq!(body["reason"], Value::Null);
+        let created = body["created_at"].as_str().unwrap();
+        assert!(humantime::parse_rfc3339(created).is_ok(), "{created}");
+        assert!(created.ends_with('Z'), "{created}");
+        assert!(body["finished_at"].is_string(), "{body}");
+        assert_eq!(
+            body["url"],
+            "https://admin.example.com/stacks/notes/deployments/8"
+        );
+    }
+    // Reading never deployed anything.
+    assert_eq!(app.stacks.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_deployment_reads_with_its_reason_and_a_running_one_as_not_terminal() {
+    let mut failed = from_run(8, DeploymentState::Failed, "123456");
+    failed.error = Some("api: health check failed after 30s".into());
+    let running = from_run(9, DeploymentState::HealthChecking, "123456");
+    let (app, signer) = app_with(vec![failed, running]).await;
+    let token = signer.sign(&claims("poll"));
+
+    let body = json_body(app.send(read(Some(&token), "notes", "8")).await).await;
+    assert_eq!(body["state"], "Failed");
+    assert_eq!(body["terminal"], true);
+    assert_eq!(body["reason"], "api: health check failed after 30s");
+
+    let body = json_body(app.send(read(Some(&token), "notes", "9")).await).await;
+    assert_eq!(body["state"], "HealthChecking");
+    assert_eq!(body["terminal"], false);
+    assert_eq!(body["finished_at"], Value::Null);
+}
+
+#[tokio::test]
+async fn only_deployments_the_run_started_are_found_and_the_rest_read_alike() {
+    let ui = crate::web::stacks::tests::deployment(10, DeploymentState::Live);
+    let (app, signer) = app_with(vec![
+        from_run(8, DeploymentState::Live, "123456"),
+        from_run(9, DeploymentState::Live, "999999"),
+        ui,
+    ])
+    .await;
+    let token = signer.sign(&claims("probe"));
+    // Another run's deployment, a UI deployment, an unknown id and no id at all.
+    for id in ["9", "10", "404", "abc", "-1"] {
+        let response = app.send(read(Some(&token), "notes", id)).await;
+        assert_eq!(response.status(), 404, "{id}");
+        assert_eq!(
+            json_body(response).await,
+            json!({ "error": "no such deployment" }),
+            "{id}"
+        );
+    }
+    // The run's own deployment, for contrast.
+    let response = app.send(read(Some(&token), "notes", "8")).await;
+    assert_eq!(response.status(), 200);
+    // Another repository's run with the same id is not this run.
+    let other = signer.sign(&with(claims("other"), "repository", json!("acme/other")));
+    let response = app.send(read(Some(&other), "notes", "8")).await;
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test]
+async fn a_read_the_deploy_rule_refuses_is_403_and_not_listed_on_the_stack_page() {
+    let (app, signer) = app_with(vec![from_run(8, DeploymentState::Live, "123456")]).await;
+    let branch = signer.sign(&with(claims("branch"), "ref", json!("refs/heads/main")));
+    let elsewhere = signer.sign(&with(claims("elsewhere"), "repository_id", json!("99")));
+    for token in [&branch, &elsewhere] {
+        let response = app.send(read(Some(token), "notes", "8")).await;
+        assert_eq!(response.status(), 403);
+        assert_eq!(
+            json_body(response).await,
+            json!({ "error": "not allowed to deploy this stack" })
+        );
+    }
+    // An unknown stack reads like a refused one, so stacks cannot be probed either.
+    let token = signer.sign(&claims("ghost"));
+    let response = app.send(read(Some(&token), "ghost", "8")).await;
+    assert_eq!(response.status(), 403);
+    assert!(app.stacks.rejections.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_stack_without_a_deploy_rule_cannot_be_read() {
+    let app = TestApp::new().await;
+    let signer = Signer::a();
+    serve_jwks(&app.github, &[&signer]).await;
+    app.stacks
+        .deployments
+        .lock()
+        .unwrap()
+        .push((from_run(8, DeploymentState::Live, "123456"), Vec::new()));
+    let token = signer.sign(&claims("no-rule"));
+    let response = app.send(read(Some(&token), "notes", "8")).await;
+    assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn a_read_with_a_bad_token_is_401() {
+    let (app, signer) = app_with(vec![from_run(8, DeploymentState::Live, "123456")]).await;
+    let expired = signer.sign(&with(claims("old"), "exp", json!(now() - 600)));
+    for token in [None, Some("garbage"), Some(expired.as_str())] {
+        let response = app.send(read(token, "notes", "8")).await;
+        assert_eq!(response.status(), 401, "{token:?}");
+        assert_eq!(header(&response, "www-authenticate"), "Bearer");
+    }
+}

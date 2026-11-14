@@ -43,7 +43,7 @@ use super::pages::{FlashKind, Layout, Page, Section, Shell};
 use crate::orchestrator::{
     ApplyOutcome, ApplyPreview, CheckReport, DeployOutcome, Operator, Orchestrator,
     OrchestratorError, RemoveOutcome, RemoveStack, SecretChange, StackSecret, StackStatus,
-    StackUpdates, UiEvent, UpdateChoice, UpdatePreview, WebhookDeploy,
+    StackUpdates, UiEvent, UpdateChoice, UpdatePreview, WebhookDeploy, WebhookRead,
 };
 use crate::runtime::ContainerRuntime;
 use crate::secrets::{SecretError, SecretValue};
@@ -90,6 +90,10 @@ pub trait StackControl: Send + Sync + 'static {
         &self,
         request: WebhookDeploy,
     ) -> Result<DeployOutcome, OrchestratorError>;
+
+    /// A deployment read by CI; see [`Orchestrator::webhook_deployment`].
+    async fn webhook_deployment(&self, read: &WebhookRead)
+    -> Result<Deployment, OrchestratorError>;
 
     /// See [`Orchestrator::record_rejection`].
     async fn record_rejection(&self, rejection: &WebhookRejection)
@@ -229,6 +233,13 @@ impl<R: ContainerRuntime> StackControl for Arc<Orchestrator<R>> {
         request: WebhookDeploy,
     ) -> Result<DeployOutcome, OrchestratorError> {
         Orchestrator::deploy_webhook(self, request).await
+    }
+
+    async fn webhook_deployment(
+        &self,
+        read: &WebhookRead,
+    ) -> Result<Deployment, OrchestratorError> {
+        Orchestrator::webhook_deployment(self, read).await
     }
 
     async fn record_rejection(

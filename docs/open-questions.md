@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-38, OQ-40, OQ-43 and OQ-45 are open (OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38, OQ-40 and OQ-43 are open (OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -49,7 +49,7 @@ Index:
 | [OQ-41](#oq-41-persisted-structured-container-logs) | ~~Persisted, structured container logs~~ **Resolved → ADR-0067 (separate `logs.db`, 7 days, 1 GiB)** | — |
 | [OQ-42](#oq-42-receiving-opentelemetry-otlp-from-containers) | ~~Receiving OpenTelemetry (OTLP) from containers~~ **Resolved → ADR-0069 (receiver on the proxy's `:80`, derived tokens, trace per request)** | — |
 | [OQ-43](#oq-43-a-filter-language-for-the-telemetry-query-box) | A filter language for the Telemetry query box | `ddf` |
-| [OQ-45](#oq-45-a-deployments-outcome-for-ci) | A deployment's outcome for CI | `aax` |
+| [OQ-45](#oq-45-a-deployments-outcome-for-ci) | ~~A deployment's outcome for CI~~ **Resolved → ADR-0070 (OIDC reads that don't consume the `jti`, scoped to the run)** | — |
 | [OQ-46](#oq-46-a-known-subnet-for-stack-networks) | ~~A known subnet for stack networks~~ **Resolved → ADR-0071 (one `network_pool`, a /24 per stack)** | — |
 
 ---
@@ -649,6 +649,11 @@ the proxy for a margin no client can exploit beyond what the total cap allows. R
 the System page's refusal counts show one address regularly crowding others out.
 
 ## OQ-45: A deployment's outcome for CI
+
+**Resolved 2026-11-14 → [ADR-0070](adr/0070-deployment-status-for-ci.md): option B. Reads are
+scoped to deployments the same workflow run started (`repository` and `run_id` of the
+provenance), which is tighter than the `repository_id` match recommended below and needs no
+new column.**
 
 **Problem.** The deploy action (`actions/deploy/`) posts digests to `/hooks/deploy` and succeeds
 on hoster's `202 {"deployment_id":…,"result":"accepted"}`. A green CI run therefore means only

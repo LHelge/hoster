@@ -20,6 +20,9 @@ A=sha256:$(printf '%064d' 0 | tr 0 a)
 B=sha256:$(printf '%064d' 0 | tr 0 b)
 failures=0
 
+# The polls the stub answers in the next run, in order, the last one for good; reset by run.
+polls=()
+
 # run NAME EXPECTED-EXIT [VAR=VALUE…] -- answers…: runs deploy.sh with a GitHub-like environment,
 # the stub answering the given lines in order. Leaves out, outputs, summary and requests in $work.
 run() {
@@ -29,6 +32,8 @@ run() {
   while [ $# -gt 0 ] && [ "$1" != -- ]; do vars+=("$1"); shift; done
   [ $# -gt 0 ] && shift
   printf '%s\n' "$@" >"$work/answers"
+  if [ ${#polls[@]} -gt 0 ]; then printf '%s\n' "${polls[@]}" >"$work/polls"; else : >"$work/polls"; fi
+  polls=()
   : >"$work/requests"
   : >"$work/outputs"
   : >"$work/summary"
@@ -39,7 +44,7 @@ run() {
     ACTIONS_ID_TOKEN_REQUEST_TOKEN=request-token \
     GITHUB_OUTPUT="$work/outputs" GITHUB_STEP_SUMMARY="$work/summary" RUNNER_TEMP="$work" \
     GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v1.4.2 GITHUB_SHA=0123456789abcdef \
-    DEPLOY_URL="$base" DEPLOY_STACK=notes DEPLOY_IMAGES="api=$A" DEPLOY_RETRY_DELAY=0 \
+    DEPLOY_URL="$base" DEPLOY_STACK=notes DEPLOY_IMAGES="api=$A" DEPLOY_RETRY_DELAY=0 DEPLOY_POLL_INTERVAL=0 \
     ${vars[@]+"${vars[@]}"} bash "$here/deploy.sh" >"$work/out" 2>&1 || code=$?
   if [ "$code" != "$expected" ]; then
     fail_case "exit $code, expected $expected"
@@ -64,6 +69,15 @@ expect_log() {
 }
 deploys() { jq -s "[.[] | select(.kind == \"deploy\")] | $1" "$work/requests"; }
 expect_deploys() { [ "$(deploys length)" = "$1" ] || fail_case "$(deploys length) deploy requests, expected $1"; }
+polled() { jq -s "[.[] | select(.kind == \"poll\")] | $1" "$work/requests"; }
+expect_polls() { [ "$(polled length)" = "$1" ] || fail_case "$(polled length) polls, expected $1"; }
+expect_summary() { grep -qF -- "$1" "$work/summary" || fail_case "summary lacks \`$1\`"; }
+
+# A status answer for deployment 8 (ADR-0070): STATE TERMINAL [REASON-JSON].
+status() {
+  printf '200 {"deployment_id":"8","stack":"notes","state":"%s","terminal":%s,"reason":%s}' "$1" "$2" "${3:-null}"
+}
+ACCEPTED='202 {"result":"accepted","deployment_id":"8","state":"Received"}'
 
 # Accepted: the body, the token's audience and use, outputs and summary.
 run accepted 0 DEPLOY_IMAGES="
@@ -117,6 +131,78 @@ run "retries exhausted" 1 -- '502 {"error":"registry unreachable"}' '502 {"error
 expect_deploys 3
 expect_log "did not take the deploy after 3 attempts (last: 502: registry unreachable)"
 
+# Without `wait`, nothing is polled; the state output is the 202's.
+run "no wait" 0 -- "$ACCEPTED"
+expect_polls 0
+expect_output "state=Received"
+
+# `wait`: polled with the deploy's own token until it is terminal.
+polls=("$(status Pulling false)" "$(status HealthChecking false)" "$(status Live true)")
+run "wait, live" 0 DEPLOY_WAIT=true -- "$ACCEPTED"
+expect_polls 3
+expect "polls the deployment" '[.[] | select(.kind == "poll") | .path] | unique == ["/hooks/deploy/notes/deployments/8"]' "$work/requests"
+[ "$(polled '[.[].authorization] | unique')" = '[
+  "Bearer token-1"
+]' ] || fail_case "polls did not reuse the deploy's token"
+expect_log "deployment 8: Pulling"
+expect_log "deployment 8: HealthChecking"
+expect_log "deployment 8 is live: $base/stacks/notes/deployments/8"
+expect_output "state=Live"
+expect_output "deployment-url=$base/stacks/notes/deployments/8"
+expect_summary "deployment [8]($base/stacks/notes/deployments/8) is live"
+
+polls=("$(status LiveWithWarnings true '"cleanup: old container still stopping"')")
+run "wait, live with warnings" 0 DEPLOY_WAIT=true -- "$ACCEPTED"
+expect_log "::warning title=hoster deploy::deployment 8 went live with warnings: cleanup: old container still stopping"
+expect_output "state=LiveWithWarnings"
+
+polls=("$(status HealthChecking false)" "$(status Failed true '"api: health check failed after 30s"')")
+run "wait, failed" 1 DEPLOY_WAIT=true -- "$ACCEPTED"
+expect_log "::error title=hoster deploy::deployment 8 ended Failed: api: health check failed after 30s; see $base/stacks/notes/deployments/8"
+expect_output "state=Failed"
+expect_output "deployment-id=8"
+expect_summary "deployment [8]($base/stacks/notes/deployments/8) ended **Failed**: api: health check failed after 30s"
+
+polls=("$(status Superseded true)")
+run "wait, superseded" 1 DEPLOY_WAIT=true -- "$ACCEPTED"
+expect_log "deployment 8 ended Superseded"
+expect_output "state=Superseded"
+
+polls=("$(status HealthChecking false)")
+run "wait, timeout" 1 DEPLOY_WAIT=true DEPLOY_TIMEOUT=1s DEPLOY_POLL_INTERVAL=0.2 -- "$ACCEPTED"
+expect_log "deployment 8 did not finish within 1s (last state: HealthChecking); it keeps running in hoster"
+expect_output "state=HealthChecking"
+expect_summary "did not finish within 1s (HealthChecking)"
+
+# An expired token is replaced; 503 and a dropped connection are retried.
+polls=('401 {"error":"invalid token"}' '503 {"error":"cannot verify tokens right now"}' drop "$(status Live true)")
+run "wait, re-mint and retry" 0 DEPLOY_WAIT=true -- "$ACCEPTED"
+expect_polls 4
+[ "$(polled '[.[].authorization]' | jq -c .)" = '["Bearer token-1","Bearer token-2","Bearer token-2","Bearer token-2"]' ] ||
+  fail_case "tokens while polling: $(polled '[.[].authorization]' | jq -c .)"
+expect_log "following deployment 8: 503; retrying"
+expect_log "following deployment 8: no answer; retrying"
+expect_output "state=Live"
+
+polls=('401 {"error":"invalid token"}')
+run "wait, token refused for good" 1 DEPLOY_WAIT=true -- "$ACCEPTED"
+expect_polls 4
+expect_log "hoster kept refusing the token (401) while following deployment 8"
+
+# A server without the endpoint, and a deployment the run may not see.
+polls=('404 <!doctype html><title>Not found</title>')
+run "wait, old server" 1 DEPLOY_WAIT=true -- "$ACCEPTED"
+expect_log "hoster has no deployment status endpoint (404)"
+expect_summary "accepted, but could not be followed"
+polls=('404 {"error":"no such deployment"}')
+run "wait, not this run's" 1 DEPLOY_WAIT=true -- "$ACCEPTED"
+expect_log "hoster does not show deployment 8 to this workflow run (404)"
+
+# A no-op has nothing to wait for.
+run "wait, noop" 0 DEPLOY_WAIT=true -- '200 {"result":"noop","deployment_id":"7"}'
+expect_polls 0
+expect_output "state=Noop"
+
 # Input errors fail before any request.
 run "no images" 1 DEPLOY_IMAGES=" " --
 expect_deploys 0
@@ -132,6 +218,12 @@ run "plain http" 1 DEPLOY_URL=http://hoster.example.com --
 expect_log "url must be hoster's https:// admin URL"
 run "no id-token permission" 1 ACTIONS_ID_TOKEN_REQUEST_TOKEN= --
 expect_log "permissions: id-token: write"
+run "bad wait" 1 DEPLOY_WAIT=yes --
+expect_log "wait must be \`true\` or \`false\`, got \`yes\`"
+run "bad timeout" 1 DEPLOY_TIMEOUT=10min --
+expect_log "timeout must be a number of seconds"
+run "zero timeout" 1 DEPLOY_TIMEOUT=0m --
+expect_log "timeout must be longer than zero"
 [ "$(wc -l <"$work/requests" | tr -d ' ')" = 0 ] || { current="no requests on input errors"; fail_case "requests were made"; }
 
 if [ "$failures" -gt 0 ]; then
