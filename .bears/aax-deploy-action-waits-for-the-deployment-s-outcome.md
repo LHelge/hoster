@@ -2,10 +2,10 @@
 id: aax
 title: Deploy action waits for the deployment's outcome
 type: epic
-status: open
+status: done
 priority: P2
 created: "2026-11-14T21:53:40.992662718Z"
-updated: "2026-11-14T21:53:40.992662718Z"
+updated: "2026-11-14T22:25:37.840709788Z"
 tags:
   - ci
   - webhook

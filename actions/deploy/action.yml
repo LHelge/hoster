@@ -42,6 +42,19 @@ inputs:
       commit SHA.
     required: false
     default: ""
+  wait:
+    description: >-
+      `true` to follow the deployment until it is over and fail the step unless it goes live
+      (failed, rejected, superseded, or still running at `timeout`). Needs a hoster at least as
+      new as this action's release. Default `false`: the step succeeds once hoster accepts.
+    required: false
+    default: "false"
+  timeout:
+    description: >-
+      With `wait`, how long to follow the deployment: seconds, or with a unit, e.g. `90s`,
+      `10m`, `1h`. The deployment keeps running in hoster when the step gives up.
+    required: false
+    default: 10m
 
 outputs:
   result:
@@ -53,6 +66,11 @@ outputs:
   deployment-url:
     description: The deployment's page in hoster's admin UI.
     value: ${{ steps.deploy.outputs.deployment-url }}
+  state:
+    description: >-
+      The deployment's last known state, e.g. `Received`, or with `wait` the state it ended in
+      (`Live`, `LiveWithWarnings`, `Failed`, …); `Noop` for a no-op.
+    value: ${{ steps.deploy.outputs.state }}
 
 runs:
   using: composite
@@ -67,4 +85,6 @@ runs:
         DEPLOY_STACK: ${{ inputs.stack }}
         DEPLOY_IMAGES: ${{ inputs.images }}
         DEPLOY_TAG: ${{ inputs.tag }}
+        DEPLOY_WAIT: ${{ inputs.wait }}
+        DEPLOY_TIMEOUT: ${{ inputs.timeout }}
       run: bash "$GITHUB_ACTION_PATH/deploy.sh"
