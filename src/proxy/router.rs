@@ -547,12 +547,14 @@ impl<'a> Forwarding<'a> {
         }
     }
 
-    /// The client's IP address, when it connected over TCP.
+    /// The client's IP address, when it connected over TCP, in canonical form: the listener is
+    /// dual-stack, so an IPv4 client arrives IPv4-mapped (`::ffff:203.0.113.9`) and is given as
+    /// the IPv4 address it is. Everything that records or compares a client takes it from here.
     pub(super) fn client_ip(session: &Session) -> Option<IpAddr> {
         session
             .client_addr()
             .and_then(|addr| addr.as_inet())
-            .map(|addr| addr.ip())
+            .map(|addr| addr.ip().to_canonical())
     }
 
     /// The host a request is for: the URI authority (HTTP/2 `:authority`, or an HTTP/1

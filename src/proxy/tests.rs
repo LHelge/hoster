@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -339,6 +339,43 @@ impl Harness {
         admission: Admission,
         log_capacity: usize,
     ) -> Self {
+        Self::start_listening(
+            defaults,
+            limits,
+            admission,
+            log_capacity,
+            Ipv4Addr::LOCALHOST,
+        )
+        .await
+    }
+
+    /// The harness with the proxy listening dual-stack on `[::]`, as a default install does,
+    /// and its clients connecting over IPv4 loopback, so the proxy sees them IPv4-mapped.
+    /// `None` where the host has no IPv6.
+    async fn start_dual_stack() -> Option<Self> {
+        std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, 0)).ok()?;
+        Some(
+            Self::start_listening(
+                Timeouts::default(),
+                DownstreamLimits::default(),
+                Admission::default(),
+                1024,
+                Ipv6Addr::UNSPECIFIED,
+            )
+            .await,
+        )
+    }
+
+    /// The harness with the proxy's listeners on `listen`; clients connect to the same ports
+    /// on IPv4 loopback.
+    async fn start_listening(
+        defaults: Timeouts,
+        limits: DownstreamLimits,
+        admission: Admission,
+        log_capacity: usize,
+        listen: impl Into<IpAddr>,
+    ) -> Self {
+        let listen = listen.into();
         let state = AppState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let web_port = listener.local_addr().unwrap().port();
@@ -534,7 +571,7 @@ impl Harness {
         let mut attempts = 0;
         let (proxy, http, ProxyThread { thread, mut events }) = loop {
             // Both listeners are held at once, so the two ports differ.
-            let bind = || std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let bind = || std::net::TcpListener::bind((listen, 0)).unwrap();
             let (proxy, http) = {
                 let (proxy, http) = (bind(), bind());
                 (proxy.local_addr().unwrap(), http.local_addr().unwrap())
@@ -549,7 +586,11 @@ impl Harness {
             };
             attempts += 1;
             match Proxy::with_limits(&config, proxy_state.clone(), limits).spawn(rx.clone()) {
-                Ok(running) => break (proxy, http, running),
+                Ok(running) => {
+                    let client =
+                        |addr: SocketAddr| SocketAddr::new(Ipv4Addr::LOCALHOST.into(), addr.port());
+                    break (client(proxy), client(http), running);
+                }
                 Err(ProxyError::Bind { .. }) if attempts < 5 => continue,
                 Err(e) => panic!("{e}"),
             }
@@ -1516,6 +1557,35 @@ async fn the_admin_app_builds_urls_and_checks_origins_through_the_proxy() {
     assert_eq!(reply.header("location"), Some("/auth/login"));
     let reply = h.request(&home).await;
     assert_eq!(reply.status, 303, "signed out: {}", reply.text());
+}
+
+/// The listener is dual-stack, so an IPv4 client's peer address is IPv4-mapped IPv6. hoster
+/// names it as the IPv4 address everywhere: in `X-Forwarded-For`, in the request row and in the
+/// per-address cap's key.
+#[tokio::test]
+async fn an_ipv4_client_of_the_dual_stack_listener_is_named_by_its_ipv4_address() {
+    let Some(h) = Harness::start_dual_stack().await else {
+        eprintln!("skipped: no IPv6 on this host");
+        return;
+    };
+    let loopback = IpAddr::from(Ipv4Addr::LOCALHOST);
+    let reply = h.get("app.example.com", "/api/whoami").await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    assert_eq!(echoed(&reply, "x-forwarded-for"), ["127.0.0.1"]);
+    assert_eq!(h.next_request().await.client, loopback);
+
+    let held = TcpStream::connect(h.proxy).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while h.admission.clients() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the connection was not counted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(h.admission.open_from_ip(loopback), 1);
+    assert_eq!(h.admission.client_keys(), ["127.0.0.1"]);
+    drop(held);
 }
 
 #[tokio::test]
