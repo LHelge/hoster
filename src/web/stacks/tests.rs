@@ -47,7 +47,7 @@ pub(super) fn revision(stack: &str, number: u32, toml: &str) -> StackRevision {
     }
 }
 
-pub(super) fn deployment(id: i64, state: DeploymentState) -> Deployment {
+pub(crate) fn deployment(id: i64, state: DeploymentState) -> Deployment {
     Deployment {
         id: DeploymentId::from(id),
         stack: "notes".into(),
@@ -376,6 +376,42 @@ impl StackControl for FakeStacks {
         // `deploy` recorded a manual deploy call too; this was one webhook call.
         self.calls.lock().unwrap().truncate(calls);
         outcome
+    }
+
+    /// The stack's rule as [`FakeStacks::deploy_webhook`] checks it, then the deployment if
+    /// the read's run started it.
+    async fn webhook_deployment(
+        &self,
+        read: &WebhookRead,
+    ) -> Result<Deployment, OrchestratorError> {
+        let forbidden = |reason: &str| OrchestratorError::Forbidden {
+            stack: read.stack.clone(),
+            reason: reason.into(),
+        };
+        let status = self
+            .current(&read.stack)
+            .ok_or_else(|| forbidden("the stack does not exist"))?;
+        let definition: Stack = status.revision.toml.parse()?;
+        definition
+            .deploy
+            .as_ref()
+            .ok_or_else(|| forbidden("the stack file has no [deploy] section"))?
+            .check(&read.caller)
+            .map_err(|denied| forbidden(&denied.to_string()))?;
+        self.deployments
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(d, _)| d)
+            .find(|d| {
+                d.id == read.deployment
+                    && d.stack == read.stack
+                    && d.provenance
+                        .as_ref()
+                        .is_some_and(|p| p.repository == read.repository && p.run_id == read.run_id)
+            })
+            .cloned()
+            .ok_or(OrchestratorError::UnknownDeployment(read.deployment))
     }
 
     async fn record_rejection(

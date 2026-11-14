@@ -30,6 +30,13 @@ impl From<&Config> for EffectiveConfig {
     }
 }
 
+impl EffectiveConfig {
+    /// The admin UI's origin; see [`Config::admin_origin`].
+    pub fn admin_origin(&self) -> String {
+        self.0.admin_origin()
+    }
+}
+
 /// One read-only section: a head, its fields, and the "set in hoster.toml" footer.
 #[derive(Debug)]
 pub struct ConfigSection {

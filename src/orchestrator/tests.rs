@@ -2081,6 +2081,62 @@ async fn webhook_deploys_several_services_as_one_deployment_with_provenance() {
     assert_eq!(again.state, S::Noop);
 }
 
+/// ADR-0070: CI reads back the deployment its own run started, through the `[deploy]` rule.
+#[tokio::test]
+async fn a_webhook_read_sees_only_its_own_runs_deployments() {
+    let h = harness().await;
+    let applied = h.apply(&hooked()).await.deployment.unwrap();
+    h.finish(&applied).await;
+    let outcome = h
+        .orchestrator
+        .deploy_webhook(webhook(
+            "notes",
+            &[("api", 1)],
+            caller(42, "refs/tags/v1.4.2"),
+        ))
+        .await
+        .unwrap();
+    h.finish(&outcome).await;
+    let read = |deployment: DeploymentId, caller: DeployCaller, run_id: &str| WebhookRead {
+        stack: "notes".into(),
+        deployment,
+        caller,
+        repository: "acme/notes".into(),
+        run_id: run_id.into(),
+    };
+    let tag = || caller(42, "refs/tags/v1.4.2");
+
+    let seen = h
+        .orchestrator
+        .webhook_deployment(&read(outcome.deployment, tag(), "123456"))
+        .await
+        .unwrap();
+    assert_eq!(seen.id, outcome.deployment);
+    assert_eq!(seen.state, S::Live);
+    // Another run, and the apply's deployment, which no run started.
+    for (id, run) in [(outcome.deployment, "999"), (applied.deployment, "123456")] {
+        assert!(matches!(
+            h.orchestrator
+                .webhook_deployment(&read(id, tag(), run))
+                .await
+                .unwrap_err(),
+            OrchestratorError::UnknownDeployment(_)
+        ));
+    }
+    // A caller the rule refuses learns nothing about the id.
+    assert!(matches!(
+        h.orchestrator
+            .webhook_deployment(&read(
+                outcome.deployment,
+                caller(42, "refs/heads/main"),
+                "123456"
+            ))
+            .await
+            .unwrap_err(),
+        OrchestratorError::Forbidden { .. }
+    ));
+}
+
 #[tokio::test]
 async fn webhook_is_forbidden_without_a_matching_deploy_rule() {
     let h = harness().await;

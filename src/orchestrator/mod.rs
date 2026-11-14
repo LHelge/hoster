@@ -298,6 +298,29 @@ pub struct WebhookDeploy {
     pub provenance: Provenance,
 }
 
+/// A read of one deployment from CI (ADR-0070), with its verified caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookRead {
+    pub stack: String,
+    pub deployment: DeploymentId,
+    /// Checked against the stack's `[deploy]` rule.
+    pub caller: DeployCaller,
+    /// The token's `repository` and `run_id`: only a deployment this run started is shown.
+    pub repository: String,
+    pub run_id: String,
+}
+
+impl WebhookRead {
+    /// Whether `deployment` is one this read may see: the stack's, started by the webhook from
+    /// the same workflow run.
+    fn may_see(&self, deployment: &Deployment) -> bool {
+        deployment.stack == self.stack
+            && deployment.provenance.as_ref().is_some_and(|provenance| {
+                provenance.repository == self.repository && provenance.run_id == self.run_id
+            })
+    }
+}
+
 /// The reply to [`Orchestrator::apply`].
 #[derive(Debug, Clone)]
 pub struct ApplyOutcome {
@@ -1595,23 +1618,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
     /// not tell anyone with a GitHub token which stacks exist.
     #[tracing::instrument(skip_all, fields(stack = %request.stack))]
     pub async fn deploy_webhook(self: &Arc<Self>, request: WebhookDeploy) -> Result<DeployOutcome> {
-        let stack = request.stack.as_str();
-        let forbidden = |reason: String| OrchestratorError::Forbidden {
-            stack: stack.to_owned(),
-            reason,
-        };
-        let revision = match self.store.stack(stack).await? {
-            Some(_) => self.store.latest_revision(stack).await?,
-            None => None,
-        }
-        .ok_or_else(|| forbidden("the stack does not exist".into()))?;
-        let definition: Arc<Stack> = Arc::new(revision.toml.parse()?);
-        let rule = definition
-            .deploy
-            .as_ref()
-            .ok_or_else(|| forbidden("the stack file has no [deploy] section".into()))?;
-        rule.check(&request.caller)
-            .map_err(|denied| forbidden(denied.to_string()))?;
+        let (revision, definition) = self.webhook_rule(&request.stack, &request.caller).await?;
         Self::deployable(&definition, &request.images)?;
         for (service, digest) in &request.images {
             let image = &definition
@@ -1647,6 +1654,45 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         let target = Target::new(definition, revision, pins, request.images);
         self.submit(target, DeploymentSource::Webhook, Some(request.provenance))
             .await
+    }
+
+    /// A deployment as CI may read it (ADR-0070): the caller must match the stack's `[deploy]`
+    /// rule as for a deploy, and the deployment must be one the caller's workflow run started.
+    /// Any other id, the stack's or not, is an [`UnknownDeployment`](OrchestratorError::UnknownDeployment).
+    pub async fn webhook_deployment(&self, read: &WebhookRead) -> Result<Deployment> {
+        self.webhook_rule(&read.stack, &read.caller).await?;
+        self.store
+            .deployment(read.deployment)
+            .await?
+            .filter(|deployment| read.may_see(deployment))
+            .ok_or(OrchestratorError::UnknownDeployment(read.deployment))
+    }
+
+    /// The current revision of `stack` and its definition, if `caller` passes its `[deploy]`
+    /// rule. An unknown stack and one without a rule are [`Forbidden`](OrchestratorError::Forbidden)
+    /// like a failed rule, so no answer tells a caller which stacks exist.
+    async fn webhook_rule(
+        &self,
+        stack: &str,
+        caller: &DeployCaller,
+    ) -> Result<(StackRevision, Arc<Stack>)> {
+        let forbidden = |reason: String| OrchestratorError::Forbidden {
+            stack: stack.to_owned(),
+            reason,
+        };
+        let revision = match self.store.stack(stack).await? {
+            Some(_) => self.store.latest_revision(stack).await?,
+            None => None,
+        }
+        .ok_or_else(|| forbidden("the stack does not exist".into()))?;
+        let definition: Arc<Stack> = Arc::new(revision.toml.parse()?);
+        definition
+            .deploy
+            .as_ref()
+            .ok_or_else(|| forbidden("the stack file has no [deploy] section".into()))?
+            .check(caller)
+            .map_err(|denied| forbidden(denied.to_string()))?;
+        Ok((revision, definition))
     }
 
     /// Records a refused webhook attempt for the stack page (ADR-0047). Attempts on stacks

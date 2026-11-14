@@ -297,7 +297,7 @@ impl WebApp {
             auth: Arc::new(auth),
             containers: Containers::from(containers),
             certificates: Certificates::from(Arc::clone(&certificates)),
-            webhook: Webhook::new(verifier, store, Arc::clone(&stacks)),
+            webhook: Webhook::new(verifier, store, Arc::clone(&stacks), config.admin_origin()),
             stacks: Stacks::from(stacks),
             settings: Settings::new(
                 config,
@@ -437,6 +437,10 @@ impl WebApp {
             .route("/system/version", get(System::version))
             .layer(Extension(self.system.clone()))
             .route("/hooks/deploy", post(Webhook::deploy))
+            .route(
+                "/hooks/deploy/{stack}/deployments/{id}",
+                get(Webhook::deployment),
+            )
             .layer(Extension(self.webhook.clone()))
             .route("/healthz", get(WebApp::healthz))
             .route(StackSchema::ADMIN_PATH, get(WebApp::stack_schema))
