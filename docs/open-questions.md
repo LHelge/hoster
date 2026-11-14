@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-38, OQ-40, OQ-43, OQ-45 and OQ-46 are open (OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38, OQ-40, OQ-43 and OQ-45 are open (OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -50,7 +50,7 @@ Index:
 | [OQ-42](#oq-42-receiving-opentelemetry-otlp-from-containers) | ~~Receiving OpenTelemetry (OTLP) from containers~~ **Resolved → ADR-0069 (receiver on the proxy's `:80`, derived tokens, trace per request)** | — |
 | [OQ-43](#oq-43-a-filter-language-for-the-telemetry-query-box) | A filter language for the Telemetry query box | `ddf` |
 | [OQ-45](#oq-45-a-deployments-outcome-for-ci) | A deployment's outcome for CI | `aax` |
-| [OQ-46](#oq-46-a-known-subnet-for-stack-networks) | A known subnet for stack networks | `w8w` |
+| [OQ-46](#oq-46-a-known-subnet-for-stack-networks) | ~~A known subnet for stack networks~~ **Resolved → ADR-0071 (one `network_pool`, a /24 per stack)** | — |
 
 ---
 
@@ -695,6 +695,9 @@ OIDC the only credential, needs no new secret, and the single-use rule exists to
 *deploy*, which a read is not. Record it as a new ADR amending ADR-0042/ADR-0047.
 
 ## OQ-46: A known subnet for stack networks
+
+**Resolved 2026-11-14 → [ADR-0071](adr/0071-stack-networks-from-a-configured-pool.md): option B,
+one hoster-wide `network_pool` (default `10.89.0.0/16`) with a /24 per stack.**
 
 **Problem.** Podman picks each stack network's subnet (`hoster-<stack>`, ADR-0006) from its
 default pools. hoster's proxied connections reach a container from inside that network, so an
