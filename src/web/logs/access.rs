@@ -21,7 +21,6 @@
 //! [`LogStore::requests_after`], as the containers' stream reads records.
 
 use std::fmt;
-use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::watch;
@@ -265,12 +264,7 @@ impl AccessLog {
         let path_cut = path.chars().count() > Self::PATH_CAP;
         let shown: String = path.chars().take(Self::PATH_CAP).collect();
         let request_id = request.request_id.to_string();
-        let client = match request.client {
-            IpAddr::V6(v6) => v6
-                .to_ipv4_mapped()
-                .map_or_else(|| v6.to_string(), |v4| v4.to_string()),
-            v4 => v4.to_string(),
-        };
+        let client = request.client.to_string();
         let records =
             self.records
                 .to(&[("service", None), ("q", Some(&request_id)), ("regex", None)]);

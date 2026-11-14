@@ -474,7 +474,7 @@ sent under the same names:
 | Header | Value |
 |---|---|
 | `Host` | Unchanged, as the client sent it. |
-| `X-Forwarded-For` | The client's own list, if it sent one, with the address hoster saw appended; only the last entry is hoster's. |
+| `X-Forwarded-For` | The client's own list, if it sent one, with the address hoster saw appended; only the last entry is hoster's. An IPv4 client is always written as plain IPv4 (`203.0.113.9`), never IPv4-mapped (`::ffff:203.0.113.9`). |
 | `X-Forwarded-Proto` | `https`. |
 | `X-Forwarded-Host` | The host as the client sent it, port included. |
 | `X-Forwarded-Prefix` | The route's `prefix`, whether or not it is stripped; not set for `/`. |

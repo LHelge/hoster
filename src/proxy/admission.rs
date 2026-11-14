@@ -383,6 +383,12 @@ impl Admission {
     pub(crate) fn clients(&self) -> usize {
         self.0.addresses.lock().unwrap().len()
     }
+
+    /// The keys of the addresses with connections open, as the log names them.
+    pub(crate) fn client_keys(&self) -> Vec<String> {
+        let addresses = self.0.addresses.lock().unwrap();
+        addresses.keys().map(Key::to_string).collect()
+    }
 }
 
 /// Why a connection was refused, as the log says it.
@@ -404,19 +410,17 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// What the per-address cap counts by: an IPv4 address, or the /64 of an IPv6 one. An
-/// IPv4-mapped IPv6 address is the IPv4 address.
+/// What the per-address cap counts by: an IPv4 address, or the /64 of an IPv6 one. The address
+/// is taken in canonical form, so an IPv4 client on the dual-stack listener, whose peer address
+/// is IPv4-mapped, counts as the IPv4 address, as `X-Forwarded-For` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Key(IpAddr);
 
 impl From<IpAddr> for Key {
     fn from(ip: IpAddr) -> Self {
-        match ip {
+        match ip.to_canonical() {
             IpAddr::V4(v4) => Key(v4.into()),
-            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-                Some(v4) => Key(v4.into()),
-                None => Key(Ipv6Addr::from(u128::from(v6) & !u128::from(u64::MAX)).into()),
-            },
+            IpAddr::V6(v6) => Key(Ipv6Addr::from(u128::from(v6) & !u128::from(u64::MAX)).into()),
         }
     }
 }

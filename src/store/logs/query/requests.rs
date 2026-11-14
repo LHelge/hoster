@@ -2,6 +2,7 @@
 //! by request id, the row a container record links to.
 
 use std::fmt;
+use std::net::IpAddr;
 use std::ops::Range;
 use std::str::FromStr;
 use std::time::Duration;
@@ -250,10 +251,13 @@ impl TryFrom<Row> for RequestEntry {
                 to_header: row.header_ms.map(millis),
                 total: millis(row.total_ms),
                 bytes: u64::try_from(row.bytes).unwrap_or(0),
+                // Rows written before the proxy canonicalised client addresses may hold an
+                // IPv4 client IPv4-mapped; one client reads as one address either way.
                 client: row
                     .client
-                    .parse()
-                    .map_err(|_| UnknownLogText::new("client address", &row.client))?,
+                    .parse::<IpAddr>()
+                    .map_err(|_| UnknownLogText::new("client address", &row.client))?
+                    .to_canonical(),
                 upstream_failed: row.upstream_failed,
                 request_id: row.request_id.parse()?,
                 server_span: span(row.server_span_id)?,

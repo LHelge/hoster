@@ -939,7 +939,10 @@ In `upstream_request_filter`:
 - **`X-Forwarded-Prefix: <prefix_str>`** is set either way. It is omitted for the root prefix
   `/`. Any client-supplied value is overwritten.
 - **Other forwarding headers.**
-  - `X-Forwarded-For` is appended to.
+  - `X-Forwarded-For` is appended to, with the client's address in canonical form: the
+    listeners are dual-stack, so an IPv4 client's peer address is IPv4-mapped
+    (`::ffff:203.0.113.9`), and hoster writes it as `203.0.113.9`. The request rows of the
+    log store and the per-address connection cap (ADR-0065) use the same form.
   - `X-Forwarded-Proto: https` and `X-Forwarded-Host: <host>` are set.
   - Client-supplied `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Forwarded-Prefix` are
     overwritten. hoster is the edge, so incoming values are untrusted.

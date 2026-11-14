@@ -94,7 +94,7 @@ impl ProxyHttp for ChallengeOrRedirect {
         let local = session
             .server_addr()
             .and_then(|addr| addr.as_inet())
-            .map(|addr| addr.ip());
+            .map(|addr| addr.ip().to_canonical());
         if let Some(route) = self
             .receiver
             .route(host, Forwarding::client_ip(session), local)

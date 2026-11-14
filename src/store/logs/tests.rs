@@ -1089,6 +1089,23 @@ mod request_queries {
     }
 
     #[tokio::test]
+    async fn an_ipv4_mapped_client_reads_back_as_ipv4() {
+        // Written before the proxy canonicalised client addresses.
+        let mut row = request(7_000, "notes", "web", "/", 200);
+        row.client = "::ffff:192.0.2.7".parse().unwrap();
+        let (_dir, store) = seed(vec![row]).await;
+        let page = store
+            .requests(&RequestQuery::new(everything(), LogScope::All))
+            .await
+            .unwrap();
+        assert_eq!(
+            page.entries[0].request.client,
+            "192.0.2.7".parse::<std::net::IpAddr>().unwrap()
+        );
+        store.close().await;
+    }
+
+    #[tokio::test]
     async fn each_filter_narrows_alone_and_together() {
         let (_dir, store) = mixed().await;
         let all = || RequestQuery::new(everything(), LogScope::All);
