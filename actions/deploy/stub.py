@@ -4,7 +4,9 @@
 
 listens on 127.0.0.1 at a free port, which it writes to DIR/port. Every request is appended to
 DIR/requests as one JSON line. Each POST to /hooks/deploy takes the first line of DIR/answers,
-`STATUS JSON-BODY`, or `drop` to close the connection without answering.
+`STATUS JSON-BODY`, or `drop` to close the connection without answering. Each GET of
+/hooks/deploy/{stack}/deployments/{id} takes the first line of DIR/polls the same way, except
+that the last line is never used up, so a deployment can stay in one state.
 """
 
 import json
@@ -30,14 +32,17 @@ def recorded(kind):
         return [e for e in map(json.loads, f) if e["kind"] == kind]
 
 
-def next_answer():
-    path = os.path.join(DIR, "answers")
-    with open(path) as f:
-        lines = f.read().splitlines()
+def next_answer(name="answers", keep_last=False):
+    path = os.path.join(DIR, name)
+    lines = []
+    if os.path.exists(path):
+        with open(path) as f:
+            lines = f.read().splitlines()
     if not lines:
         return "500", '{"error":"stub: no answer left"}'
-    with open(path, "w") as f:
-        f.write("".join(line + "\n" for line in lines[1:]))
+    if not (keep_last and len(lines) == 1):
+        with open(path, "w") as f:
+            f.write("".join(line + "\n" for line in lines[1:]))
     status, _, body = lines[0].partition(" ")
     return status, body
 
@@ -56,6 +61,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        if url.path.startswith("/hooks/deploy/"):
+            record(
+                {
+                    "kind": "poll",
+                    "path": url.path,
+                    "authorization": self.headers.get("Authorization"),
+                }
+            )
+            status, body = next_answer("polls", keep_last=True)
+            if status == "drop":
+                self.close_connection = True
+                return
+            return self.answer(status, body)
         if url.path != "/token":
             return self.answer(404, "{}")
         if self.headers.get("Authorization") != f"bearer {REQUEST_TOKEN}":

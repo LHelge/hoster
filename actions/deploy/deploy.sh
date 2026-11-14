@@ -8,17 +8,38 @@
 #   DEPLOY_STACK     the stack's name
 #   DEPLOY_IMAGES    one `service=digest` per line
 #   DEPLOY_TAG       informational; defaults to the tag name on a tag push, else the short SHA
+#   DEPLOY_WAIT      `true` to follow the deployment until it is over (ADR-0070); default `false`
+#   DEPLOY_TIMEOUT   how long to follow it: seconds, or with an `s`, `m` or `h` unit; default `10m`
 #
-# and DEPLOY_RETRY_DELAY (seconds, default 5), which only actions/deploy/test.sh sets.
+# and DEPLOY_RETRY_DELAY and DEPLOY_POLL_INTERVAL (seconds, default 5), which only
+# actions/deploy/test.sh sets.
 #
 # 200 and 202 succeed; 502, 503 and transport failures are retried with a fresh token (the token
 # is single-use, and a repeated deploy of the same digests is a no-op, ADR-0029); anything else
-# fails the step with hoster's reason.
+# fails the step with hoster's reason. With DEPLOY_WAIT, an accepted deployment is then polled
+# with the same token (a read does not use it up) until it is terminal: it must go live.
 set -euo pipefail
 
 fail() {
   echo "::error title=hoster deploy::$*"
   exit 1
+}
+
+# The answer's `error`, else the start of its body.
+reason_of() {
+  local reason
+  reason=$(jq -r '.error // empty' "$1" 2>/dev/null || true)
+  [ -n "$reason" ] || reason=$(head -c 500 "$1")
+  printf '%s' "$reason"
+}
+
+# Sets `token` to a fresh OIDC token for hoster's audience, masked in the log.
+mint_token() {
+  token=$(curl -fsS --max-time 30 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+    "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$encoded_audience" | jq -r '.value // empty') ||
+    fail "could not request an OIDC token from GitHub"
+  [ -n "$token" ] || fail "GitHub returned no OIDC token"
+  echo "::add-mask::$token"
 }
 
 # --- Inputs -------------------------------------------------------------------------------------
@@ -69,6 +90,21 @@ if [ -z "$tag" ]; then
   fi
 fi
 
+wait=${DEPLOY_WAIT:-false}
+case $wait in
+  true | false) ;;
+  *) fail "wait must be \`true\` or \`false\`, got \`$wait\`" ;;
+esac
+timeout=${DEPLOY_TIMEOUT:-10m}
+[[ $timeout =~ ^([0-9]+)([smh]?)$ ]] ||
+  fail "timeout must be a number of seconds, or with a unit like \`90s\`, \`10m\` or \`1h\`; got \`$timeout\`"
+case ${BASH_REMATCH[2]} in
+  h) timeout_secs=$((10#${BASH_REMATCH[1]} * 3600)) ;;
+  m) timeout_secs=$((10#${BASH_REMATCH[1]} * 60)) ;;
+  *) timeout_secs=$((10#${BASH_REMATCH[1]})) ;;
+esac
+[ "$timeout_secs" -gt 0 ] || fail "timeout must be longer than zero"
+
 body=$(jq -nc --arg s "$stack" --argjson i "$images" --arg t "$tag" \
   '{stack: $s, images: $i} + (if $t == "" then {} else {tag: $t} end)')
 echo "Deploying to $base: $body"
@@ -82,19 +118,14 @@ attempts=3
 delay=${DEPLOY_RETRY_DELAY:-5}
 
 for attempt in $(seq 1 "$attempts"); do
-  token=$(curl -fsS --max-time 30 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-    "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$encoded_audience" | jq -r '.value // empty') ||
-    fail "could not request an OIDC token from GitHub"
-  [ -n "$token" ] || fail "GitHub returned no OIDC token"
-  echo "::add-mask::$token"
+  mint_token
 
   : >"$response"
   status=$(curl -sS --max-time 60 -o "$response" -w '%{http_code}' -X POST "$base/hooks/deploy" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $token" \
     --data "$body") || status=000
-  reason=$(jq -r '.error // empty' "$response" 2>/dev/null || true)
-  [ -n "$reason" ] || reason=$(head -c 500 "$response")
+  reason=$(reason_of "$response")
 
   case $status in
     200 | 202) break ;;
@@ -118,6 +149,7 @@ id=$(jq -r '.deployment_id // empty' "$response")
 state=$(jq -r '.state // empty' "$response")
 [ -n "$result" ] && [ -n "$id" ] || fail "unexpected answer from hoster ($status): $(head -c 500 "$response")"
 url="$base/stacks/$stack/deployments/$id"
+[ "$result" = noop ] && state=Noop
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {
@@ -127,19 +159,102 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
   } >>"$GITHUB_OUTPUT"
 fi
 
+# finish CODE SUMMARY: the `state` output and the job summary, then exit with CODE.
+finish() {
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    echo "state=$state" >>"$GITHUB_OUTPUT"
+  fi
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "### hoster: \`$stack\` $2"
+      echo
+      echo "| Service | Digest |"
+      echo "|---|---|"
+      jq -r 'to_entries[] | "| `\(.key)` | `\(.value)` |"' <<<"$images"
+    } >>"$GITHUB_STEP_SUMMARY"
+  fi
+  exit "$1"
+}
+
+link="[$id]($url)"
 if [ "$result" = noop ]; then
   echo "Stack $stack already runs these digests: $url"
-  summary="already runs these digests (deployment [$id]($url))"
-else
-  echo "Stack $stack: deployment $id accepted${state:+ ($state)}: $url"
-  summary="deployment [$id]($url) accepted${state:+ ($state)}"
+  finish 0 "already runs these digests (deployment $link)"
 fi
-if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-  {
-    echo "### hoster: \`$stack\` $summary"
-    echo
-    echo "| Service | Digest |"
-    echo "|---|---|"
-    jq -r 'to_entries[] | "| `\(.key)` | `\(.value)` |"' <<<"$images"
-  } >>"$GITHUB_STEP_SUMMARY"
-fi
+echo "Stack $stack: deployment $id accepted${state:+ ($state)}: $url"
+[ "$wait" = true ] || finish 0 "deployment $link accepted${state:+ ($state)}"
+
+# --- Waiting (ADR-0070) -------------------------------------------------------------------------
+
+echo "Following deployment $id for up to $timeout"
+status_url="$base/hooks/deploy/$stack/deployments/$id"
+interval=${DEPLOY_POLL_INTERVAL:-5}
+deadline=$((SECONDS + timeout_secs))
+reason=
+reminted=0
+
+while :; do
+  : >"$response"
+  code=$(curl -sS --max-time 30 -o "$response" -w '%{http_code}' "$status_url" \
+    -H "Authorization: Bearer $token") || code=000
+  case $code in
+    200)
+      reminted=0
+      now=$(jq -r '.state // empty' "$response")
+      if [ -n "$now" ] && [ "$now" != "$state" ]; then
+        state=$now
+        echo "deployment $id: $state"
+      fi
+      if [ "$(jq -r '.terminal' "$response")" = true ]; then
+        reason=$(jq -r '.reason // empty' "$response")
+        break
+      fi
+      ;;
+    401)
+      # The token expired while the rollout ran; a new one reads too.
+      reminted=$((reminted + 1))
+      [ "$reminted" -le 3 ] || {
+        echo "::error title=hoster deploy::hoster kept refusing the token (401) while following deployment $id: $(reason_of "$response")"
+        finish 1 "deployment $link accepted, but could not be followed (401)"
+      }
+      mint_token
+      continue
+      ;;
+    000 | 502 | 503)
+      echo "::warning title=hoster deploy::following deployment $id: ${code/#000/no answer}; retrying"
+      ;;
+    404)
+      if [ "$(jq -r '.error // empty' "$response" 2>/dev/null || true)" = "no such deployment" ]; then
+        message="hoster does not show deployment $id to this workflow run (404)"
+      else
+        message="hoster has no deployment status endpoint (404): \`wait\` needs a hoster at least as new as this action's release"
+      fi
+      echo "::error title=hoster deploy::$message"
+      finish 1 "deployment $link accepted, but could not be followed"
+      ;;
+    *)
+      echo "::error title=hoster deploy::hoster refused to show deployment $id ($code): $(reason_of "$response")"
+      finish 1 "deployment $link accepted, but could not be followed ($code)"
+      ;;
+  esac
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "::error title=hoster deploy::deployment $id did not finish within $timeout (last state: ${state:-unknown}); it keeps running in hoster: $url"
+    finish 1 "deployment $link did not finish within $timeout (${state:-unknown})"
+  fi
+  sleep "$interval"
+done
+
+case $state in
+  Live | Noop)
+    echo "Stack $stack: deployment $id is live: $url"
+    finish 0 "deployment $link is live"
+    ;;
+  LiveWithWarnings)
+    echo "::warning title=hoster deploy::deployment $id went live with warnings${reason:+: $reason}; see $url"
+    finish 0 "deployment $link is live, with warnings"
+    ;;
+  *)
+    echo "::error title=hoster deploy::deployment $id ended $state${reason:+: $reason}; see $url"
+    finish 1 "deployment $link ended **$state**${reason:+: $reason}"
+    ;;
+esac

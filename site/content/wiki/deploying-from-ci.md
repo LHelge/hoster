@@ -134,17 +134,45 @@ repository requests the token and sends the webhook:
 | `images` | yes | One `service=digest` per line. Every service listed deploys together, as **one** deployment; services left out keep what they run. |
 | `audience` | no | The token's `aud`. Defaults to `url`, which is hoster's default; set it only when `[webhook] audience` is set in `hoster.toml` (`HOSTER_WEBHOOK__AUDIENCE`). |
 | `tag` | no | Shown in the deploy history. Defaults to the tag name on a tag push, otherwise the short commit SHA. |
+| `wait` | no | `true` to follow the deployment until it is over, and fail the step unless it goes live. Default `false`. |
+| `timeout` | no | With `wait`, how long to follow it: seconds, or `90s`, `10m`, `1h`. Default `10m`. |
 
 | Output | Meaning |
 |---|---|
 | `result` | `accepted` (a deployment started or was queued) or `noop` (the stack already runs these digests). |
 | `deployment-id` | The deployment's id. |
 | `deployment-url` | The deployment's page in the admin UI, also linked in the job summary. |
+| `state` | The deployment's last known state: the `202`'s (`Received`, `Queued`), or with `wait` the one it ended in (`Live`, `Failed`, …). `Noop` for a no-op. |
 
 The step fails with hoster's reason on any answer but `200` and `202` (§2.5). It retries `502`,
 `503` and connection failures twice, each time with a new token. A wrong `images` line, such as
 a tag where a digest belongs or an empty digest from a misnamed step id, fails it before anything
 is sent.
+
+By default a green step means hoster **accepted** the deploy, not that it went live (§2.5). With
+`wait: true` the step follows the deployment, polling every 5 seconds with the same token
+([ADR-0070](https://github.com/LHelge/hoster/blob/main/docs/adr/0070-deployment-status-for-ci.md)), and its result is the rollout's:
+
+```yaml
+- uses: LHelge/hoster/actions/deploy@v0.8.0
+  with:
+    url: https://hoster.example.com
+    stack: notes
+    images: |
+      api=${{ steps.push.outputs.digest }}
+    wait: true
+    timeout: 15m
+```
+
+| The deployment… | The step |
+|---|---|
+| goes `Live` | succeeds |
+| goes `LiveWithWarnings` | succeeds, with a warning naming the reason |
+| ends `Failed` (for example a failed health check; the old containers keep serving), `Rejected` or `Superseded` (a newer deploy of the stack replaced it in the queue) | fails, with the state and hoster's reason |
+| is still running at `timeout` | fails, naming the last state; the deployment carries on in hoster |
+
+Either way the job summary links the deployment and says how it ended. `wait` needs a hoster at
+least as new as the action's release; an older one answers `404` and the step says so.
 
 Use the action from the release tag the server runs: the tag names the webhook contract it
 speaks. It needs `bash`, `curl` and `jq`, which GitHub's runners have.
@@ -188,6 +216,24 @@ Unknown fields are refused, and `stack_file` is reserved: stack files are applie
 ([ADR-0027](https://github.com/LHelge/hoster/blob/main/docs/adr/0027-stacks-applied-via-ui-webhooks-carry-digests.md)). Repository, commit, ref, run id and actor in the deploy history come from the
 verified token, not from the body.
 
+To follow the deployment, poll `GET https://<admin_host>/hooks/deploy/<stack>/deployments/<id>`
+with a token for the same audience. A read does **not** use the token up, so the token the POST
+sent can poll until it expires; on a `401`, request a new one. Only a deployment started by the
+same workflow run (the token's `repository` and `run_id`) is shown, and the token must pass the
+stack's `[deploy]` rule as for a deploy:
+
+```sh
+curl -sS "https://hoster.example.com/hooks/deploy/notes/deployments/8" \
+  -H "Authorization: Bearer $token"
+```
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200` | `{"deployment_id":"8","stack":"notes","state":"Failed","terminal":true,"reason":"api: health check failed after 30s","created_at":"2026-11-14T09:12:03Z","finished_at":"2026-11-14T09:13:41Z","url":"https://hoster.example.com/stacks/notes/deployments/8"}` | The deployment. Stop when `terminal` is `true`; it went live if `state` is `Live` or `LiveWithWarnings`. `reason` is hoster's reason for a failure or rejection, else `null`; `finished_at` is `null` while it runs. |
+| `401` | `{"error":"invalid token"}` | Missing, malformed, expired or wrong audience. |
+| `403` | `{"error":"not allowed to deploy this stack"}` | The stack does not exist, has no `[deploy]` rule, or the rule does not match the token. Not listed on the stack page. |
+| `404` | `{"error":"no such deployment"}` | No such id, or a deployment this run did not start (another run's, a UI deploy, …). |
+
 ## 2.5 Answers
 
 | Status | Body | Meaning |
@@ -205,8 +251,8 @@ verified token, not from the body.
 | `500` | `{"error":"internal error"}` | hoster failed internally; the cause is in its log. |
 
 The `202` means the deployment was accepted, not that it went live: a failed health check aborts
-it and leaves the old containers serving ([ADR-0017](https://github.com/LHelge/hoster/blob/main/docs/adr/0017-zero-downtime-deploy-sequence.md)). Watch the deployment page or the stack's
-**Deployments** tab.
+it and leaves the old containers serving ([ADR-0017](https://github.com/LHelge/hoster/blob/main/docs/adr/0017-zero-downtime-deploy-sequence.md)). Give the action `wait: true` (§2.3), poll
+the deployment (§2.4), or watch the deployment page or the stack's **Deployments** tab.
 
 ## 2.6 Check the stack file on every push
 
