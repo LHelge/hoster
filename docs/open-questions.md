@@ -1,6 +1,6 @@
 # Open questions
 
-Status: OQ-38, OQ-40 and OQ-43 are open (OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
+Status: OQ-38, OQ-40, OQ-43, OQ-45 and OQ-46 are open (OQ-43 has an interim answer). All others are resolved (OQ-30–OQ-34 were raised by the pre-implementation review and decided the same day, 2026-11-07).
 
 Resolved questions were decided by the project owner and recorded as an ADR. Each section keeps
 a pointer to the ADR that resolved it. New open questions are added here with options and a
@@ -49,6 +49,8 @@ Index:
 | [OQ-41](#oq-41-persisted-structured-container-logs) | ~~Persisted, structured container logs~~ **Resolved → ADR-0067 (separate `logs.db`, 7 days, 1 GiB)** | — |
 | [OQ-42](#oq-42-receiving-opentelemetry-otlp-from-containers) | ~~Receiving OpenTelemetry (OTLP) from containers~~ **Resolved → ADR-0069 (receiver on the proxy's `:80`, derived tokens, trace per request)** | — |
 | [OQ-43](#oq-43-a-filter-language-for-the-telemetry-query-box) | A filter language for the Telemetry query box | `ddf` |
+| [OQ-45](#oq-45-a-deployments-outcome-for-ci) | A deployment's outcome for CI | `aax` |
+| [OQ-46](#oq-46-a-known-subnet-for-stack-networks) | A known subnet for stack networks | `w8w` |
 
 ---
 
@@ -646,3 +648,73 @@ costs descriptors that the total cap already guards, and B adds state to the hot
 the proxy for a margin no client can exploit beyond what the total cap allows. Revisit B if
 the System page's refusal counts show one address regularly crowding others out.
 
+## OQ-45: A deployment's outcome for CI
+
+**Problem.** The deploy action (`actions/deploy/`) posts digests to `/hooks/deploy` and succeeds
+on hoster's `202 {"deployment_id":…,"result":"accepted"}`. A green CI run therefore means only
+that hoster accepted the request: a rollout that fails its health checks and keeps the old
+containers still looks green. The deployment's state is visible only in the admin UI
+(`/stacks/{name}/deployments/{id}/status` and its SSE stream, `src/web/stacks/deployments.rs`),
+behind the admin session. CI authenticates only with a GitHub Actions OIDC token against the
+stack's `[deploy]` rule (ADR-0047), and that token's `jti` is single use, so a polling client
+cannot simply resend it. Raised 2026-11-14 from user feedback after deploying a larger app.
+
+**Fixed by the request either way.** An opt-in `wait: true` input with a `timeout` (default
+10m); the action polls until the deployment is terminal (`DeploymentState::is_terminal`), exits
+0 on `Live`/`LiveWithWarnings`, non-zero with the state and recorded reason on `Failed`,
+`Rejected` or `Superseded` (and on timeout), prints the deployment URL and writes the outcome to
+the job summary. Default behaviour unchanged. Plain bash + curl + jq, so polling, not SSE.
+
+**Options for the endpoint and its credential.**
+
+- **A. `GET /api/deploy/{stack}/deployments/{id}` with a fresh OIDC token per poll.** Same
+  verification as the webhook, `jti` consumed like any other. Nothing new to trust; the action
+  mints a token per poll (one every 5 s for 10 minutes is 120 token requests and 120 rows in the
+  seen-`jti` table).
+- **B. The same endpoint, where a read does not consume the `jti`.** Signature, `iss`, `aud` and
+  lifetime are checked as for the webhook; the single-use rule applies to the POST only, because
+  a read changes nothing. The action reuses one token and mints a new one when hoster answers
+  401 (expired). A token leaked from a log could read that stack's deployment states until it
+  expires, nothing more.
+- **C. A read capability returned in the 202.** The webhook answer carries a random,
+  short-lived token (or URL) that reads only that deployment. No OIDC on the read path, but a
+  new kind of bearer credential to mint, store hashed and expire, against ADR-0047's "no deploy
+  secret anywhere".
+
+**Authorisation (A and B).** The token must pass the stack's `[deploy]` rule exactly as a deploy
+would (`repository_id`, and `refs`/`environment`/`job_workflow_ref` where set), and the id must
+be a deployment of that stack; anything else is a 404 with no detail, so ids of other stacks
+cannot be probed. Optionally stricter: only deployments whose recorded provenance has the same
+`repository_id`.
+
+**Answer.** JSON: `id`, `stack`, `state`, `terminal`, `reason` (the failure reason hoster
+recorded, if any), `created_at`/`finished_at`, and the admin `url`.
+
+**Recommendation.** B with the `[deploy]`-rule check and the provenance restriction. It keeps
+OIDC the only credential, needs no new secret, and the single-use rule exists to stop a replayed
+*deploy*, which a read is not. Record it as a new ADR amending ADR-0042/ADR-0047.
+
+## OQ-46: A known subnet for stack networks
+
+**Problem.** Podman picks each stack network's subnet (`hoster-<stack>`, ADR-0006) from its
+default pools. hoster's proxied connections reach a container from inside that network, so an
+app that trusts forwarded headers (`X-Forwarded-For`) only from its proxy must trust all of
+`10.0.0.0/8`. Raised 2026-11-14 from user feedback (nginx `set_real_ip_from`).
+
+**Options.**
+
+- **A. Per-stack `[network] subnet = "10.89.200.0/24"`.** Validated by `hoster stack check` (a
+  private IPv4 CIDR, no overlap with another stack's or podman's in-use networks) and passed to
+  the network create. Exact per stack, at the cost of a new stack-file section, an overlap check
+  at apply, and a decision on what changing it does to a running stack (the network must be
+  recreated, so every container in the stack restarts).
+- **B. One hoster-wide pool.** hoster creates every stack network from a configured pool (for
+  example `[runtime] network_pool = "10.89.0.0/16"`, a /24 per stack) and documents it. Apps
+  trust the pool. No stack-file field; other stacks share the range, but ADR-0046 already keeps
+  them from reaching each other. Existing networks keep their subnet until recreated.
+- **C. Nothing in hoster; document the gateway.** Explain where hoster's connections come from
+  inside a stack network so an app can trust that address. No code, but the address is still
+  podman's choice and may change when the network is recreated.
+
+**Recommendation.** B: one documented range covers the request with no per-stack configuration
+or overlap bookkeeping. A if per-stack exactness turns out to matter.
