@@ -112,7 +112,7 @@
   {%- endif %}
 </section>
 
-{#- The selected trace. The waterfall (task aum) renders the found trace here. -#}
+{#- The selected trace: the waterfall of src/web/telemetry/traces/waterfall.rs. -#}
 {%- match view.selection %}
 {%- when Selection::Nothing %}
 {%- when Selection::Invalid with (message) %}
@@ -123,16 +123,59 @@
 <section class="card trace-selection" aria-label="Selected trace">
   <p class="card-body trace-missing">No trace <code>{{ id }}</code> in the log store: {{ view.selection.kept() }}, so it may have expired.</p>
 </section>
-{%- when Selection::Found with (trace) %}
+{%- when Selection::Found with (waterfall) %}
 <section class="card trace-waterfall" aria-labelledby="trace-title">
-  <header class="card-head">
+  <header class="card-head trace-head">
     <div class="trace-heading">
-      <span class="trace-kicker">TRACE{% if let Some(root) = trace.root() %} · {{ root.span().stack }}{% endif %}</span>
-      <h2 id="trace-title">{% if let Some(root) = trace.root() %}{{ root.span().name }}{% else %}{{ trace.id() }}{% endif %}</h2>
-      <code class="trace-id">{{ trace.id() }}</code>
+      <span class="trace-kicker">TRACE{% if !waterfall.stack.is_empty() %} · {{ waterfall.stack }}{% endif %}</span>
+      <h2 id="trace-title">{{ waterfall.title }}</h2>
+      <p class="trace-meta"><code class="trace-id">{{ waterfall.trace().id() }}</code>
+        {%- if let Some((time, shown)) = waterfall.started %} · <time datetime="{{ time }}">{{ shown }} UTC</time>{% endif %}</p>
     </div>
-    <span class="card-count">{{ trace.total_spans() }} span{% if trace.total_spans() != 1 %}s{% endif %} · {{ crate::stats::Elapsed(trace.duration()) }}</span>
+    <dl class="trace-figures">
+      <div><dt>DURATION</dt><dd>{{ waterfall.duration }}</dd></div>
+      <div><dt>SPANS</dt><dd>{{ waterfall.spans }}</dd></div>
+      <div><dt>DEPTH</dt><dd>{{ waterfall.depth }}</dd></div>
+      <div><dt>ERRORS</dt><dd{% if waterfall.errors > 0 %} class="trace-error"{% endif %}>{{ waterfall.errors }}</dd></div>
+    </dl>
   </header>
+  <div class="wf-bar-line">
+    <ul class="wf-legend" aria-label="Services">
+      {%- for entry in waterfall.legend %}
+      <li><span class="dot {{ entry.class }}" aria-hidden="true"></span>{{ entry.name }} <span class="wf-count">{{ entry.count }}</span></li>
+      {%- endfor %}
+    </ul>
+  </div>
+  <div class="wf-minimap-box">{{ waterfall.minimap }}</div>
+  <div class="wf-scroll">
+    <div class="wf-table">
+      <div class="wf-axis" aria-hidden="true">
+        <span class="wf-axis-span">SPAN</span>
+        <div class="wf-ticks">
+          {%- for tick in waterfall.ticks %}<span>{{ tick }}</span>{% endfor -%}
+        </div>
+      </div>
+      <ol class="wf-rows" aria-label="Spans">
+        {%- for row in waterfall.rows %}
+        <li class="wf-row {{ row.class }}{% if row.error %} wf-error{% endif %}{% if row.current %} wf-selected{% endif %}">
+          <div class="wf-name {{ row.depth_class }}">
+            <a href="{{ row.href }}"{% if row.current %} aria-current="true"{% endif %}>
+              {%- if row.error %}<span class="wf-err" role="img" aria-label="error">!</span>{% endif -%}
+              <span class="wf-label">{{ row.name }}</span>
+              {%- if let Some(tag) = row.tag %}<span class="wf-tag">{{ tag }}</span>{% endif %}
+              {%- if row.parent_missing %}<span class="wf-orphan" title="Its parent span is not in the trace: lost, late or past the span cap.">parent missing</span>{% endif -%}
+              <span class="visually-hidden">, {{ row.service }}, {{ row.took }} from {{ row.offset }}</span>
+            </a>
+          </div>
+          <div class="wf-track">{{ row.bar }}</div>
+        </li>
+        {%- endfor %}
+      </ol>
+    </div>
+  </div>
+  {%- if let Some(more) = waterfall.more() %}
+  <p class="card-foot wf-more">{{ more }}</p>
+  {%- endif %}
 </section>
 {%- endmatch %}
 {% endblock %}

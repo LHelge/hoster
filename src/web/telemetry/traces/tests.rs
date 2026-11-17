@@ -628,10 +628,7 @@ async fn a_trace_selected_by_its_id_is_marked_and_shown_below_the_list() {
         shown.contains(&format!(r#"<code class="trace-id">{}</code>"#, trace(1))),
         "{shown}"
     );
-    assert!(
-        shown.contains(r#"<span class="card-count">4 spans · "#),
-        "{shown}"
-    );
+    assert!(shown.contains("<dt>SPANS</dt><dd>4</dd>"), "{shown}");
 
     // Links keep the selection; a filter or range drops the page, not the trace.
     let html = session
@@ -658,6 +655,95 @@ async fn a_trace_selected_by_its_id_is_marked_and_shown_below_the_list() {
     assert!(
         html.contains(r#"<h2 id="trace-title">GET /old</h2>"#),
         "{html}"
+    );
+}
+
+/// The waterfall's rows of `html`: each one's markup.
+fn spans(html: &str) -> Vec<&str> {
+    html.split(r#"<li class="wf-row "#)
+        .skip(1)
+        .map(|rest| rest.split("</li>").next().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_selected_trace_is_drawn_as_a_waterfall_below_the_list() {
+    let session = Session::new().await;
+    let html = session
+        .get(&format!("/telemetry/traces?page=0&trace={}", trace(1)))
+        .await;
+    let at = html
+        .find(r#"<section class="card trace-waterfall""#)
+        .expect(&html);
+    assert!(html.find(r#"class="card trace-list""#).unwrap() < at);
+    let shown = &html[at..];
+    assert!(!shown.contains("style="), "no inline styles: {shown}");
+    // The header's figures, errors in red.
+    for figure in [
+        "<dt>SPANS</dt><dd>4</dd>",
+        "<dt>DEPTH</dt><dd>4</dd>",
+        r#"<dt>ERRORS</dt><dd class="trace-error">1</dd>"#,
+    ] {
+        assert!(shown.contains(figure), "{figure}: {shown}");
+    }
+    assert!(
+        shown.contains("<dt>DURATION</dt><dd>50.0 ms</dd>"),
+        "{shown}"
+    );
+    assert!(shown.contains(" UTC</time></p>"), "{shown}");
+    // The legend: the proxy first, in its colour.
+    assert!(
+        shown.contains(r#"<li><span class="dot svc-hoster" aria-hidden="true"></span>hoster <span class="wf-count">2 spans</span></li>"#),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(r#"<span class="wf-count">1 span</span></li>"#),
+        "{shown}"
+    );
+    // A minimap line per span.
+    let minimap = shown.split(r#"<svg class="wf-minimap""#).nth(1).unwrap();
+    let minimap = minimap.split("</svg>").next().unwrap();
+    assert_eq!(minimap.matches("<rect ").count(), 4, "{minimap}");
+    // The rows in depth-first order, each a link to its span that keeps the list's options.
+    let rows = spans(shown);
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|row| {
+            let rest = row.split(r#"<span class="wf-label">"#).nth(1).unwrap();
+            rest.split("</span>").next().unwrap()
+        })
+        .collect();
+    assert_eq!(names, ["GET /a", "upstream web", "GET /a", "lookup"]);
+    assert!(rows[0].starts_with(r#"svc-hoster">"#), "{}", rows[0]);
+    assert!(rows[0].contains(r#"<div class="wf-name wf-depth-0">"#));
+    assert!(rows[3].contains(r#"<div class="wf-name wf-depth-3">"#));
+    assert!(
+        rows[3].contains(r#"<span class="wf-err" role="img" aria-label="error">!</span>"#),
+        "{}",
+        rows[3]
+    );
+    assert!(rows[3].contains(r#"<rect class="wf-ring""#), "{}", rows[3]);
+    assert!(!rows[2].contains("wf-err"), "{}", rows[2]);
+    let href = format!(
+        "/telemetry/traces?page=0&#38;trace={}&#38;span={}",
+        trace(1),
+        sid(1, 3)
+    );
+    assert!(
+        rows[3].contains(&format!(r#"<a href="{href}">"#)),
+        "{}",
+        rows[3]
+    );
+    assert!(!shown.contains("aria-current"), "{shown}");
+
+    // Following it marks the span; selecting another trace drops it.
+    let html = session.get(&href.replace("&#38;", "&")).await;
+    let rows = spans(&html);
+    assert!(rows[3].contains(" wf-selected"), "{}", rows[3]);
+    assert!(rows[3].contains(r#" aria-current="true">"#), "{}", rows[3]);
+    assert_eq!(
+        select_href(&html, "GET /b"),
+        format!("/telemetry/traces?page=0&trace={}", trace(2))
     );
 }
 
@@ -761,6 +847,33 @@ fn parameters_keep_their_first_value_in_one_order() {
         ]
     );
     assert_eq!(TraceParams::default().href(&[]), "/telemetry/traces");
+}
+
+#[test]
+fn selecting_a_span_keeps_the_trace_and_selecting_a_trace_drops_the_span() {
+    let params = TraceParams::from(
+        [
+            ("span", "0101010101010101"),
+            ("trace", "ab"),
+            ("page", "2"),
+            ("sort", "slowest"),
+        ]
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .to_vec(),
+    );
+    assert_eq!(params.span(), Some(SpanId::from([1; 8])));
+    assert_eq!(
+        params.select_span(SpanId::from([2; 8])),
+        "/telemetry/traces?sort=slowest&page=2&trace=ab&span=0202020202020202"
+    );
+    assert_eq!(
+        params.select(trace(3)),
+        format!("/telemetry/traces?sort=slowest&page=2&trace={}", trace(3))
+    );
+    assert_eq!(
+        params.href(&[("since", Some("1h"))]),
+        "/telemetry/traces?since=1h&sort=slowest&trace=ab&span=0101010101010101"
+    );
 }
 
 #[test]

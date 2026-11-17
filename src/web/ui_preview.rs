@@ -1147,7 +1147,9 @@ impl Fixtures {
 
     /// The Traces tab's last 15 minutes (epic qnh): requests whose apps exported spans (one
     /// failing in its database call), one whose app exports nothing, one hoster answered
-    /// itself, and a job an app started on its own.
+    /// itself, and a job an app started on its own; and the mockup's `t1` (trace 6), a
+    /// statement timeout under a document read, with database and process calls tagged and a
+    /// span whose parent was lost.
     async fn traces(app: &TestApp) {
         use crate::store::{
             LogBatch, MicroTimestamp, RequestRow, Span, SpanId, SpanKind, SpanStatus, TraceId,
@@ -1209,9 +1211,85 @@ impl Fixtures {
         answered.upstream_start = None;
         let notes = ("notes", "api");
         let shop = ("shop", "storefront");
+        let calls = |span: Span, attributes: serde_json::Value| Span {
+            attributes: Some(attributes.to_string()),
+            ..span
+        };
+        let pg = || serde_json::json!({ "db.system": "postgresql", "db.namespace": "notes" });
+        let ok = SpanStatus::Unset;
+        let documents = vec![
+            span(
+                6,
+                2,
+                Some(1),
+                notes,
+                "POST /api/documents.info",
+                (49_997, 1_905),
+                SpanStatus::Error,
+            ),
+            span(6, 3, Some(2), notes, "authenticate", (49_995, 18), ok),
+            calls(
+                span(6, 4, Some(3), notes, "GET", (49_994, 2), ok),
+                serde_json::json!({ "db.system": "redis" }),
+            ),
+            calls(
+                span(6, 5, Some(3), notes, "SELECT users", (49_990, 9), ok),
+                pg(),
+            ),
+            span(
+                6,
+                6,
+                Some(2),
+                notes,
+                "documents.info",
+                (49_976, 1_880),
+                SpanStatus::Error,
+            ),
+            calls(
+                span(6, 7, Some(6), notes, "SELECT documents", (49_974, 14), ok),
+                pg(),
+            ),
+            calls(
+                span(
+                    6,
+                    8,
+                    Some(6),
+                    notes,
+                    "SELECT revisions",
+                    (49_948, 1_800),
+                    SpanStatus::Error,
+                ),
+                pg(),
+            ),
+            calls(
+                span(6, 9, Some(6), notes, "ROLLBACK", (48_146, 3), ok),
+                pg(),
+            ),
+            calls(
+                span(6, 10, Some(6), notes, "pdftotext", (48_400, 120), ok),
+                serde_json::json!({ "process.command": "pdftotext" }),
+            ),
+            span(
+                6,
+                11,
+                Some(0x7f),
+                ("notes", "worker"),
+                "flush metrics",
+                (49_900, 5),
+                ok,
+            ),
+        ];
         app.logs
             .append(&LogBatch {
                 requests: vec![
+                    request(
+                        6,
+                        50_000,
+                        "notes",
+                        "api",
+                        ("POST", "/api/documents.info", 500),
+                        1_912,
+                    ),
                     request(
                         1,
                         80_000,
@@ -1304,7 +1382,10 @@ impl Fixtures {
                         (597_000, 1_000),
                         SpanStatus::Unset,
                     ),
-                ],
+                ]
+                .into_iter()
+                .chain(documents)
+                .collect(),
                 ..LogBatch::default()
             })
             .await
@@ -2321,13 +2402,18 @@ async fn ui_preview() {
         &html,
     );
 
-    // The Telemetry page's traces: the slowest in error with one selected, and an id that
-    // expired.
+    // The Telemetry page's traces: the slowest in error with one selected, a waterfall with a
+    // span selected, and an id that expired.
     for (query, file, label) in [
         (
             "status=error&sort=slowest&trace=02020202020202020202020202020202",
             "telemetry-traces-errors",
             "Telemetry: traces in error, slowest first, one selected",
+        ),
+        (
+            "trace=06060606060606060606060606060606&span=06085e0000000001",
+            "telemetry-traces-waterfall",
+            "Telemetry: the waterfall of a statement timeout, its failing call selected",
         ),
         (
             "trace=77777777777777777777777777777777",
