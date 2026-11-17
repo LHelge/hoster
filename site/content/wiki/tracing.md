@@ -117,8 +117,39 @@ sampling.
 **Where to see it.** Exported log records appear in the stack's **Logs** tab and the
 **Telemetry** page's **Logs** tab, merged with every other record of the stack. A row shows
 the generation it came from, and a record with attributes opens on them as fields, with the
-stream `otlp` in its details. Spans are stored now; the trace views that show them come in a
-later release.
+stream `otlp` in its details. Traces are on the **Telemetry** page's **Traces** tab (below).
+
+# The Traces tab
+
+**Telemetry → Traces** is the Telemetry page's first tab. It lists every trace whose root span
+started in the range, across every stack or the one picked, newest first by default. Its tab
+shows how many traces the range holds, and the Logs tab beside it how many log records.
+
+- **Columns.** The root span's start (UTC) and name (the method and path of a proxied request),
+  the stack, the services with a span in the trace as coloured chips, the number of spans, the
+  root's duration with a bar scaled to the slowest trace on the page, and the status.
+- **The proxy's spans** are listed as the service `hoster`, the name hoster's own log records
+  have, in a colour of their own. Every proxied request has them.
+- **app not instrumented** marks a request whose app was called but sent no spans of its own:
+  only the proxy's two. A request hoster answered itself, such as a 503 before any upstream
+  request started, has only the proxy's server span and no such label.
+- **Status** is `error` when any span of the trace is in error: an app's span with an error
+  status, or the proxy's for a 5xx answer or a failed upstream request.
+- **Range.** The last 5m, 15m (the default), 1h, 6h or 24h. Spans are kept 3 days, so there is
+  no 7d as on the Logs tab.
+- **Sort** by newest, slowest or errors first. **Filters**: the status (`ok` or `error`),
+  *slower than* (a root duration such as `500ms`), and the grep box, which matches span names
+  (the root's, or any span an app sent) as text, ignoring case. There is no query language.
+- **Selecting a trace** (its root span name, or `?trace=<trace id>` in the URL) marks its row
+  and opens it below the list. The trace id of a proxied request is its request id in the
+  access log. A trace that is no longer stored (older than 3 days, or never seen) says so.
+
+Every option is a parameter of the page's URL, so a filtered list or a selected trace can be
+bookmarked or linked.
+
+The header's first line is the receiver's: a green dot while hoster stores what it receives
+(red, with "not storing", when the log store cannot be opened), the endpoint services send to,
+and the spans and log records stored per second over the last minute.
 
 # Limits, and what a drop looks like
 

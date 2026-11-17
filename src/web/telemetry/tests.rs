@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 
 use super::*;
 use crate::store::{Level, LogBatch, LogRecord, Stream};
@@ -74,15 +74,6 @@ fn messages(html: &str) -> Vec<&str> {
 }
 
 #[tokio::test]
-async fn the_page_redirects_to_its_logs_tab() {
-    let app = TestApp::new().await;
-    let browser = app.sign_in().await;
-    let response = app.get("/telemetry", Some(&browser.cookie)).await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(response.headers()[header::LOCATION], "/telemetry/logs");
-}
-
-#[tokio::test]
 async fn the_logs_tab_lists_every_stack_with_a_stack_column() {
     let app = seeded().await;
     let browser = app.sign_in().await;
@@ -135,8 +126,13 @@ async fn the_logs_tab_lists_every_stack_with_a_stack_column() {
         html.contains(r#"aria-current="page">Logs <span class="tab-count">5</span></a>"#),
         "{html}"
     );
+    // The Traces tab first, with its count for the same range (no request rows here).
+    let traces = html
+        .find(r#"<a role="tab" href="/telemetry/traces" aria-selected="false">Traces <span class="tab-count">0</span></a>"#)
+        .expect(&html);
+    assert!(traces < html.find(r#">Logs <span class="tab-count">"#).unwrap());
     assert!(html.contains(" logs/s</span>"), "{html}");
-    assert!(html.contains("retention 7d · "), "{html}");
+    assert!(html.contains("retention 7d, spans 3d · "), "{html}");
     // Not the stack tab's: no follow, no source switch, no live logs.
     assert!(!html.contains("hx-sse:connect"), "{html}");
     assert!(!html.contains("Log source"), "{html}");

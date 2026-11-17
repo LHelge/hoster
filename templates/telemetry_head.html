@@ -1,0 +1,21 @@
+{#- The Telemetry page's header (src/web/telemetry.rs) of a `head`: the crumb of the tab in
+    view, the receiver's line and the log store's figures, then the tab bar with each tab's
+    count for the range and stack. -#}
+<header class="page-head telemetry-head">
+  <div class="page-title">
+    <nav class="crumb" aria-label="Breadcrumb">~/{{ head.current.path() }}</nav>
+    <h1>Telemetry</h1>
+  </div>
+  <p class="page-actions telemetry-figures">
+    <span class="telemetry-receiver"><span class="dot {{ head.figures.receiver_class() }}" aria-hidden="true"></span>{{ head.figures.receiver() }}</span>
+    <span>{{ head.figures.rates() }}</span>
+    <span class="telemetry-retention">{{ head.figures.retention() }}</span>
+  </p>
+  <nav class="tabs" aria-label="Signals">
+    <div role="tablist">
+      {%- for tab in head.tabs %}
+      <a role="tab" href="{{ tab.href }}" aria-selected="{{ tab.current }}"{% if tab.current %} aria-current="page"{% endif %}>{{ tab.signal.label() }}{% if let Some(count) = tab.count %} <span class="tab-count">{{ count }}</span>{% endif %}</a>
+      {%- endfor %}
+    </div>
+  </nav>
+</header>
