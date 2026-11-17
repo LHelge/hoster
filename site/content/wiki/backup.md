@@ -128,13 +128,17 @@ To restore onto a fresh host (or the same host after a loss):
    podman volume import hoster-<stack>-<volume> ~/backups/hoster-<stack>-<volume>.tar
    ```
 
-7. **Start hoster**: `systemctl --user start hoster`. On startup it checks the database's
-   integrity, migrates it if the binary is newer, and reconciles: the services recorded in the
-   database are started again from their image digests ([ADR-0028](https://github.com/LHelge/hoster/blob/main/docs/adr/0028-hoster-reconciles-container-restarts.md)). Images are pulled from the
-   registry, so the registry credentials (in the restored database) must still be valid.
-8. **Check** the admin UI: the stacks, their latest deployments and the secret names are there,
-   and the apps answer on their hostnames. If DNS now points at a new IP, update it first;
-   certificates that were not restored are issued as soon as the hostnames resolve.
+7. **Start hoster** with `systemctl --user start hoster`. Startup adopts or restarts existing
+   containers. On a fresh host, the database lists the committed generations but Podman has
+   no containers for them yet.
+8. **Recreate missing containers.** For each affected stack, open **Deployments** in the admin
+   UI and redeploy the most recent deployment that went live. Check its revision and digests
+   before confirming. Redeploy uses that deployment's recorded digests, creates the missing
+   generations, and mounts the named volumes you restored. The registry must still serve those
+   digests and accept the restored credentials. Wait for the deployment to go live.
+9. **Verify application data.** Request each app on its hostname and check a record or file
+   known to exist in the backup. If the address changed, update DNS so clients and certificate
+   validation reach the restored host.
 
 A snapshot from a newer hoster may not open with an older binary; restore with the same or a
 newer version.

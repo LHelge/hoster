@@ -1,10 +1,11 @@
 ---
 id: c32
 title: Verify and correct fresh-host restore instructions
-status: open
+status: done
 priority: P1
 created: "2026-11-17T23:46:05.311280184Z"
-updated: "2026-11-17T23:46:05.311280184Z"
+updated: "2026-11-17T23:55:49.546165469Z"
+attempts: 1
 ---
 
 ## Summary

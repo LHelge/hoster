@@ -419,21 +419,31 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
     }
 
+    async fn current_plan(&self, target: &Target) -> Result<Plan> {
+        let running = self.store.services(target.stack().as_ref()).await?;
+        let secrets = self.secret_versions(target.definition()).await?;
+        if target.rollback_of.is_none() {
+            return Ok(target.plan(&running, &secrets)?);
+        }
+        self.check_host(target.definition())?;
+        let containers = self.runtime.list_managed().await?;
+        Ok(Plan::with_presence(
+            target.definition(),
+            &target.pins,
+            &target.requested,
+            &running,
+            &secrets,
+            |pointer| !generation_of(&containers, target.stack(), pointer).is_empty(),
+        )?)
+    }
+
     /// `Received`: (re)compares the target with the current pointers (§5.2). A queued
     /// deployment is re-planned against what runs by now, so its record is brought up to date.
     pub(super) async fn check_running(&self, run: &mut Run) -> Event {
-        let plan = match (
-            self.store.services(&run.stack_name()).await,
-            self.secret_versions(&run.target.definition).await,
-        ) {
-            (Ok(running), Ok(secrets)) => run
-                .target
-                .plan(&running, &secrets)
-                .map_err(|e| e.to_string()),
-            (Err(err), _) => Err(err.to_string()),
-            (_, Err(err)) => Err(err.to_string()),
-        };
-        run.plan = plan;
+        run.plan = self
+            .current_plan(&run.target)
+            .await
+            .map_err(|e| e.to_string());
         if let Ok(plan) = &run.plan {
             let target = plan.target();
             if target != run.recorded {
@@ -461,12 +471,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         if let Err(err) = run.target.revision.toml.parse::<Stack>() {
             return Event::Invalid(err.to_string());
         }
-        if let Err(reason) = self.check_engine(&run.target.definition) {
-            return Event::Invalid(reason);
-        }
-        // A controller can be undelegated under a stored revision (ADR-0059 §5), so rollbacks
-        // and CI deploys are checked as an apply is.
-        if let Err(err) = self.settings.machine.check_limits(&run.target.definition) {
+        if let Err(err) = self.check_host(run.target.definition()) {
             return Event::Invalid(err.to_string());
         }
         let others = match self.other_stacks(run.target.stack()).await {
