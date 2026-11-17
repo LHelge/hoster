@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{#- The Telemetry page's Traces tab (src/web/telemetry/traces.rs): the toolbar of GET options,
+    the trace list, and below it the selected trace. -#}
+{% block title %}Traces · Telemetry{% endblock %}
+{% block head %}
+{% include "telemetry_head.html" %}
+{% endblock %}
+{% block content %}
+<section class="log-view trace-toolbar" aria-label="Trace filters">
+  <div class="log-toolbar">
+    <nav class="log-choices" aria-label="Statuses">
+      <span class="log-label">status</span>
+      {%- for chip in view.statuses %}
+      <a class="log-chip" href="{{ chip.href }}"{% if chip.current %} aria-current="page"{% endif %}><span class="dot {{ chip.class }}" aria-hidden="true"></span>{{ chip.label }}</a>
+      {%- endfor %}
+    </nav>
+    <form class="log-options" method="get" action="{{ crate::web::telemetry::Telemetry::TRACES }}">
+      {%- for (name, value) in view.form_keep() %}
+      <input type="hidden" name="{{ name }}" value="{{ value }}">
+      {%- endfor %}
+      <label class="log-stack-pick"><span class="log-label">stack</span>
+        <select name="stack">
+          {%- for option in view.stacks %}
+          <option value="{{ option.value }}"{% if option.current %} selected{% endif %}>{{ option.label }}</option>
+          {%- endfor %}
+        </select>
+      </label>
+      <span class="log-grep" role="group" aria-label="Grep">
+        <span class="log-prompt" aria-hidden="true">&gt;</span>
+        <input type="search" name="q" value="{{ view.q }}" placeholder="grep span names… (e.g. SELECT or /api/)" aria-label="Grep span names">
+      </span>
+      <label class="log-slower"><span class="log-label">slower than</span>
+        <input type="text" name="slower" value="{{ view.slower }}" placeholder="500ms" aria-label="Slower than: a root duration such as 500ms"></label>
+      <button type="submit">Show</button>
+    </form>
+    <nav class="log-since" aria-label="Range">
+      <span class="log-label">last</span>
+      {%- for range in view.ranges %}
+      <a class="log-preset" href="{{ range.href }}"{% if range.current %} aria-current="true"{% endif %}>{{ range.label }}</a>
+      {%- endfor %}
+    </nav>
+  </div>
+</section>
+
+<section class="card trace-list" aria-labelledby="traces-title">
+  <header class="card-head">
+    <h2 id="traces-title">Traces{% if view.total.is_some() %} <span class="card-count">· {{ view.counted() }} · {{ view.order() }}</span>{% endif %}</h2>
+    <form class="trace-sort" method="get" action="{{ crate::web::telemetry::Telemetry::TRACES }}">
+      {%- for (name, value) in view.sort_keep() %}
+      <input type="hidden" name="{{ name }}" value="{{ value }}">
+      {%- endfor %}
+      <label><span class="log-label">sort</span>
+        <select name="sort">
+          {%- for option in view.sorts %}
+          <option value="{{ option.value }}"{% if option.current %} selected{% endif %}>{{ option.label }}</option>
+          {%- endfor %}
+        </select>
+      </label>
+      <button type="submit">Sort</button>
+    </form>
+  </header>
+  {%- if let Some(error) = view.unreadable %}
+  <p class="card-body card-error">{{ error }}</p>
+  {%- else if view.rows.is_empty() %}
+  <p class="card-body muted trace-empty">
+    {%- if view.matching > 0 %}No traces on this page. <a href="{{ view.first_page() }}">first page</a>
+    {%- else if let Some(clear) = view.clear %}No traces match these filters in this range. <a href="{{ clear }}">clear filters</a>
+    {%- else %}No traces in this range. hoster starts a trace for every request it proxies, and services that export OpenTelemetry add their own spans to it.
+    {%- endif %}</p>
+  {%- else %}
+  <div class="table-scroll">
+    <table class="list trace-table">
+      <thead>
+        <tr>
+          <th scope="col">Time</th>
+          <th scope="col">Root span</th>
+          <th scope="col">Stack</th>
+          <th scope="col">Services</th>
+          <th scope="col" class="num">Spans</th>
+          <th scope="col">Duration</th>
+          <th scope="col">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {%- for row in view.rows %}
+        <tr{% if row.current %} class="trace-selected"{% endif %}>
+          <td class="trace-time"><time datetime="{{ row.time }}">{{ row.shown }}</time></td>
+          <td class="trace-name"><a href="{{ row.href }}"{% if row.current %} aria-current="true"{% endif %}>{{ row.name }}</a></td>
+          <td class="trace-stack">{{ row.stack }}</td>
+          <td class="trace-services">
+            {%- for service in row.services %}
+            <span class="trace-service"><span class="dot {{ service.class }}" aria-hidden="true"></span>{{ service.name }}</span>
+            {%- endfor %}
+            {%- if row.uninstrumented %}
+            <span class="trace-uninstrumented">app not instrumented</span>
+            {%- endif %}
+          </td>
+          <td class="num">{{ row.spans }}</td>
+          <td><div class="trace-duration"><span class="trace-bar">{{ row.bar }}</span><span class="trace-took">{{ row.duration }}</span></div></td>
+          <td><span class="trace-status {{ row.status_class }}"><span class="dot" aria-hidden="true"></span>{{ row.status }}</span></td>
+        </tr>
+        {%- endfor %}
+      </tbody>
+    </table>
+  </div>
+  {%- endif %}
+  {%- if view.newer.is_some() || view.older.is_some() %}
+  <nav class="card-foot trace-pager" aria-label="Pages">
+    {%- if let Some(href) = view.newer %}<a href="{{ href }}" rel="prev">← previous</a>{% endif %}
+    {%- if let Some(href) = view.older %}<a href="{{ href }}" rel="next">next →</a>{% endif %}
+  </nav>
+  {%- endif %}
+</section>
+
+{#- The selected trace. The waterfall (task aum) renders the found trace here. -#}
+{%- match view.selection %}
+{%- when Selection::Nothing %}
+{%- when Selection::Invalid with (message) %}
+<section class="card trace-selection" aria-label="Selected trace">
+  <p class="card-body card-error">{{ message }}</p>
+</section>
+{%- when Selection::Missing with (id) %}
+<section class="card trace-selection" aria-label="Selected trace">
+  <p class="card-body trace-missing">No trace <code>{{ id }}</code> in the log store: {{ view.selection.kept() }}, so it may have expired.</p>
+</section>
+{%- when Selection::Found with (trace) %}
+<section class="card trace-waterfall" aria-labelledby="trace-title">
+  <header class="card-head">
+    <div class="trace-heading">
+      <span class="trace-kicker">TRACE{% if let Some(root) = trace.root() %} · {{ root.span().stack }}{% endif %}</span>
+      <h2 id="trace-title">{% if let Some(root) = trace.root() %}{{ root.span().name }}{% else %}{{ trace.id() }}{% endif %}</h2>
+      <code class="trace-id">{{ trace.id() }}</code>
+    </div>
+    <span class="card-count">{{ trace.total_spans() }} span{% if trace.total_spans() != 1 %}s{% endif %} · {{ crate::stats::Elapsed(trace.duration()) }}</span>
+  </header>
+</section>
+{%- endmatch %}
+{% endblock %}

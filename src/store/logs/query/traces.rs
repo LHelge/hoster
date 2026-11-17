@@ -141,6 +141,9 @@ pub struct TraceQuery {
     pub status: Option<TraceStatus>,
     /// Only traces whose root took at least this long.
     pub min_duration: Option<Duration>,
+    /// Grep on span names: only traces whose root's name or a stored span's name contains this,
+    /// ignoring ASCII case (the Traces tab's query box, OQ-43); every trace when empty.
+    pub name: Option<String>,
     pub sort: TraceSort,
     /// Which page, from 0.
     pub page: u32,
@@ -160,6 +163,7 @@ impl TraceQuery {
             services: Vec::new(),
             status: None,
             min_duration: None,
+            name: None,
             sort: TraceSort::Newest,
             page: 0,
             limit: Self::DEFAULT_LIMIT,
@@ -248,6 +252,16 @@ impl TraceQuery {
                 list.push_bind(service.clone());
             }
             sql.push(")))");
+        }
+        if let Some(name) = self.name.as_deref().filter(|name| !name.is_empty()) {
+            // `instr` over `lower`: no `LIKE` wildcards to escape. SQLite lowers ASCII only.
+            let name = name.to_ascii_lowercase();
+            sql.push(" AND (instr(lower(name), ")
+                .push_bind(name.clone())
+                .push(") > 0 OR EXISTS (SELECT 1 FROM spans s WHERE s.trace_id = traces.trace_id")
+                .push(" AND instr(lower(s.name), ")
+                .push_bind(name)
+                .push(") > 0))");
         }
         sql.push(")");
     }
@@ -408,6 +422,17 @@ type SummaryRow = (
 );
 
 impl LogStore {
+    /// How many traces have a root in `range` and `scope`: the count [`LogStore::traces`] gives
+    /// as [`TraceList::total`], for a page that lists none (the Telemetry page's Logs tab).
+    pub async fn count_traces(&self, range: Range<Timestamp>, scope: LogScope) -> Result<u64> {
+        let (total, _): (i64, i64) = TraceQuery::new(range, scope)
+            .count_sql()
+            .build_query_as()
+            .fetch_one(&self.reads)
+            .await?;
+        Ok(count(total))
+    }
+
     /// One page of the traces `query` matches, in its order, with how many match and how many
     /// the range and scope hold. Reads the read pool only.
     pub async fn traces(&self, query: &TraceQuery) -> Result<TraceList> {

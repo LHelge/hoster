@@ -994,7 +994,7 @@ a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent)
 .log-total { color: var(--text-2); }
 /* At phone width the toolbar's controls are touch targets. */
 @media (max-width: 760px) {
-  .log-chip, .log-preset, .log-containers .log-chip, .switch, .log-toolbar input, .log-toolbar select, .log-options button, .log-regex { min-height: 44px; }
+  .log-chip, .log-preset, .log-containers .log-chip, .switch, .log-toolbar input, .log-toolbar select, .log-options button, .log-regex, .trace-sort select, .trace-sort button { min-height: 44px; }
   .log-regex input { min-height: 0; }
   .log-pages a { display: inline-flex; align-items: center; min-height: 44px; }
   /* The message gets its own line under time, service and level. */
@@ -1391,6 +1391,60 @@ p.stack-stats { font-size: 12px; }
 .telemetry-head { gap: 14px 16px; margin-bottom: 20px; }
 .telemetry-figures { margin: 0; gap: 10px 16px; color: var(--text-2); font: 12px/1.4 var(--mono); }
 .telemetry-retention { color: var(--muted); }
+/* The OTLP receiver's state: storing, or not because the log store is unavailable. */
+.telemetry-receiver { display: inline-flex; align-items: center; gap: 8px; }
+.dot.receiver-on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-tint); }
+.dot.receiver-off { background: var(--fail); box-shadow: 0 0 0 3px var(--fail-tint); }
+
+/* Telemetry → Traces (src/web/telemetry/traces.rs): the toolbar box of the logs view on its
+   own, then the trace list as a card whose table scrolls inside it. Services are dots in the
+   --svc-* palette (the proxy's spans are svc-hoster), statuses are toned by class, and the
+   duration bar is a server-drawn meter scaled to the slowest listed: teal, red in error. The
+   selected row is set on surface0, where nothing dimmer than --text-2 sits. */
+.trace-toolbar { margin: 0 0 1.25rem; }
+.trace-toolbar .log-toolbar { border-bottom: 0; }
+.trace-sort { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font: 12px/1.4 var(--mono); }
+.trace-sort label { display: inline-flex; align-items: center; gap: 6px; }
+.trace-sort select { min-height: 30px; padding: 4px 8px; font: 12px/1.4 var(--mono); }
+.trace-sort button { min-height: 30px; padding: 0 12px; font: 500 12px/1.2 var(--mono); }
+.trace-table { min-width: 920px; }
+.trace-table td { vertical-align: middle; }
+.trace-time, .trace-stack, .trace-took { color: var(--text-2); font: 12px/1.4 var(--mono); white-space: nowrap; }
+.trace-name a { color: var(--text); font: 500 13px/1.4 var(--mono); overflow-wrap: anywhere; }
+.trace-service, .trace-uninstrumented {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 2px 10px 2px 0;
+  font: 11px/1.4 var(--mono);
+  white-space: nowrap;
+}
+.trace-service { color: var(--text-2); }
+.trace-service .dot { width: 8px; height: 8px; border-radius: 2px; }
+.trace-uninstrumented { color: var(--muted); }
+.trace-duration { display: flex; align-items: center; gap: 8px; min-width: 160px; }
+.trace-bar { flex: 1 1 auto; min-width: 40px; }
+.trace-bar .meter { height: 4px; border-radius: 2px; }
+.trace-bar .meter-fill { fill: var(--p50); }
+.trace-bar .meter-fail .meter-fill { fill: var(--fail); }
+.trace-took { min-width: 4.5rem; text-align: right; color: var(--text); }
+.trace-status { display: inline-flex; align-items: center; gap: 6px; font: 12px/1.4 var(--mono); }
+.trace-status .dot { width: 6px; height: 6px; }
+.trace-ok { color: var(--ok); }
+.trace-error { color: var(--fail); }
+.dot.trace-ok, .trace-ok .dot { background: var(--ok); }
+.dot.trace-error, .trace-error .dot { background: var(--fail); }
+.trace-selected > td { background: var(--hover); }
+.trace-selected .trace-name a { font-weight: 700; }
+.trace-selected .trace-uninstrumented { color: var(--text-2); }
+.trace-empty a, .trace-pager a { margin-left: 4px; }
+.trace-pager { display: flex; justify-content: space-between; gap: 12px; }
+.trace-missing code { overflow-wrap: anywhere; }
+/* The selected trace's header; the waterfall goes below it. */
+.trace-heading { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.trace-kicker { color: var(--muted); font: 11px/1.4 var(--mono); letter-spacing: 0.06em; }
+.trace-heading h2 { font: 600 16px/1.3 var(--mono); overflow-wrap: anywhere; }
+.trace-id { color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
 .stack-title h1 { margin: 0; font: 600 26px/1.2 var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .stack-meta {
   display: flex;

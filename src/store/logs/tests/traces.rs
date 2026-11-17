@@ -308,9 +308,37 @@ async fn each_filter_narrows_and_the_total_stays_the_ranges() {
     query.min_duration = Some(Duration::from_secs(1));
     assert_eq!(listed(&store, &query).await, [5]);
 
+    // Grep on span names: the root's (the proxy's `GET /b`) or a stored span's, ignoring case.
+    let mut query = all();
+    query.name = Some("LOOK".into());
+    assert_eq!(listed(&store, &query).await, [1]);
+    query.name = Some("/b".into());
+    assert_eq!(listed(&store, &query).await, [2]);
+    query.name = Some("hourly".into());
+    assert_eq!(listed(&store, &query).await, [6]);
+    query.name = Some("%".into());
+    assert_eq!(listed(&store, &query).await, [] as [u8; 0]);
+    query.name = Some(String::new());
+    assert_eq!(listed(&store, &query).await, [6, 5, 3, 2, 1]);
+
     let blog = TraceQuery::new(everything(), LogScope::Stack("blog".into()));
     assert_eq!(listed(&store, &blog).await, [3]);
     assert_eq!(store.traces(&blog).await.unwrap().total, 1);
+    // The count alone, as the Logs tab reads it.
+    assert_eq!(
+        store
+            .count_traces(everything(), LogScope::All)
+            .await
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        store
+            .count_traces(at(2_000)..at(5_000), LogScope::Stack("blog".into()))
+            .await
+            .unwrap(),
+        1
+    );
     let hoster = TraceQuery::new(everything(), LogScope::Hoster);
     assert_eq!(store.traces(&hoster).await.unwrap(), TraceList::default());
 

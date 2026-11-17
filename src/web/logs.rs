@@ -131,7 +131,7 @@ impl LogScope {
     }
 
     /// The store's scope for this one.
-    fn store(&self) -> store::LogScope {
+    pub(super) fn store(&self) -> store::LogScope {
         match self {
             LogScope::All { stack: Some(stack) } if stack == Self::HOSTER => {
                 store::LogScope::Hoster
@@ -696,6 +696,11 @@ impl LogParams {
         Self::text(&self.stack)
     }
 
+    /// The *since* as given, when it is: the Telemetry page's other tab keeps it.
+    pub fn since_param(&self) -> Option<&str> {
+        Self::text(&self.since)
+    }
+
     /// The range without a `since`.
     fn default_since(&self) -> &str {
         self.default_since.as_deref().unwrap_or(Self::DEFAULT_SINCE)
@@ -977,6 +982,13 @@ pub struct StackOption {
 /// [`LogsView::COUNT_CAP`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Total(u64);
+
+impl From<u64> for Total {
+    /// A count read with a cap of [`LogsView::COUNT_CAP`] and one more.
+    fn from(count: u64) -> Self {
+        Self(count)
+    }
+}
 
 impl fmt::Display for Total {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1566,9 +1578,10 @@ impl LogsView {
     /// classes, never inline styles).
     /// They are the categorical colours of `docs/design/README.md` (Telemetry notes), hoster's
     /// own first ([`LogsView::HOSTER_CLASS`]).
-    const PALETTE: [&str; 6] = ["svc-0", "svc-1", "svc-2", "svc-3", "svc-4", "svc-5"];
-    /// hoster's own records (ADR-0068).
-    const HOSTER_CLASS: &str = "svc-hoster";
+    /// The Traces tab colours its services from the same palette.
+    pub(super) const PALETTE: [&str; 6] = ["svc-0", "svc-1", "svc-2", "svc-3", "svc-4", "svc-5"];
+    /// hoster's own records (ADR-0068), and the proxy's spans on the Traces tab.
+    pub(super) const HOSTER_CLASS: &str = "svc-hoster";
     const ALL_CLASS: &str = "svc-all";
     /// The service hoster's own records are listed under.
     const HOSTER: &str = "hoster";

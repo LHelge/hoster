@@ -1145,6 +1145,172 @@ impl Fixtures {
             .unwrap();
     }
 
+    /// The Traces tab's last 15 minutes (epic qnh): requests whose apps exported spans (one
+    /// failing in its database call), one whose app exports nothing, one hoster answered
+    /// itself, and a job an app started on its own.
+    async fn traces(app: &TestApp) {
+        use crate::store::{
+            LogBatch, MicroTimestamp, RequestRow, Span, SpanId, SpanKind, SpanStatus, TraceId,
+        };
+        let now = Timestamp::now();
+        let id = |n: u8, k: u8| SpanId::from([n, k, 0x5e, 0, 0, 0, 0, 1]);
+        let request =
+            |n: u8, ago_ms: u64, stack: &str, service: &str, line: (&str, &str, u16), ms: u64| {
+                let time = now - Duration::from_millis(ago_ms);
+                RequestRow {
+                    time,
+                    host: format!("{stack}.example.com"),
+                    prefix: "/".into(),
+                    stack: stack.into(),
+                    service: service.into(),
+                    method: line.0.into(),
+                    path: line.1.into(),
+                    status: line.2,
+                    to_header: Some(Duration::from_millis(ms.saturating_sub(1))),
+                    total: Duration::from_millis(ms),
+                    bytes: 2_048,
+                    client: std::net::IpAddr::from([203, 0, 113, 7]),
+                    upstream_failed: false,
+                    request_id: TraceId::from([n; 16]),
+                    server_span: Some(id(n, 0)),
+                    client_span: Some(id(n, 1)),
+                    upstream_start: Some(MicroTimestamp::from(time + Duration::from_millis(1))),
+                }
+            };
+        let span = |n: u8,
+                    k: u8,
+                    parent: Option<u8>,
+                    (stack, service): (&str, &str),
+                    name: &str,
+                    (ago_ms, ms): (u64, u64),
+                    status: SpanStatus| Span {
+            trace_id: TraceId::from([n; 16]),
+            span_id: id(n, k),
+            parent: parent.map(|p| id(n, p)),
+            stack: stack.into(),
+            service: service.into(),
+            name: name.into(),
+            kind: if parent.is_some_and(|p| p > 1) {
+                SpanKind::Client
+            } else {
+                SpanKind::Server
+            },
+            start: MicroTimestamp::from(now - Duration::from_millis(ago_ms)),
+            duration: Duration::from_millis(ms),
+            status,
+            status_message: None,
+            attributes: None,
+            resource: None,
+            events: None,
+            received: now,
+        };
+        let mut answered = request(4, 400_000, "notes", "api", ("GET", "/healthz", 503), 2);
+        answered.client_span = None;
+        answered.upstream_start = None;
+        let notes = ("notes", "api");
+        let shop = ("shop", "storefront");
+        app.logs
+            .append(&LogBatch {
+                requests: vec![
+                    request(
+                        1,
+                        80_000,
+                        "notes",
+                        "api",
+                        ("GET", "/api/notes/42", 200),
+                        182,
+                    ),
+                    request(
+                        2,
+                        190_000,
+                        "shop",
+                        "storefront",
+                        ("POST", "/checkout", 500),
+                        1_911,
+                    ),
+                    request(3, 300_000, "blog", "web", ("GET", "/posts/hello", 200), 3),
+                    answered,
+                ],
+                spans: vec![
+                    span(
+                        1,
+                        2,
+                        Some(1),
+                        notes,
+                        "GET /api/notes/{id}",
+                        (79_998, 178),
+                        SpanStatus::Unset,
+                    ),
+                    span(
+                        1,
+                        3,
+                        Some(2),
+                        notes,
+                        "SELECT notes",
+                        (79_990, 41),
+                        SpanStatus::Unset,
+                    ),
+                    span(
+                        1,
+                        4,
+                        Some(2),
+                        ("notes", "storage"),
+                        "GET /blobs/42",
+                        (79_940, 120),
+                        SpanStatus::Unset,
+                    ),
+                    span(
+                        2,
+                        2,
+                        Some(1),
+                        shop,
+                        "POST /checkout",
+                        (189_998, 1_905),
+                        SpanStatus::Error,
+                    ),
+                    span(
+                        2,
+                        3,
+                        Some(2),
+                        shop,
+                        "SELECT cart",
+                        (189_990, 12),
+                        SpanStatus::Unset,
+                    ),
+                    span(
+                        2,
+                        4,
+                        Some(2),
+                        ("shop", "payments"),
+                        "POST /charge",
+                        (189_970, 1_880),
+                        SpanStatus::Error,
+                    ),
+                    span(
+                        5,
+                        2,
+                        None,
+                        ("notes", "worker"),
+                        "nightly export",
+                        (600_000, 4_100),
+                        SpanStatus::Unset,
+                    ),
+                    span(
+                        5,
+                        3,
+                        Some(2),
+                        ("notes", "worker"),
+                        "upload export",
+                        (597_000, 1_000),
+                        SpanStatus::Unset,
+                    ),
+                ],
+                ..LogBatch::default()
+            })
+            .await
+            .unwrap();
+    }
+
     async fn containers(app: &TestApp) -> String {
         let runtime = &app.runtime;
         let mut first = None;
@@ -2036,6 +2202,7 @@ async fn ui_preview() {
     let container = Fixtures::containers(&app).await;
     Fixtures::resources(&app).await;
     Fixtures::logs(&app).await;
+    Fixtures::traces(&app).await;
     let schema: i64 = crate::store::Store::expected_schema_version().into();
     let host = Host::new(&[("0.1.2", schema), ("0.1.3", schema)]).await;
     let mut releases = FakeReleases::default().publish_binary("0.2.0", script("0.2.0", schema));
@@ -2107,6 +2274,7 @@ async fn ui_preview() {
             "Logs of notes: every service, the last hour",
         ),
         ("/stacks/docs/logs", "Logs of docs: no records"),
+        ("/telemetry/traces", "Telemetry: traces of every stack"),
         ("/telemetry/logs", "Telemetry: logs of every stack"),
     ] {
         let html = session.get(url, StatusCode::OK).await;
@@ -2152,6 +2320,26 @@ async fn ui_preview() {
         "Logs of notes: api over 6 hours",
         &html,
     );
+
+    // The Telemetry page's traces: the slowest in error with one selected, and an id that
+    // expired.
+    for (query, file, label) in [
+        (
+            "status=error&sort=slowest&trace=02020202020202020202020202020202",
+            "telemetry-traces-errors",
+            "Telemetry: traces in error, slowest first, one selected",
+        ),
+        (
+            "trace=77777777777777777777777777777777",
+            "telemetry-traces-expired",
+            "Telemetry: a trace that expired",
+        ),
+    ] {
+        let html = session
+            .get(&format!("/telemetry/traces?{query}"), StatusCode::OK)
+            .await;
+        preview.write(&format!("states/{file}.html"), label, &html);
+    }
 
     // The Telemetry page's logs of one stack, and of hoster's own records.
     for (query, file, label) in [
