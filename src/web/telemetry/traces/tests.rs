@@ -748,7 +748,7 @@ async fn the_selected_trace_is_drawn_as_a_waterfall_below_the_list() {
     );
     assert!(
         rows[3].contains(&format!(
-            r#"<a class="wf-pick" href="{close}" aria-current="true">"#
+            r#"<a class="wf-pick" href="{close}#trace" aria-current="true">"#
         )),
         "{}",
         rows[3]
@@ -760,7 +760,7 @@ async fn the_selected_trace_is_drawn_as_a_waterfall_below_the_list() {
         sid(1, 2)
     );
     assert!(
-        rows[2].contains(&format!(r#"<a class="wf-pick" href="{href}">"#)),
+        rows[2].contains(&format!(r#"<a class="wf-pick" href="{href}#trace">"#)),
         "{}",
         rows[2]
     );
@@ -953,7 +953,7 @@ async fn t1_opens_on_the_failing_statement_with_every_section_of_its_details() {
     }
     assert!(
         shown.contains(&format!(
-            r#"<a class="wf-close" href="{close}" aria-label="Close span details""#
+            r#"<a class="wf-close" href="{close}#trace" aria-label="Close span details""#
         )),
         "{shown}"
     );
@@ -965,7 +965,7 @@ async fn t1_opens_on_the_failing_statement_with_every_section_of_its_details() {
         "{shown}"
     );
     let parent = format!(
-        r#"<a href="/telemetry/traces?trace={}&#38;span={}">{}</a>"#,
+        r#"<a href="/telemetry/traces?trace={}&#38;span={}#trace">{}</a>"#,
         trace(6),
         sid(6, 6),
         sid(6, 6)
@@ -1026,7 +1026,7 @@ async fn the_waterfall_links_the_traces_records_with_their_count() {
         .get(&format!("/telemetry/traces?trace={}", trace(6)))
         .await;
     let link = format!(
-        r#"<a class="wf-action" href="/telemetry/logs?trace={}">logs in trace (3)<span aria-hidden="true">&nbsp;→</span></a>"#,
+        r#"<a class="wf-action" href="/telemetry/logs?trace={}" hx-boost="false">logs in trace (3)<span aria-hidden="true">&nbsp;→</span></a>"#,
         trace(6)
     );
     // In the controls, after the collapse links.
@@ -1066,7 +1066,7 @@ async fn the_waterfall_links_the_traces_records_with_their_count() {
         .await;
     assert!(
         html.contains(&format!(
-            r#"href="/telemetry/logs?trace={}">logs in trace (0)<span"#,
+            r#"href="/telemetry/logs?trace={}" hx-boost="false">logs in trace (0)<span"#,
             trace(1)
         )),
         "{html}"
@@ -1105,7 +1105,7 @@ async fn spans_collapse_and_expand_by_links_kept_in_the_url() {
     let row = span_row(waterfall, "documents.info");
     assert!(
         row.contains(&format!(
-            r#"<a class="wf-toggle" href="{collapse}" aria-expanded="true" aria-label="Collapse documents.info" title="Collapse documents.info"><svg class="icon""#
+            r#"<a class="wf-toggle" href="{collapse}#trace" aria-expanded="true" aria-label="Collapse documents.info" title="Collapse documents.info"><svg class="icon""#
         )),
         "{row}"
     );
@@ -1130,7 +1130,7 @@ async fn spans_collapse_and_expand_by_links_kept_in_the_url() {
     let row = span_row(&html, "documents.info");
     assert!(
         row.contains(&format!(
-            r#"<a class="wf-toggle" href="/telemetry/traces?trace={}" aria-expanded="false" aria-label="Expand documents.info" title="Expand documents.info">"#,
+            r#"<a class="wf-toggle" href="/telemetry/traces?trace={}#trace" aria-expanded="false" aria-label="Expand documents.info" title="Expand documents.info">"#,
             trace(6)
         )),
         "{row}"
@@ -1153,7 +1153,7 @@ async fn spans_collapse_and_expand_by_links_kept_in_the_url() {
     let authenticate = span_row(&html, "authenticate");
     assert!(
         authenticate.contains(&format!(
-            r#"href="/telemetry/traces?trace={}&#38;collapsed={}%2C{}" aria-expanded="true""#,
+            r#"href="/telemetry/traces?trace={}&#38;collapsed={}%2C{}#trace" aria-expanded="true""#,
             trace(6),
             sid(6, 3),
             sid(6, 6)
@@ -1162,7 +1162,7 @@ async fn spans_collapse_and_expand_by_links_kept_in_the_url() {
     );
     // "expand all" clears it, and the details are back.
     let expand = format!(
-        r#"<a class="wf-action" href="/telemetry/traces?trace={}">expand all</a>"#,
+        r#"<a class="wf-action" href="/telemetry/traces?trace={}#trace">expand all</a>"#,
         trace(6)
     );
     assert!(html.contains(&expand), "{html}");
@@ -1197,7 +1197,7 @@ async fn collapse_to_services_collapses_the_apps_entry_span() {
     );
     assert!(
         html.contains(&format!(
-            r#"<a class="wf-action" href="{services}">collapse to services</a>"#
+            r#"<a class="wf-action" href="{services}#trace">collapse to services</a>"#
         )),
         "{html}"
     );
@@ -1242,14 +1242,97 @@ async fn collapse_to_services_collapses_the_apps_entry_span() {
     );
 }
 
+/// Task ksa: the waterfall is below the list and the scatter, so its own links must not land
+/// at the top of the page.
 #[tokio::test]
-async fn the_critical_path_switch_dims_by_css_with_crit_on_as_its_fallback() {
+async fn the_waterfalls_own_links_stay_on_it_and_links_that_leave_the_tab_do_not() {
+    let session = t1_app().await;
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}", trace(6)))
+        .await;
+    // With htmx the page is morphed in place, which keeps the scroll position: boosted links
+    // otherwise scroll their target to the top (`show:none`) and to the fragment (`anchor`).
+    assert!(
+        html.contains(concat!(
+            r#"<section class="card trace-waterfall" id="trace" aria-labelledby="trace-title" "#,
+            r#"hx-boost:inherited="true" hx-target:inherited="main" hx-select:inherited="main" "#,
+            r#"hx-swap:inherited="outerMorph show:none" hx-config:inherited="anchor:false">"#
+        )),
+        "{html}"
+    );
+    // The waterfall is the content's last section.
+    let waterfall = html
+        .split(r#"<section class="card trace-waterfall"#)
+        .nth(1)
+        .and_then(|rest| rest.split("</main>").next())
+        .expect(&html);
+    // Without htmx every link that stays on the tab lands on the waterfall again; the others
+    // are ordinary links, not boosted.
+    let mut stays = 0;
+    let mut leaves = 0;
+    for link in waterfall.split("<a ").skip(1) {
+        let tag = link.split('>').next().unwrap();
+        let href = tag
+            .split(r#"href=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect(tag);
+        if href.starts_with("/telemetry/traces") {
+            assert!(href.ends_with("#trace"), "{tag}");
+            assert!(!tag.contains("hx-boost"), "{tag}");
+            stays += 1;
+        } else {
+            assert!(href.starts_with("/telemetry/logs?trace="), "{tag}");
+            assert!(tag.contains(r#"hx-boost="false""#), "{tag}");
+            leaves += 1;
+        }
+    }
+    // The switch, collapse to services, a toggle or a pick per row, the close and the parent
+    // link; "logs in trace" and the selected span's records.
+    assert!(stays >= 6, "{stays}: {waterfall}");
+    assert!(leaves >= 2, "{leaves}: {waterfall}");
+    for class in ["wf-crit-link", "wf-toggle", "wf-pick", "wf-close"] {
+        assert!(
+            waterfall.contains(&format!(r#"class="{class}"#))
+                || waterfall.contains(&format!(r#" {class}""#)),
+            "{class}"
+        );
+    }
+    assert!(
+        waterfall.contains("#trace\">collapse to services</a>"),
+        "{waterfall}"
+    );
+    let collapsed = session
+        .get(&format!(
+            "/telemetry/traces?trace={}&collapsed={}",
+            trace(6),
+            sid(6, 6)
+        ))
+        .await;
+    assert!(
+        collapsed.contains(&format!(
+            r#"<a class="wf-action" href="/telemetry/traces?trace={}#trace">expand all</a>"#,
+            trace(6)
+        )),
+        "{collapsed}"
+    );
+    // The list above keeps plain links: selecting another trace starts at the top.
+    assert!(
+        !select_href(&html, "POST /api/documents.info").contains('#'),
+        "{html}"
+    );
+}
+
+#[tokio::test]
+async fn the_critical_path_switch_is_a_link_to_crit_on_that_the_waterfalls_links_keep() {
     let session = t1_app().await;
     let html = session
         .get(&format!("/telemetry/traces?trace={}", trace(6)))
         .await;
     assert!(
-        html.contains(r#"<section class="card trace-waterfall" aria-labelledby="trace-title">"#),
+        html.contains(
+            r#"<section class="card trace-waterfall" id="trace" aria-labelledby="trace-title" "#
+        ),
         "{html}"
     );
     // The rows on the path are marked, and say so.
@@ -1272,15 +1355,12 @@ async fn the_critical_path_switch_dims_by_css_with_crit_on_as_its_fallback() {
             "ROLLBACK"
         ]
     );
-    // The switch: a checkbox, and the link that stands in for it without `:has()`.
-    assert!(
-        html.contains(r#"<label class="switch wf-crit-switch"><input type="checkbox" role="switch" class="wf-crit-input"><span class="switch-track" aria-hidden="true"></span><span class="visually-hidden">highlight </span>critical path</label>"#),
-        "{html}"
-    );
+    // The switch is a link, so the highlight is in the URL; no checkbox that a link would reset.
+    assert!(!html.contains(r#"type="checkbox""#), "{html}");
     let on = format!("/telemetry/traces?trace={}&#38;crit=on", trace(6));
     assert!(
         html.contains(&format!(
-            r#"<a class="switch wf-crit-link" role="switch" aria-checked="false" href="{on}">"#
+            r#"<a class="switch wf-crit-link" role="switch" aria-checked="false" href="{on}#trace"><span class="switch-track" aria-hidden="true"></span><span class="visually-hidden">highlight </span>critical path</a>"#
         )),
         "{html}"
     );
@@ -1289,21 +1369,24 @@ async fn the_critical_path_switch_dims_by_css_with_crit_on_as_its_fallback() {
     let html = session.get(&on.replace("&#38;", "&")).await;
     assert!(
         html.contains(
-            r#"<section class="card trace-waterfall wf-crit-on" aria-labelledby="trace-title">"#
+            r#"<section class="card trace-waterfall wf-crit-on" id="trace" aria-labelledby="trace-title" "#
         ),
         "{html}"
     );
-    assert!(html.contains(r#"class="wf-crit-input" checked>"#), "{html}");
     assert!(
         html.contains(&format!(
-            r#"<a class="switch wf-crit-link" role="switch" aria-checked="true" href="/telemetry/traces?trace={}">"#,
+            r#"<a class="switch wf-crit-link" role="switch" aria-checked="true" href="/telemetry/traces?trace={}#trace">"#,
             trace(6)
         )),
         "{html}"
     );
     // It is kept by the other links, selecting a trace included.
     let row = span_row(&html, "documents.info");
-    assert!(row.contains("&#38;crit=on\" aria-expanded"), "{row}");
+    assert!(row.contains("&#38;crit=on#trace\" aria-expanded"), "{row}");
+    assert!(
+        row.contains("&#38;crit=on#trace\">"),
+        "selecting a span: {row}"
+    );
     assert_eq!(
         select_href(&html, "POST /api/documents.info"),
         format!("/telemetry/traces?trace={}&crit=on", trace(6))

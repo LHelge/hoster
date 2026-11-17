@@ -1518,9 +1518,9 @@ p.stack-stats { font-size: 12px; }
 }
 .wf-legend li { display: inline-flex; align-items: center; gap: 6px; }
 /* The controls beside the legend: the critical-path switch and the collapse links, as the
-   mockup's ghost buttons. The switch is a checkbox (.switch) that dims the rows off the critical
-   path by :has() alone; where :has() is not supported, a link to crit=on (wf-crit-link) stands
-   in for it and the server's wf-crit-on dims them. */
+   mockup's ghost buttons. The switch is a link to crit=on (or back), drawn as a .switch; the
+   server's wf-crit-on dims the rows off the critical path, so the highlight is in the URL and
+   every link of the waterfall keeps it. */
 .wf-controls {
   display: flex;
   flex-wrap: wrap;
@@ -1529,19 +1529,13 @@ p.stack-stats { font-size: 12px; }
   margin-left: auto;
   font: 12px/1.4 var(--mono);
 }
-.wf-crit-link { display: none; color: var(--text-2); text-decoration: none; }
+.wf-crit-link { color: var(--text-2); text-decoration: none; }
 .wf-crit-link[aria-checked="true"] { border-color: var(--ok); background: var(--ok-tint); color: var(--ok); }
 .wf-crit-link[aria-checked="true"] .switch-track { background: var(--ok); box-shadow: none; }
 .wf-crit-link[aria-checked="true"] .switch-track::after { left: 14px; background: var(--inset); }
 .wf-crit-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-@supports not selector(:has(*)) {
-  .wf-crit-switch { display: none; }
-  .wf-crit-link { display: inline-flex; }
-  .wf-crit-on .wf-row:not(.wf-critical) .wf-bar rect { opacity: 0.25; }
-  .wf-crit-on .wf-row:not(.wf-critical) .wf-took { fill: var(--muted); }
-}
-.trace-waterfall:has(.wf-crit-input:checked) .wf-row:not(.wf-critical) .wf-bar rect { opacity: 0.25; }
-.trace-waterfall:has(.wf-crit-input:checked) .wf-row:not(.wf-critical) .wf-took { fill: var(--muted); }
+.wf-crit-on .wf-row:not(.wf-critical) .wf-bar rect { opacity: 0.25; }
+.wf-crit-on .wf-row:not(.wf-critical) .wf-took { fill: var(--muted); }
 .wf-action {
   display: inline-flex;
   align-items: center;
