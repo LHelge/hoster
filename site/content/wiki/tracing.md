@@ -151,6 +151,29 @@ The header's first line is the receiver's: a green dot while hoster stores what 
 (red, with "not storing", when the log store cannot be opened), the endpoint services send to,
 and the spans and log records stored per second over the last minute.
 
+## The waterfall
+
+The selected trace opens as a waterfall below the list:
+
+- **The header** names the stack, the root span, the trace id and when the trace started
+  (UTC), with its duration (from the earliest span's start to the latest span's end), the
+  number of spans, how deep the tree goes, and how many spans are in error (red when any are).
+- **The legend** lists each service with its number of spans, in the same colours as the
+  list's chips. The proxy's spans are `hoster`.
+- **The minimap** draws every span as a short line on the trace's time axis, red when it is
+  in error, so a long trace's shape shows at a glance.
+- **One row per span**, each under its parent and children by start time, indented by depth.
+  A span in error has a red `!` and its bar a red ring. A tag says what a span calls, from its
+  attributes: the database (`db.system`: `pg` for PostgreSQL, `redis`, `mysql`, …) or `exec`
+  for a process (`process.command`).
+- **The bars** share one axis from the trace's start to its end, labelled at its quarters,
+  with the span's duration beside the bar (inside it when the bar is wide).
+- **Selecting a span** (its row, or `&span=<span id>` in the URL) marks its row; the link
+  keeps the trace and the list's options.
+- **Partial traces.** A span whose parent never arrived (lost, late, or not yet received) is
+  drawn under the root and marked *parent missing*. A trace read stops at its first 1,000
+  spans by start, and the waterfall then says how many more it has.
+
 # Limits, and what a drop looks like
 
 Each service may send, sustained, **1000 log records and 1000 spans a second**, with bursts of

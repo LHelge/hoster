@@ -5,7 +5,8 @@
 //! `since` (one of [`TraceParams::RANGES`], 15m by default; spans are kept 3 days, so the
 //! Logs tab's 7d is not offered), `q` (grep on span names: the root's or any stored span's,
 //! OQ-43), `status` ([`TraceStatus`]), `slower` (a minimum root duration such as `500ms`),
-//! `sort` ([`TraceSort`]), `page` (from 0) and `trace` (the selected trace). Every link is
+//! `sort` ([`TraceSort`]), `page` (from 0), `trace` (the selected trace) and `span` (the
+//! selected span of it). Every link is
 //! built by [`TraceParams::href`] or [`TraceParams::select`], so it keeps the others: a filter
 //! or range drops the page, selecting a trace drops what was selected in the last one
 //! ([`TraceParams::SELECTION`]).
@@ -20,7 +21,9 @@
 //!
 //! The selected trace ([`Selection`]) is read whether or not the list shows it, so a link from
 //! a log record opens it on any range; one that no longer exists says that spans are kept
-//! [`Retention::SPAN_MAX_AGE`].
+//! [`Retention::SPAN_MAX_AGE`]. A found one is laid out as a [`Waterfall`].
+
+mod waterfall;
 
 use std::time::{Duration, SystemTime};
 
@@ -30,9 +33,11 @@ use super::super::logs::{Chip, LogReader, LogScope, LogsView, StackOption, Total
 use super::super::ui::{Count, Meter, Tone};
 use crate::stats::Elapsed;
 use crate::store::{
-    self, LogStore, Retention, Span, StoreError, Timestamp, Trace, TraceId, TraceList, TraceQuery,
-    TraceSort, TraceStatus, TraceSummary,
+    self, LogStore, Retention, Span, SpanId, StoreError, Timestamp, Trace, TraceId, TraceList,
+    TraceQuery, TraceSort, TraceStatus, TraceSummary,
 };
+
+use self::waterfall::Waterfall;
 
 /// The Traces tab's options, as GET parameters: each given one, in [`TraceParams::KEYS`]
 /// order. Values are trimmed (but for `q`, whose spaces are searched for) and empty ones are
@@ -66,11 +71,11 @@ impl TraceParams {
     /// Where the tab is.
     pub const PATH: &str = "/telemetry/traces";
     /// Every option, in the order links write them.
-    pub const KEYS: [&str; 8] = [
-        "stack", "since", "q", "status", "slower", "sort", "page", "trace",
+    pub const KEYS: [&str; 9] = [
+        "stack", "since", "q", "status", "slower", "sort", "page", "trace", "span",
     ];
     /// What is selected below the list; selecting another trace drops them all.
-    pub const SELECTION: [&str; 1] = ["trace"];
+    pub const SELECTION: [&str; 2] = ["trace", "span"];
     /// The options the toolbar's form edits rather than keeps as hidden fields.
     const FORM: [&str; 3] = ["stack", "q", "slower"];
     /// The range presets: spans are kept 3 days, so nothing longer than a day.
@@ -130,6 +135,18 @@ impl TraceParams {
         set.push(("page", page));
         set.push(("trace", Some(&id)));
         self.href(&set)
+    }
+
+    /// The tab with span `id` of the selected trace selected: everything else kept, the page
+    /// included.
+    pub fn select_span(&self, id: SpanId) -> String {
+        let id = id.to_string();
+        self.href(&[("page", self.get("page")), ("span", Some(&id))])
+    }
+
+    /// The selected span, when `span` is a span id; one that is not selects none.
+    pub fn span(&self) -> Option<SpanId> {
+        self.get("span")?.to_ascii_lowercase().parse().ok()
     }
 
     /// The options a form keeps as hidden fields: all but those it edits (`edited`) and the
@@ -323,8 +340,8 @@ pub enum Selection {
     Invalid(String),
     /// No trace has this id: it expired, or never existed.
     Missing(TraceId),
-    /// The trace, for the waterfall.
-    Found(Box<Trace>),
+    /// The trace, laid out.
+    Found(Box<Waterfall>),
 }
 
 impl Selection {
@@ -428,17 +445,32 @@ impl TracesView {
             .inspect_err(|err| tracing::warn!(error = %err, "counting the log records failed"))
             .ok()
             .map(Total::from);
+        let mut found = None;
         view.selection = match (selected, trace) {
             (Err(message), _) => Selection::Invalid(message),
             (Ok(None), _) => Selection::Nothing,
             (Ok(Some(id)), Ok(None)) => Selection::Missing(id),
-            (Ok(Some(_)), Ok(Some(trace))) => Selection::Found(Box::new(trace)),
+            (Ok(Some(_)), Ok(Some(trace))) => {
+                found = Some(trace);
+                Selection::Nothing
+            }
             (Ok(Some(_)), Err(err)) => {
                 tracing::warn!(error = %err, "reading a trace failed");
                 Selection::Invalid("The trace cannot be read right now.".to_owned())
             }
         };
-        view.list(&query, list);
+        let selected = match &view.selection {
+            Selection::Missing(id) => Some(*id),
+            _ => found.as_ref().map(Trace::id),
+        };
+        view.list(&query, list, selected);
+        if let Some(trace) = found {
+            // After the list's, so the list's services keep their colours.
+            view.palette
+                .learn(trace.spans().iter().map(|s| s.span().service.as_str()));
+            view.selection =
+                Selection::Found(Box::new(Waterfall::new(trace, &view.palette, &view.params)));
+        }
         view
     }
 
@@ -517,8 +549,9 @@ impl TracesView {
         }
     }
 
-    /// The rows of `list`, the page `query` asked for, and the links around them.
-    fn list(&mut self, query: &TraceQuery, list: TraceList) {
+    /// The rows of `list`, the page `query` asked for, and the links around them; the trace
+    /// `selected` is marked.
+    fn list(&mut self, query: &TraceQuery, list: TraceList, selected: Option<TraceId>) {
         let TraceList {
             traces,
             matching,
@@ -527,10 +560,6 @@ impl TracesView {
         for trace in &traces {
             self.palette
                 .learn(trace.services.iter().map(String::as_str));
-        }
-        if let Selection::Found(trace) = &self.selection {
-            self.palette
-                .learn(trace.spans().iter().map(|s| s.span().service.as_str()));
         }
         let slowest = traces
             .iter()
@@ -543,11 +572,6 @@ impl TracesView {
             .map(|t| humantime::format_rfc3339_millis(Timestamp::from(t.start).into()).to_string())
             .collect();
         let dated = Self::dated(&times);
-        let selected = match &self.selection {
-            Selection::Found(trace) => Some(trace.id()),
-            Selection::Missing(id) => Some(*id),
-            _ => None,
-        };
         self.rows = traces
             .into_iter()
             .zip(times)

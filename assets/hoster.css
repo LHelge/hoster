@@ -1440,11 +1440,126 @@ p.stack-stats { font-size: 12px; }
 .trace-empty a, .trace-pager a { margin-left: 4px; }
 .trace-pager { display: flex; justify-content: space-between; gap: 12px; }
 .trace-missing code { overflow-wrap: anywhere; }
-/* The selected trace's header; the waterfall goes below it. */
+/* The selected trace's header: what it is, then its figures. */
 .trace-heading { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .trace-kicker { color: var(--muted); font: 11px/1.4 var(--mono); letter-spacing: 0.06em; }
 .trace-heading h2 { font: 600 16px/1.3 var(--mono); overflow-wrap: anywhere; }
 .trace-id { color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
+.trace-waterfall .trace-head { align-items: flex-start; gap: 14px 24px; }
+.trace-meta { margin: 0; color: var(--text-2); font: 12px/1.4 var(--mono); }
+.trace-figures { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 0; font-family: var(--mono); }
+.trace-figures div { display: flex; flex-direction: column; gap: 2px; }
+.trace-figures dt { color: var(--muted); font-size: 10px; letter-spacing: 0.06em; }
+.trace-figures dd { margin: 0; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* The waterfall (src/web/telemetry/traces/waterfall.rs): the legend, a minimap of every span,
+   then a row per span whose bar is an SVG with its geometry as attributes (ADR-0054). A row's
+   service class sets --svc, which colours its edge, bar and minimap line; error spans keep it
+   and get a red ring (wf-ring) with a gap of the row's colour (wf-gap) drawn under the fill.
+   The span's link covers its whole row (its ::after), so the bar is a target too and the row is
+   one tab stop. Rows are set on --hover when hovered or selected: nothing dimmer than --text-2
+   sits on them. */
+.trace-waterfall .svc-hoster { --svc: var(--svc-hoster); }
+.trace-waterfall .svc-0 { --svc: var(--svc-0); }
+.trace-waterfall .svc-1 { --svc: var(--svc-1); }
+.trace-waterfall .svc-2 { --svc: var(--svc-2); }
+.trace-waterfall .svc-3 { --svc: var(--svc-3); }
+.trace-waterfall .svc-4 { --svc: var(--svc-4); }
+.trace-waterfall .svc-5 { --svc: var(--svc-5); }
+.wf-bar-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.wf-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-2);
+  font: 12px/1.4 var(--mono);
+}
+.wf-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.wf-legend .dot { width: 10px; height: 10px; border-radius: 2px; }
+.wf-count { color: var(--muted); }
+.wf-minimap-box { padding: 10px 18px 8px; border-bottom: 1px solid var(--border); }
+.wf-minimap { display: block; width: 100%; border-radius: 4px; background: var(--inset); }
+.wf-mini { fill: var(--svc, var(--muted)); }
+.wf-mini.wf-mini-error { fill: var(--fail); }
+.wf-scroll { overflow-x: auto; }
+.wf-table { min-width: 860px; }
+.wf-axis, .wf-row { display: grid; grid-template-columns: 330px minmax(0, 1fr); }
+.wf-axis { border-bottom: 1px solid var(--border); color: var(--muted); font: 10px/1.4 var(--mono); }
+.wf-axis-span { padding: 8px 18px; font-size: 11px; letter-spacing: 0.06em; }
+.wf-ticks { display: flex; justify-content: space-between; gap: 8px; padding: 8px 18px 8px 0; }
+.wf-rows { margin: 0; padding: 0; list-style: none; }
+.wf-row { position: relative; border-bottom: 1px solid var(--divider); }
+.wf-row:last-child { border-bottom: 0; }
+.wf-row:hover, .wf-row.wf-selected { background: var(--hover); }
+.wf-name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 30px;
+  padding-right: 10px;
+  border-left: 3px solid var(--svc);
+}
+.wf-name a {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text);
+  font: 12px/1.4 var(--mono);
+  text-decoration: none;
+}
+.wf-name a::after { content: ""; position: absolute; inset: 0; }
+.wf-name a:focus-visible { outline: 0; }
+.wf-name a:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-selected .wf-name a { font-weight: 600; }
+.wf-error .wf-name a { color: var(--fail); }
+.wf-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-err {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fail);
+  color: var(--surface);
+  font-size: 10px;
+  font-weight: 700;
+}
+.wf-tag { flex: none; padding: 0 5px; border-radius: 4px; background: var(--border); color: var(--text); font-size: 10px; }
+.wf-orphan { flex: none; color: var(--text-2); font-size: 10px; font-style: italic; }
+.wf-depth-0 { padding-left: 8px; }
+.wf-depth-1 { padding-left: 24px; }
+.wf-depth-2 { padding-left: 40px; }
+.wf-depth-3 { padding-left: 56px; }
+.wf-depth-4 { padding-left: 72px; }
+.wf-depth-5 { padding-left: 88px; }
+.wf-depth-6 { padding-left: 104px; }
+.wf-depth-7 { padding-left: 120px; }
+.wf-depth-8 { padding-left: 136px; }
+.wf-depth-9 { padding-left: 152px; }
+.wf-depth-10 { padding-left: 168px; }
+.wf-track { min-width: 0; margin-right: 18px; }
+.wf-bar { display: block; width: 100%; height: 30px; }
+.wf-grid { stroke: var(--border); stroke-width: 1px; }
+.wf-fill { fill: var(--svc); }
+.wf-ring { fill: none; stroke: var(--fail); stroke-width: 6px; }
+.wf-gap { fill: none; stroke: var(--surface); stroke-width: 3px; }
+.wf-row:hover .wf-gap, .wf-selected .wf-gap { stroke: var(--hover); }
+.wf-took { fill: var(--text-2); font: 11px var(--mono); dominant-baseline: central; }
+.wf-took-left { text-anchor: end; }
+.wf-took-inside { fill: var(--surface); font-weight: 600; }
 .stack-title h1 { margin: 0; font: 600 26px/1.2 var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .stack-meta {
   display: flex;
