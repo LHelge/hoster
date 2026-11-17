@@ -1474,9 +1474,7 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             return Err(OrchestratorError::Removing(definition.name.to_string()));
         }
         self.check_routes(&definition).await?;
-        self.check_engine(&definition)
-            .map_err(OrchestratorError::Unsupported)?;
-        self.settings.machine.check_limits(&definition)?;
+        self.check_host(&definition)?;
         let mut warnings = parsed.warnings;
         warnings.extend(self.limit_warnings(&definition, toml));
         warnings.sort_by_key(|d| d.location);
@@ -2448,6 +2446,13 @@ impl<R: ContainerRuntime> Orchestrator<R> {
 
     /// Whether this host's podman can run `stack`: config files need podman 5.4 (ADR-0057 §9).
     /// Checked at apply and again in `Validating`, since podman can change under a stored
+    fn check_host(&self, definition: &Stack) -> Result<()> {
+        self.check_engine(definition)
+            .map_err(OrchestratorError::Unsupported)?;
+        self.settings.machine.check_limits(definition)?;
+        Ok(())
+    }
+
     /// revision. A stack without `files` runs on any podman hoster connects to.
     fn check_engine(&self, stack: &Stack) -> std::result::Result<(), String> {
         if stack.services.values().all(|s| s.files.is_empty()) {

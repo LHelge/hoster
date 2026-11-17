@@ -173,7 +173,10 @@ struct Hoster {
 
 impl Hoster {
     async fn start() -> Self {
-        let dir = TempDir::new().unwrap();
+        Self::from_state(TempDir::new().unwrap(), Self::unique_stack()).await
+    }
+
+    async fn from_state(dir: TempDir, stack: String) -> Self {
         let store = Store::open(&dir.path().join("state")).await.unwrap();
         let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(PathBuf::from);
         let runtime = PodmanRuntime::connect(&PodmanSocket::from_env(socket.as_deref()))
@@ -216,7 +219,7 @@ impl Hoster {
 
         Hoster {
             _dir: dir,
-            stack: Self::unique_stack(),
+            stack,
             orchestrator,
             https: config.https_listen,
             ca,
@@ -695,4 +698,105 @@ async fn container_output_reaches_the_log_store() {
     if let Err(err) = outcome {
         std::panic::resume_unwind(err.into_panic());
     }
+}
+
+/// A fresh host has only the state backup and the application volume archive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redeploy_after_restore_serves_the_imported_volume() {
+    if !enabled() {
+        return;
+    }
+    let source = Hoster::start().await;
+    let toml = format!(
+        r#"version = 1
+name = "{}"
+[services.app]
+image = "{IMAGE}"
+update = "stop-first"
+volumes = {{ site = "/www" }}
+health = {{ tcp = {{ port = 8080 }} }}
+command = ["httpd", "-f", "-p", "8080", "-h", "/www"]
+stop_timeout = "1s"
+[[services.app.routes]]
+host = "{HOST}"
+port = 8080
+"#,
+        source.stack
+    );
+    let first = source
+        .orchestrator
+        .apply(&toml)
+        .await
+        .unwrap()
+        .deployment
+        .unwrap();
+    let first = source.orchestrator.wait(first.deployment).await.unwrap();
+    assert_eq!(first.state, DeploymentState::Live, "{first:?}");
+
+    let restored_dir = TempDir::new().unwrap();
+    let state = restored_dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    Store::open_read_only(&source._dir.path().join("state"))
+        .await
+        .unwrap()
+        .snapshot(&state.join(Store::FILE_NAME))
+        .await
+        .unwrap();
+    let remove = || RemoveStack::deleting_volumes(&source.stack, &source.stack);
+    source.orchestrator.remove(remove()).await.unwrap();
+    source
+        .shutdown
+        .send_replace(Some(ShutdownSignal::FastShutdown));
+
+    // Import an archive containing a file the image and startup command cannot produce.
+    let backup = restored_dir.path();
+    std::fs::write(backup.join("index.html"), "from the volume backup").unwrap();
+    let archive = backup.join("site.tar");
+    assert!(
+        std::process::Command::new("tar")
+            .arg("-cf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(backup)
+            .arg("index.html")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let volume = format!("hoster-{}-site", source.stack);
+    let socket = std::env::var_os("HOSTER_PODMAN_SOCKET").map(PathBuf::from);
+    let socket = PodmanSocket::from_env(socket.as_deref());
+    let podman = |args: &[&str]| {
+        let status = std::process::Command::new("podman")
+            .arg("--url")
+            .arg(format!("unix://{}", socket.candidates()[0].display()))
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "podman {args:?}: {status}");
+    };
+    podman(&[
+        "volume",
+        "create",
+        "--label",
+        "hoster.managed=true",
+        "--label",
+        &format!("hoster.stack={}", source.stack),
+        &volume,
+    ]);
+    podman(&["volume", "import", &volume, archive.to_str().unwrap()]);
+
+    let restored = Hoster::from_state(restored_dir, source.stack.clone()).await;
+    let result = restored
+        .orchestrator
+        .rollback(&restored.stack, first.id)
+        .await
+        .unwrap();
+    let deployment = restored.orchestrator.wait(result.deployment).await.unwrap();
+    assert_eq!(deployment.state, DeploymentState::Live, "{deployment:?}");
+    assert_eq!(restored.version().await, "from the volume backup");
+    restored.orchestrator.remove(remove()).await.unwrap();
+    restored
+        .shutdown
+        .send_replace(Some(ShutdownSignal::FastShutdown));
 }

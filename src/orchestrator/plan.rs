@@ -264,6 +264,20 @@ impl Plan {
         running: &[ServicePointer],
         secrets: &SecretVersions,
     ) -> Result<Self, PlanError> {
+        Self::with_presence(stack, revision_images, requested, running, secrets, |_| {
+            true
+        })
+    }
+
+    /// Explicit redeploys also check that each committed generation still exists in Podman.
+    pub(super) fn with_presence(
+        stack: &Stack,
+        revision_images: &DigestSet,
+        requested: &DigestSet,
+        running: &[ServicePointer],
+        secrets: &SecretVersions,
+        present: impl Fn(&ServicePointer) -> bool,
+    ) -> Result<Self, PlanError> {
         if let Some(unknown) = requested
             .keys()
             .find(|s| !stack.services.keys().any(|n| n.as_ref() == s.as_str()))
@@ -291,7 +305,11 @@ impl Plan {
             })?;
             let config = ConfigHash::new(name, service, secrets);
             match current {
-                Some(p) if p.digest == digest.as_ref() && p.config_hash == config.as_ref() => {
+                Some(p)
+                    if p.digest == digest.as_ref()
+                        && p.config_hash == config.as_ref()
+                        && present(p) =>
+                {
                     plan.unchanged.push(p.clone());
                 }
                 _ => plan.changes.push(Change {
