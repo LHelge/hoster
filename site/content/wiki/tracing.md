@@ -168,11 +168,42 @@ The selected trace opens as a waterfall below the list:
   for a process (`process.command`).
 - **The bars** share one axis from the trace's start to its end, labelled at its quarters,
   with the span's duration beside the bar (inside it when the bar is wide).
-- **Selecting a span** (its row, or `&span=<span id>` in the URL) marks its row; the link
-  keeps the trace and the list's options.
+- **Selecting a span** (its row, or `&span=<span id>` in the URL) marks its row and opens its
+  details under it; the link keeps the trace and the list's options. A trace opens on the
+  span where it went wrong: the first span in error with no child in error (the deepest of
+  the first error chain), or the root when nothing failed. Following the selected row again,
+  or the close button, closes the details (`&span=none` in the URL).
 - **Partial traces.** A span whose parent never arrived (lost, late, or not yet received) is
   drawn under the root and marked *parent missing*. A trace read stops at its first 1,000
   spans by start, and the waterfall then says how many more it has.
+
+### Span details
+
+The selected span's details show:
+
+- **The title line**: the service's colour, the span's name and service, its kind (`server`,
+  `client`, `internal`, …) and its status (`error`, `ok` or `unset`).
+- **START** (how long after the trace's start it began), **DURATION** with its share of the
+  trace, **SELF TIME** (its duration less the time its children cover, so time spent waiting
+  on them is not counted twice), its **SPAN ID** and its **PARENT** (a link to the parent
+  span, `— (root)` for a root, or the id marked *not in the trace* when the parent is
+  missing).
+- For a span in error, its **status message** on its own line in red.
+- **ATTRIBUTES** as a list of keys and values, as the app sent them; `error.type` and a 5xx
+  `http.response.status_code` are red. **RESOURCE**: the service's `service.name`,
+  `service.version` and `telemetry.sdk.language`, and the stack (`service.namespace`) and
+  deployment generation (`hoster.generation`) hoster gives every container.
+- **EVENTS** with their name, when they happened (`@ 1.85 s (+1.80 s in span)`: from the
+  trace's start, and from the span's), their attributes, and an exception's
+  `exception.stacktrace` as it was sent.
+- **LOGS FOR THIS SPAN**: the log records the app sent with this span's id, oldest first (the
+  first 50), each with its time, level and message, and each a link to the Logs tab opened on
+  that record. A record has a span id when the app sends it over OTLP from inside the span
+  (see [[tracing#pick-one-stdout-or-otlp-for-logs|Pick one: stdout or OTLP for logs]]).
+
+The proxy's spans have the request's attributes (method, path, host, status, client address,
+the route's prefix, and the stack and service called), a resource of `service.name=hoster`,
+and no events.
 
 # Limits, and what a drop looks like
 

@@ -724,27 +724,305 @@ async fn the_selected_trace_is_drawn_as_a_waterfall_below_the_list() {
     );
     assert!(rows[3].contains(r#"<rect class="wf-ring""#), "{}", rows[3]);
     assert!(!rows[2].contains("wf-err"), "{}", rows[2]);
-    let href = format!(
-        "/telemetry/traces?page=0&#38;trace={}&#38;span={}",
-        trace(1),
-        sid(1, 3)
+    // It opens on the span in error, whose link closes its details.
+    assert!(rows[3].contains(" wf-selected"), "{}", rows[3]);
+    let close = format!(
+        "/telemetry/traces?page=0&#38;trace={}&#38;span=none",
+        trace(1)
     );
     assert!(
-        rows[3].contains(&format!(r#"<a href="{href}">"#)),
+        rows[3].contains(&format!(r#"<a href="{close}" aria-current="true">"#)),
         "{}",
         rows[3]
     );
-    assert!(!shown.contains("aria-current"), "{shown}");
+    assert_eq!(shown.matches("aria-current").count(), 1, "{shown}");
+    let href = format!(
+        "/telemetry/traces?page=0&#38;trace={}&#38;span={}",
+        trace(1),
+        sid(1, 2)
+    );
+    assert!(
+        rows[2].contains(&format!(r#"<a href="{href}">"#)),
+        "{}",
+        rows[2]
+    );
 
-    // Following it marks the span; selecting another trace drops it.
+    // Following another marks that span; selecting another trace drops it.
     let html = session.get(&href.replace("&#38;", "&")).await;
     let rows = spans(&html);
-    assert!(rows[3].contains(" wf-selected"), "{}", rows[3]);
-    assert!(rows[3].contains(r#" aria-current="true">"#), "{}", rows[3]);
+    assert!(rows[2].contains(" wf-selected"), "{}", rows[2]);
+    assert!(rows[2].contains(r#" aria-current="true">"#), "{}", rows[2]);
+    assert!(!rows[3].contains(" wf-selected"), "{}", rows[3]);
     assert_eq!(
         select_href(&html, "GET /b"),
         format!("/telemetry/traces?page=0&trace={}", trace(2))
     );
+    // Closing selects none.
+    let html = session.get(&close.replace("&#38;", "&")).await;
+    assert!(!html.contains("wf-selected"), "{html}");
+    assert!(!html.contains("wf-details"), "{html}");
+}
+
+/// The mockup's `t1` as trace 6 through the app, a minute ago: the proxy's spans of a
+/// `POST /api/documents.info` answered 500, and the app's spans under them down to `s9`, the
+/// statement that timed out, with its attributes (one of them markup), resource, exception
+/// event and two log records; a record of another span besides.
+async fn t1_app() -> Session {
+    let app = TestApp::new().await;
+    let mut request = request(6, 60, "notes", "/api/documents.info", 500, 1_912);
+    request.method = "POST".into();
+    request.upstream_start = Some(MicroTimestamp::from(request.time) + Duration::from_micros(600));
+    let start = MicroTimestamp::from(request.time);
+    let at = |ms: f64| start + Duration::from_micros((ms * 1000.0).round() as u64);
+    let app_span = |k: u8, parent: u8, name: &str, at_ms: f64, ms: f64, error: bool| Span {
+        trace_id: trace(6),
+        span_id: sid(6, k),
+        parent: Some(sid(6, parent)),
+        stack: "notes".into(),
+        service: "outline-app".into(),
+        name: name.into(),
+        kind: SpanKind::Internal,
+        start: at(at_ms),
+        duration: Duration::from_micros((ms * 1000.0).round() as u64),
+        status: if error {
+            SpanStatus::Error
+        } else {
+            SpanStatus::Unset
+        },
+        status_message: error.then(|| "QueryCanceledError".to_owned()),
+        attributes: None,
+        resource: None,
+        events: None,
+        received: Timestamp::now(),
+    };
+    let mut s9 = app_span(9, 6, "SELECT revisions", 51.7, 1800.4, true);
+    s9.kind = SpanKind::Client;
+    s9.status_message = Some("canceling statement due to statement timeout".into());
+    s9.attributes = Some(
+        serde_json::json!({
+            "db.system": "postgresql",
+            "db.query.text": "SELECT r.* FROM revisions r WHERE r.document_id = $1 ORDER BY r.created_at DESC LIMIT 100 OFFSET 0 -- a long statement that wraps",
+            "error.type": "QueryCanceledError",
+            "user.note": "<script>alert(1)</script>",
+        })
+        .to_string(),
+    );
+    s9.resource = Some(
+        serde_json::json!({
+            "service.name": "outline-app",
+            "service.version": "0.81.1",
+            "telemetry.sdk.language": "nodejs",
+            "service.namespace": "notes",
+            "hoster.generation": "4",
+        })
+        .to_string(),
+    );
+    s9.events = Some(
+        serde_json::json!([{
+            "name": "exception",
+            "time_us": at(1852.1).as_micros(),
+            "attributes": {
+                "exception.type": "SequelizeDatabaseError",
+                "exception.stacktrace": "at Query.run (query.js:87:18)\nat <anonymous>",
+            },
+        }])
+        .to_string(),
+    );
+    let log = |ms: f64, span: u8, level, message: &str| LogRecord {
+        time: Timestamp::from_millis(at(ms).as_micros() / 1000),
+        level: Some(level),
+        trace_id: Some(trace(6)),
+        span_id: Some(sid(6, span)),
+        stream: Stream::Otlp,
+        ..record(0, message)
+    };
+    app.logs
+        .append(&LogBatch {
+            records: vec![
+                log(30.0, 6, crate::store::Level::Info, "loading document"),
+                log(1852.0, 9, crate::store::Level::Error, "query <b>failed</b>"),
+                log(1853.0, 9, crate::store::Level::Warn, "rolling back"),
+            ],
+            requests: vec![request],
+            spans: vec![
+                app_span(2, 1, "POST /api/documents.info", 3.8, 1905.2, true),
+                app_span(3, 2, "authenticate", 5.1, 17.6, false),
+                app_span(4, 3, "GET", 6.9, 1.8, false),
+                app_span(5, 3, "SELECT users", 10.4, 9.2, false),
+                app_span(6, 2, "documents.info", 23.9, 1880.3, true),
+                app_span(12, 6, "GET", 24.6, 0.9, false),
+                app_span(7, 6, "SELECT documents", 26.2, 14.1, false),
+                app_span(8, 6, "SELECT collections", 41.0, 8.3, false),
+                s9,
+                app_span(10, 6, "ROLLBACK", 1853.6, 2.7, false),
+            ],
+            ..LogBatch::default()
+        })
+        .await
+        .unwrap();
+    Session {
+        cookie: app.sign_in().await.cookie,
+        app,
+    }
+}
+
+/// The details under the selected row of `html`.
+fn details(html: &str) -> &str {
+    let at = html
+        .find(r#"<section class="wf-details""#)
+        .unwrap_or_else(|| panic!("no details: {html}"));
+    let rest = &html[at..];
+    &rest[..rest.find("</section>").unwrap()]
+}
+
+#[tokio::test]
+async fn t1_opens_on_the_failing_statement_with_every_section_of_its_details() {
+    let session = t1_app().await;
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}", trace(6)))
+        .await;
+    let waterfall = &html[html
+        .find(r#"<section class="card trace-waterfall""#)
+        .unwrap()..];
+    assert!(
+        !waterfall.contains("style="),
+        "no inline styles: {waterfall}"
+    );
+    // s9 is selected, and its details sit inside its row, after its bar.
+    let rows = spans(waterfall);
+    let selected: Vec<&&str> = rows.iter().filter(|r| r.contains(" wf-selected")).collect();
+    assert_eq!(selected.len(), 1, "{waterfall}");
+    assert!(
+        selected[0].contains(r#"<span class="wf-label">SELECT revisions</span>"#),
+        "{}",
+        selected[0]
+    );
+    assert!(selected[0].contains(r#"</div><section class="wf-details""#));
+    let shown = details(waterfall);
+
+    let close = format!("/telemetry/traces?trace={}&#38;span=none", trace(6));
+    for part in [
+        // The title line.
+        r#"<span class="wf-swatch" aria-hidden="true"></span>"#,
+        r#"<h3 id="wf-details-title">SELECT revisions</h3>"#,
+        r#"<span class="wf-details-service">outline-app</span>"#,
+        r#"<span class="pill pill-neutral">client</span>"#,
+        r#"<span class="pill pill-fail">error</span>"#,
+        // Timing and ids.
+        "<div><dt>START</dt><dd>+51.7 ms</dd></div>",
+        r#"<div><dt>DURATION</dt><dd>1.80 s <span class="wf-share">· 94.2% of trace</span></dd></div>"#,
+        "<div><dt>SELF TIME</dt><dd>1.80 s</dd></div>",
+        // The status message.
+        r#"<p class="wf-status-message">status: ERROR · canceling statement due to statement timeout</p>"#,
+        // Attributes, error.type in red.
+        r#"<div><dt>db.system</dt><dd>postgresql</dd></div>"#,
+        r#"<div class="wf-alert"><dt>error.type</dt><dd>QueryCanceledError</dd></div>"#,
+        // The resource.
+        r#"<span class="wf-chip"><span class="wf-chip-key">service.name=</span>outline-app</span>"#,
+        r#"<span class="wf-chip"><span class="wf-chip-key">service.namespace=</span>notes</span>"#,
+        r#"<span class="wf-chip"><span class="wf-chip-key">hoster.generation=</span>4</span>"#,
+        // The exception, its stack trace as it is.
+        r#"<div class="wf-event wf-exception">"#,
+        r#"<span class="wf-event-name">exception</span><span class="wf-event-at">@ 1.85 s (+1.80 s in span)</span>"#,
+        "<div><dt>exception.type</dt><dd>SequelizeDatabaseError</dd></div>",
+        "<pre class=\"wf-stacktrace\">at Query.run (query.js:87:18)\nat &#60;anonymous&#62;</pre>",
+    ] {
+        assert!(shown.contains(part), "{part}: {shown}");
+    }
+    assert!(
+        shown.contains(&format!(
+            r#"<a class="wf-close" href="{close}" aria-label="Close span details""#
+        )),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!(
+            "<div><dt>SPAN ID</dt><dd>{}</dd></div>",
+            sid(6, 9)
+        )),
+        "{shown}"
+    );
+    let parent = format!(
+        r#"<a href="/telemetry/traces?trace={}&#38;span={}">{}</a>"#,
+        trace(6),
+        sid(6, 6),
+        sid(6, 6)
+    );
+    assert!(shown.contains(&parent), "{parent}: {shown}");
+    // Every value escaped.
+    assert!(!shown.contains("<script>"), "{shown}");
+    assert!(
+        shown.contains("<dd>&#60;script&#62;alert(1)&#60;/script&#62;</dd>"),
+        "{shown}"
+    );
+    // The span's own records, oldest first, each a link to the Logs tab; not the other span's.
+    let logs: Vec<&str> = shown
+        .split(r#"<a class="wf-log "#)
+        .skip(1)
+        .map(|rest| rest.split("</a>").next().unwrap())
+        .collect();
+    assert_eq!(logs.len(), 2, "{shown}");
+    assert!(
+        logs[0].starts_with(r#"log-error" href="/telemetry/logs?stack=notes&#38;since="#),
+        "{}",
+        logs[0]
+    );
+    assert!(logs[0].contains("&#38;after="), "{}", logs[0]);
+    assert!(
+        logs[0].ends_with(r#"<span class="log-lvl">error</span><span class="log-msg">query &#60;b&#62;failed&#60;/b&#62;</span>"#),
+        "{}",
+        logs[0]
+    );
+    assert!(logs[1].contains("rolling back"), "{}", logs[1]);
+    assert!(!shown.contains("loading document"), "{shown}");
+
+    // The Logs tab link opens on the record.
+    let href = logs[0]
+        .split(r#"href=""#)
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .replace("&#38;", "&");
+    let page = session.get(&href).await;
+    let first = page.find("query &#60;b&#62;failed").expect(&page);
+    assert!(!page[..first].contains("loading document"), "{page}");
+
+    // Closing selects none, and the trace stays open without details.
+    let html = session.get(&close.replace("&#38;", "&")).await;
+    assert!(html.contains(r#"<section class="card trace-waterfall""#));
+    assert!(!html.contains("wf-details"), "{html}");
+}
+
+#[tokio::test]
+async fn the_proxys_root_span_has_its_attributes_and_no_events_or_logs() {
+    let session = t1_app().await;
+    let html = session
+        .get(&format!(
+            "/telemetry/traces?trace={}&span={}",
+            trace(6),
+            sid(6, 0)
+        ))
+        .await;
+    let shown = details(&html);
+    for part in [
+        r#"<h3 id="wf-details-title">POST /api/documents.info</h3>"#,
+        r#"<span class="wf-details-service">hoster</span>"#,
+        r#"<span class="pill pill-neutral">server</span>"#,
+        "<div><dt>START</dt><dd>+0 µs</dd></div>",
+        r#"<div><dt>PARENT</dt><dd class="wf-parent">— (root)</dd></div>"#,
+        r#"<p class="wf-status-message">status: ERROR · responded 500</p>"#,
+        r#"<div class="wf-alert"><dt>http.response.status_code</dt><dd>500</dd></div>"#,
+        "<div><dt>hoster.route.prefix</dt><dd>/</dd></div>",
+        r#"<span class="wf-chip"><span class="wf-chip-key">service.name=</span>hoster</span>"#,
+        r#"<p class="wf-none">no events on this span</p>"#,
+        r#"<p class="wf-none">none emitted</p>"#,
+    ] {
+        assert!(shown.contains(part), "{part}: {shown}");
+    }
+    // The details are of the root only.
+    assert_eq!(html.matches("wf-selected").count(), 1, "{html}");
 }
 
 #[tokio::test]
@@ -874,6 +1152,20 @@ fn selecting_a_span_keeps_the_trace_and_selecting_a_trace_drops_the_span() {
         params.href(&[("since", Some("1h"))]),
         "/telemetry/traces?since=1h&sort=slowest&trace=ab&span=0101010101010101"
     );
+    // Closing the details keeps everything else and says so, so the trace does not open on its
+    // default span again; `none` selects no span.
+    let closed = params.close_span();
+    assert_eq!(
+        closed,
+        "/telemetry/traces?sort=slowest&page=2&trace=ab&span=none"
+    );
+    let closed = TraceParams::from(
+        form_urlencoded::parse(closed.split_once('?').unwrap().1.as_bytes())
+            .into_owned()
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(closed.get("span"), Some(TraceParams::NO_SPAN));
+    assert_eq!(closed.span(), None);
 }
 
 #[test]

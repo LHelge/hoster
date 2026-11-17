@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use super::details::{SpanLog, SpanLogs};
 use super::*;
-use crate::store::{MicroTimestamp, SpanKind, SpanStatus, TraceId};
+use crate::store::{LogEntry, MicroTimestamp, SpanKind, SpanStatus, TraceId};
 
 /// When the mockup's traces start: 2026-11-12 19:58:41.081 UTC.
 const BASE_US: i64 = 1_794_513_521_081_000;
@@ -637,4 +638,377 @@ fn span_times_are_microseconds_below_a_millisecond() {
     assert_eq!(nanos(59_996_000_000), "1 min");
     assert_eq!(nanos(99_940_000), "99.9 ms");
     assert_eq!(nanos(185_600_000_000), "3 min 6 s");
+}
+
+/// The mockup's `t1` with `s9` as the mockup has it: the statement timeout with its status
+/// message, attributes, resource and exception event.
+fn t1_detailed() -> Vec<Span> {
+    let mut spans = t1();
+    let s9 = spans.iter_mut().find(|s| s.span_id == id(9)).unwrap();
+    s9.kind = SpanKind::Client;
+    s9.status_message = Some("canceling statement due to statement timeout".into());
+    s9.attributes = Some(
+        json!({
+            "db.system": "postgresql",
+            "db.namespace": "outline",
+            "db.query.text": "SELECT r.* FROM revisions r WHERE r.document_id = $1 ORDER BY r.created_at DESC",
+            "db.response.status_code": "57014",
+            "error.type": "QueryCanceledError",
+            "server.address": "postgres:5432",
+        })
+        .to_string(),
+    );
+    s9.resource = Some(
+        json!({
+            "service.name": "outline-app",
+            "service.version": "0.81.1",
+            "telemetry.sdk.language": "nodejs",
+            "telemetry.sdk.name": "opentelemetry",
+            "service.namespace": "outline",
+            "hoster.generation": "4",
+            "host.name": "srv-01",
+        })
+        .to_string(),
+    );
+    s9.events = Some(
+        json!([{
+            "name": "exception",
+            "time_us": BASE_US + 1_852_100,
+            "attributes": {
+                "exception.type": "SequelizeDatabaseError",
+                "exception.message": "canceling statement due to statement timeout",
+                "exception.stacktrace": "at Query.formatError (node_modules/sequelize/lib/dialects/postgres/query.js:386:16)\nat Query.run (node_modules/sequelize/lib/dialects/postgres/query.js:87:18)",
+            },
+        }])
+        .to_string(),
+    );
+    spans
+}
+
+fn details_of(spans: Vec<Span>, pairs: &[(&str, &str)]) -> Waterfall {
+    let id = trace_id().to_string();
+    let mut given = vec![("trace", id.as_str())];
+    given.extend_from_slice(pairs);
+    Waterfall::new(
+        Trace::new(trace_id(), spans, 12),
+        &palette(&["outline-app"]),
+        &params(&given),
+    )
+}
+
+#[test]
+fn t1_opens_on_its_failing_statement_with_its_details() {
+    let waterfall = details_of(t1_detailed(), &[("page", "1")]);
+    // No `span`: the end of the first error chain, s9, is selected.
+    let selected: Vec<&str> = waterfall
+        .rows
+        .iter()
+        .filter(|r| r.current)
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(selected, ["SELECT revisions"]);
+    let trace = trace_id();
+    // Its row's link closes the details, as the close link does.
+    let close = format!("/telemetry/traces?page=1&trace={trace}&span=none");
+    assert_eq!(waterfall.rows[10].href, close);
+
+    let details = waterfall.details.as_ref().unwrap();
+    assert_eq!(details.id, id(9));
+    assert_eq!(
+        (details.name.as_str(), details.service.as_str()),
+        ("SELECT revisions", "outline-app")
+    );
+    assert_eq!(details.kind, SpanKind::Client);
+    assert_eq!(
+        (details.status, details.status_class),
+        (SpanStatus::Error, "pill-fail")
+    );
+    assert_eq!(details.close, close);
+    assert_eq!(details.start, "+51.7 ms");
+    assert_eq!(details.duration, "1.80 s");
+    assert_eq!(details.share.as_deref(), Some("94.1%"));
+    assert_eq!(details.self_time, "1.80 s");
+    assert_eq!(details.parent, id(6).to_string());
+    assert_eq!(
+        details.parent_href.as_deref(),
+        Some(format!("/telemetry/traces?page=1&trace={trace}&span={}", id(6)).as_str())
+    );
+    assert!(!details.parent_missing);
+    assert_eq!(
+        details.message.as_deref(),
+        Some("canceling statement due to statement timeout")
+    );
+
+    let attributes: Vec<(&str, &str, bool)> = details
+        .attributes
+        .iter()
+        .map(|a| (a.key.as_str(), a.value.as_str(), a.alert))
+        .collect();
+    assert_eq!(
+        attributes,
+        [
+            ("db.namespace", "outline", false),
+            (
+                "db.query.text",
+                "SELECT r.* FROM revisions r WHERE r.document_id = $1 ORDER BY r.created_at DESC",
+                false
+            ),
+            ("db.response.status_code", "57014", false),
+            ("db.system", "postgresql", false),
+            ("error.type", "QueryCanceledError", true),
+            ("server.address", "postgres:5432", false),
+        ]
+    );
+    assert_eq!(details.attributes_raw, None);
+    // The named resource attributes, in their order; the rest are left out.
+    let resource: Vec<(&str, &str)> = details
+        .resource
+        .iter()
+        .map(|c| (c.key.as_str(), c.value.as_str()))
+        .collect();
+    assert_eq!(
+        resource,
+        [
+            ("service.name", "outline-app"),
+            ("service.version", "0.81.1"),
+            ("telemetry.sdk.language", "nodejs"),
+            ("service.namespace", "outline"),
+            ("hoster.generation", "4"),
+        ]
+    );
+
+    let [event] = details.events.as_slice() else {
+        panic!("{:?}", details.events)
+    };
+    assert_eq!(event.name, "exception");
+    assert!(event.exception);
+    assert_eq!(event.at, "@ 1.85 s (+1.80 s in span)");
+    assert_eq!(
+        event.attributes,
+        [
+            (
+                "exception.message".to_owned(),
+                "canceling statement due to statement timeout".to_owned()
+            ),
+            (
+                "exception.type".to_owned(),
+                "SequelizeDatabaseError".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        event.stacktrace.as_deref(),
+        Some(
+            "at Query.formatError (node_modules/sequelize/lib/dialects/postgres/query.js:386:16)\nat Query.run (node_modules/sequelize/lib/dialects/postgres/query.js:87:18)"
+        )
+    );
+    assert_eq!(details.logs, SpanLogs::default());
+}
+
+#[test]
+fn self_time_is_the_duration_less_the_union_of_its_children() {
+    // documents.info (1880.3 ms) less its five children (1826.4 ms, none overlapping).
+    let waterfall = details_of(t1(), &[("span", &id(6).to_string())]);
+    let details = waterfall.details.unwrap();
+    assert_eq!(details.name, "documents.info");
+    assert_eq!(details.self_time, "53.9 ms");
+    assert_eq!(details.start, "+23.9 ms");
+    assert_eq!(details.share.as_deref(), Some("98.3%"));
+    // authenticate (17.6 ms) less GET and SELECT users (11.0 ms).
+    let waterfall = details_of(t1(), &[("span", &id(3).to_string())]);
+    assert_eq!(waterfall.details.unwrap().self_time, "6.6 ms");
+}
+
+#[test]
+fn the_root_has_no_parent_and_a_span_without_anything_says_so() {
+    let waterfall = details_of(t1(), &[("span", &id(0).to_string())]);
+    let details = waterfall.details.unwrap();
+    assert_eq!(details.parent, "— (root)");
+    assert_eq!(details.parent_href, None);
+    assert_eq!(details.start, "+0 µs");
+    assert_eq!(details.share.as_deref(), Some("100.0%"));
+    // In error without a message: no status line.
+    assert_eq!(details.message, None);
+    assert!(details.attributes.is_empty());
+    assert!(details.resource.is_empty());
+    assert!(details.events.is_empty());
+    // A span not in error has no status line even with a message.
+    let mut spans = t1();
+    spans[3].status_message = Some("fine".into());
+    let waterfall = details_of(spans, &[("span", &id(3).to_string())]);
+    let details = waterfall.details.unwrap();
+    assert_eq!(
+        (details.status, details.status_class, details.message),
+        (SpanStatus::Unset, "pill-neutral", None)
+    );
+}
+
+#[test]
+fn closing_selects_nothing_and_a_trace_without_errors_opens_on_its_root() {
+    let waterfall = details_of(t1(), &[("span", TraceParams::NO_SPAN)]);
+    assert!(waterfall.details.is_none());
+    assert!(waterfall.rows.iter().all(|r| !r.current));
+    // A span id the trace does not have selects none either.
+    let waterfall = details_of(t1(), &[("span", &id(0x42).to_string())]);
+    assert!(waterfall.details.is_none());
+    // Nothing failed: the root.
+    let waterfall = details_of(t2(), &[]);
+    assert_eq!(waterfall.details.unwrap().id, id(0));
+    assert!(waterfall.rows[0].current);
+}
+
+#[test]
+fn a_lost_parent_is_named_but_not_linked() {
+    let spans: Vec<Span> = t1().into_iter().filter(|s| s.span_id != id(2)).collect();
+    let waterfall = details_of(spans, &[("span", &id(6).to_string())]);
+    let details = waterfall.details.unwrap();
+    assert_eq!(details.parent, id(2).to_string());
+    assert_eq!(details.parent_href, None);
+    assert!(details.parent_missing);
+}
+
+#[test]
+fn the_proxys_spans_have_their_attributes_and_an_answer_of_5xx_in_red() {
+    let alert = |key: &str, value: serde_json::Value| {
+        let mut spans = t1();
+        spans[0].attributes = Some(json!({ key: value }).to_string());
+        let waterfall = details_of(spans, &[("span", &id(0).to_string())]);
+        waterfall.details.unwrap().attributes[0].alert
+    };
+    assert!(alert("http.response.status_code", json!(500)));
+    assert!(alert("http.response.status_code", json!("503")));
+    assert!(!alert("http.response.status_code", json!(404)));
+    assert!(!alert("http.response.status_code", json!(600)));
+    assert!(alert("error.type", json!("timeout")));
+    assert!(!alert("http.request.method", json!("POST")));
+    // Values that are not text are shown as JSON; a column that is not an object as it is.
+    let mut spans = t1();
+    spans[0].attributes = Some(json!({ "tags": ["a", 1], "n": 2.5, "ok": true }).to_string());
+    spans[1].attributes = Some("not json".into());
+    spans[1].resource = Some("[]".into());
+    spans[1].events = Some(r#"{"name": "x"}"#.into());
+    let waterfall = details_of(spans.clone(), &[("span", &id(0).to_string())]);
+    let values: Vec<(String, String)> = waterfall
+        .details
+        .unwrap()
+        .attributes
+        .into_iter()
+        .map(|a| (a.key, a.value))
+        .collect();
+    assert_eq!(
+        values,
+        [
+            ("n".to_owned(), "2.5".to_owned()),
+            ("ok".to_owned(), "true".to_owned()),
+            ("tags".to_owned(), r#"["a",1]"#.to_owned()),
+        ]
+    );
+    let waterfall = details_of(spans, &[("span", &id(1).to_string())]);
+    let details = waterfall.details.unwrap();
+    assert!(details.attributes.is_empty());
+    assert_eq!(details.attributes_raw.as_deref(), Some("not json"));
+    assert!(details.resource.is_empty());
+    assert!(details.events.is_empty());
+}
+
+#[test]
+fn events_are_timed_from_the_trace_and_the_span_and_need_no_attributes() {
+    let mut spans = t1();
+    spans[3].events = Some(
+        json!([
+            { "name": "cache miss", "time_us": BASE_US + 6_100 },
+            "not an event",
+            { "name": "early", "time_us": BASE_US - 5_000 },
+        ])
+        .to_string(),
+    );
+    let waterfall = details_of(spans, &[("span", &id(3).to_string())]);
+    let events = waterfall.details.unwrap().events;
+    let shown: Vec<(&str, &str, bool, usize)> = events
+        .iter()
+        .map(|e| {
+            (
+                e.name.as_str(),
+                e.at.as_str(),
+                e.exception,
+                e.attributes.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("cache miss", "@ 6.1 ms (+1.0 ms in span)", false, 0),
+            // Before the trace began: at its start.
+            ("early", "@ 0 µs (+0 µs in span)", false, 0),
+        ]
+    );
+    assert_eq!(events[0].stacktrace, None);
+}
+
+fn entry(n: i64, ms: i64, stack: Option<&str>, message: &str) -> LogEntry {
+    LogEntry {
+        id: n,
+        record: crate::store::LogRecord {
+            time: Timestamp::from_millis(BASE_US / 1000 + ms),
+            stack: stack.map(str::to_owned),
+            service: "outline-app".into(),
+            generation: Some(4),
+            stream: crate::store::Stream::Otlp,
+            level: Some(crate::store::Level::Error),
+            message: message.into(),
+            fields: None,
+            cut: false,
+            marker: false,
+            trace_id: Some(trace_id()),
+            span_id: Some(id(9)),
+            received: None,
+        },
+    }
+}
+
+#[test]
+fn span_logs_link_each_record_to_the_logs_tab_and_say_when_there_are_more() {
+    let logs = SpanLogs::from(vec![
+        entry(41, 1_852, Some("outline"), "query failed"),
+        entry(42, 1_853, None, "hoster's own"),
+    ]);
+    assert_eq!(logs.more, None);
+    assert!(!logs.unreadable);
+    let first = &logs.records[0];
+    assert_eq!(first.time, "2026-11-12T19:58:42.933Z");
+    assert_eq!(first.shown, "19:58:42.933");
+    assert_eq!(first.level, Some(crate::store::Level::Error));
+    assert_eq!(first.message, "query failed");
+    // The record is the first of the page after the one before it, in a range from it.
+    assert_eq!(
+        first.href,
+        "/telemetry/logs?stack=outline&since=2026-11-12T19%3A58%3A42.933Z&after=1794513522933.40"
+    );
+    assert!(
+        logs.records[1]
+            .href
+            .starts_with("/telemetry/logs?stack=_hoster&"),
+        "{}",
+        logs.records[1].href
+    );
+
+    let limit = SpanLogs::LIMIT as i64;
+    let many: Vec<LogEntry> = (0..=limit)
+        .map(|n| entry(100 + n, n, Some("outline"), "line"))
+        .collect();
+    let next = SpanLog::from(&many[SpanLogs::LIMIT as usize]).href;
+    let logs = SpanLogs::from(many);
+    assert_eq!(logs.records.len(), SpanLogs::LIMIT as usize);
+    // "the rest" starts at the first record not shown: the 51st.
+    assert_eq!(logs.more, Some(next));
+    assert!(
+        logs.more
+            .as_deref()
+            .unwrap()
+            .ends_with("&after=1794513521131.149"),
+        "{:?}",
+        logs.more
+    );
+    assert_eq!(logs.first(), "the first 50 records");
 }

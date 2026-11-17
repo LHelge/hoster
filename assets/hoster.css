@@ -1560,6 +1560,124 @@ p.stack-stats { font-size: 12px; }
 .wf-took { fill: var(--text-2); font: 11px var(--mono); dominant-baseline: central; }
 .wf-took-left { text-anchor: end; }
 .wf-took-inside { fill: var(--surface); font-weight: 600; }
+/* The selected span's details (src/web/telemetry/traces/waterfall/details.rs), under its row
+   across both columns and above the row link's cover (its ::after), so their own links work.
+   Set on --bg, as the mockup's, with the row's --svc for the swatch; values wrap anywhere, the
+   stack trace included, and a red status line, alert attributes and exception events. */
+.wf-details {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  grid-column: 1 / -1;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 18px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  font: 12px/1.5 var(--mono);
+}
+.wf-details-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.wf-details-head h3 { min-width: 0; margin: 0; font: 700 14px/1.4 var(--mono); overflow-wrap: anywhere; }
+.wf-details-head .pill { font-size: 11px; }
+.wf-swatch { flex: none; width: 10px; height: 10px; border-radius: 2px; background: var(--svc); }
+.wf-details-service { color: var(--text-2); overflow-wrap: anywhere; }
+.wf-close {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  color: var(--text-2);
+}
+.wf-close:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.wf-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wf-close .icon { width: 14px; height: 14px; margin: 0; }
+.wf-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0; }
+.wf-facts div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.wf-facts dt { color: var(--muted); font-size: 10px; letter-spacing: 0.06em; }
+.wf-facts dd { margin: 0; overflow-wrap: anywhere; }
+.wf-share, .wf-chip-key { color: var(--muted); }
+.wf-parent { color: var(--text-2); }
+.wf-parent a { color: var(--text); }
+.wf-status-message {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--fail) 25%, transparent);
+  border-radius: 8px;
+  background: var(--fail-tint);
+  color: var(--fail);
+  overflow-wrap: anywhere;
+}
+.wf-details-body { display: flex; flex-wrap: wrap; gap: 16px; }
+.wf-details-main { display: flex; flex: 3 1 420px; flex-direction: column; gap: 8px; min-width: 0; }
+.wf-details-side { display: flex; flex: 2 1 320px; flex-direction: column; gap: 8px; min-width: 0; }
+.wf-section { margin: 0; color: var(--muted); font: 400 11px/1.4 var(--mono); letter-spacing: 0.06em; }
+.wf-section:not(:first-child) { margin-top: 6px; }
+.wf-none { margin: 0; color: var(--muted); }
+.wf-unreadable { color: var(--fail); }
+.wf-attrs { margin: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; }
+.wf-attrs div {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.9fr) minmax(0, 1.6fr);
+  gap: 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--divider);
+}
+.wf-attrs div:last-child { border-bottom: 0; }
+.wf-attrs dt { color: var(--text-2); overflow-wrap: anywhere; }
+.wf-attrs dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wf-attrs .wf-alert dd { color: var(--fail); }
+.wf-raw, .wf-stacktrace {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--inset);
+  color: var(--text-2);
+  font: 11px/1.6 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wf-raw { border: 1px solid var(--border); border-radius: 8px; }
+.wf-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; font-size: 11px; }
+.wf-chip {
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.wf-event { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; }
+.wf-event.wf-exception { border-color: color-mix(in srgb, var(--fail) 25%, transparent); }
+.wf-event-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 10px;
+  margin: 0;
+  padding: 8px 12px;
+  background: var(--neutral-tint);
+}
+.wf-exception .wf-event-head { background: var(--fail-tint); }
+.wf-event-name { font-weight: 600; overflow-wrap: anywhere; }
+.wf-exception .wf-event-name { color: var(--fail); }
+.wf-event-at { color: var(--text-2); }
+.wf-event-attrs { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 8px 12px; }
+.wf-event-attrs div { display: flex; flex-wrap: wrap; gap: 0 8px; min-width: 0; }
+.wf-event-attrs dt { color: var(--text-2); overflow-wrap: anywhere; }
+.wf-event-attrs dd { min-width: 0; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wf-stacktrace { border-top: 1px solid var(--border); }
+.wf-logs { display: flex; flex-direction: column; gap: 4px; }
+.wf-log { display: flex; gap: 10px; padding: 7px 10px; border-radius: 6px; background: var(--inset); color: var(--text); }
+.wf-log:hover { background: var(--hover); text-decoration: none; }
+.wf-log:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-log time { flex: none; color: var(--muted); }
+.wf-log .log-lvl { flex: none; min-width: 5ch; }
+.wf-log .log-msg { min-width: 0; }
 .stack-title h1 { margin: 0; font: 600 26px/1.2 var(--mono); letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .stack-meta {
   display: flex;
