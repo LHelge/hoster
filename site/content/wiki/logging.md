@@ -29,6 +29,8 @@ the first key present wins:
 |---|---|
 | level | `level`, `severity`, `lvl` |
 | message | `message`, `msg`, then `fields.message` (where `tracing-subscriber` puts it) |
+| trace id | `trace_id`, `traceId`, then the same two keys inside `fields` |
+| span id | `span_id`, `spanId`, then the same two keys inside `fields` |
 | fields | every other key, kept as JSON |
 
 Level names are read in any case and folded onto `trace`, `debug`, `info`, `warn` and `error`:
@@ -51,6 +53,27 @@ So this line from a Rust app:
 
 becomes a `warn` record with the message `slow query` and the fields
 `{"timestamp": "…", "fields": {"ms": 812}, "target": "blog::db"}`.
+
+## Trace and span ids
+
+A line that names the trace and span it was written in links to that trace: its row ends with
+the trace, the Logs tabs' trace filter finds it, and it is listed under its span in the Traces
+tab ([[tracing#traces-and-log-records|Traces and log records]]). This is for an app that sends
+its spans over OTLP and keeps its logs on stdout.
+
+```json
+{"level":"info","msg":"order paid","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7"}
+```
+
+- The ids are the ones W3C Trace Context and OpenTelemetry use: 32 hex digits for a trace and
+  16 for a span, not all zero. Upper case is read and stored in lower case.
+- Anything else under those keys (a number, a shorter id, a vendor's decimal id) is not read
+  as an id and stays a field.
+- A span id is read only beside a trace id in the same line. A trace id alone is enough for
+  the link; a span id alone stays a field.
+- The ids that were read leave the fields, so an opened record lists them once, as
+  `trace_id` and `span_id`.
+- The keys are fixed, and text lines are not searched for ids.
 
 ## Text lines
 

@@ -9,7 +9,7 @@ use super::*;
 use crate::logs::{LogRecorder, Tap};
 use crate::runtime::{ContainerSpec, ContainerState, FakeRuntime, Labels, NetworkSpec};
 use crate::stack::{Name, PinnedImage};
-use crate::store::{DeploymentId, LogStore};
+use crate::store::{DeploymentId, LogQuery, LogScope, LogStore, SpanId, TraceId};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -388,6 +388,82 @@ async fn the_cursor_commits_with_the_lines_and_seeds_a_later_follower() {
         .unwrap()
         .unwrap();
     assert_eq!(record.message, "three");
+}
+
+/// ADR-0072: a JSON line's ids reach the store's columns, where the trace filter of the logs
+/// views (`?trace=`) and the waterfall's "logs in trace" read them.
+#[tokio::test]
+async fn a_json_lines_trace_and_span_ids_are_stored_and_found_by_the_trace_filter() {
+    let dir = TempDir::new().unwrap();
+    let store = LogStore::open(dir.path()).await.unwrap();
+    let (recorder, sink) = LogRecorder::new(store.clone()).await.unwrap();
+    let stop = CancellationToken::new();
+    let recording = tokio::spawn(
+        recorder
+            .with_interval(Duration::from_millis(10))
+            .run(stop.clone()),
+    );
+    let runtime = Arc::new(FakeRuntime::new());
+    let f = Fixture {
+        runtime: Arc::clone(&runtime),
+        followers: LogFollowers::new(Arc::clone(&runtime), sink, CancellationToken::new()),
+        tap: LogSink::tapped(1).1,
+    };
+    let trace: TraceId = "4bf92f3577b34da6a3ce929d0e0e4736".parse().unwrap();
+    let span: SpanId = "00f067aa0ba902b7".parse().unwrap();
+    let id = f.start(&generation("api", 1)).await;
+    for (ms, text) in [
+        (
+            1,
+            r#"{"level":"INFO","fields":{"message":"order paid","traceId":"4BF92F3577B34DA6A3CE929D0E0E4736","spanId":"00f067aa0ba902b7","order":7}}"#,
+        ),
+        (
+            2,
+            r#"{"level":"info","msg":"other trace","trace_id":"11111111111111111111111111111111"}"#,
+        ),
+        (
+            3,
+            r#"{"level":"info","msg":"no trace","span_id":"00f067aa0ba902b7"}"#,
+        ),
+        (4, "trace_id=4bf92f3577b34da6a3ce929d0e0e4736 as text"),
+    ] {
+        f.runtime.push_log(&id, out(ms, text));
+    }
+    f.followers.follow(&id);
+    tokio::time::timeout(WAIT, async {
+        while store.head().await.unwrap().record < 4 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the records are committed");
+    f.followers.stop().await;
+    stop.cancel();
+    recording.await.unwrap();
+
+    let all = Timestamp::from(at(0))..Timestamp::from(at(10));
+    let mut query = LogQuery::new(all.clone(), LogScope::Stack("notes".into()));
+    query.trace = Some(trace);
+    let found = store.records(&query).await.unwrap().entries;
+    assert_eq!(found.len(), 1);
+    let record = &found[0].record;
+    assert_eq!(record.message, "order paid");
+    assert_eq!((record.trace_id, record.span_id), (Some(trace), Some(span)));
+    assert_eq!(record.fields.as_deref(), Some(r#"{"fields":{"order":7}}"#));
+
+    // A span id without a trace id, and ids in text, name no trace.
+    let page = store
+        .records(&LogQuery::new(all, LogScope::All))
+        .await
+        .unwrap();
+    let untraced: Vec<_> = page
+        .entries
+        .iter()
+        .filter(|e| e.record.trace_id.is_none())
+        .map(|e| (e.record.message.as_str(), e.record.span_id))
+        .collect();
+    assert_eq!(untraced.len(), 2);
+    assert!(untraced.iter().all(|(_, span)| span.is_none()));
 }
 
 /// A cursor of `id` at the `nth` line stamped `at(ms)`.
