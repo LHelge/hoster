@@ -24,12 +24,14 @@
 //! services" sets it to [`Trace::service_entries`]. The selected span's details are drawn only
 //! while its row is shown: a collapse that hides it closes nothing, so expanding shows them
 //! again. The critical path is marked on its rows ([`TraceSpan::on_critical_path`]) and the
-//! others are dimmed by CSS while the switch's checkbox is checked (`:has()`), or where
-//! `:has()` is not supported by the server while `crit=on` ([`TraceParams::critical`]), which
-//! the switch's fallback link toggles. The checkbox is not in the URL, so it lasts for the page
-//! view: every link loads the page again with the checkbox as `crit` has it (checked for
-//! `crit=on`), and only `crit=on` lasts across links. The minimap always draws every span
+//! others are dimmed while `crit=on` ([`TraceParams::critical`]), which the switch, a link,
+//! toggles and every other link of the waterfall keeps. The minimap always draws every span
 //! read.
+//!
+//! The waterfall sits below the list and the scatter, so its own links must not land at the
+//! top of the page. In the template each ends in `#trace`, the waterfall's id, for a plain
+//! page load; with htmx they are boosted and the page is morphed in place, which keeps the
+//! scroll position (and the fragment out of the address).
 //!
 //! Beside them, "logs in trace (N) →" ([`TraceLogs`]) links the Logs tab narrowed to the
 //! trace with every level ([`LogParams::trace_href`]); N is every record of the trace, read with
@@ -80,7 +82,7 @@ pub struct Waterfall {
     pub details: Option<SpanDetails>,
     /// The critical path is highlighted from the URL (`crit=on`).
     pub critical: bool,
-    /// Where the critical-path switch's fallback link goes: the highlight switched.
+    /// Where the critical-path switch goes: the highlight switched.
     pub critical_href: String,
     /// "expand all": the trace with nothing collapsed; `None` when nothing is.
     pub expand_all: Option<String>,

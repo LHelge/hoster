@@ -203,11 +203,12 @@ The selected trace opens as a waterfall below the list:
   link or a reload keeps them; selecting another trace clears them. A collapse that hides the
   selected span hides its details too, until the span is shown again.
 - **critical path** is a switch that dims every span not on the critical path: from the root,
-  each time the child that ended last, which is what the trace waited for. The switch works in
-  the browser alone and lasts for the page view: selecting a span, collapsing or expanding, or
-  opening another trace loads the page again and turns it off. To keep it on across those
-  links, put `&crit=on` in the URL: every link of the page then keeps it, selecting another
-  trace included.
+  each time the child that ended last, which is what the trace waited for. It is in the URL
+  (`&crit=on`), so it stays on while you select spans, collapse or expand, or open another
+  trace, and a link or a reload keeps it.
+- **The waterfall stays in view.** Selecting a span, closing its details, collapsing,
+  expanding and the critical-path switch change the page in place, without moving it. Without
+  JavaScript they load the page again and land on the waterfall.
 - **logs in trace (N) →** opens the Logs tab with the trace's log records, every level, from
   every span and stack. N counts them all. See [[tracing#traces-and-log-records|Traces and
   log records]].

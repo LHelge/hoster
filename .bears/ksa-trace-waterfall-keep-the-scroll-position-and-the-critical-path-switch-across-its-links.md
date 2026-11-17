@@ -1,13 +1,14 @@
 ---
 id: ksa
 title: "Trace waterfall: keep the scroll position and the critical-path switch across its links"
-status: open
+status: done
 priority: P3
 created: "2026-11-17T20:11:02.440134353Z"
-updated: "2026-11-17T20:11:02.440134353Z"
+updated: "2026-11-17T21:25:42.555971706Z"
 tags:
   - web
   - observability
+attempts: 1
 ---
 
 ## Summary
