@@ -10,8 +10,9 @@
 //!
 //! The background dots are muted for ok and red for error, decorative (`aria-hidden`). The
 //! traces of the list's page are drawn on top, each a link that selects it as its row's does,
-//! filled by status inside an accent ring and named for a screen reader ("Open trace GET /a,
-//! 50.0 ms"); the selected one is larger, ringed in the text colour and drawn last. Nothing
+//! an accent ring that is hollow for ok and filled red for error, named for a screen reader
+//! ("Open trace GET /a, 50.0 ms"); the selected one is larger, ringed in the text colour and
+//! drawn last. Nothing
 //! else is clickable: the background narrows nothing (no brushing), the list's duration filter
 //! does.
 //!

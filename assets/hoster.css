@@ -692,15 +692,17 @@ a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent)
 .chart-key-ring { width: 10px; height: 10px; border-radius: 50%; border: 2px solid; box-sizing: border-box; }
 /* The duration scatter of the Traces tab (src/web/charts/scatter.rs): no viewBox, so positions
    are percent of the plot and radii px, and dots stay round as it stretches. Background dots
-   are muted for ok (faded, as there are many) and red for error; the listed traces are filled
-   by status inside an accent ring, the selected one larger and ringed in the text colour. */
+   are muted for ok (faded, as there are many) and red for error; the listed traces have an
+   accent ring, hollow for ok (as the legend's key) and filled red for error, so the two are
+   told apart by shape as well as colour; the selected one is larger and ringed in the text
+   colour. */
 .chart-scatter .chart-y, .chart-scatter .chart-plot { height: 150px; }
 .scatter-ok { fill: var(--muted); background: var(--muted); }
 .scatter-error { fill: var(--fail); background: var(--fail); }
 .scatter-listed { border-color: var(--accent); }
 .scatter-dot.scatter-ok { fill-opacity: 0.55; }
 .scatter-hit { fill: transparent; }
-.scatter-mark { fill: var(--p50); stroke: var(--accent); stroke-width: 2px; }
+.scatter-mark { fill: var(--surface); stroke: var(--accent); stroke-width: 2px; }
 .scatter-mark.scatter-error { fill: var(--fail); }
 .scatter-current .scatter-mark { stroke: var(--text); }
 .scatter-link:hover .scatter-mark { stroke-width: 3px; }
@@ -1647,6 +1649,18 @@ p.stack-stats { font-size: 12px; }
 .wf-took { fill: var(--text-2); font: 11px var(--mono); dominant-baseline: central; }
 .wf-took-left { text-anchor: end; }
 .wf-took-inside { fill: var(--surface); font-weight: 600; }
+/* Forced colours (Windows high contrast). An SVG's shapes keep their colours there, so the bars
+   stay in their service's; what is drawn with backgrounds or SVG text does not. The service
+   squares keep theirs to match the bars, a bar's inside label keeps the colour chosen against
+   it, the error ring is set off from the bar on the forced canvas and the error badge gets an
+   edge, and the selected row, whose background is gone, is outlined. The critical path dims
+   by opacity, which is not forced. */
+@media (forced-colors: active) {
+  .wf-legend .dot, .wf-swatch, .wf-took-inside { forced-color-adjust: none; }
+  .wf-gap, .wf-row:hover .wf-gap, .wf-selected .wf-gap { stroke: Canvas; }
+  .wf-err { border: 1px solid CanvasText; }
+  .wf-row.wf-selected { outline: 2px solid Highlight; outline-offset: -2px; }
+}
 /* The selected span's details (src/web/telemetry/traces/waterfall/details.rs), under its row
    across both columns and above the row link's cover (its ::after), so their own links work.
    Set on --bg, as the mockup's, with the row's --svc for the swatch; values wrap anywhere, the

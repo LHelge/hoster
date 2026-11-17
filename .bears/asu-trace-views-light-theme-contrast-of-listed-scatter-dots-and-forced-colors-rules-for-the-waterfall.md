@@ -1,14 +1,15 @@
 ---
 id: asu
 title: "Trace views: light-theme contrast of listed scatter dots and forced-colors rules for the waterfall"
-status: proposed
+status: done
 priority: P3
 created: "2026-11-17T20:11:02.462046695Z"
-updated: "2026-11-17T20:11:02.482825404Z"
+updated: "2026-11-17T21:28:01.121252270Z"
 tags:
   - web
   - observability
   - charts
+attempts: 1
 ---
 
 ## Summary
