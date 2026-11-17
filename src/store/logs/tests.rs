@@ -1956,6 +1956,17 @@ mod spans {
         (dir, store)
     }
 
+    /// The stored spans of a trace as the waterfall's read returns them.
+    async fn stored(store: &LogStore, id: TraceId) -> Vec<Span> {
+        store
+            .load_trace(id)
+            .await
+            .unwrap()
+            .map_or_else(Vec::new, |trace| {
+                trace.spans().iter().map(|s| s.span().clone()).collect()
+            })
+    }
+
     fn ids(spans: &[Span]) -> Vec<String> {
         spans
             .iter()
@@ -1976,7 +1987,7 @@ mod spans {
         let child = span(trace(1), 2, Some(1), "notes", 1_234_570);
         let (_dir, store) = seed(vec![child.clone(), full.clone()]).await;
 
-        assert_eq!(store.trace_spans(trace(1)).await.unwrap(), [full, child]);
+        assert_eq!(stored(&store, trace(1)).await, [full, child]);
         store.close().await;
     }
 
@@ -1989,56 +2000,8 @@ mod spans {
             span(trace(1), 2, Some(1), "blog", 2_000),
         ])
         .await;
-        assert_eq!(
-            ids(&store.trace_spans(trace(1)).await.unwrap()),
-            ["01", "02", "03"]
-        );
-        assert!(store.trace_spans(trace(7)).await.unwrap().is_empty());
-        store.close().await;
-    }
-
-    #[tokio::test]
-    async fn roots_over_a_range_and_scope_come_newest_first() {
-        let ms = 1_000;
-        let (_dir, store) = seed(vec![
-            span(trace(1), 1, None, "notes", 1_000 * ms),
-            span(trace(1), 2, Some(1), "notes", 1_001 * ms),
-            span(trace(2), 3, None, "blog", 2_000 * ms),
-            span(trace(3), 4, None, "notes", 3_000 * ms),
-            // Its parent was lost or is the proxy's: not a root here.
-            span(trace(4), 5, Some(99), "notes", 4_000 * ms),
-        ])
-        .await;
-        let roots = |query: RootQuery| {
-            let store = store.clone();
-            async move { ids(&store.root_spans(&query).await.unwrap()) }
-        };
-
-        assert_eq!(
-            roots(RootQuery::new(everything(), LogScope::All)).await,
-            ["04", "03", "01"]
-        );
-        assert_eq!(
-            roots(RootQuery::new(
-                everything(),
-                LogScope::Stack("notes".into())
-            ))
-            .await,
-            ["04", "01"]
-        );
-        assert!(
-            roots(RootQuery::new(everything(), LogScope::Hoster))
-                .await
-                .is_empty()
-        );
-        // The range is in milliseconds, its end exclusive.
-        assert_eq!(
-            roots(RootQuery::new(at(1_000)..at(3_000), LogScope::All)).await,
-            ["03", "01"]
-        );
-        let mut limited = RootQuery::new(everything(), LogScope::All);
-        limited.limit = 2;
-        assert_eq!(roots(limited).await, ["04", "03"]);
+        assert_eq!(ids(&stored(&store, trace(1)).await), ["01", "02", "03"]);
+        assert!(store.load_trace(trace(7)).await.unwrap().is_none());
         store.close().await;
     }
 

@@ -381,11 +381,6 @@ impl Trace {
         services
     }
 
-    /// The spans on the critical path, root first, every root's path in turn.
-    pub fn critical_path(&self) -> impl Iterator<Item = &TraceSpan> {
-        self.spans.iter().filter(|s| s.critical)
-    }
-
     /// The span a trace opens on: the first span in error, in row order, without a child in
     /// error (the end of the first error chain, where it went wrong); the root when nothing
     /// failed.

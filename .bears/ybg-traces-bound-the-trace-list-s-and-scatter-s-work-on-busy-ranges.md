@@ -11,7 +11,7 @@ tags:
 ---
 
 ## Summary
-`LogStore::traces` and `LogStore::trace_points` (task `txt`) collect and sort every root in the range before the page limit or the sampling applies, and the count, the page and the scatter each do it again. Found in the review of `txt` on 2026-11-17: with 1M requests over 24 h (about 12 req/s, every second one with a stored app span) one Traces tab load costs roughly 0.7 s (count) + 0.9 s (page) + 1.8 s (scatter) after the cheap fix in `txt`, growing linearly with traffic. The rest of the log store bounds its reads with `SCAN_CAP` (ADR-0067); these do not. The status filter, the services filter and the errors-first sort additionally look up spans for every root.
+`LogStore::traces` and `LogStore::trace_points` (task `txt`) collect and sort every root in the range before the page limit or the sampling applies, and the count, the page and the scatter each do it again. Found in the review of `txt` on 2026-11-17: with 1M requests over 24 h (about 12 req/s, every second one with a stored app span) one Traces tab load costs roughly 0.7 s (count) + 0.9 s (page) + 1.8 s (scatter) after the cheap fix in `txt`, growing linearly with traffic. The rest of the log store bounds its reads with `SCAN_CAP` (ADR-0067); these do not. The status filter and the errors-first sort additionally look up spans for every root.
 
 Whether and how to bound it is a design call for the owner: a scan cap as in ADR-0067 (with "showing the newest N" in the UI), one shared pass for count, page and scatter, or a rule on the range the tab offers.
 

@@ -135,9 +135,6 @@ pub struct TraceQuery {
     pub range: Range<Timestamp>,
     /// [`LogScope::All`] or one stack (the root's); [`LogScope::Hoster`] matches nothing.
     pub scope: LogScope,
-    /// Only traces with a span of one of these services ([`Span::EDGE_SERVICE`] for the
-    /// proxy's); every trace when empty.
-    pub services: Vec<String>,
     pub status: Option<TraceStatus>,
     /// Only traces whose root took at least this long.
     pub min_duration: Option<Duration>,
@@ -160,7 +157,6 @@ impl TraceQuery {
         Self {
             range,
             scope,
-            services: Vec::new(),
             status: None,
             min_duration: None,
             name: None,
@@ -240,18 +236,6 @@ impl TraceQuery {
         if let Some(min) = self.min_duration {
             sql.push(" AND duration >= ")
                 .push_bind(LogStore::micros(min));
-        }
-        if !self.services.is_empty() {
-            let edge = self.services.iter().any(|s| s == Span::EDGE_SERVICE);
-            sql.push(" AND (")
-                .push(if edge { "proxied OR " } else { "" })
-                .push("EXISTS (SELECT 1 FROM spans s WHERE s.trace_id = traces.trace_id")
-                .push(" AND s.service IN (");
-            let mut list = sql.separated(", ");
-            for service in &self.services {
-                list.push_bind(service.clone());
-            }
-            sql.push(")))");
         }
         if let Some(name) = self.name.as_deref().filter(|name| !name.is_empty()) {
             // `instr` over `lower`: no `LIKE` wildcards to escape. SQLite lowers ASCII only.
