@@ -1,5 +1,6 @@
-//! The read side of `spans` (ADR-0069 §6): one trace's spans, and the root spans over a range
-//! that the trace list starts from.
+//! The read side of `spans` (ADR-0069 §6): one trace's spans, and the stored root spans over a
+//! range. The trace list does not read these: it merges request rows and stored roots in SQL
+//! (`TraceQuery`, in `traces.rs`).
 
 use std::ops::Range;
 use std::time::Duration;
@@ -75,10 +76,16 @@ impl LogStore {
     /// retention removed or no container exported; the proxy's own two spans are not here
     /// (ADR-0069 §9). Reads the read pool only.
     pub async fn trace_spans(&self, id: TraceId) -> Result<Vec<Span>> {
+        self.trace_spans_up_to(id, usize::MAX).await
+    }
+
+    /// The first `limit` stored spans of the trace `id` in [`LogStore::trace_spans`]'s order.
+    pub(super) async fn trace_spans_up_to(&self, id: TraceId, limit: usize) -> Result<Vec<Span>> {
         let mut sql = QueryBuilder::<Sqlite>::new(COLUMNS);
         sql.push(" WHERE trace_id = ")
             .push_bind(id.to_string())
-            .push(" ORDER BY start, span_id");
+            .push(" ORDER BY start, span_id LIMIT ")
+            .push_bind(i64::try_from(limit).unwrap_or(i64::MAX));
         Ok(sql.build_query_as().fetch_all(&self.reads).await?)
     }
 
