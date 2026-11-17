@@ -1,13 +1,14 @@
 ---
 id: "3ku"
 title: "Log follower: read trace and span ids from JSON stdout lines (ADR-0072)"
-status: open
+status: done
 priority: P2
 created: "2026-11-17T20:53:27.227572608Z"
-updated: "2026-11-17T20:53:27.227572608Z"
+updated: "2026-11-17T21:11:09.678186811Z"
 tags:
   - logs
   - observability
+attempts: 1
 ---
 
 ## Summary

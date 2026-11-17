@@ -237,8 +237,8 @@ The selected span's details show:
 - **LOGS FOR THIS SPAN**: the log records the app sent with this span's id, oldest first (the
   first 50), each with its time, level and message, and each a link to the Logs tab with the
   trace's records, starting at that one. A record has a span id when the app sends it over
-  OTLP from inside the span (see [[tracing#pick-one-stdout-or-otlp-for-logs|Pick one: stdout
-  or OTLP for logs]]).
+  OTLP from inside the span, or prints it as a JSON line with the span's ids (see
+  [[tracing#pick-one-stdout-or-otlp-for-logs|Pick one: stdout or OTLP for logs]]).
 
 The proxy's spans have the request's attributes (method, path, host, status, client address,
 the route's prefix, and the stack and service called), a resource of `service.name=hoster`,
@@ -252,7 +252,9 @@ and span id:
 - **The TRACE column.** Every record has one, at the end of its row: the first 8 hex digits of
   its trace id and an arrow, a link to the trace in the Traces tab opened on the record's span,
   or `—` for a record without one. Records an app sends over OTLP from inside a span carry
-  its ids. A JSON line on stdout has none, even when it has a `trace_id` field.
+  its ids. A JSON line on stdout or stderr has them when it names them: `trace_id` or
+  `traceId`, and `span_id` or `spanId`, at the top level or under `fields`
+  ([[logging#trace-and-span-ids|Trace and span ids]]).
 - **An opened record** lists `trace_id`, `span_id` and `service.name` after its fields, so a
   record with a trace id opens even without fields. `trace_id` lists only the records of that
   trace, `span_id` opens the span in the Traces tab, and `service.name` lists only that
@@ -302,7 +304,10 @@ cap. Choose one per app:
 - **Spans and logs over OTLP.** Install the SDK's log bridge and stop printing log lines. The
   records carry their trace and span ids.
 - **Spans over OTLP, logs on stdout.** Export spans only and keep JSON lines on stdout
-  ([[logging]]). Nothing is stored twice; the lines carry no trace id unless the app adds one.
+  ([[logging]]). Nothing is stored twice. For the lines to link to their trace, the app
+  writes the current span's ids into each line as `trace_id` and `span_id`
+  ([[logging#trace-and-span-ids|Trace and span ids]]); without them the lines are stored
+  with no trace.
 - **Logs on stdout only.** No SDK, or export turned off. Each request still has the proxy's
   two spans.
 
@@ -476,7 +481,9 @@ What each part is for:
 - **The filter on the log bridge** keeps the exporter's own HTTP client from exporting its
   events, which would feed back into the exporter when `RUST_LOG` is set to `debug`.
 - **Spans only:** to keep logs on stdout, replace the `OpenTelemetryTracingBridge` layer with
-  the `fmt` JSON layer and drop the logger provider.
+  the `fmt` JSON layer and drop the logger provider. That layer does not write the
+  OpenTelemetry ids by itself: add `trace_id` and `span_id` to the lines
+  ([[logging#trace-and-span-ids|Trace and span ids]]) if they should link to their trace.
 
 Set the level with `RUST_LOG` in the service's `env`, as for JSON lines.
 
