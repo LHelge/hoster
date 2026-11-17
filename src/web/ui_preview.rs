@@ -2473,7 +2473,8 @@ async fn ui_preview() {
     );
 
     // The Telemetry page's traces: the slowest in error with one selected, a waterfall with a
-    // span selected, and an id that expired.
+    // span selected, the same collapsed to services (the selected span hidden, so no details)
+    // and with its critical path highlighted, and an id that expired.
     for (query, file, label) in [
         (
             "status=error&sort=slowest&trace=02020202020202020202020202020202",
@@ -2484,6 +2485,16 @@ async fn ui_preview() {
             "trace=06060606060606060606060606060606&span=06085e0000000001",
             "telemetry-traces-waterfall",
             "Telemetry: the waterfall of a statement timeout, its failing call's details open",
+        ),
+        (
+            "trace=06060606060606060606060606060606&collapsed=06025e0000000001",
+            "telemetry-traces-collapsed",
+            "Telemetry: the waterfall collapsed to services, its failing call hidden",
+        ),
+        (
+            "trace=06060606060606060606060606060606&span=none&crit=on",
+            "telemetry-traces-critical",
+            "Telemetry: the waterfall with its critical path highlighted",
         ),
         (
             "trace=77777777777777777777777777777777",

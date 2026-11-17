@@ -1455,9 +1455,10 @@ p.stack-stats { font-size: 12px; }
    then a row per span whose bar is an SVG with its geometry as attributes (ADR-0054). A row's
    service class sets --svc, which colours its edge, bar and minimap line; error spans keep it
    and get a red ring (wf-ring) with a gap of the row's colour (wf-gap) drawn under the fill.
-   The span's link covers its whole row (its ::after), so the bar is a target too and the row is
-   one tab stop. Rows are set on --hover when hovered or selected: nothing dimmer than --text-2
-   sits on them. */
+   The span's link (wf-pick) covers its whole row (its ::after), so the bar is a target too and
+   the row is one tab stop; a span with rows under it has a collapse toggle before it, a second
+   link above that cover. Rows are set on --hover when hovered or selected: nothing dimmer than
+   --text-2 sits on them. */
 .trace-waterfall .svc-hoster { --svc: var(--svc-hoster); }
 .trace-waterfall .svc-0 { --svc: var(--svc-0); }
 .trace-waterfall .svc-1 { --svc: var(--svc-1); }
@@ -1484,6 +1485,44 @@ p.stack-stats { font-size: 12px; }
   font: 12px/1.4 var(--mono);
 }
 .wf-legend li { display: inline-flex; align-items: center; gap: 6px; }
+/* The controls beside the legend: the critical-path switch and the collapse links, as the
+   mockup's ghost buttons. The switch is a checkbox (.switch) that dims the rows off the critical
+   path by :has() alone; where :has() is not supported, a link to crit=on (wf-crit-link) stands
+   in for it and the server's wf-crit-on dims them. */
+.wf-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font: 12px/1.4 var(--mono);
+}
+.wf-crit-link { display: none; color: var(--text-2); text-decoration: none; }
+.wf-crit-link[aria-checked="true"] { border-color: var(--ok); background: var(--ok-tint); color: var(--ok); }
+.wf-crit-link[aria-checked="true"] .switch-track { background: var(--ok); box-shadow: none; }
+.wf-crit-link[aria-checked="true"] .switch-track::after { left: 14px; background: var(--inset); }
+.wf-crit-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@supports not selector(:has(*)) {
+  .wf-crit-switch { display: none; }
+  .wf-crit-link { display: inline-flex; }
+  .wf-crit-on .wf-row:not(.wf-critical) .wf-bar rect { opacity: 0.25; }
+  .wf-crit-on .wf-row:not(.wf-critical) .wf-took { fill: var(--muted); }
+}
+.trace-waterfall:has(.wf-crit-input:checked) .wf-row:not(.wf-critical) .wf-bar rect { opacity: 0.25; }
+.trace-waterfall:has(.wf-crit-input:checked) .wf-row:not(.wf-critical) .wf-took { fill: var(--muted); }
+.wf-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  text-decoration: none;
+}
+.wf-action:hover { background: var(--hover); text-decoration: none; }
+.wf-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wf-action-off { border-color: var(--border); color: var(--muted); }
 .wf-legend .dot { width: 10px; height: 10px; border-radius: 2px; }
 .wf-count { color: var(--muted); }
 .wf-minimap-box { padding: 10px 18px 8px; border-bottom: 1px solid var(--border); }
@@ -1503,12 +1542,13 @@ p.stack-stats { font-size: 12px; }
 .wf-name {
   display: flex;
   align-items: center;
+  gap: 6px;
   min-width: 0;
   height: 30px;
   padding-right: 10px;
   border-left: 3px solid var(--svc);
 }
-.wf-name a {
+.wf-pick {
   display: flex;
   flex: 1 1 auto;
   align-items: center;
@@ -1518,11 +1558,31 @@ p.stack-stats { font-size: 12px; }
   font: 12px/1.4 var(--mono);
   text-decoration: none;
 }
-.wf-name a::after { content: ""; position: absolute; inset: 0; }
-.wf-name a:focus-visible { outline: 0; }
-.wf-name a:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -2px; }
-.wf-selected .wf-name a { font-weight: 600; }
-.wf-error .wf-name a { color: var(--fail); }
+.wf-pick::after { content: ""; position: absolute; inset: 0; }
+.wf-pick:focus-visible { outline: 0; }
+.wf-pick:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-selected .wf-pick { font-weight: 600; }
+.wf-error .wf-pick { color: var(--fail); }
+/* The collapse toggle, above the row link's cover; its chevron points down while expanded. A
+   leaf has a spacer of its width, so names line up. */
+.wf-toggle {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--text-2);
+}
+.wf-toggle:hover { background: var(--border); color: var(--text); }
+.wf-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.wf-toggle .icon { width: 12px; height: 12px; margin: 0; }
+.wf-toggle[aria-expanded="true"] .icon { transform: rotate(90deg); }
+.wf-leaf { flex: none; width: 20px; }
+.wf-hidden { flex: none; color: var(--text-2); font-size: 10px; }
 .wf-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wf-err {
   display: flex;

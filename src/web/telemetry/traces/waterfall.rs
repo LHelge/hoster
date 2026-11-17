@@ -17,8 +17,19 @@
 //! details under its row ([`SpanDetails`], `waterfall/details.rs`), and its row's link closes
 //! them ([`TraceParams::close_span`]).
 //!
-//! The rows are what [`Trace::visible`] shows for a set of collapsed spans, empty for now; the
-//! minimap always draws every span read.
+//! The controls work as links, without script (ADR-0054, ADR-0060). A span with rows under it
+//! has a toggle that collapses or expands it: the collapsed set is the URL's `collapsed`
+//! ([`TraceParams::collapsed`], kept to the spans of this trace that have rows under them), and
+//! the rows are what [`Trace::visible`] shows for it; "expand all" clears it and "collapse to
+//! services" sets it to [`Trace::service_entries`]. The selected span's details are drawn only
+//! while its row is shown: a collapse that hides it closes nothing, so expanding shows them
+//! again. The critical path is marked on its rows ([`TraceSpan::on_critical_path`]) and the
+//! others are dimmed by CSS while the switch's checkbox is checked (`:has()`), or where
+//! `:has()` is not supported by the server while `crit=on` ([`TraceParams::critical`]), which
+//! the switch's fallback link toggles. The checkbox is not in the URL, so it lasts for the page
+//! view: every link loads the page again with the checkbox as `crit` has it (checked for
+//! `crit=on`), and only `crit=on` lasts across links. The minimap always draws every span
+//! read.
 
 mod details;
 
@@ -88,8 +99,18 @@ pub struct Waterfall {
     pub ticks: Vec<String>,
     pub minimap: Minimap,
     pub rows: Vec<SpanRow>,
-    /// The selected span's details, drawn under its row; `None` when none is selected.
+    /// The selected span's details, drawn under its row; `None` when none is selected or a
+    /// collapse hides its row.
     pub details: Option<SpanDetails>,
+    /// The critical path is highlighted from the URL (`crit=on`).
+    pub critical: bool,
+    /// Where the critical-path switch's fallback link goes: the highlight switched.
+    pub critical_href: String,
+    /// "expand all": the trace with nothing collapsed; `None` when nothing is.
+    pub expand_all: Option<String>,
+    /// "collapse to services": the trace with [`Trace::service_entries`] collapsed; `None`
+    /// when it has none or they are what is collapsed.
+    pub collapse_services: Option<String>,
 }
 
 impl Waterfall {
@@ -101,14 +122,20 @@ impl Waterfall {
     pub fn new(trace: Trace, palette: &ServicePalette, params: &TraceParams) -> Self {
         let total = trace.duration();
         let current = params.selected_span(&trace);
+        let mut collapsed = params.collapsed();
+        collapsed.retain(|id| trace.span(*id).is_some_and(TraceSpan::has_children));
+        let visible = trace.visible(&collapsed);
         let details = current
-            .and_then(|id| trace.span(id))
+            .and_then(|id| visible.iter().find(|row| row.span().span_id == id))
             .map(|span| SpanDetails::new(&trace, span, params));
-        let rows = trace
-            .visible(&HashSet::new())
+        let rows = visible
             .into_iter()
-            .map(|span| SpanRow::new(&trace, span, total, palette, params, current))
+            .map(|span| SpanRow::new(&trace, span, total, palette, params, current, &collapsed))
             .collect();
+        let entries = trace.service_entries();
+        let collapse_services = (!entries.is_empty() && entries != collapsed)
+            .then(|| params.collapse(&trace, &entries));
+        let expand_all = (!collapsed.is_empty()).then(|| params.collapse(&trace, &HashSet::new()));
         let started = trace.start().map(|start| {
             let time = humantime::format_rfc3339_millis(Timestamp::from(start).into()).to_string();
             let shown = time.trim_end_matches('Z').replacen('T', " ", 1);
@@ -144,6 +171,10 @@ impl Waterfall {
             minimap: Minimap::new(&trace, palette),
             rows,
             details,
+            critical: params.critical(),
+            critical_href: params.toggle_critical(),
+            expand_all,
+            collapse_services,
             trace,
         }
     }
@@ -201,6 +232,10 @@ pub struct SpanRow {
     pub href: String,
     /// It is the selected span.
     pub current: bool,
+    /// It is on the critical path, which the switch highlights.
+    pub critical: bool,
+    /// Its collapse toggle, when it has rows under it.
+    pub toggle: Option<Toggle>,
     /// Its duration and where it starts on the axis (`+51.7 ms`), as text.
     pub took: String,
     pub offset: String,
@@ -233,6 +268,7 @@ impl SpanRow {
         palette: &ServicePalette,
         params: &TraceParams,
         current: Option<SpanId>,
+        collapsed: &HashSet<SpanId>,
     ) -> Self {
         let span = row.span();
         let class = palette.class(&span.service);
@@ -255,6 +291,8 @@ impl SpanRow {
                 params.select_span(span.span_id)
             },
             current,
+            critical: row.on_critical_path(),
+            toggle: Toggle::new(trace, row, params, collapsed),
             offset: format!("+{}", SpanTime(offset)),
             bar: Bar::new(offset, span.duration, total, class, span.is_error(), &took),
             took,
@@ -278,6 +316,58 @@ impl SpanRow {
         attributes
             .contains_key("process.command")
             .then(|| "exec".to_owned())
+    }
+}
+
+/// The toggle of a span with rows under it: a link that collapses it when it is expanded and
+/// expands it when it is collapsed, the other collapsed spans kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toggle {
+    /// The trace with this span collapsed or expanded.
+    pub href: String,
+    /// Its rows are shown.
+    pub expanded: bool,
+    /// `Collapse documents.info`, `Expand documents.info`.
+    pub label: String,
+    /// How many rows collapsing it hides, all the way down: the `+N` of a collapsed span.
+    pub hidden: usize,
+}
+
+impl Toggle {
+    /// The toggle of `row` of `trace` with `collapsed` collapsed; `None` when nothing is under
+    /// it.
+    fn new(
+        trace: &Trace,
+        row: &TraceSpan,
+        params: &TraceParams,
+        collapsed: &HashSet<SpanId>,
+    ) -> Option<Self> {
+        if !row.has_children() {
+            return None;
+        }
+        let id = row.span().span_id;
+        let expanded = !collapsed.contains(&id);
+        let mut toggled = collapsed.clone();
+        if expanded {
+            toggled.insert(id);
+        } else {
+            toggled.remove(&id);
+        }
+        Some(Self {
+            href: params.collapse(trace, &toggled),
+            expanded,
+            label: format!(
+                "{} {}",
+                if expanded { "Collapse" } else { "Expand" },
+                row.span().name
+            ),
+            hidden: row.descendants(),
+        })
+    }
+
+    /// `9 spans`: what is hidden, as said to a screen reader.
+    pub fn hidden_spans(&self) -> String {
+        Counted(self.hidden, "span").to_string()
     }
 }
 
