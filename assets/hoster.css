@@ -951,6 +951,12 @@ a.scatter-link:focus-visible .scatter-hit { stroke: var(--accent); stroke-width:
   border-left: 3px solid transparent;
 }
 .log-stacks .log-record { --log-cols: max-content 12ch 12ch 5ch minmax(0, 1fr); }
+/* The TRACE column of the records and the access log: the trace's first 8 hex digits and an
+   arrow, a link to it in the Traces tab, or a dash without one. */
+.log-traces .log-record { --log-cols: max-content 12ch 5ch minmax(0, 1fr) 10ch; }
+.log-stacks.log-traces .log-record { --log-cols: max-content 12ch 12ch 5ch minmax(0, 1fr) 10ch; }
+.log-trace { color: var(--muted); white-space: nowrap; }
+.log-trace a { color: var(--link); }
 .log-record.log-fielded { display: block; }
 .log-fielded > details > summary, .log-request > details > summary {
   display: grid;
@@ -988,6 +994,7 @@ a.scatter-link:focus-visible .scatter-hit { stroke: var(--accent); stroke-width:
    client; it always opens, on the rest of the row. Status tones are the traffic charts'. */
 .log-record.log-request { --log-cols: max-content 12ch 7ch minmax(0, 1fr) 3ch 9ch 9ch 16ch; display: block; }
 .log-stacks .log-record.log-request { --log-cols: max-content 12ch 12ch 7ch minmax(0, 1fr) 3ch 9ch 9ch 16ch; }
+.log-traces .log-record.log-request { --log-cols: max-content 12ch 7ch minmax(0, 1fr) 3ch 9ch 9ch 16ch 10ch; }
 .req-method { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .req-path { white-space: normal; }
 .req-status { font-weight: 600; }
@@ -1020,12 +1027,19 @@ a.scatter-link:focus-visible .scatter-hit { stroke: var(--accent); stroke-width:
   /* Across stacks: time, stack, service and level on one line, in the same columns on every
      row, long names cut. */
   .log-stacks .log-record { --log-cols: max-content 9ch 11ch 5ch; }
+  /* No TRACE column: a trace link gets a line of its own under the message (another column
+     would be widened by the message spanning it), and a row without one shows nothing. */
+  .log-traces .log-record { --log-cols: max-content max-content max-content; }
+  .log-stacks.log-traces .log-record { --log-cols: max-content 9ch 11ch 5ch; }
+  .log-traces .log-trace { grid-column: 1 / -1; }
+  .log-trace-none { display: none; }
   .log-fields { grid-template-columns: minmax(0, 1fr); }
   .log-fields dd { margin-bottom: 4px; }
   .log-record .log-msg { grid-column: 1 / -1; }
   /* A request: time, service, method and status on the first line, the path on its own, then
      duration, bytes and client. */
   .log-record.log-request, .log-stacks .log-record.log-request { --log-cols: max-content max-content max-content max-content; }
+  .log-traces .log-record.log-request { --log-cols: max-content max-content max-content max-content; }
   .log-request .req-path { grid-column: 1 / -1; grid-row: 2; }
   .log-request .req-num { text-align: start; }
 }
@@ -1537,6 +1551,7 @@ p.stack-stats { font-size: 12px; }
   border-radius: var(--radius-control);
   color: var(--text);
   text-decoration: none;
+  white-space: nowrap;
 }
 .wf-action:hover { background: var(--hover); text-decoration: none; }
 .wf-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

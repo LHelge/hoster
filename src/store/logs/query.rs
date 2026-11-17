@@ -4,6 +4,9 @@
 //! index, and by whatever else SQL can compare; text, regular expressions and field filters are
 //! matched in Rust, a chunk of rows at a time, until the page is full or [`SCAN_CAP`] rows have
 //! been visited. The two share that scan, the [`PageAt`] cursor and the [`Page`] they return.
+//! A record query narrowed to one trace ([`LogQuery::trace`]) reads by the partial
+//! `log_records_by_trace` index instead, whatever its range, so a trace's few records are found
+//! without reading the range.
 
 mod requests;
 mod spans;
@@ -18,7 +21,7 @@ use regex::{Regex, RegexBuilder};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Sqlite};
 
-use super::{Level, LogRecord, LogStore, Stream, UnknownLogText};
+use super::{Level, LogRecord, LogStore, Stream, TraceId, UnknownLogText};
 use crate::store::{Result, StoreError, Timestamp};
 
 pub use requests::{RequestCounts, RequestEntry, RequestQuery, StatusFilter};
@@ -199,6 +202,9 @@ pub struct LogQuery {
     /// `(dotted key, value)` pairs a record's [`flat_fields`](LogRecord::flat_fields) must all
     /// hold exactly.
     pub fields: Vec<(String, String)>,
+    /// Only the records of this trace (ADR-0069 §6), read by the trace index rather than the
+    /// range's; every record when `None`.
+    pub trace: Option<TraceId>,
     pub page: PageAt,
     /// At most this many records; clamped to `1..=`[`LogQuery::MAX_LIMIT`].
     pub limit: u32,
@@ -222,9 +228,38 @@ impl LogQuery {
             streams: Vec::new(),
             text: None,
             fields: Vec::new(),
+            trace: None,
             page: PageAt::Newest,
             limit: Self::DEFAULT_LIMIT,
         }
+    }
+
+    /// The table its reads name: with the trace index forced when it is narrowed to a trace,
+    /// as the planner would otherwise pick the time index and read the whole range for a
+    /// trace's few records. `trace_id = ?` implies the partial index's `trace_id IS NOT NULL`,
+    /// so SQLite can always use it.
+    fn table(&self) -> &'static str {
+        match self.trace {
+            Some(_) => "log_records INDEXED BY log_records_by_trace",
+            None => "log_records",
+        }
+    }
+
+    /// `AND trace_id = <trace>`, when it is narrowed to one.
+    fn push_trace(&self, sql: &mut QueryBuilder<Sqlite>) {
+        if let Some(trace) = self.trace {
+            sql.push(" AND trace_id = ").push_bind(trace.to_string());
+        }
+    }
+
+    /// The SQL of its newest page's first chunk, `?` for each bound value: for the tests that
+    /// check which index it reads.
+    #[cfg(test)]
+    pub(crate) fn newest_page_sql(&self) -> String {
+        self.chunk_sql(None, true, self.limit())
+            .sql()
+            .as_str()
+            .to_owned()
     }
 
     /// The filters SQL cannot apply.
@@ -297,10 +332,15 @@ impl Paged for LogQuery {
              marker, trace_id, span_id, received FROM {from}"
         ));
         Self::push_where(&mut sql, &self.range, &self.scope);
+        self.push_trace(&mut sql);
         Self::push_in(&mut sql, "service", self.services.clone());
         Self::push_in(&mut sql, "level", self.levels.iter().map(|l| l.as_str()));
         Self::push_in(&mut sql, "stream", self.streams.iter().map(|s| s.as_str()));
         sql
+    }
+
+    fn select(&self) -> QueryBuilder<Sqlite> {
+        self.select_from(self.table())
     }
 
     fn decode(row: EntryRow) -> Result<LogEntry, UnknownLogText> {
@@ -670,12 +710,14 @@ impl LogStore {
     }
 
     /// How many records without a level `query` would list if it took every level: what a
-    /// level filter hides (ADR-0067 §3). Narrows by range, scope, services and streams only,
-    /// with the index and no message scan, so its text and field filters and its page are not
-    /// applied.
+    /// level filter hides (ADR-0067 §3). Narrows by range, scope, trace, services and streams
+    /// only, with the index and no message scan, so its text and field filters and its page
+    /// are not applied.
     pub async fn count_unleveled(&self, query: &LogQuery) -> Result<u64> {
-        let mut sql = QueryBuilder::<Sqlite>::new("SELECT count(*) FROM log_records");
+        let mut sql =
+            QueryBuilder::<Sqlite>::new(format!("SELECT count(*) FROM {}", query.table()));
         LogQuery::push_where(&mut sql, &query.range, &query.scope);
+        query.push_trace(&mut sql);
         LogQuery::push_in(&mut sql, "service", query.services.clone());
         LogQuery::push_in(&mut sql, "stream", query.streams.iter().map(|s| s.as_str()));
         sql.push(" AND level IS NULL");
@@ -691,19 +733,19 @@ impl LogStore {
             .await?)
     }
 
-    /// Every stack and service with records in `range` and `scope`, with the deployment
-    /// generations those records came from: the service chips of the logs view, and whether a
-    /// row needs its generation to tell replaced containers apart. Ordered by stack (hoster's
-    /// own records without one first), then service. Reads what the index narrows to, with no
-    /// message scan, as [`LogStore::count_by_level`] does.
-    pub async fn services_in(
-        &self,
-        range: Range<Timestamp>,
-        scope: &LogScope,
-    ) -> Result<Vec<ServiceSeen>> {
-        let mut sql =
-            QueryBuilder::<Sqlite>::new("SELECT stack, service, generation FROM log_records");
-        LogQuery::push_where(&mut sql, &range, scope);
+    /// Every stack and service with records in the range, scope and trace of `query`, with
+    /// the deployment generations those records came from: the service chips of the logs view,
+    /// and whether a row needs its generation to tell replaced containers apart. Its other
+    /// filters and its page are not applied. Ordered by stack (hoster's own records without one
+    /// first), then service. Reads what the index narrows to, with no message scan, as
+    /// [`LogStore::count_by_level`] does.
+    pub async fn services_in(&self, query: &LogQuery) -> Result<Vec<ServiceSeen>> {
+        let mut sql = QueryBuilder::<Sqlite>::new(format!(
+            "SELECT stack, service, generation FROM {}",
+            query.table()
+        ));
+        LogQuery::push_where(&mut sql, &query.range, &query.scope);
+        query.push_trace(&mut sql);
         sql.push(" GROUP BY stack, service, generation ORDER BY stack, service, generation");
         let rows: Vec<(Option<String>, String, Option<i64>)> =
             sql.build_query_as().fetch_all(&self.reads).await?;
@@ -770,11 +812,11 @@ impl LogStore {
     }
 
     /// Records per `bucket`-long period since the epoch and level that `query` narrows to by
-    /// range, scope, services and streams, for the severity histogram, oldest bucket first: its
-    /// levels, text and field filters and its page are not applied (every level is counted, so
-    /// the caller can draw what a level filter keeps). Buckets without records are left out.
-    /// Reads what the index narrows to, with no message scan; a zero `bucket` counts per
-    /// millisecond.
+    /// range, scope, trace, services and streams, for the severity histogram, oldest bucket
+    /// first: its levels, text and field filters and its page are not applied (every level is
+    /// counted, so the caller can draw what a level filter keeps). Buckets without records are
+    /// left out. Reads what the index narrows to, with no message scan; a zero `bucket` counts
+    /// per millisecond.
     pub async fn count_by_level(
         &self,
         query: &LogQuery,
@@ -787,8 +829,10 @@ impl LogStore {
             .push_bind(length)
             .push(") % ")
             .push_bind(length)
-            .push(") AS bucket, level, count(*) FROM log_records");
+            .push(") AS bucket, level, count(*) FROM ")
+            .push(query.table());
         LogQuery::push_where(&mut sql, &query.range, &query.scope);
+        query.push_trace(&mut sql);
         LogQuery::push_in(&mut sql, "service", query.services.clone());
         LogQuery::push_in(&mut sql, "stream", query.streams.iter().map(|s| s.as_str()));
         sql.push(" GROUP BY bucket, level ORDER BY bucket");

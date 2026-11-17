@@ -19,10 +19,10 @@ use serde_json::{Map, Value};
 use super::super::TraceParams;
 use crate::otlp::ResourceAttributes;
 use crate::store::{
-    Level, LogEntry, LogStore, MicroTimestamp, RecordKey, Span, SpanId, SpanKind, SpanStatus,
-    Trace, TraceId, TraceSpan,
+    Level, LogEntry, LogStore, MicroTimestamp, Span, SpanId, SpanKind, SpanStatus, Trace, TraceId,
+    TraceSpan,
 };
-use crate::web::logs::LogScope;
+use crate::web::logs::LogParams;
 use crate::web::telemetry::Telemetry;
 use crate::web::ui::SpanTime;
 
@@ -117,7 +117,7 @@ impl SpanDetails {
             .span_records(trace, self.id, SpanLogs::LIMIT + 1)
             .await
         {
-            Ok(entries) => SpanLogs::from(entries),
+            Ok(entries) => SpanLogs::from((trace, entries)),
             Err(err) => {
                 tracing::warn!(error = %err, "reading a span's log records failed");
                 SpanLogs {
@@ -336,15 +336,20 @@ impl SpanLogs {
     }
 }
 
-/// Records read with a limit of one more than [`SpanLogs::LIMIT`], oldest first, so one past
-/// the limit says there are more.
-impl From<Vec<LogEntry>> for SpanLogs {
-    fn from(mut entries: Vec<LogEntry>) -> Self {
+/// The records of trace `trace`'s span, read with a limit of one more than [`SpanLogs::LIMIT`],
+/// oldest first, so one past the limit says there are more.
+impl From<(TraceId, Vec<LogEntry>)> for SpanLogs {
+    fn from((trace, mut entries): (TraceId, Vec<LogEntry>)) -> Self {
         let limit = usize::try_from(Self::LIMIT).unwrap_or(usize::MAX);
-        let more = entries.get(limit).map(|next| SpanLog::from(next).href);
+        let more = entries
+            .get(limit)
+            .map(|next| SpanLog::from((trace, next)).href);
         entries.truncate(limit);
         Self {
-            records: entries.iter().map(SpanLog::from).collect(),
+            records: entries
+                .iter()
+                .map(|entry| SpanLog::from((trace, entry)))
+                .collect(),
             more,
             unreadable: false,
         }
@@ -366,28 +371,17 @@ pub struct SpanLog {
     pub href: String,
 }
 
-/// The Logs tab opened on a record: its stack (or hoster's own records, for one without), the
-/// range from its time, and the page of records after the one before it, so it is the page's
-/// first. The Logs tab has no filter by trace yet; one by `trace` can narrow this link.
-impl From<&LogEntry> for SpanLog {
-    fn from(entry: &LogEntry) -> Self {
+/// A record of trace `trace` (the trace whose span read it), linking the Logs tab opened on it:
+/// the records of that trace, every level over the store's retention
+/// ([`LogParams::trace_href`]), on the page that starts with it, so the tab shows the trace's
+/// records from this one on rather than everything of its stack.
+impl From<(TraceId, &LogEntry)> for SpanLog {
+    fn from((trace, entry): (TraceId, &LogEntry)) -> Self {
         let record = &entry.record;
         let time = humantime::format_rfc3339_millis(record.time.into()).to_string();
-        let before = RecordKey {
-            time: record.time,
-            id: entry.id - 1,
-        }
-        .to_string();
-        let query = form_urlencoded::Serializer::new(String::new())
-            .extend_pairs([
-                ("stack", record.stack.as_deref().unwrap_or(LogScope::HOSTER)),
-                ("since", &time),
-                ("after", &before),
-            ])
-            .finish();
         Self {
             shown: time.get(11..23).unwrap_or(&time).to_owned(),
-            href: format!("{}?{query}", Telemetry::LOGS),
+            href: LogParams::trace_href(Telemetry::LOGS, trace, Some(entry.key())),
             time,
             level: record.level,
             message: record.message.clone(),

@@ -4,6 +4,7 @@
     tab and the Telemetry page's Logs tab, and by every source; a source shows only the chips
     it has. -#}
 {%- let stack_column = view.stack_column %}
+{%- let trace_column = view.trace_column %}
 <section class="log-view" aria-label="Logs">
   <div class="log-toolbar">
     {%- if !view.sources.is_empty() %}
@@ -42,6 +43,13 @@
       {%- for chip in view.fields %}
       <a class="log-chip log-field-chip" href="{{ chip.remove }}" title="Remove this filter">{{ chip.label }} <span aria-hidden="true">×</span><span class="visually-hidden">(remove)</span></a>
       {%- endfor %}
+    </nav>
+    {%- endif %}
+    {%- if let Some(chip) = view.trace %}
+    <nav class="log-choices log-trace-filter" aria-label="Trace filter">
+      <span class="log-label">trace</span>
+      <a class="log-chip log-field-chip" href="{{ chip.remove }}" title="Remove this filter">{{ chip.label() }} <span aria-hidden="true">×</span><span class="visually-hidden">(remove)</span></a>
+      <a class="log-preset" href="{{ chip.trace.href }}" title="Trace {{ chip.trace.id }} in the Traces tab">the trace<span aria-hidden="true"> →</span></a>
     </nav>
     {%- endif %}
     {%- if let Some(follow) = view.follow %}
@@ -132,7 +140,7 @@
       {%- if let Some(href) = view.older %}<a href="{{ href }}">older</a>{% endif %}
       {%- if let Some(href) = view.newest %}<a href="{{ href }}">newest</a>{% endif %}</p>
     {%- endif %}
-    <ol id="log-records" class="log log-records{% if view.stack_column %} log-stacks{% endif %}" tabindex="0" aria-label="Records, oldest first"{% if let Some(url) = stream %} hx-sse:connect="{{ url }}" hx-swap="beforeend" hx-sse:close="end"{% endif %}>
+    <ol id="log-records" class="log log-records{% if view.stack_column %} log-stacks{% endif %}{% if view.trace_column %} log-traces{% endif %}" tabindex="0" aria-label="Records, oldest first"{% if let Some(url) = stream %} hx-sse:connect="{{ url }}" hx-swap="beforeend" hx-sse:close="end"{% endif %}>
       {%- for row in view.rows %}
       {%- include "log_record.html" %}
       {%- endfor %}

@@ -402,6 +402,7 @@ fn followed_rows_render_as_the_page_does() {
     let html = LogRecords {
         rows: vec![row],
         stack_column: false,
+        trace_column: false,
         notice: None,
     }
     .render()
@@ -1045,6 +1046,7 @@ fn opened_records_render_escaped_with_no_inline_style() {
             rows.row(&entry(3, Duration::ZERO, "api", 1)),
         ],
         stack_column: false,
+        trace_column: false,
         notice: None,
     }
     .render()
@@ -1163,4 +1165,255 @@ fn the_record_count_says_when_it_stopped_at_its_cap() {
     let cap = u64::from(LogsView::COUNT_CAP);
     assert_eq!(Total(cap).to_string(), "100,000");
     assert_eq!(Total(cap + 1).to_string(), "100,000+");
+}
+
+/// The view alone, as the pages include it.
+#[derive(Template)]
+#[template(path = "logs_view.html")]
+struct LogsViewPage<'a> {
+    view: &'a LogsView,
+}
+
+/// A trace and a span of it, as the OTLP receiver stores them.
+const TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+const SPAN: &str = "00f067aa0ba902b7";
+
+fn traced(id: i64, ago: Duration, service: &str) -> LogEntry {
+    let mut entry = entry(id, ago, service, 1);
+    entry.record.stream = Stream::Otlp;
+    entry.record.trace_id = Some(TRACE.parse().unwrap());
+    entry.record.span_id = Some(SPAN.parse().unwrap());
+    entry
+}
+
+#[test]
+fn a_trace_filter_narrows_the_query_and_widens_the_default_range_to_the_retention() {
+    let day = Duration::from_secs(24 * 60 * 60);
+    let Plan { query, problem, .. } = plan(&format!("trace={}", TRACE.to_uppercase()));
+    assert_eq!(problem, None);
+    assert_eq!(query.trace, Some(TRACE.parse().unwrap()));
+    assert_eq!(query.range.start, Timestamp::from(noon() - 7 * day));
+    assert_eq!(
+        LogParams::TRACE_SINCE
+            .parse::<LogSince>()
+            .unwrap()
+            .resolve(noon()),
+        noon() - store::Retention::MAX_AGE,
+        "the store's retention"
+    );
+    // A `since` given still counts.
+    let Plan { query, .. } = plan(&format!("trace={TRACE}&since=5m"));
+    assert_eq!(
+        query.range.start,
+        Timestamp::from(noon() - Duration::from_secs(300))
+    );
+    // Not a trace id: said, and no filter or wider range.
+    let Plan { query, problem, .. } = plan("trace=4bf92f35");
+    assert_eq!(query.trace, None);
+    assert_eq!(
+        problem.as_deref(),
+        Some("`4bf92f35` is not a trace id (32 hex digits); not filtering by trace.")
+    );
+    assert_eq!(
+        query.range.start,
+        Timestamp::from(noon() - Duration::from_secs(3600))
+    );
+    // A source that takes none ignores it, its range included.
+    let access = params(&format!("source=access&trace={TRACE}"));
+    assert_eq!(access.trace(), (None, None));
+    assert!(!links_of(&access, LogSource::Access).contains("trace"));
+    assert_eq!(
+        SourcePlan::new(&access, noon()).range.start,
+        Timestamp::from(noon() - Duration::from_secs(3600))
+    );
+}
+
+fn links_of(params: &LogParams, source: LogSource) -> String {
+    Links::of(
+        "/stacks/notes/logs",
+        &LogScope::Stack("notes".into()),
+        params,
+        source,
+    )
+    .to(&[])
+}
+
+#[test]
+fn the_trace_filter_is_a_removable_chip_kept_by_every_link_and_named_when_nothing_matches() {
+    let read = || {
+        Ok(Read {
+            page: LogPage {
+                entries: vec![traced(1, Duration::from_secs(60), "api")],
+                ..LogPage::default()
+            },
+            oldest: Some(Timestamp::from(noon() - Duration::from_secs(3600))),
+            ..Read::default()
+        })
+    };
+    let view = view(
+        LogScope::Stack("notes".into()),
+        &format!("trace={TRACE}&level=error"),
+        read(),
+    );
+    // The range is the filter's own: where the data starts is not said.
+    assert_eq!(view.starts_at, None);
+    let given = self::view(
+        LogScope::Stack("notes".into()),
+        &format!("trace={TRACE}&since=6h"),
+        read(),
+    );
+    assert!(given.starts_at.is_some());
+    let chip = view.trace.as_ref().expect("a chip");
+    assert_eq!(chip.label(), "trace_id = 4bf92f35…");
+    assert_eq!(chip.remove, "/stacks/notes/logs?level=error");
+    assert_eq!(chip.trace.href, format!("/telemetry/traces?trace={TRACE}"));
+    assert!(view.keep.contains(&("trace", TRACE.to_owned())));
+    assert!(
+        view.levels[0]
+            .href
+            .ends_with(&format!("/stacks/notes/logs?trace={TRACE}")),
+        "{}",
+        view.levels[0].href
+    );
+    let html = LogsViewPage { view: &view }.render().unwrap();
+    assert!(
+        html.contains(r#"<a class="log-chip log-field-chip" href="/stacks/notes/logs?level=error" title="Remove this filter">trace_id = 4bf92f35… <span aria-hidden="true">×</span>"#),
+        "{html}"
+    );
+
+    let empty = view_empty(&format!("trace={TRACE}"));
+    let (active, clear) = empty.cleared.expect("named");
+    assert_eq!(active, "trace_id = 4bf92f35…");
+    assert_eq!(clear, "/stacks/notes/logs");
+}
+
+fn view_empty(query: &str) -> LogsView {
+    view(LogScope::Stack("notes".into()), query, Ok(Read::default()))
+}
+
+#[test]
+fn rows_link_their_trace_at_their_span_and_open_on_their_ids() {
+    let mut fielded = traced(1, Duration::from_secs(60), "api");
+    fielded.record.fields = Some(r#"{"user.id":7}"#.into());
+    // A stdout record that carries ids links as an OTLP one does.
+    fielded.record.stream = Stream::Stdout;
+    let mut no_span = traced(2, Duration::from_secs(50), "hoster");
+    no_span.record.span_id = None;
+    let view = view(
+        LogScope::Stack("notes".into()),
+        "",
+        Ok(Read {
+            page: LogPage {
+                entries: vec![
+                    fielded,
+                    traced(3, Duration::from_secs(40), "api"),
+                    no_span,
+                    entry(4, Duration::from_secs(30), "api", 1),
+                ],
+                ..LogPage::default()
+            },
+            ..Read::default()
+        }),
+    );
+    assert!(view.trace_column);
+    let trace = view.rows[0].trace.as_ref().expect("linked");
+    assert_eq!(trace.short(), "4bf92f35");
+    assert_eq!(
+        trace.href,
+        format!("/telemetry/traces?trace={TRACE}&span={SPAN}")
+    );
+    assert_eq!(
+        view.rows[2].trace.as_ref().unwrap().href,
+        format!("/telemetry/traces?trace={TRACE}")
+    );
+    assert_eq!(view.rows[3].trace, None);
+
+    // The ids follow the fields; a record with a trace id opens without fields.
+    let ids = |row: &LogRow| -> Vec<(&str, String, String)> {
+        row.detail
+            .as_ref()
+            .expect("it opens")
+            .ids
+            .iter()
+            .map(|id| (id.key, id.value.clone(), id.href.clone()))
+            .collect()
+    };
+    let detail = view.rows[0].detail.as_ref().unwrap();
+    assert_eq!(detail.fields[0].key, "user.id");
+    assert_eq!(
+        ids(&view.rows[0]),
+        [
+            (
+                "trace_id",
+                TRACE.to_owned(),
+                format!("/stacks/notes/logs?trace={TRACE}")
+            ),
+            (
+                "span_id",
+                SPAN.to_owned(),
+                format!("/telemetry/traces?trace={TRACE}&span={SPAN}")
+            ),
+            (
+                "service.name",
+                "api".to_owned(),
+                "/stacks/notes/logs?service=api".to_owned()
+            ),
+        ]
+    );
+    assert!(view.rows[1].detail.as_ref().unwrap().fields.is_empty());
+    assert_eq!(ids(&view.rows[1]).len(), 3);
+    assert_eq!(
+        ids(&view.rows[2])
+            .iter()
+            .map(|(key, ..)| *key)
+            .collect::<Vec<_>>(),
+        ["trace_id", "service.name"]
+    );
+    assert!(view.rows[3].detail.is_none(), "no fields, no trace");
+
+    let html = LogsViewPage { view: &view }.render().unwrap();
+    assert!(!html.contains("style="), "{html}");
+    assert!(
+        html.contains(r#"class="log log-records log-traces""#),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"<span class="log-trace"><a href="/telemetry/traces?trace={TRACE}&#38;span={SPAN}" title="Trace {TRACE} in the Traces tab">4bf92f35<span aria-hidden="true"> →</span></a></span></summary>"#
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="log-msg">line 4</span><span class="log-trace log-trace-none"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></li>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"<dt class="log-id">span_id</dt><dd><a href="/telemetry/traces?trace={TRACE}&#38;span={SPAN}" title="The span in the Traces tab">{SPAN}</a></dd>"#
+        )),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_trace_href_lists_the_traces_records_from_one_of_them() {
+    let trace: TraceId = TRACE.parse().unwrap();
+    assert_eq!(
+        LogParams::trace_href("/telemetry/logs", trace, None),
+        format!("/telemetry/logs?trace={TRACE}")
+    );
+    let key = RecordKey {
+        time: Timestamp::from_millis(1_000),
+        id: 42,
+    };
+    assert_eq!(
+        LogParams::trace_href("/telemetry/logs", trace, Some(key)),
+        format!("/telemetry/logs?trace={TRACE}&after=1000.41")
+    );
+}
+
+#[test]
+fn the_deploy_source_has_no_trace_column() {
+    assert!(LogSource::Containers.traced() && LogSource::Access.traced());
+    assert!(!LogSource::Deploy.traced());
 }

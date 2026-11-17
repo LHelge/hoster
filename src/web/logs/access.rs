@@ -6,7 +6,12 @@
 //! stack overview writes latencies, the response bytes and the client address. Every row opens,
 //! a `<details>` as a record with fields does, on the host, the route's prefix, the whole path,
 //! the time to the response header, whether the upstream failed and the request id, which links
-//! the containers' records that mention it (grep, as no field name for it is fixed).
+//! the containers' records that mention it (grep, as no field name for it is fixed). A request
+//! the proxy sent trace context for (task buj: it has a server span, as
+//! [`RequestRow::edge_spans`] needs) links its trace in the TRACE column and when opened, at
+//! the server span; the trace id is the request id (ADR-0069 §8). An older row has no link.
+//!
+//! [`RequestRow::edge_spans`]: crate::store::RequestRow::edge_spans
 //!
 //! Rows are kept by stack and service as the proxy stored them, without a join to the routes,
 //! so a route that moved to another stack keeps its old rows here.
@@ -27,7 +32,7 @@ use tokio::sync::watch;
 
 use super::{
     Chip, Download, EmptyNote, Links, LogFollow, LogMount, LogParams, LogReader, LogScope,
-    LogSource, LogsView, SourceEntry, SourcePlan, SourceRead, SourceTail,
+    LogSource, LogsView, SourceEntry, SourcePlan, SourceRead, SourceTail, TraceLink,
 };
 use crate::stats::{Elapsed, StatusClass};
 use crate::store::{
@@ -295,6 +300,10 @@ impl AccessLog {
                 request_id,
                 records,
             }),
+            // Without trace context the proxy started no trace: no spans, nothing to link.
+            trace: request
+                .server_span
+                .map(|span| TraceLink::new(request.request_id, Some(span))),
         }
     }
 }

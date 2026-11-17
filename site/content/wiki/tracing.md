@@ -208,6 +208,9 @@ The selected trace opens as a waterfall below the list:
   opening another trace loads the page again and turns it off. To keep it on across those
   links, put `&crit=on` in the URL: every link of the page then keeps it, selecting another
   trace included.
+- **logs in trace (N) →** opens the Logs tab with the trace's log records, every level, from
+  every span and stack. N counts them all. See [[tracing#traces-and-log-records|Traces and
+  log records]].
 - **Partial traces.** A span whose parent never arrived (lost, late, or not yet received) is
   drawn under the root and marked *parent missing*. A trace read stops at its first 1,000
   spans by start, and the waterfall then says how many more it has.
@@ -232,13 +235,37 @@ The selected span's details show:
   trace's start, and from the span's), their attributes, and an exception's
   `exception.stacktrace` as it was sent.
 - **LOGS FOR THIS SPAN**: the log records the app sent with this span's id, oldest first (the
-  first 50), each with its time, level and message, and each a link to the Logs tab opened on
-  that record. A record has a span id when the app sends it over OTLP from inside the span
-  (see [[tracing#pick-one-stdout-or-otlp-for-logs|Pick one: stdout or OTLP for logs]]).
+  first 50), each with its time, level and message, and each a link to the Logs tab with the
+  trace's records, starting at that one. A record has a span id when the app sends it over
+  OTLP from inside the span (see [[tracing#pick-one-stdout-or-otlp-for-logs|Pick one: stdout
+  or OTLP for logs]]).
 
 The proxy's spans have the request's attributes (method, path, host, status, client address,
 the route's prefix, and the stack and service called), a resource of `service.name=hoster`,
 and no events.
+
+## Traces and log records
+
+The Logs tabs (the stack's and the Telemetry page's) and the Traces tab link each other by trace
+and span id:
+
+- **The TRACE column.** Every record has one, at the end of its row: the first 8 hex digits of
+  its trace id and an arrow, a link to the trace in the Traces tab opened on the record's span,
+  or `—` for a record without one. Records an app sends over OTLP from inside a span carry
+  its ids. A JSON line on stdout has none, even when it has a `trace_id` field.
+- **An opened record** lists `trace_id`, `span_id` and `service.name` after its fields, so a
+  record with a trace id opens even without fields. `trace_id` lists only the records of that
+  trace, `span_id` opens the span in the Traces tab, and `service.name` lists only that
+  service's records.
+- **`?trace=<trace id>`** narrows a Logs tab to one trace's records. It shows as a chip,
+  `trace_id = 4bf92f35…`, whose `×` removes it, beside a link to the trace. Without a `since`
+  it reaches back over the whole 7 days the store keeps, since a trace's records can be older
+  than the tab's usual range. The waterfall's **logs in trace** and the span details' records
+  link here, with every level.
+- **The access log** (the stack Logs tab's `access` source) has the column too: a request's
+  trace is the one the proxy started for it, whose id is the request id, and the link opens
+  it on the proxy's server span. An opened request names it as `trace`. Requests stored before
+  hoster sent trace context (before version 0.9.0) have no trace and show `—`.
 
 # Limits, and what a drop looks like
 

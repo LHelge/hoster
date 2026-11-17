@@ -172,6 +172,7 @@
       {%- else %}
       <span class="wf-action wf-action-off">collapse to services</span>
       {%- endif %}
+      <a class="wf-action" href="{{ waterfall.logs.href }}">{{ waterfall.logs.label() }}<span aria-hidden="true">&nbsp;→</span></a>
     </div>
   </div>
   <div class="wf-minimap-box">{{ waterfall.minimap }}</div>

@@ -948,10 +948,13 @@ fn entry(n: i64, ms: i64, stack: Option<&str>, message: &str) -> LogEntry {
 
 #[test]
 fn span_logs_link_each_record_to_the_logs_tab_and_say_when_there_are_more() {
-    let logs = SpanLogs::from(vec![
-        entry(41, 1_852, Some("outline"), "query failed"),
-        entry(42, 1_853, None, "hoster's own"),
-    ]);
+    let logs = SpanLogs::from((
+        trace_id(),
+        vec![
+            entry(41, 1_852, Some("outline"), "query failed"),
+            entry(42, 1_853, None, "hoster's own"),
+        ],
+    ));
     assert_eq!(logs.more, None);
     assert!(!logs.unreadable);
     let first = &logs.records[0];
@@ -959,25 +962,23 @@ fn span_logs_link_each_record_to_the_logs_tab_and_say_when_there_are_more() {
     assert_eq!(first.shown, "19:58:42.933");
     assert_eq!(first.level, Some(crate::store::Level::Error));
     assert_eq!(first.message, "query failed");
-    // The record is the first of the page after the one before it, in a range from it.
+    // The trace's records, the record the first of the page after the one before it,
+    // whatever its stack.
     assert_eq!(
         first.href,
-        "/telemetry/logs?stack=outline&since=2026-11-12T19%3A58%3A42.933Z&after=1794513522933.40"
+        "/telemetry/logs?trace=4bf92f3577b34da6a3ce929d0e0e4736&after=1794513522933.40"
     );
-    assert!(
-        logs.records[1]
-            .href
-            .starts_with("/telemetry/logs?stack=_hoster&"),
-        "{}",
-        logs.records[1].href
+    assert_eq!(
+        logs.records[1].href,
+        "/telemetry/logs?trace=4bf92f3577b34da6a3ce929d0e0e4736&after=1794513522934.41"
     );
 
     let limit = SpanLogs::LIMIT as i64;
     let many: Vec<LogEntry> = (0..=limit)
         .map(|n| entry(100 + n, n, Some("outline"), "line"))
         .collect();
-    let next = SpanLog::from(&many[SpanLogs::LIMIT as usize]).href;
-    let logs = SpanLogs::from(many);
+    let next = SpanLog::from((trace_id(), &many[SpanLogs::LIMIT as usize])).href;
+    let logs = SpanLogs::from((trace_id(), many));
     assert_eq!(logs.records.len(), SpanLogs::LIMIT as usize);
     // "the rest" starts at the first record not shown: the 51st.
     assert_eq!(logs.more, Some(next));

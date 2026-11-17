@@ -30,6 +30,10 @@
 //! view: every link loads the page again with the checkbox as `crit` has it (checked for
 //! `crit=on`), and only `crit=on` lasts across links. The minimap always draws every span
 //! read.
+//!
+//! Beside them, "logs in trace (N) →" ([`TraceLogs`]) links the Logs tab narrowed to the
+//! trace with every level ([`LogParams::trace_href`]); N is every record of the trace, read with
+//! the span's records ([`LogStore::trace_record_count`]), and left out when it cannot be read.
 
 mod details;
 
@@ -43,6 +47,8 @@ use self::details::SpanDetails;
 use super::{ServicePalette, TraceParams};
 use crate::stack::Counted;
 use crate::store::{LogStore, Span, SpanId, Timestamp, Trace, TraceSpan};
+use crate::web::logs::LogParams;
+use crate::web::telemetry::Telemetry;
 use crate::web::ui::{Count, Escaped, SpanTime};
 
 /// The selected trace laid out: its header figures, legend, minimap and rows.
@@ -81,6 +87,27 @@ pub struct Waterfall {
     /// "collapse to services": the trace with [`Trace::service_entries`] collapsed; `None`
     /// when it has none or they are what is collapsed.
     pub collapse_services: Option<String>,
+    /// "logs in trace (N) →".
+    pub logs: TraceLogs,
+}
+
+/// The waterfall's link to the trace's log records in the Logs tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceLogs {
+    /// The Logs tab narrowed to the trace, every level.
+    pub href: String,
+    /// Every record of the trace; `None` until read, or when it could not be.
+    pub count: Option<u64>,
+}
+
+impl TraceLogs {
+    /// What the link says: `logs in trace (12)`, or `logs in trace` without a count.
+    pub fn label(&self) -> String {
+        match self.count {
+            Some(n) => format!("logs in trace ({})", Count(n)),
+            None => "logs in trace".to_owned(),
+        }
+    }
 }
 
 impl Waterfall {
@@ -145,15 +172,29 @@ impl Waterfall {
             critical_href: params.toggle_critical(),
             expand_all,
             collapse_services,
+            logs: TraceLogs {
+                href: LogParams::trace_href(Telemetry::LOGS, trace.id(), None),
+                count: None,
+            },
             trace,
         }
     }
 
-    /// Reads the log records of the selected span from `store` into its details.
+    /// Reads from `store` how many log records the trace has, and the selected span's records
+    /// into its details.
     pub async fn read_logs(&mut self, store: &LogStore) {
-        if let Some(details) = &mut self.details {
-            details.read_logs(store, self.trace.id()).await;
-        }
+        let id = self.trace.id();
+        let span = async {
+            if let Some(details) = &mut self.details {
+                details.read_logs(store, id).await;
+            }
+        };
+        let (count, ()) = tokio::join!(store.trace_record_count(id), span);
+        self.logs.count = count
+            .inspect_err(
+                |err| tracing::warn!(error = %err, "counting a trace's log records failed"),
+            )
+            .ok();
     }
 
     /// The trace laid out.

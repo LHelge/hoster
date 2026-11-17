@@ -2968,8 +2968,12 @@ mod stored_logs {
         html.split(r#"<span class="log-msg">"#)
             .skip(1)
             .map(|rest| {
-                // A row ends with its item, or with the summary of a record with fields.
+                // A row ends with its TRACE cell, its item, or the summary of a record with
+                // fields.
                 let text = rest
+                    .split(r#"</span><span class="log-trace"#)
+                    .next()
+                    .unwrap()
                     .split("</span></li>")
                     .next()
                     .unwrap()
@@ -3281,11 +3285,11 @@ mod stored_logs {
         assert_eq!(html.matches("<details>").count(), 3, "{html}");
         // The target is in the row; the text line has no expander.
         assert!(
-            html.contains(r#"<span class="log-msg"><span class="log-target">notes::http</span> GET /notes</span></summary>"#),
+            html.contains(r#"<span class="log-msg"><span class="log-target">notes::http</span> GET /notes</span><span class="log-trace log-trace-none"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></summary>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<span class="log-msg">plain text</span></li>"#),
+            html.contains(r#"<span class="log-msg">plain text</span><span class="log-trace log-trace-none"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></li>"#),
             "{html}"
         );
         // Keys and values escaped, in the text and in the links.
@@ -3672,6 +3676,58 @@ mod stored_logs {
                 get("/stacks/notes/logs?source=access&status=5xx&slower=1s&service=api").await;
             assert!(
                 html.contains(r#"<a href="/stacks/notes/logs?service=api">containers</a>"#),
+                "{html}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_request_with_trace_context_links_its_trace_and_an_older_one_does_not() {
+            use crate::store::SpanId;
+            let app = TestApp::new().await;
+            let browser = app.sign_in().await;
+            let mut traced = request(20, "web", "/traced", 200);
+            traced.server_span = Some(SpanId::from([0x5e; 8]));
+            traced.client_span = Some(SpanId::from([0x5f; 8]));
+            commit(&app, vec![request(30, "web", "/untraced", 200), traced]).await;
+            let get = async |path: &str| body(app.get(path, Some(&browser.cookie)).await).await;
+
+            let html = get("/stacks/notes/logs?source=access").await;
+            assert_eq!(paths(&html), ["/untraced", "/traced"], "{html}");
+            assert!(
+                html.contains(r#"class="log log-records log-traces""#),
+                "{html}"
+            );
+            // The trace id is the request id; the link opens it at the proxy's server span.
+            let id = RequestId::from([20; 16]).to_string();
+            let href = format!(
+                "/telemetry/traces?trace={id}&#38;span={}",
+                SpanId::from([0x5e; 8])
+            );
+            assert!(
+                html.contains(&format!(
+                    r#"<span class="log-trace"><a href="{href}" title="Trace {id} in the Traces tab">14141414<span aria-hidden="true"> →</span></a></span></summary>"#
+                )),
+                "{html}"
+            );
+            assert!(
+                html.contains(&format!(
+                    r#"<dt>trace</dt><dd><a href="{href}" title="The request's trace in the Traces tab">{id}</a></dd>"#
+                )),
+                "{html}"
+            );
+            // A row from before trace context has no link.
+            assert_eq!(html.matches("<dt>trace</dt>").count(), 1, "{html}");
+            assert!(
+                html.contains(r#"<span class="log-trace log-trace-none"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></summary>"#),
+                "{html}"
+            );
+
+            // The trace filter is the records': the access log ignores it, range included.
+            let html = get(&format!("/stacks/notes/logs?source=access&trace={id}")).await;
+            assert_eq!(paths(&html), ["/untraced", "/traced"], "{html}");
+            assert!(!html.contains("trace_id ="), "{html}");
+            assert!(
+                html.contains(r#"href="/stacks/notes/logs?source=access&#38;since=1h" aria-current="true">1h</a>"#),
                 "{html}"
             );
         }
