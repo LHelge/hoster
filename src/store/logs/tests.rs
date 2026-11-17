@@ -791,7 +791,10 @@ mod queries {
             generations: generations.to_vec(),
         };
         let notes = store
-            .services_in(everything(), &LogScope::Stack("notes".into()))
+            .services_in(&LogQuery::new(
+                everything(),
+                LogScope::Stack("notes".into()),
+            ))
             .await
             .unwrap();
         assert_eq!(
@@ -804,17 +807,121 @@ mod queries {
         );
         // The range narrows: api's second generation is past it.
         let early = store
-            .services_in(at(0)..at(6_500), &LogScope::Stack("notes".into()))
+            .services_in(&LogQuery::new(
+                at(0)..at(6_500),
+                LogScope::Stack("notes".into()),
+            ))
             .await
             .unwrap();
         assert_eq!(early[0], seen(Some("notes"), "api", &[1]));
         let all = store
-            .services_in(everything(), &LogScope::All)
+            .services_in(&LogQuery::new(everything(), LogScope::All))
             .await
             .unwrap();
         assert_eq!(all[0], seen(None, "hoster", &[]));
         assert_eq!(all[1], seen(Some("blog"), "app", &[1]));
         assert_eq!(all.len(), 5);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_trace_filter_reads_the_traces_records_by_its_index() {
+        let traced = |time, stack: Option<&str>, service, trace: u8, level, message| {
+            let mut record = record(time, stack, service, message);
+            record.trace_id = Some(TraceId::from([trace; 16]));
+            record.span_id = Some(SpanId::from([trace; 8]));
+            record.level = level;
+            record
+        };
+        let (_dir, store) = seed(vec![
+            record(1_000, Some("notes"), "api", "no trace"),
+            traced(
+                2_000,
+                Some("notes"),
+                "api",
+                1,
+                Some(Level::Info),
+                "one: api",
+            ),
+            traced(3_000, None, "hoster", 1, None, "one: hoster"),
+            traced(
+                4_000,
+                Some("notes"),
+                "api",
+                2,
+                Some(Level::Error),
+                "two: api",
+            ),
+            traced(
+                5_000,
+                Some("blog"),
+                "app",
+                1,
+                Some(Level::Error),
+                "one: blog",
+            ),
+        ])
+        .await;
+        let one = |scope| {
+            let mut query = LogQuery::new(everything(), scope);
+            query.trace = Some(TraceId::from([1; 16]));
+            query
+        };
+        assert_eq!(
+            messages(&store, &one(LogScope::All)).await,
+            ["one: api", "one: hoster", "one: blog"]
+        );
+        // The scope still narrows, and so do the range and the other filters.
+        let notes = one(LogScope::Stack("notes".into()));
+        assert_eq!(messages(&store, &notes).await, ["one: api"]);
+        let mut early = one(LogScope::All);
+        early.range = at(0)..at(4_500);
+        assert_eq!(messages(&store, &early).await, ["one: api", "one: hoster"]);
+        let mut errors = one(LogScope::All);
+        errors.levels = vec![Level::Error];
+        assert_eq!(messages(&store, &errors).await, ["one: blog"]);
+        assert_eq!(store.count_unleveled(&errors).await.unwrap(), 1);
+        let mut grep = one(LogScope::All);
+        grep.text = Some(TextFilter::substring("BLOG"));
+        assert_eq!(messages(&store, &grep).await, ["one: blog"]);
+        let mut unknown = one(LogScope::All);
+        unknown.trace = Some(TraceId::from([9; 16]));
+        assert!(messages(&store, &unknown).await.is_empty());
+
+        // The chips and the histogram count the trace's records only.
+        let seen: Vec<String> = store
+            .services_in(&one(LogScope::All))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.service)
+            .collect();
+        assert_eq!(seen, ["hoster", "app", "api"]);
+        let buckets = store
+            .count_by_level(&one(LogScope::All), Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(buckets.iter().map(LevelCounts::total).sum::<u64>(), 3);
+
+        // Following reads by id, with the trace filter as well.
+        let tail = store
+            .records_after(&one(LogScope::All), 0, 5)
+            .await
+            .unwrap();
+        assert_eq!(tail.entries.len(), 3);
+
+        // The page reads the trace index, not the range.
+        let sql = one(LogScope::All).newest_page_sql();
+        let plan: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            plan.iter()
+                .any(|row| row.3.contains("log_records_by_trace")),
+            "{plan:?}"
+        );
         store.close().await;
     }
 

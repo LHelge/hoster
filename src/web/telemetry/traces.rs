@@ -163,6 +163,14 @@ impl TraceParams {
         self.href(&set)
     }
 
+    /// The tab with trace `trace` selected at span `span` (where the trace opens without
+    /// one), and nothing else: where a log record or a request row links its trace. The trace
+    /// is read whatever the list's range, and a span it does not have selects none.
+    pub fn link(trace: TraceId, span: Option<SpanId>) -> String {
+        let (trace, span) = (trace.to_string(), span.map(|id| id.to_string()));
+        Self::default().href(&[("trace", Some(&trace)), ("span", span.as_deref())])
+    }
+
     /// The tab with span `id` of the selected trace selected: everything else kept, the page
     /// included.
     pub fn select_span(&self, id: SpanId) -> String {

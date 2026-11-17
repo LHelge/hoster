@@ -2556,6 +2556,11 @@ async fn ui_preview() {
             "telemetry-logs-hoster",
             "Telemetry: hoster's own records",
         ),
+        (
+            "trace=06060606060606060606060606060606",
+            "telemetry-logs-trace",
+            "Telemetry: the records of one trace, as the waterfall's logs in trace links them",
+        ),
     ] {
         let html = session
             .get(&format!("/telemetry/logs?{query}"), StatusCode::OK)

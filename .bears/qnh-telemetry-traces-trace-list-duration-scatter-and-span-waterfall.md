@@ -2,10 +2,10 @@
 id: qnh
 title: "Telemetry → Traces: trace list, duration scatter and span waterfall"
 type: epic
-status: open
+status: done
 priority: P3
 created: "2026-11-12T13:14:07.275145457Z"
-updated: "2026-11-17T17:00:29.580877367Z"
+updated: "2026-11-17T20:39:49.498741422Z"
 tags:
   - observability
   - web

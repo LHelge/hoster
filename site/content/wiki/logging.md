@@ -101,7 +101,9 @@ streams straight from podman, so it shows a line before it is stored and works w
 is unavailable. The **Telemetry** page's **Logs** tab has the same filters across every stack,
 with a stack column and a stack selector (every stack, one, or `hoster` for hoster's own
 records that name no stack), over the last 15 minutes unless you pick another range. It does
-not follow new records; reload it, or follow on the stack's tab.
+not follow new records; reload it, or follow on the stack's tab. Both tabs end each row with
+its trace, a link to the Traces tab, and take a trace filter
+([[tracing#traces-and-log-records|Traces and log records]]).
 
 **Downloading.** The stack's **Logs** tab has a **download** button for the containers'
 records: every record the current filters select over the whole range, oldest first, not only

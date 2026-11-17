@@ -985,11 +985,13 @@ async fn t1_opens_on_the_failing_statement_with_every_section_of_its_details() {
         .collect();
     assert_eq!(logs.len(), 2, "{shown}");
     assert!(
-        logs[0].starts_with(r#"log-error" href="/telemetry/logs?stack=notes&#38;since="#),
+        logs[0].starts_with(&format!(
+            r#"log-error" href="/telemetry/logs?trace={}&#38;after="#,
+            trace(6)
+        )),
         "{}",
         logs[0]
     );
-    assert!(logs[0].contains("&#38;after="), "{}", logs[0]);
     assert!(
         logs[0].ends_with(r#"<span class="log-lvl">error</span><span class="log-msg">query &#60;b&#62;failed&#60;/b&#62;</span>"#),
         "{}",
@@ -1015,6 +1017,60 @@ async fn t1_opens_on_the_failing_statement_with_every_section_of_its_details() {
     let html = session.get(&close.replace("&#38;", "&")).await;
     assert!(html.contains(r#"<section class="card trace-waterfall""#));
     assert!(!html.contains("wf-details"), "{html}");
+}
+
+#[tokio::test]
+async fn the_waterfall_links_the_traces_records_with_their_count() {
+    let session = t1_app().await;
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}", trace(6)))
+        .await;
+    let link = format!(
+        r#"<a class="wf-action" href="/telemetry/logs?trace={}">logs in trace (3)<span aria-hidden="true">&nbsp;→</span></a>"#,
+        trace(6)
+    );
+    // In the controls, after the collapse links.
+    let controls = html
+        .split(r#"<div class="wf-controls">"#)
+        .nth(1)
+        .and_then(|rest| rest.split("</div>").next())
+        .expect(&html);
+    let at = controls.find(&link).expect(controls);
+    assert!(
+        controls.find("collapse to services").unwrap() < at,
+        "{controls}"
+    );
+    // It lists the trace's records of every span, every level.
+    let page = session
+        .get(&format!("/telemetry/logs?trace={}", trace(6)))
+        .await;
+    for message in [
+        "loading document",
+        "query &#60;b&#62;failed&#60;/b&#62;",
+        "rolling back",
+    ] {
+        assert!(page.contains(message), "{message}: {page}");
+    }
+    assert!(
+        page.contains(r#"<a class="log-chip" href="/telemetry/logs?trace="#)
+            && page.contains(
+                r#"aria-current="page"><span class="dot lvl-all" aria-hidden="true"></span>all</a>"#
+            ),
+        "{page}"
+    );
+
+    // A trace without records counts none.
+    let session = Session::new().await;
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}", trace(1)))
+        .await;
+    assert!(
+        html.contains(&format!(
+            r#"href="/telemetry/logs?trace={}">logs in trace (0)<span"#,
+            trace(1)
+        )),
+        "{html}"
+    );
 }
 
 /// The row of `html`'s waterfall whose span is `name`, the first of that name.

@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 
 use super::*;
-use crate::store::{Level, LogBatch, LogRecord, Stream};
+use crate::store::{Level, LogBatch, LogRecord, SpanId, Stream, TraceId};
 use crate::web::auth::tests::TestApp;
 use crate::web::stacks::tests::body;
 
@@ -63,7 +63,10 @@ fn messages(html: &str) -> Vec<&str> {
     html.split(r#"<span class="log-msg">"#)
         .skip(1)
         .map(|rest| {
-            rest.split("</span></li>")
+            rest.split(r#"</span><span class="log-trace"#)
+                .next()
+                .unwrap()
+                .split("</span></li>")
                 .next()
                 .unwrap()
                 .split("</span></summary>")
@@ -99,7 +102,7 @@ async fn the_logs_tab_lists_every_stack_with_a_stack_column() {
         "{html}"
     );
     assert!(
-        html.contains(r#"class="log log-records log-stacks""#),
+        html.contains(r#"class="log log-records log-stacks log-traces""#),
         "{html}"
     );
     assert!(
@@ -370,4 +373,125 @@ fn rates_have_one_decimal_below_ten() {
     assert_eq!(rate(90), "1.5");
     assert_eq!(rate(600), "10");
     assert_eq!(rate(90_000), "1,500");
+}
+
+#[tokio::test]
+async fn a_trace_filter_lists_the_traces_records_of_any_age_and_rows_link_their_trace() {
+    let app = TestApp::new().await;
+    let trace = TraceId::from([0x4b; 16]);
+    let span = SpanId::from([0x07; 8]);
+    let traced = |ago, stack, service, message, trace| {
+        let mut record = record(ago, stack, service, message);
+        record.stream = Stream::Otlp;
+        record.trace_id = Some(trace);
+        record.span_id = Some(span);
+        record
+    };
+    let other = TraceId::from([0x11; 16]);
+    app.logs
+        .append(&LogBatch {
+            records: vec![
+                // Older than any default range, kept 7 days.
+                traced(2 * 86_400, Some("notes"), "api", "two days ago", trace),
+                traced(60, None, "hoster", "proxy said", trace),
+                traced(30, Some("notes"), "api", "another trace", other),
+                record(20, Some("notes"), "api", "no trace"),
+            ],
+            ..LogBatch::default()
+        })
+        .await
+        .unwrap();
+    let browser = app.sign_in().await;
+    let get = async |uri: &str| {
+        let response = app.get(uri, Some(&browser.cookie)).await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        body(response).await
+    };
+    let id = trace.to_string();
+
+    // Upper-case digits are taken; the range widens to the retention; every stack.
+    let html = get(&format!("/telemetry/logs?trace={}", id.to_uppercase())).await;
+    assert_eq!(messages(&html), ["two days ago", "proxy said"], "{html}");
+    assert!(
+        html.contains(r#"<a class="log-chip log-field-chip" href="/telemetry/logs" title="Remove this filter">trace_id = 4b4b4b4b… <span aria-hidden="true">×</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"<a class="log-preset" href="/telemetry/logs?trace={id}&#38;since=7d" aria-current="true">7d</a>"#
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"<input type="hidden" name="trace" value="{id}">"#
+        )),
+        "{html}"
+    );
+    // Each row links the trace at its span, and opens on its ids.
+    let link = format!(
+        r#"<span class="log-trace"><a href="/telemetry/traces?trace={id}&#38;span={span}" title="Trace {id} in the Traces tab">4b4b4b4b<span aria-hidden="true"> →</span></a></span></summary>"#
+    );
+    assert_eq!(html.matches(&link).count(), 2, "{html}");
+    for part in [
+        format!(
+            r#"<dt class="log-id">trace_id</dt><dd><a href="/telemetry/logs?trace={id}" title="Only the records of this trace">{id}</a></dd>"#
+        ),
+        format!(
+            r#"<dt class="log-id">span_id</dt><dd><a href="/telemetry/traces?trace={id}&#38;span={span}" title="The span in the Traces tab">{span}</a></dd>"#
+        ),
+        format!(
+            r#"<dt class="log-id">service.name</dt><dd><a href="/telemetry/logs?trace={id}&#38;service=api" title="Only the records of this service">api</a></dd>"#
+        ),
+    ] {
+        assert!(html.contains(&part), "{part}: {html}");
+    }
+
+    // Unfiltered, a record without a trace id says so.
+    let html = get("/telemetry/logs").await;
+    assert_eq!(
+        messages(&html),
+        ["proxy said", "another trace", "no trace"],
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"href="/telemetry/traces?trace={other}&#38;span={span}""#
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="log-msg">no trace</span><span class="log-trace log-trace-none"><span aria-hidden="true">—</span><span class="visually-hidden">no trace</span></span></li>"#),
+        "{html}"
+    );
+
+    // A trace without records is named, and clearing drops it.
+    let none = TraceId::from([0x99; 16]);
+    let html = get(&format!("/telemetry/logs?trace={none}")).await;
+    assert!(
+        html.contains(r#"No records match trace_id = 99999999… in this range. <a href="/telemetry/logs">clear filters</a>"#),
+        "{html}"
+    );
+    // Not a trace id: said, and not applied.
+    let html = get("/telemetry/logs?trace=4b4b").await;
+    assert!(
+        html.contains("`4b4b` is not a trace id (32 hex digits); not filtering by trace."),
+        "{html}"
+    );
+    assert_eq!(messages(&html).len(), 3, "{html}");
+
+    // The stack logs tab has the column and the filter too, in its own scope.
+    let html = get(&format!("/stacks/notes/logs?trace={id}")).await;
+    assert_eq!(messages(&html), ["two days ago"], "{html}");
+    assert!(html.contains("log-traces"), "{html}");
+    assert!(
+        html.contains(r#"<a class="log-chip log-field-chip" href="/stacks/notes/logs" title="Remove this filter">trace_id = 4b4b4b4b…"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(&format!(
+            r#"<a class="log-preset" href="/telemetry/traces?trace={id}" title="Trace {id} in the Traces tab">the trace"#
+        )),
+        "{html}"
+    );
 }

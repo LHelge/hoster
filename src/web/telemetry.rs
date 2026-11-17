@@ -25,7 +25,8 @@ use axum::Extension;
 use axum::extract::Query;
 use axum::response::{IntoResponse, Redirect, Response};
 
-use self::traces::{Selection, TraceParams, TracesView};
+pub(super) use self::traces::TraceParams;
+use self::traces::{Selection, TracesView};
 use super::logs::{LogMount, LogParams, LogReader, LogScope, LogsView};
 use super::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 use super::stacks::Stacks;
