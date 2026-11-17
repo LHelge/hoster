@@ -726,3 +726,33 @@ app that trusts forwarded headers (`X-Forwarded-For`) only from its proxy must t
 
 **Recommendation.** B: one documented range covers the request with no per-stack configuration
 or overlap bookkeeping. A if per-stack exactness turns out to matter.
+
+## OQ-47: Trace and span ids from JSON stdout lines
+
+**Problem.** A log record has `trace_id` and `span_id` columns (ADR-0067 §4), and since epic
+`qnh` a record that has them links to its trace, is found by the Logs tab's `?trace=` filter
+and is listed under its span in the waterfall. Only the OTLP receiver fills them (ADR-0069).
+The container log follower (`src/logs/follower.rs`) stores both as empty for every stdout and
+stderr line: ADR-0067 maps a JSON line's level, message and fields and says the ids "stay empty
+until OQ-42", and ADR-0069 then decided the OTLP side only. So an app that logs JSON to stdout
+with `trace_id` and `span_id` fields (the common setup with `tracing` and a JSON formatter, and
+what the tracing guide's "pick one: stdout or OTLP for logs" leaves people with when they pick
+stdout) gets no link between its log lines and its traces; the ids are only ordinary fields.
+Task `9x4` asked that "stdout records that carry ids" link too; the view does so for any record
+with ids, but no stdout record has any. Raised 2026-11-17 while implementing epic `qnh`.
+
+**Options.**
+
+- **A. Leave it.** Linked logs need OTLP logs. Say so in the tracing guide. No code change.
+- **B. Read fixed keys.** The follower's JSON mapping reads `trace_id` and `span_id` (and the
+  usual variants: `traceId`/`spanId`, `otelTraceID`/`otelSpanID`, `dd.trace_id` left out) into
+  the columns when they are well-formed W3C ids (32 and 16 lower-case hex digits, not all
+  zero), and otherwise leaves them as fields. Which keys, and whether the keys also stay in
+  `fields`, are part of the decision. No schema change: the columns and the index exist.
+- **C. Read `traceparent`-style or configurable keys.** A per-service setting in the stack file
+  names the keys. More flexible, and a new stack-format field to maintain.
+
+**Recommendation.** B, with the keys `trace_id`/`span_id` and `traceId`/`spanId`, kept out of
+`fields` once mapped, as an amendment to ADR-0067's JSON mapping. It costs a few lines in the
+parser, changes nothing for lines without the keys, and makes the stdout path of the guide
+link the way the OTLP path does. C can follow if someone's logger uses other names.
