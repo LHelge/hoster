@@ -5,16 +5,15 @@ type: epic
 status: open
 priority: P3
 created: "2026-11-12T13:14:07.275145457Z"
-updated: "2026-11-12T19:38:53.342986307Z"
+updated: "2026-11-17T17:00:29.580877367Z"
 tags:
   - observability
   - web
 depends_on:
-  - xv9
   - usf
 ---
 
-From the telemetry investigation of 2026-11-12, broken down the same day from `docs/design/Telemetry.dc.html` (traces tab), which the owner added that day. It waits for the OTLP receiver (`xv9`): the owner chose on 2026-11-12 not to ship proxy-only traces before it.
+From the telemetry investigation of 2026-11-12, broken down the same day from `docs/design/Telemetry.dc.html` (traces tab), which the owner added that day. It waited for the OTLP receiver (`xv9`): the owner chose on 2026-11-12 not to ship proxy-only traces before it. The dependency was removed on 2026-11-17: the trace views need only the span table (`aqy`), which is done, and `xv9` stays open only for the manual check `u9m`.
 
 ## What
 
