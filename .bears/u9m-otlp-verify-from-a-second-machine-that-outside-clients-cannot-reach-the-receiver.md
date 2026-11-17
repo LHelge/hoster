@@ -4,12 +4,13 @@ title: "OTLP: verify from a second machine that outside clients cannot reach the
 status: open
 priority: P2
 created: "2026-11-13T18:41:38.471751462Z"
-updated: "2026-11-13T18:41:44.024360676Z"
+updated: "2026-11-17T17:00:29.598156431Z"
 tags:
   - observability
   - proxy
   - security
   - test
+  - manual
 depends_on:
   - "5up"
 parent: xv9
