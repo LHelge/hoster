@@ -688,6 +688,24 @@ a.chart-bar:focus-visible .chart-hit { fill: var(--hover); stroke: var(--accent)
 .chart-key { flex: none; display: inline-block; }
 .chart-key-box { width: 10px; height: 10px; border-radius: 2px; }
 .chart-key-line { width: 14px; height: 2px; }
+.chart-key-dot { width: 8px; height: 8px; border-radius: 50%; }
+.chart-key-ring { width: 10px; height: 10px; border-radius: 50%; border: 2px solid; box-sizing: border-box; }
+/* The duration scatter of the Traces tab (src/web/charts/scatter.rs): no viewBox, so positions
+   are percent of the plot and radii px, and dots stay round as it stretches. Background dots
+   are muted for ok (faded, as there are many) and red for error; the listed traces are filled
+   by status inside an accent ring, the selected one larger and ringed in the text colour. */
+.chart-scatter .chart-y, .chart-scatter .chart-plot { height: 150px; }
+.scatter-ok { fill: var(--muted); background: var(--muted); }
+.scatter-error { fill: var(--fail); background: var(--fail); }
+.scatter-listed { border-color: var(--accent); }
+.scatter-dot.scatter-ok { fill-opacity: 0.55; }
+.scatter-hit { fill: transparent; }
+.scatter-mark { fill: var(--p50); stroke: var(--accent); stroke-width: 2px; }
+.scatter-mark.scatter-error { fill: var(--fail); }
+.scatter-current .scatter-mark { stroke: var(--text); }
+.scatter-link:hover .scatter-mark { stroke-width: 3px; }
+a.scatter-link:focus { outline: none; }
+a.scatter-link:focus-visible .scatter-hit { stroke: var(--accent); stroke-width: 2px; }
 
 /* Sparklines: 96 x 28 by default, teal unless the stack's state says otherwise. */
 .spark { display: block; flex: none; }

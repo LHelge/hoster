@@ -1348,6 +1348,39 @@ impl Fixtures {
                 ok,
             ),
         ];
+        // Background traffic for the duration scatter: 200 requests to notes over the 15
+        // minutes, as the mockup spreads them (half under 60 ms, a few slower than a second,
+        // some of the slowest failing), so the newest page is marked on many dots behind.
+        let mut seed: u64 = 11;
+        let mut rnd = move || {
+            seed = seed * 16_807 % 2_147_483_647;
+            (seed - 1) as f64 / 2_147_483_646.0
+        };
+        let background: Vec<RequestRow> = (0..200u16)
+            .map(|i| {
+                let ago_ms = 1_000 + (rnd() * 898_000.0) as u64;
+                let r = rnd();
+                let ms = if r < 0.5 {
+                    6.0 + rnd() * 50.0
+                } else if r < 0.82 {
+                    60.0 + rnd() * 260.0
+                } else if r < 0.96 {
+                    320.0 + rnd() * 900.0
+                } else {
+                    1_300.0 + rnd() * 1_000.0
+                } as u64;
+                let failed = (ms > 1_700 && rnd() < 0.5) || rnd() < 0.015;
+                let path = format!("/api/notes/{}", 100 + i % 37);
+                let status = if failed { 500 } else { 200 };
+                let [hi, lo] = i.to_be_bytes();
+                let mut row = request(0, ago_ms, "notes", "api", ("GET", &path, status), ms);
+                row.request_id =
+                    TraceId::from([0xb0, hi, lo, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+                row.server_span = Some(SpanId::from([0xb0, hi, lo, 0, 0, 0, 0, 1]));
+                row.client_span = Some(SpanId::from([0xb0, hi, lo, 0, 0, 0, 0, 2]));
+                row
+            })
+            .collect();
         app.logs
             .append(&LogBatch {
                 records: span_records,
@@ -1378,7 +1411,10 @@ impl Fixtures {
                     ),
                     request(3, 300_000, "blog", "web", ("GET", "/posts/hello", 200), 3),
                     answered,
-                ],
+                ]
+                .into_iter()
+                .chain(background)
+                .collect(),
                 spans: vec![
                     span(
                         1,

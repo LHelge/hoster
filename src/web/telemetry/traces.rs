@@ -16,7 +16,10 @@
 //! critical-path checkbox is not in the URL, so it lasts for the page view only.)
 //!
 //! [`TracesView::load`] reads one page of the list ([`LogStore::traces`], once per load), the
-//! Logs tab's count for the same range and stack, and the selected trace, at once. A row names
+//! duration scatter's points for the same query ([`LogStore::trace_points`], once per load), the
+//! Logs tab's count for the same range and stack, and the selected trace, at once. The scatter
+//! ([`DurationScatter`]) is drawn above the list, the list's page marked on it with the rows'
+//! links; one whose points cannot be read is left out, and the list stays. A row names
 //! its root span, stack, services as chips in the categorical palette ([`ServicePalette`];
 //! the proxy's spans are the service [`Span::EDGE_SERVICE`] in its own colour), span count,
 //! duration with a bar scaled to the slowest listed, and status. "app not instrumented" marks a
@@ -35,12 +38,12 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
+use super::super::charts::DurationScatter;
 use super::super::logs::{Chip, LogReader, LogScope, LogsView, StackOption, Total};
-use super::super::ui::{Count, Meter, Tone};
-use crate::stats::Elapsed;
+use super::super::ui::{Count, Meter, SpanTime, Tone};
 use crate::store::{
     self, LogStore, Retention, Span, SpanId, StoreError, Timestamp, Trace, TraceId, TraceList,
-    TraceQuery, TraceSort, TraceStatus, TraceSummary,
+    TracePoints, TraceQuery, TraceSort, TraceStatus, TraceSummary,
 };
 
 use self::waterfall::Waterfall;
@@ -487,6 +490,8 @@ pub struct TracesView {
     /// The list without status, duration and grep, when they narrow it.
     pub clear: Option<String>,
     pub palette: ServicePalette,
+    /// The duration scatter above the list; `None` when its points cannot be read.
+    pub scatter: Option<DurationScatter>,
     pub selection: Selection,
 }
 
@@ -515,8 +520,9 @@ impl TracesView {
                 return view;
             }
         };
-        let (list, logs, trace) = tokio::join!(
+        let (list, points, logs, trace) = tokio::join!(
             store.traces(&query),
+            store.trace_points(&query),
             store.count_records(query.range.clone(), &query.scope, LogsView::COUNT_CAP + 1),
             Self::read_trace(store, selected.as_ref().ok().copied().flatten()),
         );
@@ -550,6 +556,10 @@ impl TracesView {
             Selection::Missing(id) => Some(*id),
             _ => found.as_ref().map(Trace::id),
         };
+        view.scatter = points
+            .inspect_err(|err| tracing::warn!(error = %err, "reading the trace scatter failed"))
+            .ok()
+            .map(|points| view.scatter(now, points, &list.traces, selected));
         view.list(&query, list, selected);
         if let Some(trace) = found {
             // After the list's, so the list's services keep their colours.
@@ -633,8 +643,30 @@ impl TracesView {
             newer: None,
             older: None,
             palette: ServicePalette::default(),
+            scatter: None,
             selection: Selection::Nothing,
         }
+    }
+
+    /// The duration scatter of `points` over the range before `now`, with the list's page
+    /// (`listed`) marked, linked as its rows are, and the trace `selected` larger.
+    fn scatter(
+        &self,
+        now: SystemTime,
+        points: TracePoints,
+        listed: &[TraceSummary],
+        selected: Option<TraceId>,
+    ) -> DurationScatter {
+        let ((_, length), _) = self.params.range();
+        let mut chart = DurationScatter::new(now, length, points);
+        for trace in listed {
+            chart.list(
+                trace,
+                self.params.select(trace.trace_id),
+                selected == Some(trace.trace_id),
+            );
+        }
+        chart
     }
 
     /// The rows of `list`, the page `query` asked for, and the links around them; the trace
@@ -693,7 +725,8 @@ impl TracesView {
         slowest: f64,
         selected: Option<TraceId>,
     ) -> TraceRow {
-        let duration = Elapsed(trace.duration).to_string();
+        // As the scatter and the waterfall write it.
+        let duration = SpanTime(trace.duration).to_string();
         let tone = match trace.status {
             TraceStatus::Error => Tone::Fail,
             TraceStatus::Ok => Tone::Neutral,

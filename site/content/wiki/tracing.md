@@ -140,9 +140,10 @@ shows how many traces the range holds, and the Logs tab beside it how many log r
 - **Sort** by newest, slowest or errors first. **Filters**: the status (`ok` or `error`),
   *slower than* (a root duration such as `500ms`), and the grep box, which matches span names
   (the root's, or any span an app sent) as text, ignoring case. There is no query language.
-- **Selecting a trace** (its root span name, or `?trace=<trace id>` in the URL) marks its row
-  and opens it below the list. The trace id of a proxied request is its request id in the
-  access log. A trace that is no longer stored (older than 3 days, or never seen) says so.
+- **Selecting a trace** (its root span name, its dot in the duration chart, or
+  `?trace=<trace id>` in the URL) marks its row and opens it below the list. The trace id of a
+  proxied request is its request id in the access log. A trace that is no longer stored (older
+  than 3 days, or never seen) says so.
 
 Every option is a parameter of the page's URL, so a filtered list or a selected trace can be
 bookmarked or linked.
@@ -150,6 +151,27 @@ bookmarked or linked.
 The header's first line is the receiver's: a green dot while hoster stores what it receives
 (red, with "not storing", when the log store cannot be opened), the endpoint services send to,
 and the spans and log records stored per second over the last minute.
+
+## The duration chart
+
+Above the list, **Trace duration** draws the root span of every trace in the range as a dot:
+when it started across (from the start of the range to now) and how long it took up, on a log
+scale from 1 ms to the first power of ten at or above the slowest trace, and at least to 1 s.
+Traces that are ok are muted dots, and traces in error are red.
+
+- **It follows the list's filters**: the stack, the status, *slower than* and the grep box, but
+  not the sort or the page. It draws up to 1,000 traces. When more match, 1,000 of them are
+  picked evenly by start time, and the heading says how many of how many are drawn. The scale
+  still reaches the slowest trace of the range, drawn or not, but the slowest trace in error
+  that a screen reader is told of is then the slowest among those drawn.
+- **The traces on the list's page** are drawn on top in a ring of the accent colour, and the
+  selected one is larger. Each is a link that opens its trace, as its row does. A screen reader
+  names each one by its root span and duration, and the chart by its range, how many traces it
+  holds and its slowest trace in error.
+- **Nothing else is clickable.** Dragging across the chart does not select a range of time or
+  durations. To narrow the list to slow traces, use *slower than*.
+
+A range without traces shows the chart's empty axes, 1 ms to 1 s.
 
 ## The waterfall
 

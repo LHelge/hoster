@@ -381,6 +381,8 @@ async fn scatter_points_are_every_match_by_start() {
         .collect();
     // Neither the sort nor the page apply.
     assert_eq!(ids, [1, 2, 3, 5, 6]);
+    let slowest = points.points.iter().map(|p| p.duration).max().unwrap();
+    assert_eq!(points.slowest, slowest);
     assert_eq!(
         points.points[0],
         TracePoint {
@@ -411,9 +413,15 @@ async fn over_the_cap_scatter_points_are_sampled_evenly() {
             let mut id = [0; 16];
             id[8..].copy_from_slice(&(i + 1).to_be_bytes());
             row.request_id = TraceId::from(id);
+            if i == 1 {
+                row.total = Duration::from_secs(30);
+            }
             row
         })
         .collect();
+    let mut slow = [0; 16];
+    slow[8..].copy_from_slice(&2i64.to_be_bytes());
+    let slow = TraceId::from(slow);
     let (_dir, store) = seed(LogBatch {
         requests,
         ..LogBatch::default()
@@ -425,6 +433,9 @@ async fn over_the_cap_scatter_points_are_sampled_evenly() {
         .unwrap();
     assert_eq!(points.matching, 2_500);
     assert_eq!(points.points.len(), TracePoints::CAP as usize);
+    // The slowest root of every match, though sampling left it out: trace 2 (start 1,001).
+    assert!(!points.points.iter().any(|p| p.trace_id == slow));
+    assert_eq!(points.slowest, Duration::from_secs(30));
     let starts: Vec<i64> = points
         .points
         .iter()
