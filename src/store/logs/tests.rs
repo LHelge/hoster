@@ -8,6 +8,8 @@ use tempfile::TempDir;
 use super::*;
 use crate::store::Timestamp;
 
+mod traces;
+
 async fn open() -> (TempDir, LogStore) {
     let dir = TempDir::new().unwrap();
     let store = LogStore::open(&dir.path().join("state")).await.unwrap();
