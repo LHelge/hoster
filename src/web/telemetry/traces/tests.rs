@@ -267,9 +267,20 @@ async fn the_list_shows_the_ranges_traces_newest_first_with_every_column() {
     );
     assert!(one.contains(r#"<td class="num">4</td>"#), "{one}");
     assert!(
-        one.contains(r#"<span class="trace-took">50 ms</span>"#),
+        one.contains(r#"<span class="trace-took">50.0 ms</span>"#),
         "{one}"
     );
+    // Written as the scatter and the waterfall write durations.
+    for (name, took) in [
+        ("GET /b", "300 ms"),
+        ("GET /c", "10.0 ms"),
+        ("nightly", "2.00 s"),
+    ] {
+        assert!(
+            row(&html, name).contains(&format!(r#"<span class="trace-took">{took}</span>"#)),
+            "{name}: {html}"
+        );
+    }
     // In error by its app's span, though the request answered 200: red bar and status.
     assert!(one.contains(r#"class="meter meter-fail""#), "{one}");
     assert!(
@@ -1296,6 +1307,119 @@ async fn a_trace_that_does_not_exist_says_it_may_have_expired() {
         "{html}"
     );
     assert_eq!(names(&html).len(), 4);
+}
+
+/// The duration scatter's card.
+fn scatter(html: &str) -> &str {
+    let start = html
+        .find(r#"<section class="card trace-scatter""#)
+        .unwrap_or_else(|| panic!("no scatter: {html}"));
+    let end = start + html[start..].find("</section>").unwrap();
+    &html[start..end]
+}
+
+#[tokio::test]
+async fn the_scatter_above_the_list_marks_the_listed_traces_with_their_rows_links() {
+    let session = Session::new().await;
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}", trace(2)))
+        .await;
+    let chart = scatter(&html);
+    assert!(
+        html.find("trace-scatter").unwrap() < html.find("trace-list").unwrap(),
+        "{html}"
+    );
+    assert!(
+        chart.contains(r#"<h2 id="scatter-title">Trace duration <span class="card-count">· root spans · last 15m · log scale</span></h2>"#),
+        "{chart}"
+    );
+    assert!(chart.contains(r#"<ul class="chart-legend">"#), "{chart}");
+    // Every listed trace is a link that selects it as its row's does; the selected one is the
+    // current one, drawn last.
+    for (name, took) in [
+        ("GET /a", "50.0 ms"),
+        ("GET /b", "300 ms"),
+        ("GET /c", "10.0 ms"),
+        ("nightly", "2.00 s"),
+    ] {
+        let href = select_href(&html, name).replace('&', "&#38;");
+        assert!(
+            chart.contains(&format!(
+                r#"href="{href}" aria-label="Open trace {name}, {took}""#
+            )),
+            "{name}: {chart}"
+        );
+    }
+    let links: Vec<&str> = chart.split(r#"<a class="scatter-link"#).skip(1).collect();
+    assert_eq!(links.len(), 4, "{chart}");
+    assert!(
+        links[3].starts_with(r#" scatter-current" href="/telemetry/traces?trace=02020202020202020202020202020202" aria-label="Open trace GET /b, 300 ms" aria-current="true">"#),
+        "{chart}"
+    );
+    assert_eq!(chart.matches("aria-current").count(), 1, "{chart}");
+    // Every trace of the range is listed, so none is drawn behind.
+    assert!(!chart.contains("scatter-dot"), "{chart}");
+    assert!(
+        chart.contains(r#"role="group" aria-label="Trace duration of root spans over the last 15m, log scale: 4 traces, 4 listed below; slowest error GET /a, 50.0 ms, 1m"#),
+        "{chart}"
+    );
+}
+
+#[tokio::test]
+async fn the_scatter_follows_the_lists_filters_but_not_its_page() {
+    let session = Session::new().await;
+    // A page past the traces: every trace behind, none linked; errors red.
+    let html = session.get("/telemetry/traces?page=1").await;
+    let chart = scatter(&html);
+    assert_eq!(
+        chart.matches(r#"class="scatter-dot "#).count(),
+        4,
+        "{chart}"
+    );
+    assert_eq!(
+        chart
+            .matches(r#"class="scatter-dot scatter-error""#)
+            .count(),
+        2,
+        "{chart}"
+    );
+    assert!(!chart.contains("<a "), "{chart}");
+    assert!(chart.contains(r#"role="img""#), "{chart}");
+    // The status filter narrows it as it narrows the list.
+    let html = session.get("/telemetry/traces?status=error").await;
+    let chart = scatter(&html);
+    assert_eq!(chart.matches(r#"<a class="scatter-link""#).count(), 2);
+    assert!(chart.contains("Open trace GET /a, 50.0 ms"), "{chart}");
+    assert!(chart.contains("Open trace GET /c, 10.0 ms"), "{chart}");
+    // A longer range reaches trace 9, two hours ago.
+    let html = session.get("/telemetry/traces?since=6h").await;
+    let chart = scatter(&html);
+    assert!(
+        chart.contains("· root spans · last 6h · log scale"),
+        "{chart}"
+    );
+    assert!(chart.contains("Open trace GET /old, 5.0 ms"), "{chart}");
+    assert!(
+        chart.contains("<span>-6h</span><span>-4h</span><span>-2h</span><span>now</span>"),
+        "{chart}"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_range_has_an_empty_scatter_from_1_ms_to_1_s() {
+    let app = TestApp::new().await;
+    let session = Session {
+        cookie: app.sign_in().await.cookie,
+        app,
+    };
+    let html = session.get("/telemetry/traces").await;
+    let chart = scatter(&html);
+    assert!(
+        chart.contains(r#"<div class="chart chart-scatter" role="img" aria-label="Trace duration of root spans over the last 15m, log scale: no traces"><div class="chart-y" aria-hidden="true"><span>1 s</span><span>100 ms</span><span>10 ms</span><span>1 ms</span></div>"#),
+        "{chart}"
+    );
+    assert!(!chart.contains("<circle"), "{chart}");
+    assert!(html.contains("No traces in this range."), "{html}");
 }
 
 #[tokio::test]

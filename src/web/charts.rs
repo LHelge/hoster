@@ -27,6 +27,10 @@
 //! stretch with it. Each chart is one `role="img"` whose `aria-label` says what it shows in
 //! words, and each bar carries a `<title>` as the tooltip that needs no script. The x axis is
 //! relative (`-24h … now`), so no time zone is involved.
+//!
+//! The Telemetry page's charts build on the same frame: the Logs tab's severity histogram
+//! (`charts/severity.rs`) and the Traces tab's duration scatter (`charts/scatter.rs`), whose
+//! y axis is the [`LogScale`] beside the linear [`Scale`] here.
 
 use std::fmt::{self, Write as _};
 use std::time::Duration;
@@ -231,6 +235,50 @@ impl Scale {
     }
 }
 
+/// A y axis on a log10 scale: from `bottom` up a whole number of powers of ten, a label at
+/// each, so the labels are evenly spaced as the frame lays them out. The top is the first power
+/// of ten at or above the maximum, and at least `min_decades` above the bottom; values at or
+/// below the bottom (zero included) lie on it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LogScale {
+    bottom: f64,
+    decades: u32,
+}
+
+impl LogScale {
+    /// The scale from `bottom` that holds `max`, at least `min_decades` high. An empty or
+    /// invalid `max` gets the least height.
+    fn new(max: f64, bottom: f64, min_decades: u32) -> Self {
+        let above = (max / bottom).log10();
+        // A hair below a power of ten (rounding) is that power, not the next.
+        let needed = if above.is_finite() && above > 0.0 {
+            (above - 1e-9).ceil()
+        } else {
+            0.0
+        };
+        let decades = (needed as u32).max(min_decades).max(1);
+        Self { bottom, decades }
+    }
+
+    /// The y coordinate of `value`: the bottom of the plot at or below `bottom`, its top at or
+    /// above the top, a decade every `HEIGHT / decades` between.
+    fn y(&self, value: f64) -> f64 {
+        let share = if value > self.bottom {
+            ((value / self.bottom).log10() / f64::from(self.decades)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        HEIGHT - share * HEIGHT
+    }
+
+    /// The tick values, top first: each power of ten from the top down to `bottom`.
+    fn ticks(&self) -> impl Iterator<Item = f64> + '_ {
+        (0..=self.decades)
+            .rev()
+            .map(|i| self.bottom * 10f64.powi(i32::try_from(i).unwrap_or(i32::MAX)))
+    }
+}
+
 /// A count as the y axis writes it: `750`, `2.5k`, `90k`, `1.2M`.
 #[derive(Debug, Clone, Copy)]
 struct Compact(f64);
@@ -251,16 +299,29 @@ impl fmt::Display for Compact {
     }
 }
 
-/// The plot frame both charts share: the y labels, the grid and axis lines, and the x labels
-/// around what `plot` draws inside the SVG.
+/// How a plot's coordinates map onto its box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Units {
+    /// A [`WIDTH`] x [`HEIGHT`] viewBox stretched to the box (`preserveAspectRatio="none"`):
+    /// bars and lines, whose strokes keep their width by `vector-effect`.
+    Stretched,
+    /// No viewBox: positions in percent of the box and sizes in px, so a circle stays round
+    /// however the plot stretches (the duration scatter's dots).
+    Percent,
+}
+
+/// The plot frame the charts share: the y labels, a grid line at each but the lowest, the axis
+/// line and the x labels around what `plot` draws inside the SVG.
 struct Frame<'a> {
     class: &'a str,
     /// `img`, or `group` where the bars are links (an image's children are not reachable).
     role: &'a str,
     label: &'a str,
+    /// The y axis labels, top first, evenly spaced from the top of the plot to its bottom.
     y_labels: Vec<String>,
     /// The x axis labels, oldest first.
     x_labels: Vec<String>,
+    units: Units,
 }
 
 impl Frame<'_> {
@@ -280,22 +341,46 @@ impl Frame<'_> {
             write!(f, "<span>{label}</span>")?;
         }
         let (w, h) = (Num(WIDTH), Num(HEIGHT));
-        write!(
-            f,
-            r#"</div><svg class="chart-plot" width="{w}" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none">"#
-        )?;
-        for i in 0..Y_INTERVALS {
-            let y = Num(HEIGHT * f64::from(i) / f64::from(Y_INTERVALS));
-            write!(
-                f,
-                r#"<line class="chart-grid" x1="0" y1="{y}" x2="{w}" y2="{y}" vector-effect="non-scaling-stroke"></line>"#
-            )?;
+        let intervals = self.y_labels.len().saturating_sub(1).max(1);
+        match self.units {
+            Units::Stretched => {
+                write!(
+                    f,
+                    r#"</div><svg class="chart-plot" width="{w}" height="{h}" viewBox="0 0 {w} {h}" preserveAspectRatio="none">"#
+                )?;
+                for i in 0..intervals {
+                    let y = Num(HEIGHT * i as f64 / intervals as f64);
+                    write!(
+                        f,
+                        r#"<line class="chart-grid" x1="0" y1="{y}" x2="{w}" y2="{y}" vector-effect="non-scaling-stroke"></line>"#
+                    )?;
+                }
+            }
+            Units::Percent => {
+                write!(
+                    f,
+                    r#"</div><svg class="chart-plot" width="{w}" height="{h}">"#
+                )?;
+                for i in 0..intervals {
+                    let y = Num(100.0 * i as f64 / intervals as f64);
+                    write!(
+                        f,
+                        r#"<line class="chart-grid" x1="0" y1="{y}%" x2="100%" y2="{y}%"></line>"#
+                    )?;
+                }
+            }
         }
         plot(f)?;
-        write!(
-            f,
-            r#"<line class="chart-axis" x1="0" y1="{h}" x2="{w}" y2="{h}" vector-effect="non-scaling-stroke"></line></svg><div class="chart-x" aria-hidden="true">"#
-        )?;
+        match self.units {
+            Units::Stretched => write!(
+                f,
+                r#"<line class="chart-axis" x1="0" y1="{h}" x2="{w}" y2="{h}" vector-effect="non-scaling-stroke"></line>"#
+            )?,
+            Units::Percent => f.write_str(
+                r#"<line class="chart-axis" x1="0" y1="100%" x2="100%" y2="100%"></line>"#,
+            )?,
+        }
+        f.write_str(r#"</svg><div class="chart-x" aria-hidden="true">"#)?;
         for label in &self.x_labels {
             write!(f, "<span>{}</span>", Escaped(label))?;
         }
@@ -356,7 +441,7 @@ impl StackedBars {
                 .filter(|((name, _), total)| *name != "other" || *total > 0)
                 .map(|((name, (class, _)), total)| LegendKey {
                     class,
-                    line: false,
+                    shape: KeyShape::Box,
                     text: format!("{name} {}", Count(total)),
                 })
                 .collect(),
@@ -435,6 +520,7 @@ impl fmt::Display for StackedBars {
                 })
                 .collect(),
             x_labels: self.timeline.labels(),
+            units: Units::Stretched,
         };
         let slot = self.timeline.slot();
         let gap = slot * 0.2;
@@ -538,7 +624,7 @@ impl LineChart {
             [("chart-p50", "p50"), ("chart-p95", "p95")]
                 .map(|(class, text)| LegendKey {
                     class,
-                    line: true,
+                    shape: KeyShape::Line,
                     text: text.to_owned(),
                 })
                 .into(),
@@ -631,6 +717,7 @@ impl fmt::Display for LineChart {
                 })
                 .collect(),
             x_labels: self.timeline.labels(),
+            units: Units::Stretched,
         };
         let slot = self.timeline.slot();
         frame.write(f, |f| {
@@ -670,20 +757,39 @@ pub struct Legend(Vec<LegendKey>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LegendKey {
     class: &'static str,
-    /// A line key (the line chart's) rather than a square swatch.
-    line: bool,
+    shape: KeyShape,
     text: String,
+}
+
+/// The shape of a legend key: what the series looks like in its chart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyShape {
+    /// A square swatch, for bars.
+    Box,
+    /// A short line, for the line chart.
+    Line,
+    /// A filled dot, for the scatter's points.
+    Dot,
+    /// A ring, for the scatter's marked points.
+    Ring,
+}
+
+impl KeyShape {
+    fn class(self) -> &'static str {
+        match self {
+            KeyShape::Box => "chart-key-box",
+            KeyShape::Line => "chart-key-line",
+            KeyShape::Dot => "chart-key-dot",
+            KeyShape::Ring => "chart-key-ring",
+        }
+    }
 }
 
 impl fmt::Display for Legend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(r#"<ul class="chart-legend">"#)?;
         for key in &self.0 {
-            let shape = if key.line {
-                "chart-key-line"
-            } else {
-                "chart-key-box"
-            };
+            let shape = key.shape.class();
             write!(
                 f,
                 r#"<li><span class="chart-key {shape} {}" aria-hidden="true"></span>{}</li>"#,
@@ -762,8 +868,10 @@ impl fmt::Display for Sparkline {
 /// Numbers only.
 impl askama::filters::HtmlSafe for Sparkline {}
 
+mod scatter;
 mod severity;
 
+pub use scatter::DurationScatter;
 pub use severity::{Buckets, SeverityBars, SeverityCounts};
 
 #[cfg(test)]

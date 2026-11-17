@@ -314,7 +314,8 @@ impl TraceQuery {
 
     /// The scatter's points: every matching trace, or [`TracePoints::CAP`] of them sampled
     /// evenly by start, with the status read for those points alone unless a filter needs it
-    /// for every root.
+    /// for every root; and the slowest matching root's duration, sampled or not, which is on
+    /// every root and needs no span lookup.
     fn points_sql(&self) -> QueryBuilder<Sqlite> {
         let cap = i64::from(TracePoints::CAP);
         let mut sql = QueryBuilder::<Sqlite>::new("");
@@ -322,10 +323,11 @@ impl TraceQuery {
         sql.push("SELECT trace_id, start, duration, ")
             .push(Self::error_of("sample"))
             .push(
-                ", matching FROM ( \
+                ", matching, slowest FROM ( \
                    SELECT trace_id, start, duration, failed, \
                           row_number() OVER (ORDER BY start, trace_id) - 1 AS n, \
-                          count(*) OVER () AS matching \
+                          count(*) OVER () AS matching, \
+                          max(duration) OVER () AS slowest \
                    FROM traces WHERE ",
             );
         self.push_filters(&mut sql);
@@ -388,6 +390,8 @@ pub struct TracePoints {
     pub points: Vec<TracePoint>,
     /// How many traces match: more than the points when they were sampled.
     pub matching: u64,
+    /// The slowest matching root's duration, the points sampled or not; zero for none.
+    pub slowest: Duration,
 }
 
 impl TracePoints {
@@ -485,16 +489,17 @@ impl LogStore {
     /// apply): every one up to [`TracePoints::CAP`], and that many sampled evenly in start
     /// order when there are more, so busy stretches keep their share.
     pub async fn trace_points(&self, query: &TraceQuery) -> Result<TracePoints> {
-        let rows: Vec<(String, i64, i64, bool, i64)> = query
+        let rows: Vec<(String, i64, i64, bool, i64, i64)> = query
             .points_sql()
             .build_query_as()
             .fetch_all(&self.reads)
             .await?;
 
         let matching = rows.first().map_or(0, |row| count(row.4));
+        let slowest = rows.first().map_or(Duration::ZERO, |row| micros(row.5));
         let points = rows
             .into_iter()
-            .map(|(trace_id, start, duration, error, _)| {
+            .map(|(trace_id, start, duration, error, _, _)| {
                 Ok(TracePoint {
                     trace_id: trace_id.parse().map_err(decode_err)?,
                     start: MicroTimestamp::from_micros(start),
@@ -503,7 +508,11 @@ impl LogStore {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(TracePoints { points, matching })
+        Ok(TracePoints {
+            points,
+            matching,
+            slowest,
+        })
     }
 
     /// The trace `id` for the waterfall: the proxy's spans built from its request row, if it

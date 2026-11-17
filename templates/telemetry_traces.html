@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {#- The Telemetry page's Traces tab (src/web/telemetry/traces.rs): the toolbar of GET options,
-    the trace list, and below it the selected trace. -#}
+    the duration scatter, the trace list, and below it the selected trace. -#}
 {% block title %}Traces · Telemetry{% endblock %}
 {% block head %}
 {% include "telemetry_head.html" %}
@@ -41,6 +41,18 @@
     </nav>
   </div>
 </section>
+
+{#- The duration scatter of src/web/charts/scatter.rs: root spans over the range, the list's
+    page marked and linked. -#}
+{%- if let Some(chart) = view.scatter %}
+<section class="card trace-scatter" aria-labelledby="scatter-title">
+  <header class="card-head">
+    <h2 id="scatter-title">Trace duration <span class="card-count">· {{ chart.heading() }}</span></h2>
+    {{ chart.legend() }}
+  </header>
+  <div class="card-body">{{ chart }}</div>
+</section>
+{%- endif %}
 
 <section class="card trace-list" aria-labelledby="traces-title">
   <header class="card-head">

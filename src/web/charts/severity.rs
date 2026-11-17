@@ -8,7 +8,7 @@ use std::fmt::{self, Write as _};
 use std::ops::Range;
 use std::time::Duration;
 
-use super::{Frame, HEIGHT, Legend, LegendKey, Num, Scale, Span, WIDTH};
+use super::{Frame, HEIGHT, KeyShape, Legend, LegendKey, Num, Scale, Span, Units, WIDTH};
 use crate::store::{Level, LevelCounts, Timestamp};
 use crate::web::ui::{Count, Escaped};
 
@@ -262,7 +262,7 @@ impl SeverityBars {
                 .filter(|(_, shown)| *shown)
                 .map(|(((class, name), total), _)| LegendKey {
                     class,
-                    line: false,
+                    shape: KeyShape::Box,
                     text: format!("{name} {}", Count(total)),
                 })
                 .collect(),
@@ -357,6 +357,7 @@ impl fmt::Display for SeverityBars {
                 })
                 .collect(),
             x_labels: self.buckets.labels(),
+            units: Units::Stretched,
         };
         let slot = WIDTH / self.bars.len().max(1) as f64;
         let gap = slot * 0.2;

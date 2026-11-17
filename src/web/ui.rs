@@ -2,9 +2,10 @@
 //! (deployment states, health, [`CertState`] here; DNS verdicts and warnings where they are
 //! defined), the [`Pill`] that shows one, the server-drawn [`Meter`] bar, the [`Load`] of a
 //! resource meter with its tone, and how figures are written ([`Count`], [`PerMinute`],
-//! [`Percent`], [`ByteUsage`], the [`Uptime`] of something running). Each renders its own
-//! markup in Askama templates (`HtmlSafe`, like [`Icon`]) and is coloured by a class whose colours are the role tokens in `assets/hoster.css`,
-//! so no page names a palette colour and nothing needs an inline `style=` under the CSP.
+//! [`Percent`], [`ByteUsage`], the [`SpanTime`] of a trace view, the [`Uptime`] of something
+//! running). Each renders its own markup in Askama templates (`HtmlSafe`, like [`Icon`]) and is
+//! coloured by a class whose colours are the role tokens in `assets/hoster.css`, so no page
+//! names a palette colour and nothing needs an inline `style=` under the CSP.
 
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -13,7 +14,7 @@ use askama::filters::{Html, escape};
 
 use super::icons::Icon;
 use crate::health::HealthStatus;
-use crate::stats::Usage;
+use crate::stats::{Elapsed, Usage};
 use crate::store::DeploymentState;
 
 /// How a status reads at a glance; its `Display` is the CSS class suffix (`pill-ok`,
@@ -365,6 +366,36 @@ impl fmt::Display for Count {
             write!(f, "{digit}")?;
         }
         Ok(())
+    }
+}
+
+/// A span's or a trace's time as the trace views write it (the waterfall, its span details,
+/// the duration scatter), finer than [`Elapsed`] since spans are short and sit side by side, as
+/// the mockup writes them: `900 µs`, `17.6 ms`, `478 ms`, `1.91 s`, and from a minute as
+/// everywhere else in the UI (`3 min 5 s`). The unit is picked after rounding to what it shows,
+/// so 99.96 ms reads `100 ms`, never `100.0 ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpanTime(pub Duration);
+
+impl fmt::Display for SpanTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secs = self.0.as_secs_f64();
+        let micros = (secs * 1e6).round();
+        let tenth_ms = (secs * 1e4).round();
+        let ms = (secs * 1e3).round();
+        let hundredth_s = (secs * 1e2).round();
+        if micros < 1e3 {
+            write!(f, "{micros} µs")
+        } else if tenth_ms < 1e3 {
+            write!(f, "{:.1} ms", tenth_ms / 10.0)
+        } else if ms < 1e3 {
+            write!(f, "{ms} ms")
+        } else if hundredth_s < 6e3 {
+            write!(f, "{:.2} s", hundredth_s / 100.0)
+        } else {
+            // Whole seconds, which `Elapsed` shows from a minute on (it would cut, not round).
+            write!(f, "{}", Elapsed(Duration::from_secs_f64(secs.round())))
+        }
     }
 }
 
@@ -724,5 +755,26 @@ mod tests {
             Load::new(40.0, 50.0).meter("cpu"),
             Meter::new(40.0, 50.0, Tone::Warn, "cpu")
         );
+    }
+
+    #[test]
+    fn span_times_are_microseconds_below_a_millisecond() {
+        let shown = |us: u64| SpanTime(Duration::from_micros(us)).to_string();
+        assert_eq!(shown(0), "0 µs");
+        assert_eq!(shown(40), "40 µs");
+        assert_eq!(shown(999), "999 µs");
+        assert_eq!(shown(1_800), "1.8 ms");
+        assert_eq!(shown(17_600), "17.6 ms");
+        assert_eq!(shown(478_600), "479 ms");
+        assert_eq!(shown(1_912_400), "1.91 s");
+        assert_eq!(shown(185_000_000), "3 min 5 s");
+        // The unit is picked after rounding.
+        let nanos = |ns: u64| SpanTime(Duration::from_nanos(ns)).to_string();
+        assert_eq!(nanos(999_600), "1.0 ms");
+        assert_eq!(nanos(99_960_000), "100 ms");
+        assert_eq!(nanos(999_600_000), "1.00 s");
+        assert_eq!(nanos(59_996_000_000), "1 min");
+        assert_eq!(nanos(99_940_000), "99.9 ms");
+        assert_eq!(nanos(185_600_000_000), "3 min 6 s");
     }
 }

@@ -42,38 +42,8 @@ use serde_json::{Map, Value};
 use self::details::SpanDetails;
 use super::{ServicePalette, TraceParams};
 use crate::stack::Counted;
-use crate::stats::Elapsed;
 use crate::store::{LogStore, Span, SpanId, Timestamp, Trace, TraceSpan};
-use crate::web::ui::{Count, Escaped};
-
-/// A span's or the axis's time as the waterfall writes it, finer than [`Elapsed`] since spans
-/// are short and sit side by side, as the mockup writes them: `900 µs`, `17.6 ms`, `478 ms`,
-/// `1.91 s`, and from a minute as everywhere else in the UI (`3 min 5 s`). The unit is picked
-/// after rounding to what it shows, so 99.96 ms reads `100 ms`, never `100.0 ms`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpanTime(pub Duration);
-
-impl fmt::Display for SpanTime {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let secs = self.0.as_secs_f64();
-        let micros = (secs * 1e6).round();
-        let tenth_ms = (secs * 1e4).round();
-        let ms = (secs * 1e3).round();
-        let hundredth_s = (secs * 1e2).round();
-        if micros < 1e3 {
-            write!(f, "{micros} µs")
-        } else if tenth_ms < 1e3 {
-            write!(f, "{:.1} ms", tenth_ms / 10.0)
-        } else if ms < 1e3 {
-            write!(f, "{ms} ms")
-        } else if hundredth_s < 6e3 {
-            write!(f, "{:.2} s", hundredth_s / 100.0)
-        } else {
-            // Whole seconds, which `Elapsed` shows from a minute on (it would cut, not round).
-            write!(f, "{}", Elapsed(Duration::from_secs_f64(secs.round())))
-        }
-    }
-}
+use crate::web::ui::{Count, Escaped, SpanTime};
 
 /// The selected trace laid out: its header figures, legend, minimap and rows.
 #[derive(Debug)]

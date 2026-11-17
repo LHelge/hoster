@@ -17,7 +17,6 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 
 use super::super::TraceParams;
-use super::SpanTime;
 use crate::otlp::ResourceAttributes;
 use crate::store::{
     Level, LogEntry, LogStore, MicroTimestamp, RecordKey, Span, SpanId, SpanKind, SpanStatus,
@@ -25,6 +24,7 @@ use crate::store::{
 };
 use crate::web::logs::LogScope;
 use crate::web::telemetry::Telemetry;
+use crate::web::ui::SpanTime;
 
 /// The details of the selected span.
 #[derive(Debug, Clone, PartialEq)]

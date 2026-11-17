@@ -619,27 +619,6 @@ fn tags_come_from_the_database_or_process_a_span_calls() {
     assert_eq!(SpanRow::tag(&none), None);
 }
 
-#[test]
-fn span_times_are_microseconds_below_a_millisecond() {
-    let shown = |us: u64| SpanTime(Duration::from_micros(us)).to_string();
-    assert_eq!(shown(0), "0 µs");
-    assert_eq!(shown(40), "40 µs");
-    assert_eq!(shown(999), "999 µs");
-    assert_eq!(shown(1_800), "1.8 ms");
-    assert_eq!(shown(17_600), "17.6 ms");
-    assert_eq!(shown(478_600), "479 ms");
-    assert_eq!(shown(1_912_400), "1.91 s");
-    assert_eq!(shown(185_000_000), "3 min 5 s");
-    // The unit is picked after rounding.
-    let nanos = |ns: u64| SpanTime(Duration::from_nanos(ns)).to_string();
-    assert_eq!(nanos(999_600), "1.0 ms");
-    assert_eq!(nanos(99_960_000), "100 ms");
-    assert_eq!(nanos(999_600_000), "1.00 s");
-    assert_eq!(nanos(59_996_000_000), "1 min");
-    assert_eq!(nanos(99_940_000), "99.9 ms");
-    assert_eq!(nanos(185_600_000_000), "3 min 6 s");
-}
-
 /// The mockup's `t1` with `s9` as the mockup has it: the statement timeout with its status
 /// message, attributes, resource and exception event.
 fn t1_detailed() -> Vec<Span> {
