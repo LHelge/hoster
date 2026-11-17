@@ -124,7 +124,7 @@
   <p class="card-body trace-missing">No trace <code>{{ id }}</code> in the log store: {{ view.selection.kept() }}, so it may have expired.</p>
 </section>
 {%- when Selection::Found with (waterfall) %}
-<section class="card trace-waterfall" aria-labelledby="trace-title">
+<section class="card trace-waterfall{% if waterfall.critical %} wf-crit-on{% endif %}" aria-labelledby="trace-title">
   <header class="card-head trace-head">
     <div class="trace-heading">
       <span class="trace-kicker">TRACE{% if !waterfall.stack.is_empty() %} · {{ waterfall.stack }}{% endif %}</span>
@@ -145,6 +145,22 @@
       <li><span class="dot {{ entry.class }}" aria-hidden="true"></span>{{ entry.name }} <span class="wf-count">{{ entry.count }}</span></li>
       {%- endfor %}
     </ul>
+    {#- The controls: links, and the critical-path switch, a checkbox that dims the rows off
+        the path by CSS (`:has()`), or where that is not supported a link to `crit=on`. -#}
+    <div class="wf-controls">
+      <label class="switch wf-crit-switch"><input type="checkbox" role="switch" class="wf-crit-input"{% if waterfall.critical %} checked{% endif %}><span class="switch-track" aria-hidden="true"></span><span class="visually-hidden">highlight </span>critical path</label>
+      <a class="switch wf-crit-link" role="switch" aria-checked="{{ waterfall.critical }}" href="{{ waterfall.critical_href }}"><span class="switch-track" aria-hidden="true"></span><span class="visually-hidden">highlight </span>critical path</a>
+      {%- if let Some(href) = waterfall.expand_all %}
+      <a class="wf-action" href="{{ href }}">expand all</a>
+      {%- else %}
+      <span class="wf-action wf-action-off">expand all</span>
+      {%- endif %}
+      {%- if let Some(href) = waterfall.collapse_services %}
+      <a class="wf-action" href="{{ href }}">collapse to services</a>
+      {%- else %}
+      <span class="wf-action wf-action-off">collapse to services</span>
+      {%- endif %}
+    </div>
   </div>
   <div class="wf-minimap-box">{{ waterfall.minimap }}</div>
   <div class="wf-scroll">
@@ -157,14 +173,20 @@
       </div>
       <ol class="wf-rows" aria-label="Spans">
         {%- for row in waterfall.rows %}
-        <li class="wf-row {{ row.class }}{% if row.error %} wf-error{% endif %}{% if row.current %} wf-selected{% endif %}">
+        <li class="wf-row {{ row.class }}{% if row.error %} wf-error{% endif %}{% if row.current %} wf-selected{% endif %}{% if row.critical %} wf-critical{% endif %}">
           <div class="wf-name {{ row.depth_class }}">
-            <a href="{{ row.href }}"{% if row.current %} aria-current="true"{% endif %}>
+            {%- if let Some(toggle) = row.toggle %}
+            <a class="wf-toggle" href="{{ toggle.href }}" aria-expanded="{{ toggle.expanded }}" aria-label="{{ toggle.label }}" title="{{ toggle.label }}">{{ crate::web::Icon::Disclosure }}</a>
+            {%- else %}
+            <span class="wf-leaf" aria-hidden="true"></span>
+            {%- endif %}
+            <a class="wf-pick" href="{{ row.href }}"{% if row.current %} aria-current="true"{% endif %}>
               {%- if row.error %}<span class="wf-err" role="img" aria-label="error">!</span>{% endif -%}
               <span class="wf-label">{{ row.name }}</span>
               {%- if let Some(tag) = row.tag %}<span class="wf-tag">{{ tag }}</span>{% endif %}
+              {%- if let Some(toggle) = row.toggle %}{% if !toggle.expanded %}<span class="wf-hidden" aria-hidden="true">+{{ toggle.hidden }}</span>{% endif %}{% endif %}
               {%- if row.parent_missing %}<span class="wf-orphan" title="Its parent span is not in the trace: lost, late or past the span cap.">parent missing</span>{% endif -%}
-              <span class="visually-hidden">, {{ row.service }}, {{ row.took }} from {{ row.offset }}{% if row.current %}; its details are open below, follow to close them{% endif %}</span>
+              <span class="visually-hidden">, {{ row.service }}, {{ row.took }} from {{ row.offset }}{% if row.critical %}, on the critical path{% endif %}{% if let Some(toggle) = row.toggle %}{% if !toggle.expanded %}; {{ toggle.hidden_spans() }} collapsed under it{% endif %}{% endif %}{% if row.current %}; its details are open below, follow to close them{% endif %}</span>
             </a>
           </div>
           <div class="wf-track">{{ row.bar }}</div>

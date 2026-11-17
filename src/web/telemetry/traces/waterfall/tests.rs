@@ -1012,3 +1012,245 @@ fn span_logs_link_each_record_to_the_logs_tab_and_say_when_there_are_more() {
     );
     assert_eq!(logs.first(), "the first 50 records");
 }
+
+/// The mockup's `t1` with its kinds: the proxy's root and the app's entry span are server
+/// spans, so "collapse to services" has the app's entry span to collapse.
+fn t1_kinds() -> Vec<Span> {
+    let mut spans = t1();
+    for span in &mut spans {
+        if span.span_id == id(0) || span.span_id == id(2) {
+            span.kind = SpanKind::Server;
+        }
+    }
+    spans
+}
+
+/// The waterfall of `spans` with the trace selected and `pairs` given besides.
+fn waterfall_with(spans: Vec<Span>, pairs: &[(&str, &str)]) -> Waterfall {
+    let trace = trace_id().to_string();
+    let mut given = vec![("trace", trace.as_str())];
+    given.extend_from_slice(pairs);
+    Waterfall::new(
+        Trace::new(trace_id(), spans, 12),
+        &palette(&["outline-app"]),
+        &params(&given),
+    )
+}
+
+fn row_names(waterfall: &Waterfall) -> Vec<&str> {
+    waterfall.rows.iter().map(|r| r.name.as_str()).collect()
+}
+
+/// The URL `href` links to, as the tab reads it.
+fn followed(href: &str) -> TraceParams {
+    let (path, query) = href.split_once('?').unwrap_or((href, ""));
+    assert_eq!(path, TraceParams::PATH);
+    TraceParams::from(
+        form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn spans_with_rows_under_them_have_a_toggle_and_collapsing_one_hides_its_rows() {
+    let waterfall = waterfall_with(t1(), &[("span", "none")]);
+    let toggles: Vec<(&str, &str, bool)> = waterfall
+        .rows
+        .iter()
+        .filter_map(|r| {
+            let toggle = r.toggle.as_ref()?;
+            Some((r.name.as_str(), toggle.label.as_str(), toggle.expanded))
+        })
+        .collect();
+    assert_eq!(
+        toggles,
+        [
+            (
+                "POST /api/documents.info",
+                "Collapse POST /api/documents.info",
+                true
+            ),
+            ("upstream outline", "Collapse upstream outline", true),
+            (
+                "POST /api/documents.info",
+                "Collapse POST /api/documents.info",
+                true
+            ),
+            ("authenticate", "Collapse authenticate", true),
+            ("documents.info", "Collapse documents.info", true),
+        ]
+    );
+    // Leaves have none; nothing is collapsed, so there is nothing to expand.
+    assert!(waterfall.rows[4].toggle.is_none());
+    assert_eq!(waterfall.expand_all, None);
+
+    // Collapsing documents.info (s6) hides its five rows and keeps everything else.
+    let s6 = &waterfall.rows[6];
+    let href = &s6.toggle.as_ref().unwrap().href;
+    assert_eq!(
+        *href,
+        format!(
+            "/telemetry/traces?trace={}&span=none&collapsed={}",
+            trace_id(),
+            id(6)
+        )
+    );
+    let collapsed = Waterfall::new(
+        Trace::new(trace_id(), t1(), 12),
+        &palette(&["outline-app"]),
+        &followed(href),
+    );
+    assert_eq!(collapsed.rows.len(), 7);
+    let s6 = &collapsed.rows[6];
+    assert_eq!(s6.name, "documents.info");
+    let toggle = s6.toggle.as_ref().unwrap();
+    assert!(!toggle.expanded);
+    assert_eq!(toggle.label, "Expand documents.info");
+    assert_eq!(
+        (toggle.hidden, toggle.hidden_spans().as_str()),
+        (5, "5 spans")
+    );
+    // Expanding it drops `collapsed`; collapsing authenticate (s3) as well writes both in row
+    // order.
+    assert_eq!(
+        toggle.href,
+        format!("/telemetry/traces?trace={}&span=none", trace_id())
+    );
+    let s3 = collapsed.rows[3].toggle.as_ref().unwrap();
+    assert!(s3.expanded);
+    assert_eq!(s3.hidden, 2);
+    assert_eq!(
+        followed(&s3.href).get("collapsed"),
+        Some(format!("{},{}", id(3), id(6)).as_str())
+    );
+    assert_eq!(
+        followed(&s3.href).collapsed(),
+        HashSet::from([id(3), id(6)])
+    );
+    // "expand all" clears it.
+    assert_eq!(
+        collapsed.expand_all,
+        Some(format!("/telemetry/traces?trace={}&span=none", trace_id()))
+    );
+}
+
+#[test]
+fn collapse_to_services_on_t1_collapses_the_apps_entry_span() {
+    let waterfall = waterfall_with(t1_kinds(), &[("page", "1")]);
+    let href = waterfall.collapse_services.clone().unwrap();
+    assert_eq!(
+        href,
+        format!(
+            "/telemetry/traces?page=1&trace={}&collapsed={}",
+            trace_id(),
+            id(2)
+        )
+    );
+    let collapsed = Waterfall::new(
+        Trace::new(trace_id(), t1_kinds(), 12),
+        &palette(&["outline-app"]),
+        &followed(&href),
+    );
+    assert_eq!(
+        row_names(&collapsed),
+        [
+            "POST /api/documents.info",
+            "upstream outline",
+            "POST /api/documents.info"
+        ]
+    );
+    let s2 = collapsed.rows[2].toggle.as_ref().unwrap();
+    assert!(!s2.expanded);
+    assert_eq!(s2.hidden, 9);
+    // It is what is collapsed now, so the link is off; "expand all" shows every row again.
+    assert_eq!(collapsed.collapse_services, None);
+    assert_eq!(
+        collapsed.expand_all,
+        Some(format!("/telemetry/traces?page=1&trace={}", trace_id()))
+    );
+    // The minimap still draws every span.
+    assert_eq!(collapsed.minimap.lines.len(), 12);
+    // A trace without such a span has nothing to collapse to: the mockup's t1 as stored with
+    // internal spans only.
+    assert_eq!(waterfall_with(t1(), &[]).collapse_services, None);
+}
+
+#[test]
+fn collapsed_ids_the_trace_does_not_have_or_that_hide_nothing_are_ignored() {
+    let other = SpanId::from([0xee; 8]).to_string();
+    let s6 = id(6).to_string().to_ascii_uppercase();
+    let s4 = id(4).to_string();
+    let given = format!("not-an-id, {s6},{s4},{other},,");
+    let waterfall = waterfall_with(t1(), &[("collapsed", &given)]);
+    assert_eq!(waterfall.rows.len(), 7);
+    assert_eq!(
+        waterfall
+            .rows
+            .iter()
+            .filter(|r| r.toggle.as_ref().is_some_and(|t| !t.expanded))
+            .count(),
+        1
+    );
+    // Every link writes the set as the trace has it: s6 alone.
+    let expand_s6 = waterfall.rows[6].toggle.as_ref().unwrap();
+    assert_eq!(followed(&expand_s6.href).get("collapsed"), None);
+    let collapse_s3 = waterfall.rows[3].toggle.as_ref().unwrap();
+    assert_eq!(
+        followed(&collapse_s3.href).get("collapsed"),
+        Some(format!("{},{}", id(3), id(6)).as_str())
+    );
+    // Only unknown ids: nothing is collapsed and nothing needs expanding.
+    let waterfall = waterfall_with(t1(), &[("collapsed", &other)]);
+    assert_eq!(waterfall.rows.len(), 12);
+    assert_eq!(waterfall.expand_all, None);
+}
+
+#[test]
+fn a_collapse_that_hides_the_selected_span_shows_no_details_until_expanded() {
+    let s6 = id(6).to_string();
+    // t1 opens on s9, under s6.
+    let waterfall = waterfall_with(t1(), &[("collapsed", &s6)]);
+    assert!(waterfall.details.is_none());
+    assert!(waterfall.rows.iter().all(|r| !r.current));
+    let expand = &waterfall.rows[6].toggle.as_ref().unwrap().href;
+    let expanded = Waterfall::new(
+        Trace::new(trace_id(), t1(), 12),
+        &palette(&["outline-app"]),
+        &followed(expand),
+    );
+    assert_eq!(expanded.details.as_ref().unwrap().id, id(9));
+    assert!(expanded.rows[10].current);
+    // A selected span that stays shown keeps its details: s6 itself.
+    let waterfall = waterfall_with(t1(), &[("collapsed", &s6), ("span", &s6)]);
+    assert_eq!(waterfall.details.as_ref().unwrap().id, id(6));
+    assert!(waterfall.rows[6].current);
+}
+
+#[test]
+fn the_critical_path_is_marked_on_its_rows_and_crit_on_switches_the_highlight() {
+    let waterfall = waterfall_with(t1(), &[("page", "2")]);
+    let critical: Vec<SpanId> = waterfall
+        .rows
+        .iter()
+        .filter(|r| r.critical)
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(critical, [id(0), id(1), id(2), id(6), id(10)]);
+    assert!(!waterfall.critical);
+    assert_eq!(
+        waterfall.critical_href,
+        format!("/telemetry/traces?page=2&trace={}&crit=on", trace_id())
+    );
+    let on = waterfall_with(t1(), &[("page", "2"), ("crit", "on")]);
+    assert!(on.critical);
+    assert_eq!(
+        on.critical_href,
+        format!("/telemetry/traces?page=2&trace={}", trace_id())
+    );
+    // Collapse links keep the highlight.
+    let toggle = on.rows[6].toggle.as_ref().unwrap();
+    assert!(followed(&toggle.href).critical());
+    // Any other value is the highlight off.
+    assert!(!waterfall_with(t1(), &[("crit", "yes")]).critical);
+}

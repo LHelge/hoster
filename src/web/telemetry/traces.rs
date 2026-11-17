@@ -5,12 +5,15 @@
 //! `since` (one of [`TraceParams::RANGES`], 15m by default; spans are kept 3 days, so the
 //! Logs tab's 7d is not offered), `q` (grep on span names: the root's or any stored span's,
 //! OQ-43), `status` ([`TraceStatus`]), `slower` (a minimum root duration such as `500ms`),
-//! `sort` ([`TraceSort`]), `page` (from 0), `trace` (the selected trace) and `span` (the
+//! `sort` ([`TraceSort`]), `page` (from 0), `trace` (the selected trace), `span` (the
 //! selected span of it: without it the trace opens on [`Trace::default_span`], and
-//! [`TraceParams::NO_SPAN`] is the details closed). Every link is
-//! built by [`TraceParams::href`] or [`TraceParams::select`], so it keeps the others: a filter
-//! or range drops the page, selecting a trace drops what was selected in the last one
-//! ([`TraceParams::SELECTION`]).
+//! [`TraceParams::NO_SPAN`] is the details closed), `collapsed` (the waterfall's collapsed
+//! spans, comma-separated span ids: [`TraceParams::collapsed`]) and `crit` (`on` highlights the
+//! critical path: [`TraceParams::critical`]). Every link is built by [`TraceParams::href`] or
+//! [`TraceParams::select`], so it keeps the others: a filter or range drops the page, selecting
+//! a trace drops what was selected in the last one ([`TraceParams::SELECTION`]) but keeps
+//! `crit`, which is how traces are shown rather than what is picked in one. (The waterfall's
+//! critical-path checkbox is not in the URL, so it lasts for the page view only.)
 //!
 //! [`TracesView::load`] reads one page of the list ([`LogStore::traces`], once per load), the
 //! Logs tab's count for the same range and stack, and the selected trace, at once. A row names
@@ -27,6 +30,7 @@
 
 mod waterfall;
 
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
@@ -73,11 +77,24 @@ impl TraceParams {
     /// Where the tab is.
     pub const PATH: &str = "/telemetry/traces";
     /// Every option, in the order links write them.
-    pub const KEYS: [&str; 9] = [
-        "stack", "since", "q", "status", "slower", "sort", "page", "trace", "span",
+    pub const KEYS: [&str; 11] = [
+        "stack",
+        "since",
+        "q",
+        "status",
+        "slower",
+        "sort",
+        "page",
+        "trace",
+        "span",
+        "collapsed",
+        "crit",
     ];
-    /// What is selected below the list; selecting another trace drops them all.
-    pub const SELECTION: [&str; 2] = ["trace", "span"];
+    /// What is selected below the list; selecting another trace drops them all. The collapsed
+    /// spans are the last trace's span ids, which mean nothing in another.
+    pub const SELECTION: [&str; 3] = ["trace", "span", "collapsed"];
+    /// The `crit` that highlights the critical path.
+    pub const CRIT_ON: &str = "on";
     /// The `span` of a trace whose span details were closed. Without `span` a trace opens on
     /// its default span, so closing needs a value of its own; like any value that is not a
     /// span id, it selects none.
@@ -170,6 +187,53 @@ impl TraceParams {
     /// included.
     pub fn close_span(&self) -> String {
         self.href(&[("page", self.get("page")), ("span", Some(Self::NO_SPAN))])
+    }
+
+    /// The spans collapsed in the waterfall: the span ids `collapsed` names, separated by
+    /// commas. What is not a span id is ignored, as the waterfall ignores ids its trace does
+    /// not have or that have nothing under them.
+    pub fn collapsed(&self) -> HashSet<SpanId> {
+        self.get("collapsed")
+            .into_iter()
+            .flat_map(|ids| ids.split(','))
+            .filter_map(|id| id.trim().to_ascii_lowercase().parse().ok())
+            .collect()
+    }
+
+    /// The tab with the spans of `trace` in `collapsed` collapsed, everything else kept, the
+    /// page included. Only spans with rows under them are written, in row order, so the link
+    /// says the same set the same way; none drops `collapsed`.
+    pub fn collapse(&self, trace: &Trace, collapsed: &HashSet<SpanId>) -> String {
+        let mut written = HashSet::new();
+        let ids: Vec<String> = trace
+            .spans()
+            .iter()
+            .map(|row| row.span().span_id)
+            .filter(|id| {
+                collapsed.contains(id)
+                    && trace.span(*id).is_some_and(|row| row.has_children())
+                    && written.insert(*id)
+            })
+            .map(|id| id.to_string())
+            .collect();
+        let ids = ids.join(",");
+        self.href(&[
+            ("page", self.get("page")),
+            ("collapsed", (!ids.is_empty()).then_some(ids.as_str())),
+        ])
+    }
+
+    /// Whether the critical path is highlighted: `crit` is [`TraceParams::CRIT_ON`]. Anything
+    /// else is the highlight off.
+    pub fn critical(&self) -> bool {
+        self.get("crit") == Some(Self::CRIT_ON)
+    }
+
+    /// The tab with the critical-path highlight switched: on when it is off, off when it is
+    /// on, everything else kept, the page included.
+    pub fn toggle_critical(&self) -> String {
+        let crit = (!self.critical()).then_some(Self::CRIT_ON);
+        self.href(&[("page", self.get("page")), ("crit", crit)])
     }
 
     /// The options a form keeps as hidden fields: all but those it edits (`edited`) and the

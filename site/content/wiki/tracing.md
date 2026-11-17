@@ -173,6 +173,19 @@ The selected trace opens as a waterfall below the list:
   span where it went wrong: the first span in error with no child in error (the deepest of
   the first error chain), or the root when nothing failed. Following the selected row again,
   or the close button, closes the details (`&span=none` in the URL).
+- **Collapsing.** A span with spans under it has an arrow before its name that collapses it:
+  its rows are hidden and it shows how many with `+N`. The arrow again expands it. **expand
+  all** shows every row again, and **collapse to services** collapses each service's entry
+  span (a server span that has a parent and spans under it), so a trace reads as the services
+  it went through. The collapsed spans are in the URL (`&collapsed=<span id>,<span id>`), so a
+  link or a reload keeps them; selecting another trace clears them. A collapse that hides the
+  selected span hides its details too, until the span is shown again.
+- **critical path** is a switch that dims every span not on the critical path: from the root,
+  each time the child that ended last, which is what the trace waited for. The switch works in
+  the browser alone and lasts for the page view: selecting a span, collapsing or expanding, or
+  opening another trace loads the page again and turns it off. To keep it on across those
+  links, put `&crit=on` in the URL: every link of the page then keeps it, selecting another
+  trace included.
 - **Partial traces.** A span whose parent never arrived (lost, late, or not yet received) is
   drawn under the root and marked *parent missing*. A trace read stops at its first 1,000
   spans by start, and the waterfall then says how many more it has.

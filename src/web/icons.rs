@@ -43,11 +43,14 @@ pub enum Icon {
     LogOut,
     /// Close what is open in place: a trace's span details.
     Close,
+    /// Show or hide what is under something: a waterfall span's subtree. It points right while
+    /// closed; CSS turns it down while open.
+    Disclosure,
 }
 
 impl Icon {
     /// Every icon, in sprite order.
-    pub const ALL: [Icon; 21] = [
+    pub const ALL: [Icon; 22] = [
         Icon::Brand,
         Icon::Dashboard,
         Icon::Stacks,
@@ -69,6 +72,7 @@ impl Icon {
         Icon::Update,
         Icon::LogOut,
         Icon::Close,
+        Icon::Disclosure,
     ];
 
     /// The notice the ISC and MIT licences ask for in every copy (`assets/lucide.LICENSE`).
@@ -100,6 +104,7 @@ impl Icon {
             Icon::Update => icondata::LuDownload,
             Icon::LogOut => icondata::LuLogOut,
             Icon::Close => icondata::LuX,
+            Icon::Disclosure => icondata::LuChevronRight,
         }
     }
 
@@ -127,6 +132,7 @@ impl Icon {
             Icon::Update => "update",
             Icon::LogOut => "log-out",
             Icon::Close => "close",
+            Icon::Disclosure => "disclosure",
         }
     }
 

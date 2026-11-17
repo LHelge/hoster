@@ -1,6 +1,7 @@
 //! The Traces tab through the whole app, against seeded request rows and spans and the fake
 //! orchestrator, whose state holds the stack `notes`; and its parameters and palette alone.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -714,7 +715,11 @@ async fn the_selected_trace_is_drawn_as_a_waterfall_below_the_list() {
         })
         .collect();
     assert_eq!(names, ["GET /a", "upstream web", "GET /a", "lookup"]);
-    assert!(rows[0].starts_with(r#"svc-hoster">"#), "{}", rows[0]);
+    assert!(
+        rows[0].starts_with(r#"svc-hoster wf-critical">"#),
+        "{}",
+        rows[0]
+    );
     assert!(rows[0].contains(r#"<div class="wf-name wf-depth-0">"#));
     assert!(rows[3].contains(r#"<div class="wf-name wf-depth-3">"#));
     assert!(
@@ -731,7 +736,9 @@ async fn the_selected_trace_is_drawn_as_a_waterfall_below_the_list() {
         trace(1)
     );
     assert!(
-        rows[3].contains(&format!(r#"<a href="{close}" aria-current="true">"#)),
+        rows[3].contains(&format!(
+            r#"<a class="wf-pick" href="{close}" aria-current="true">"#
+        )),
         "{}",
         rows[3]
     );
@@ -742,7 +749,7 @@ async fn the_selected_trace_is_drawn_as_a_waterfall_below_the_list() {
         sid(1, 2)
     );
     assert!(
-        rows[2].contains(&format!(r#"<a href="{href}">"#)),
+        rows[2].contains(&format!(r#"<a class="wf-pick" href="{href}">"#)),
         "{}",
         rows[2]
     );
@@ -845,7 +852,11 @@ async fn t1_app() -> Session {
             ],
             requests: vec![request],
             spans: vec![
-                app_span(2, 1, "POST /api/documents.info", 3.8, 1905.2, true),
+                // The app's entry span, which "collapse to services" collapses.
+                Span {
+                    kind: SpanKind::Server,
+                    ..app_span(2, 1, "POST /api/documents.info", 3.8, 1905.2, true)
+                },
                 app_span(3, 2, "authenticate", 5.1, 17.6, false),
                 app_span(4, 3, "GET", 6.9, 1.8, false),
                 app_span(5, 3, "SELECT users", 10.4, 9.2, false),
@@ -993,6 +1004,243 @@ async fn t1_opens_on_the_failing_statement_with_every_section_of_its_details() {
     let html = session.get(&close.replace("&#38;", "&")).await;
     assert!(html.contains(r#"<section class="card trace-waterfall""#));
     assert!(!html.contains("wf-details"), "{html}");
+}
+
+/// The row of `html`'s waterfall whose span is `name`, the first of that name.
+fn span_row<'a>(html: &'a str, name: &str) -> &'a str {
+    let label = format!(r#"<span class="wf-label">{name}</span>"#);
+    spans(html)
+        .into_iter()
+        .find(|row| row.contains(&label))
+        .unwrap_or_else(|| panic!("no row {name}: {html}"))
+}
+
+#[tokio::test]
+async fn spans_collapse_and_expand_by_links_kept_in_the_url() {
+    let session = t1_app().await;
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}", trace(6)))
+        .await;
+    let waterfall = &html[html
+        .find(r#"<section class="card trace-waterfall""#)
+        .unwrap()..];
+    assert!(
+        !waterfall.contains("style="),
+        "no inline styles: {waterfall}"
+    );
+    assert_eq!(spans(waterfall).len(), 12);
+    // A span with rows under it has a toggle before its link, named for what it does.
+    let collapse = format!(
+        "/telemetry/traces?trace={}&#38;collapsed={}",
+        trace(6),
+        sid(6, 6)
+    );
+    let row = span_row(waterfall, "documents.info");
+    assert!(
+        row.contains(&format!(
+            r#"<a class="wf-toggle" href="{collapse}" aria-expanded="true" aria-label="Collapse documents.info" title="Collapse documents.info"><svg class="icon""#
+        )),
+        "{row}"
+    );
+    assert!(row.contains(r##"#disclosure"></use></svg></a>"##), "{row}");
+    assert!(!row.contains("wf-hidden"), "{row}");
+    // A leaf has a spacer instead.
+    let leaf = span_row(waterfall, "ROLLBACK");
+    assert!(!leaf.contains("wf-toggle"), "{leaf}");
+    assert!(
+        leaf.contains(r#"<span class="wf-leaf" aria-hidden="true"></span>"#),
+        "{leaf}"
+    );
+    // Nothing is collapsed: "expand all" is off.
+    assert!(
+        waterfall.contains(r#"<span class="wf-action wf-action-off">expand all</span>"#),
+        "{waterfall}"
+    );
+
+    // Following the toggle collapses the span: its five rows are hidden and it says so.
+    let html = session.get(&collapse.replace("&#38;", "&")).await;
+    assert_eq!(spans(&html).len(), 7, "{html}");
+    let row = span_row(&html, "documents.info");
+    assert!(
+        row.contains(&format!(
+            r#"<a class="wf-toggle" href="/telemetry/traces?trace={}" aria-expanded="false" aria-label="Expand documents.info" title="Expand documents.info">"#,
+            trace(6)
+        )),
+        "{row}"
+    );
+    assert!(
+        row.contains(r#"<span class="wf-hidden" aria-hidden="true">+5</span>"#),
+        "{row}"
+    );
+    assert!(row.contains("; 5 spans collapsed under it"), "{row}");
+    for hidden in ["SELECT revisions", "ROLLBACK", "SELECT documents"] {
+        assert!(
+            !html.contains(&format!(r#"<span class="wf-label">{hidden}</span>"#)),
+            "{hidden}: {html}"
+        );
+    }
+    // The trace opens on s9, which is hidden now: no details, and the trace stays open.
+    assert!(!html.contains("wf-details"), "{html}");
+    assert!(!html.contains("wf-selected"), "{html}");
+    // Collapsing another keeps this one; the set is written in row order.
+    let authenticate = span_row(&html, "authenticate");
+    assert!(
+        authenticate.contains(&format!(
+            r#"href="/telemetry/traces?trace={}&#38;collapsed={}%2C{}" aria-expanded="true""#,
+            trace(6),
+            sid(6, 3),
+            sid(6, 6)
+        )),
+        "{authenticate}"
+    );
+    // "expand all" clears it, and the details are back.
+    let expand = format!(
+        r#"<a class="wf-action" href="/telemetry/traces?trace={}">expand all</a>"#,
+        trace(6)
+    );
+    assert!(html.contains(&expand), "{html}");
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}", trace(6)))
+        .await;
+    assert!(html.contains("wf-details"), "{html}");
+
+    // Ids the trace does not have, or that hide nothing, are ignored without an error.
+    let html = session
+        .get(&format!(
+            "/telemetry/traces?trace={}&collapsed=zz,{},{}",
+            trace(6),
+            sid(6, 10),
+            sid(7, 6)
+        ))
+        .await;
+    assert_eq!(spans(&html).len(), 12, "{html}");
+    assert!(!html.contains("card-error"), "{html}");
+}
+
+#[tokio::test]
+async fn collapse_to_services_collapses_the_apps_entry_span() {
+    let session = t1_app().await;
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}&span=none", trace(6)))
+        .await;
+    let services = format!(
+        "/telemetry/traces?trace={}&#38;span=none&#38;collapsed={}",
+        trace(6),
+        sid(6, 2)
+    );
+    assert!(
+        html.contains(&format!(
+            r#"<a class="wf-action" href="{services}">collapse to services</a>"#
+        )),
+        "{html}"
+    );
+    let html = session.get(&services.replace("&#38;", "&")).await;
+    let names: Vec<&str> = spans(&html)
+        .into_iter()
+        .map(|row| {
+            let rest = row.split(r#"<span class="wf-label">"#).nth(1).unwrap();
+            rest.split("</span>").next().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "POST /api/documents.info",
+            "upstream web",
+            "POST /api/documents.info"
+        ]
+    );
+    let entry = spans(&html)[2];
+    assert!(
+        entry.contains(r#"<span class="wf-hidden" aria-hidden="true">+9</span>"#),
+        "{entry}"
+    );
+    assert!(
+        entry.contains(r#"aria-expanded="false" aria-label="Expand POST /api/documents.info""#),
+        "{entry}"
+    );
+    // That is what is collapsed now, so the link is off.
+    assert!(
+        html.contains(r#"<span class="wf-action wf-action-off">collapse to services</span>"#),
+        "{html}"
+    );
+    // Selecting another trace drops the collapsed set, the span with it.
+    assert_eq!(
+        TraceParams::from(vec![
+            ("trace".to_owned(), trace(6).to_string()),
+            ("collapsed".to_owned(), sid(6, 2).to_string()),
+        ])
+        .select(trace(1)),
+        format!("/telemetry/traces?trace={}", trace(1))
+    );
+}
+
+#[tokio::test]
+async fn the_critical_path_switch_dims_by_css_with_crit_on_as_its_fallback() {
+    let session = t1_app().await;
+    let html = session
+        .get(&format!("/telemetry/traces?trace={}", trace(6)))
+        .await;
+    assert!(
+        html.contains(r#"<section class="card trace-waterfall" aria-labelledby="trace-title">"#),
+        "{html}"
+    );
+    // The rows on the path are marked, and say so.
+    let critical: Vec<&str> = spans(&html)
+        .into_iter()
+        .filter(|row| row.contains(r#" wf-critical">"#))
+        .map(|row| {
+            assert!(row.contains(", on the critical path"), "{row}");
+            let rest = row.split(r#"<span class="wf-label">"#).nth(1).unwrap();
+            rest.split("</span>").next().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        critical,
+        [
+            "POST /api/documents.info",
+            "upstream web",
+            "POST /api/documents.info",
+            "documents.info",
+            "ROLLBACK"
+        ]
+    );
+    // The switch: a checkbox, and the link that stands in for it without `:has()`.
+    assert!(
+        html.contains(r#"<label class="switch wf-crit-switch"><input type="checkbox" role="switch" class="wf-crit-input"><span class="switch-track" aria-hidden="true"></span><span class="visually-hidden">highlight </span>critical path</label>"#),
+        "{html}"
+    );
+    let on = format!("/telemetry/traces?trace={}&#38;crit=on", trace(6));
+    assert!(
+        html.contains(&format!(
+            r#"<a class="switch wf-crit-link" role="switch" aria-checked="false" href="{on}">"#
+        )),
+        "{html}"
+    );
+
+    // With crit=on the server dims the rows and the switch is on.
+    let html = session.get(&on.replace("&#38;", "&")).await;
+    assert!(
+        html.contains(
+            r#"<section class="card trace-waterfall wf-crit-on" aria-labelledby="trace-title">"#
+        ),
+        "{html}"
+    );
+    assert!(html.contains(r#"class="wf-crit-input" checked>"#), "{html}");
+    assert!(
+        html.contains(&format!(
+            r#"<a class="switch wf-crit-link" role="switch" aria-checked="true" href="/telemetry/traces?trace={}">"#,
+            trace(6)
+        )),
+        "{html}"
+    );
+    // It is kept by the other links, selecting a trace included.
+    let row = span_row(&html, "documents.info");
+    assert!(row.contains("&#38;crit=on\" aria-expanded"), "{row}");
+    assert_eq!(
+        select_href(&html, "POST /api/documents.info"),
+        format!("/telemetry/traces?trace={}&crit=on", trace(6))
+    );
 }
 
 #[tokio::test]
@@ -1207,4 +1455,76 @@ fn rows_are_dated_when_any_falls_on_another_day_in_any_order() {
         "2026-11-17T23:40:00.000Z",
     ])));
     assert!(!TracesView::dated(&[]));
+}
+
+#[test]
+fn the_collapsed_set_and_the_highlight_round_trip_and_only_the_set_is_of_a_selection() {
+    let collapsed = format!("{}, {},nope", SpanId::from([2; 8]), "0303030303030303");
+    let params = TraceParams::from(
+        [
+            ("crit", "on"),
+            ("collapsed", collapsed.as_str()),
+            ("trace", "ab"),
+            ("page", "1"),
+        ]
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .to_vec(),
+    );
+    assert_eq!(
+        params.collapsed(),
+        HashSet::from([SpanId::from([2; 8]), SpanId::from([3; 8])])
+    );
+    assert!(params.critical());
+    // Selecting a span keeps both; selecting a trace keeps the highlight only.
+    assert_eq!(
+        params.select_span(SpanId::from([4; 8])),
+        format!(
+            "/telemetry/traces?page=1&trace=ab&span=0404040404040404&collapsed={}&crit=on",
+            form_urlencoded::byte_serialize(collapsed.as_bytes()).collect::<String>()
+        )
+    );
+    assert_eq!(
+        params.select(trace(3)),
+        format!("/telemetry/traces?page=1&trace={}&crit=on", trace(3))
+    );
+    assert_eq!(
+        params.toggle_critical(),
+        format!(
+            "/telemetry/traces?page=1&trace=ab&collapsed={}",
+            form_urlencoded::byte_serialize(collapsed.as_bytes()).collect::<String>()
+        )
+    );
+    // A collapse link writes the spans with rows under them in row order, and reads back as
+    // that set; none drops `collapsed`.
+    let ok = SpanStatus::Unset;
+    let trace = Trace::new(
+        trace(3),
+        vec![
+            span(3, 4, Some(3), "web", "leaf", 30, 1, ok),
+            span(3, 3, Some(2), "web", "middle", 40, 10, ok),
+            span(3, 2, None, "web", "root", 50, 20, ok),
+        ],
+        3,
+    );
+    let href = params.collapse(&trace, &HashSet::from([sid(3, 4), sid(3, 3), sid(3, 2)]));
+    assert_eq!(
+        href,
+        format!(
+            "/telemetry/traces?page=1&trace=ab&collapsed={}%2C{}&crit=on",
+            sid(3, 2),
+            sid(3, 3)
+        )
+    );
+    let read = TraceParams::from(
+        form_urlencoded::parse(href.split_once('?').unwrap().1.as_bytes())
+            .into_owned()
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(read.collapsed(), HashSet::from([sid(3, 2), sid(3, 3)]));
+    assert_eq!(
+        params.collapse(&trace, &HashSet::new()),
+        "/telemetry/traces?page=1&trace=ab&crit=on"
+    );
+    assert!(TraceParams::default().collapsed().is_empty());
+    assert!(!TraceParams::default().critical());
 }
