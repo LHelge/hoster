@@ -41,11 +41,13 @@ pub enum Icon {
     CheckUpdates,
     Update,
     LogOut,
+    /// Close what is open in place: a trace's span details.
+    Close,
 }
 
 impl Icon {
     /// Every icon, in sprite order.
-    pub const ALL: [Icon; 20] = [
+    pub const ALL: [Icon; 21] = [
         Icon::Brand,
         Icon::Dashboard,
         Icon::Stacks,
@@ -66,6 +68,7 @@ impl Icon {
         Icon::CheckUpdates,
         Icon::Update,
         Icon::LogOut,
+        Icon::Close,
     ];
 
     /// The notice the ISC and MIT licences ask for in every copy (`assets/lucide.LICENSE`).
@@ -96,6 +99,7 @@ impl Icon {
             Icon::CheckUpdates => icondata::LuRefreshCw,
             Icon::Update => icondata::LuDownload,
             Icon::LogOut => icondata::LuLogOut,
+            Icon::Close => icondata::LuX,
         }
     }
 
@@ -122,6 +126,7 @@ impl Icon {
             Icon::CheckUpdates => "check-updates",
             Icon::Update => "update",
             Icon::LogOut => "log-out",
+            Icon::Close => "close",
         }
     }
 

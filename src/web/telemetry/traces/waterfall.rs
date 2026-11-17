@@ -12,10 +12,15 @@
 //! colour in the list, the legend, the minimap and the bars.
 //!
 //! Each row's name is a link that selects the span (`span=<id>`, kept with the trace by
-//! [`TraceParams::select_span`]); the whole row is its target, by CSS alone.
+//! [`TraceParams::select_span`]); the whole row is its target, by CSS alone. The selected span
+//! ([`TraceParams::selected_span`]: the trace's default span until another is picked) has its
+//! details under its row ([`SpanDetails`], `waterfall/details.rs`), and its row's link closes
+//! them ([`TraceParams::close_span`]).
 //!
 //! The rows are what [`Trace::visible`] shows for a set of collapsed spans, empty for now; the
 //! minimap always draws every span read.
+
+mod details;
 
 use std::collections::HashSet;
 use std::fmt;
@@ -23,10 +28,11 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
+use self::details::SpanDetails;
 use super::{ServicePalette, TraceParams};
 use crate::stack::Counted;
 use crate::stats::Elapsed;
-use crate::store::{Span, SpanId, Timestamp, Trace, TraceSpan};
+use crate::store::{LogStore, Span, SpanId, Timestamp, Trace, TraceSpan};
 use crate::web::ui::{Count, Escaped};
 
 /// A span's or the axis's time as the waterfall writes it, finer than [`Elapsed`] since spans
@@ -82,6 +88,8 @@ pub struct Waterfall {
     pub ticks: Vec<String>,
     pub minimap: Minimap,
     pub rows: Vec<SpanRow>,
+    /// The selected span's details, drawn under its row; `None` when none is selected.
+    pub details: Option<SpanDetails>,
 }
 
 impl Waterfall {
@@ -92,7 +100,10 @@ impl Waterfall {
     /// tab as `params` has it.
     pub fn new(trace: Trace, palette: &ServicePalette, params: &TraceParams) -> Self {
         let total = trace.duration();
-        let current = params.span();
+        let current = params.selected_span(&trace);
+        let details = current
+            .and_then(|id| trace.span(id))
+            .map(|span| SpanDetails::new(&trace, span, params));
         let rows = trace
             .visible(&HashSet::new())
             .into_iter()
@@ -132,7 +143,15 @@ impl Waterfall {
             ticks,
             minimap: Minimap::new(&trace, palette),
             rows,
+            details,
             trace,
+        }
+    }
+
+    /// Reads the log records of the selected span from `store` into its details.
+    pub async fn read_logs(&mut self, store: &LogStore) {
+        if let Some(details) = &mut self.details {
+            details.read_logs(store, self.trace.id()).await;
         }
     }
 
@@ -178,7 +197,7 @@ pub struct SpanRow {
     pub tag: Option<String>,
     /// Its parent is not in the trace, so it hangs under the root.
     pub parent_missing: bool,
-    /// Where selecting it goes.
+    /// Where selecting it goes; for the selected span, where closing its details goes.
     pub href: String,
     /// It is the selected span.
     pub current: bool,
@@ -219,6 +238,7 @@ impl SpanRow {
         let class = palette.class(&span.service);
         let offset = trace.offset(row);
         let took = SpanTime(span.duration).to_string();
+        let current = current == Some(span.span_id);
         Self {
             id: span.span_id,
             name: span.name.clone(),
@@ -229,8 +249,12 @@ impl SpanRow {
             error: span.is_error(),
             tag: Self::tag(span),
             parent_missing: row.parent_missing(),
-            href: params.select_span(span.span_id),
-            current: current == Some(span.span_id),
+            href: if current {
+                params.close_span()
+            } else {
+                params.select_span(span.span_id)
+            },
+            current,
             offset: format!("+{}", SpanTime(offset)),
             bar: Bar::new(offset, span.duration, total, class, span.is_error(), &took),
             took,

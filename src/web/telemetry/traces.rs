@@ -6,7 +6,8 @@
 //! Logs tab's 7d is not offered), `q` (grep on span names: the root's or any stored span's,
 //! OQ-43), `status` ([`TraceStatus`]), `slower` (a minimum root duration such as `500ms`),
 //! `sort` ([`TraceSort`]), `page` (from 0), `trace` (the selected trace) and `span` (the
-//! selected span of it). Every link is
+//! selected span of it: without it the trace opens on [`Trace::default_span`], and
+//! [`TraceParams::NO_SPAN`] is the details closed). Every link is
 //! built by [`TraceParams::href`] or [`TraceParams::select`], so it keeps the others: a filter
 //! or range drops the page, selecting a trace drops what was selected in the last one
 //! ([`TraceParams::SELECTION`]).
@@ -21,7 +22,8 @@
 //!
 //! The selected trace ([`Selection`]) is read whether or not the list shows it, so a link from
 //! a log record opens it on any range; one that no longer exists says that spans are kept
-//! [`Retention::SPAN_MAX_AGE`]. A found one is laid out as a [`Waterfall`].
+//! [`Retention::SPAN_MAX_AGE`]. A found one is laid out as a [`Waterfall`], with the details of
+//! its selected span under that span's row, whose log records are read once the span is known.
 
 mod waterfall;
 
@@ -76,6 +78,10 @@ impl TraceParams {
     ];
     /// What is selected below the list; selecting another trace drops them all.
     pub const SELECTION: [&str; 2] = ["trace", "span"];
+    /// The `span` of a trace whose span details were closed. Without `span` a trace opens on
+    /// its default span, so closing needs a value of its own; like any value that is not a
+    /// span id, it selects none.
+    pub const NO_SPAN: &str = "none";
     /// The options the toolbar's form edits rather than keeps as hidden fields.
     const FORM: [&str; 3] = ["stack", "q", "slower"];
     /// The range presets: spans are kept 3 days, so nothing longer than a day.
@@ -147,6 +153,23 @@ impl TraceParams {
     /// The selected span, when `span` is a span id; one that is not selects none.
     pub fn span(&self) -> Option<SpanId> {
         self.get("span")?.to_ascii_lowercase().parse().ok()
+    }
+
+    /// The span of `trace` whose details are open: without `span`, the one the trace opens on
+    /// ([`Trace::default_span`]); with it, the span it names when the trace has it, and none
+    /// for [`TraceParams::NO_SPAN`] or anything else that is not one of its spans.
+    pub fn selected_span(&self, trace: &Trace) -> Option<SpanId> {
+        match self.get("span") {
+            None => trace.default_span().map(|span| span.span().span_id),
+            Some(_) => self.span().filter(|id| trace.span(*id).is_some()),
+        }
+    }
+
+    /// The tab with the span details closed: `span` set to [`TraceParams::NO_SPAN`], so the
+    /// trace does not open on its default span again, and everything else kept, the page
+    /// included.
+    pub fn close_span(&self) -> String {
+        self.href(&[("page", self.get("page")), ("span", Some(Self::NO_SPAN))])
     }
 
     /// The options a form keeps as hidden fields: all but those it edits (`edited`) and the
@@ -468,8 +491,9 @@ impl TracesView {
             // After the list's, so the list's services keep their colours.
             view.palette
                 .learn(trace.spans().iter().map(|s| s.span().service.as_str()));
-            view.selection =
-                Selection::Found(Box::new(Waterfall::new(trace, &view.palette, &view.params)));
+            let mut waterfall = Waterfall::new(trace, &view.palette, &view.params);
+            waterfall.read_logs(store).await;
+            view.selection = Selection::Found(Box::new(waterfall));
         }
         view
     }

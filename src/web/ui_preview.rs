@@ -1148,11 +1148,13 @@ impl Fixtures {
     /// The Traces tab's last 15 minutes (epic qnh): requests whose apps exported spans (one
     /// failing in its database call), one whose app exports nothing, one hoster answered
     /// itself, and a job an app started on its own; and the mockup's `t1` (trace 6), a
-    /// statement timeout under a document read, with database and process calls tagged and a
-    /// span whose parent was lost.
+    /// statement timeout under a document read, with database and process calls tagged, a
+    /// span whose parent was lost, and the failing statement's attributes, resource, exception
+    /// and log records for its details.
     async fn traces(app: &TestApp) {
         use crate::store::{
-            LogBatch, MicroTimestamp, RequestRow, Span, SpanId, SpanKind, SpanStatus, TraceId,
+            Level, LogBatch, LogRecord, MicroTimestamp, RequestRow, Span, SpanId, SpanKind,
+            SpanStatus, Stream, TraceId,
         };
         let now = Timestamp::now();
         let id = |n: u8, k: u8| SpanId::from([n, k, 0x5e, 0, 0, 0, 0, 1]);
@@ -1217,6 +1219,84 @@ impl Fixtures {
         };
         let pg = || serde_json::json!({ "db.system": "postgresql", "db.namespace": "notes" });
         let ok = SpanStatus::Unset;
+        // The statement that timed out, with everything its details show: a status message,
+        // attributes (error.type in red), a resource, an exception with its stack, and two log
+        // records made inside it.
+        let s8 = span(
+            6,
+            8,
+            Some(6),
+            notes,
+            "SELECT revisions",
+            (49_948, 1_800),
+            SpanStatus::Error,
+        );
+        let thrown = s8.start + Duration::from_micros(1_800_400);
+        let timed_out = Span {
+            status_message: Some("canceling statement due to statement timeout".into()),
+            attributes: Some(
+                serde_json::json!({
+                    "db.system": "postgresql",
+                    "db.namespace": "notes",
+                    "db.query.text": "SELECT r.* FROM revisions r WHERE r.document_id = $1 ORDER BY r.created_at DESC",
+                    "db.response.status_code": "57014",
+                    "error.type": "QueryCanceledError",
+                    "server.address": "postgres:5432",
+                })
+                .to_string(),
+            ),
+            resource: Some(
+                serde_json::json!({
+                    "service.name": "api",
+                    "service.version": "0.81.1",
+                    "telemetry.sdk.language": "nodejs",
+                    "telemetry.sdk.name": "opentelemetry",
+                    "service.namespace": "notes",
+                    "hoster.generation": "4",
+                })
+                .to_string(),
+            ),
+            events: Some(
+                serde_json::json!([{
+                    "name": "exception",
+                    "time_us": thrown.as_micros(),
+                    "attributes": {
+                        "exception.type": "SequelizeDatabaseError",
+                        "exception.message": "canceling statement due to statement timeout",
+                        "exception.stacktrace": "at Query.formatError (node_modules/sequelize/lib/dialects/postgres/query.js:386:16)\nat Query.run (node_modules/sequelize/lib/dialects/postgres/query.js:87:18)\nat async Revision.findAll (server/models/Revision.ts:112:5)\nat async documents.info (server/routes/api/documents.ts:418:22)",
+                    },
+                }])
+                .to_string(),
+            ),
+            ..s8
+        };
+        let in_span = |ms: u64, level, message: &str| LogRecord {
+            time: Timestamp::from_millis(thrown.as_micros() / 1000) + Duration::from_millis(ms),
+            stack: Some("notes".into()),
+            service: "api".into(),
+            generation: Some(4),
+            stream: Stream::Otlp,
+            level: Some(level),
+            message: message.into(),
+            fields: None,
+            cut: false,
+            marker: false,
+            trace_id: Some(TraceId::from([6; 16])),
+            span_id: Some(id(6, 8)),
+            received: Some(now),
+        };
+        let span_records = vec![
+            in_span(
+                0,
+                Level::Error,
+                "SequelizeDatabaseError: canceling statement due to statement timeout",
+            ),
+            in_span(
+                1,
+                Level::Warn,
+                "documents.info failed, rolling back the transaction",
+            ),
+        ];
         let documents = vec![
             span(
                 6,
@@ -1249,18 +1329,7 @@ impl Fixtures {
                 span(6, 7, Some(6), notes, "SELECT documents", (49_974, 14), ok),
                 pg(),
             ),
-            calls(
-                span(
-                    6,
-                    8,
-                    Some(6),
-                    notes,
-                    "SELECT revisions",
-                    (49_948, 1_800),
-                    SpanStatus::Error,
-                ),
-                pg(),
-            ),
+            timed_out,
             calls(
                 span(6, 9, Some(6), notes, "ROLLBACK", (48_146, 3), ok),
                 pg(),
@@ -1281,6 +1350,7 @@ impl Fixtures {
         ];
         app.logs
             .append(&LogBatch {
+                records: span_records,
                 requests: vec![
                     request(
                         6,
@@ -2413,7 +2483,7 @@ async fn ui_preview() {
         (
             "trace=06060606060606060606060606060606&span=06085e0000000001",
             "telemetry-traces-waterfall",
-            "Telemetry: the waterfall of a statement timeout, its failing call selected",
+            "Telemetry: the waterfall of a statement timeout, its failing call's details open",
         ),
         (
             "trace=77777777777777777777777777777777",

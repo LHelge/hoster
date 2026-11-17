@@ -164,10 +164,99 @@
               <span class="wf-label">{{ row.name }}</span>
               {%- if let Some(tag) = row.tag %}<span class="wf-tag">{{ tag }}</span>{% endif %}
               {%- if row.parent_missing %}<span class="wf-orphan" title="Its parent span is not in the trace: lost, late or past the span cap.">parent missing</span>{% endif -%}
-              <span class="visually-hidden">, {{ row.service }}, {{ row.took }} from {{ row.offset }}</span>
+              <span class="visually-hidden">, {{ row.service }}, {{ row.took }} from {{ row.offset }}{% if row.current %}; its details are open below, follow to close them{% endif %}</span>
             </a>
           </div>
           <div class="wf-track">{{ row.bar }}</div>
+          {%- if row.current %}{% if let Some(details) = waterfall.details %}
+          {#- The selected span's details (waterfall/details.rs), under its row and above the
+              row link's cover, so their own links can be followed. -#}
+          <section class="wf-details" aria-labelledby="wf-details-title">
+            <header class="wf-details-head">
+              <span class="wf-swatch" aria-hidden="true"></span>
+              <h3 id="wf-details-title">{{ details.name }}</h3>
+              <span class="wf-details-service">{{ details.service }}</span>
+              <span class="pill pill-neutral">{{ details.kind }}</span>
+              <span class="pill {{ details.status_class }}">{{ details.status }}</span>
+              <a class="wf-close" href="{{ details.close }}" aria-label="Close span details" title="Close span details">{{ crate::web::Icon::Close }}</a>
+            </header>
+            <dl class="wf-facts">
+              <div><dt>START</dt><dd>{{ details.start }}</dd></div>
+              <div><dt>DURATION</dt><dd>{{ details.duration }}{% if let Some(share) = details.share %} <span class="wf-share">· {{ share }} of trace</span>{% endif %}</dd></div>
+              <div><dt>SELF TIME</dt><dd>{{ details.self_time }}</dd></div>
+              <div><dt>SPAN ID</dt><dd>{{ details.id }}</dd></div>
+              <div><dt>PARENT</dt><dd class="wf-parent">
+                {%- if let Some(href) = details.parent_href %}<a href="{{ href }}">{{ details.parent }}</a>{% else %}{{ details.parent }}{% endif %}
+                {%- if details.parent_missing %} <span class="wf-orphan">not in the trace</span>{% endif -%}
+              </dd></div>
+            </dl>
+            {%- if let Some(message) = details.message %}
+            <p class="wf-status-message">status: ERROR · {{ message }}</p>
+            {%- endif %}
+            <div class="wf-details-body">
+              <div class="wf-details-main">
+                <h4 class="wf-section">ATTRIBUTES</h4>
+                {%- if let Some(raw) = details.attributes_raw %}
+                <pre class="wf-raw">{{ raw }}</pre>
+                {%- else if details.attributes.is_empty() %}
+                <p class="wf-none">no attributes on this span</p>
+                {%- else %}
+                <dl class="wf-attrs">
+                  {%- for attribute in details.attributes %}
+                  <div{% if attribute.alert %} class="wf-alert"{% endif %}><dt>{{ attribute.key }}</dt><dd>{{ attribute.value }}</dd></div>
+                  {%- endfor %}
+                </dl>
+                {%- endif %}
+                <h4 class="wf-section">RESOURCE</h4>
+                {%- if details.resource.is_empty() %}
+                <p class="wf-none">no resource attributes</p>
+                {%- else %}
+                <p class="wf-chips">
+                  {%- for chip in details.resource %}
+                  <span class="wf-chip"><span class="wf-chip-key">{{ chip.key }}=</span>{{ chip.value }}</span>
+                  {%- endfor %}
+                </p>
+                {%- endif %}
+              </div>
+              <div class="wf-details-side">
+                <h4 class="wf-section">EVENTS</h4>
+                {%- if details.events.is_empty() %}
+                <p class="wf-none">no events on this span</p>
+                {%- endif %}
+                {%- for event in details.events %}
+                <div class="wf-event{% if event.exception %} wf-exception{% endif %}">
+                  <p class="wf-event-head"><span class="wf-event-name">{{ event.name }}</span><span class="wf-event-at">{{ event.at }}</span></p>
+                  {%- if !event.attributes.is_empty() %}
+                  <dl class="wf-event-attrs">
+                    {%- for (key, value) in event.attributes %}
+                    <div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>
+                    {%- endfor %}
+                  </dl>
+                  {%- endif %}
+                  {%- if let Some(stacktrace) = event.stacktrace %}
+                  <pre class="wf-stacktrace">{{ stacktrace }}</pre>
+                  {%- endif %}
+                </div>
+                {%- endfor %}
+                <h4 class="wf-section">LOGS FOR THIS SPAN</h4>
+                {%- if details.logs.unreadable %}
+                <p class="wf-none wf-unreadable">The span's log records cannot be read right now.</p>
+                {%- else if details.logs.records.is_empty() %}
+                <p class="wf-none">none emitted</p>
+                {%- else %}
+                <div class="wf-logs">
+                  {%- for record in details.logs.records %}
+                  <a class="wf-log{% if let Some(level) = record.level %} log-{{ level }}{% endif %}" href="{{ record.href }}"><time datetime="{{ record.time }}" title="{{ record.time }}">{{ record.shown }}</time><span class="log-lvl">{% if let Some(level) = record.level %}{{ level }}{% else %}<span aria-hidden="true">—</span><span class="visually-hidden">no level</span>{% endif %}</span><span class="log-msg">{{ record.message }}{% if record.cut %} <span class="log-cut" title="The line was longer than the store keeps and was cut.">[cut]</span>{% endif %}</span></a>
+                  {%- endfor %}
+                </div>
+                {%- if let Some(href) = details.logs.more %}
+                <p class="wf-none">Showing {{ details.logs.first() }}. <a href="{{ href }}">the rest in the Logs tab →</a></p>
+                {%- endif %}
+                {%- endif %}
+              </div>
+            </div>
+          </section>
+          {%- endif %}{% endif %}
         </li>
         {%- endfor %}
       </ol>
