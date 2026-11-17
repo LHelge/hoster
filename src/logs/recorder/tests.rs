@@ -167,11 +167,11 @@ async fn spans_and_otlp_records_are_committed_with_the_rest() {
     head_reaches(&sink, |head| head.record == 1).await;
     assert_eq!(
         store
-            .trace_spans(TraceId::from([7; 16]))
+            .load_trace(TraceId::from([7; 16]))
             .await
             .unwrap()
-            .len(),
-        2
+            .map(|trace| trace.total_spans()),
+        Some(2)
     );
     assert!(sink.drops().is_empty());
 

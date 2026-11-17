@@ -75,6 +75,11 @@ fn names<'a>(spans: impl IntoIterator<Item = &'a TraceSpan>) -> Vec<String> {
     spans.into_iter().map(|s| s.span().name.clone()).collect()
 }
 
+/// The names of the spans on the critical path, in row order.
+fn critical(trace: &Trace) -> Vec<String> {
+    names(trace.spans().iter().filter(|s| s.on_critical_path()))
+}
+
 fn ms(ms: f64) -> Duration {
     Duration::from_micros((ms * 1000.0).round() as u64)
 }
@@ -124,10 +129,7 @@ fn the_header_figures_of_t1() {
 fn the_critical_path_follows_the_child_that_ended_last() {
     let trace = Trace::new(trace_id(), t1(), 12);
     // s6 ends at 1904.2 ms, after s3; under s6, s10 ends at 1856.3 ms, after s9's 1852.1.
-    assert_eq!(
-        names(trace.critical_path()),
-        ["s0", "s1", "s2", "s6", "s10"]
-    );
+    assert_eq!(critical(&trace), ["s0", "s1", "s2", "s6", "s10"]);
     assert!(trace.span(id(10)).unwrap().on_critical_path());
     assert!(!trace.span(id(9)).unwrap().on_critical_path());
 }
@@ -239,7 +241,7 @@ fn without_a_root_every_span_with_a_missing_parent_is_a_root_by_start() {
     );
     assert_eq!(names(trace.spans()), ["s2", "s3", "s5"]);
     assert!(trace.spans()[0].parent_missing() && trace.spans()[2].parent_missing());
-    assert_eq!(names(trace.critical_path()), ["s2", "s3", "s5"]);
+    assert_eq!(critical(&trace), ["s2", "s3", "s5"]);
     assert_eq!(trace.depth(), 2);
 }
 

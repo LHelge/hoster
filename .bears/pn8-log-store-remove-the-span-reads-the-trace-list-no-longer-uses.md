@@ -1,14 +1,15 @@
 ---
 id: pn8
 title: "Log store: remove the span reads the trace list no longer uses"
-status: open
+status: done
 priority: P3
 created: "2026-11-17T20:39:49.449444968Z"
-updated: "2026-11-17T20:39:49.449444968Z"
+updated: "2026-11-17T21:17:47.971507518Z"
 tags:
   - store
   - observability
   - chore
+attempts: 1
 ---
 
 ## Summary

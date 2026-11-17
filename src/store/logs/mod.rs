@@ -40,8 +40,8 @@ use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 pub use health::{LogFileFacts, RowCounts};
 pub use query::{
     InvalidPattern, LevelCounts, LogEntry, LogPage, LogQuery, LogScope, LogTail, Page, PageAt,
-    RecordKey, RequestCounts, RequestEntry, RequestQuery, RootQuery, ServiceSeen, StatusFilter,
-    Tail, TextFilter, TraceList, TracePoint, TracePoints, TraceQuery, TraceSort, TraceStatus,
+    RecordKey, RequestCounts, RequestEntry, RequestQuery, ServiceSeen, StatusFilter, Tail,
+    TextFilter, TraceList, TracePoint, TracePoints, TraceQuery, TraceSort, TraceStatus,
     TraceSummary,
 };
 pub use retention::{Removed, Retention, Sweep, SweepReport};

@@ -25,7 +25,6 @@ use super::{Level, LogRecord, LogStore, Stream, TraceId, UnknownLogText};
 use crate::store::{Result, StoreError, Timestamp};
 
 pub use requests::{RequestCounts, RequestEntry, RequestQuery, StatusFilter};
-pub use spans::RootQuery;
 pub use traces::{
     TraceList, TracePoint, TracePoints, TraceQuery, TraceSort, TraceStatus, TraceSummary,
 };

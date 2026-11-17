@@ -295,16 +295,7 @@ async fn each_filter_narrows_and_the_total_stays_the_ranges() {
     assert_eq!(listed(&store, &query).await, [6, 5, 2]);
 
     let mut query = all();
-    query.services = vec!["api".into()];
-    assert_eq!(listed(&store, &query).await, [1]);
-    query.services = vec![Span::EDGE_SERVICE.into()];
-    assert_eq!(listed(&store, &query).await, [3, 2, 1]);
-    query.services = vec!["worker".into(), "api".into()];
-    assert_eq!(listed(&store, &query).await, [6, 5, 1]);
-
-    let mut query = all();
     query.status = Some(TraceStatus::Ok);
-    query.services = vec!["worker".into()];
     query.min_duration = Some(Duration::from_secs(1));
     assert_eq!(listed(&store, &query).await, [5]);
 
@@ -632,7 +623,6 @@ async fn the_list_reads_its_roots_and_spans_with_their_indexes() {
     let (_dir, store) = open().await;
     let mut query = TraceQuery::new(everything(), LogScope::All);
     query.status = Some(TraceStatus::Error);
-    query.services = vec!["api".into()];
     let plan = |query: TraceQuery| {
         let store = store.clone();
         async move {
@@ -691,18 +681,6 @@ async fn the_page_only_path_and_the_every_root_path_agree() {
     // Stable: newest first within each status.
     expected.sort_by_key(|t| t.status != TraceStatus::Error);
     assert_eq!(errors_first.traces, expected);
-
-    // A services filter without a status keeps the cheap order, and agrees too.
-    let mut query = TraceQuery::new(everything(), LogScope::All);
-    query.services = vec!["worker".into(), "api".into()];
-    let services = read(query).await;
-    let expected: Vec<TraceSummary> = newest
-        .traces
-        .iter()
-        .filter(|t| t.services.iter().any(|s| s == "worker" || s == "api"))
-        .cloned()
-        .collect();
-    assert_eq!(services.traces, expected);
 
     // The scatter reads its points' status after sampling, or before with a status filter.
     let all = store

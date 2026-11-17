@@ -1,39 +1,14 @@
-//! The read side of `spans` (ADR-0069 §6): one trace's spans, and the stored root spans over a
-//! range. The trace list does not read these: it merges request rows and stored roots in SQL
-//! (`TraceQuery`, in `traces.rs`).
+//! The read side of `spans` (ADR-0069 §6): one trace's stored spans, for
+//! [`LogStore::load_trace`]. The trace list does not read spans here: it merges request rows
+//! and stored roots in SQL (`TraceQuery`, in `traces.rs`).
 
-use std::ops::Range;
 use std::time::Duration;
 
 use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, QueryBuilder, Row as _, Sqlite};
 
-use super::{LogQuery, LogScope};
+use crate::store::Result;
 use crate::store::logs::{LogStore, MicroTimestamp, Span, TraceId};
-use crate::store::{Result, Timestamp};
-
-/// Which root spans, the spans without a parent, a read returns.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RootQuery {
-    /// Roots that started at or after the start and before the end.
-    pub range: Range<Timestamp>,
-    /// [`LogScope::All`] or one stack; [`LogScope::Hoster`] matches nothing, as hoster
-    /// exports no spans.
-    pub scope: LogScope,
-    /// At most this many, the newest first; clamped to `1..=`[`LogQuery::MAX_LIMIT`].
-    pub limit: u32,
-}
-
-impl RootQuery {
-    /// The newest roots in `range` and `scope`.
-    pub fn new(range: Range<Timestamp>, scope: LogScope) -> Self {
-        Self {
-            range,
-            scope,
-            limit: LogQuery::DEFAULT_LIMIT,
-        }
-    }
-}
 
 const COLUMNS: &str = "SELECT trace_id, span_id, parent_span_id, stack, service, name, kind, \
                        start, duration, status, status_message, attributes, resource, events, \
@@ -72,35 +47,15 @@ impl<'r> FromRow<'r, SqliteRow> for Span {
 }
 
 impl LogStore {
-    /// Every stored span of the trace `id`, by start (then span id). Empty for a trace that
-    /// retention removed or no container exported; the proxy's own two spans are not here
-    /// (ADR-0069 §9). Reads the read pool only.
-    pub async fn trace_spans(&self, id: TraceId) -> Result<Vec<Span>> {
-        self.trace_spans_up_to(id, usize::MAX).await
-    }
-
-    /// The first `limit` stored spans of the trace `id` in [`LogStore::trace_spans`]'s order.
+    /// The first `limit` stored spans of the trace `id`, by start (then span id). Empty for a
+    /// trace that retention removed or no container exported; the proxy's own two spans are
+    /// not here (ADR-0069 §9). Reads the read pool only.
     pub(super) async fn trace_spans_up_to(&self, id: TraceId, limit: usize) -> Result<Vec<Span>> {
         let mut sql = QueryBuilder::<Sqlite>::new(COLUMNS);
         sql.push(" WHERE trace_id = ")
             .push_bind(id.to_string())
             .push(" ORDER BY start, span_id LIMIT ")
             .push_bind(i64::try_from(limit).unwrap_or(i64::MAX));
-        Ok(sql.build_query_as().fetch_all(&self.reads).await?)
-    }
-
-    /// The root spans `query` matches, the newest first, read with the partial index on spans
-    /// without a parent. A trace whose root was lost, or whose root is the proxy's (built from
-    /// its request row, ADR-0069 §9), has no root here.
-    pub async fn root_spans(&self, query: &RootQuery) -> Result<Vec<Span>> {
-        let mut sql = QueryBuilder::<Sqlite>::new(COLUMNS);
-        sql.push(" WHERE parent_span_id IS NULL AND start >= ")
-            .push_bind(MicroTimestamp::from(query.range.start))
-            .push(" AND start < ")
-            .push_bind(MicroTimestamp::from(query.range.end));
-        query.scope.push_sql(&mut sql);
-        sql.push(" ORDER BY start DESC, id DESC LIMIT ")
-            .push_bind(i64::from(query.limit.clamp(1, LogQuery::MAX_LIMIT)));
         Ok(sql.build_query_as().fetch_all(&self.reads).await?)
     }
 }
