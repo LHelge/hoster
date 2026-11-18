@@ -272,7 +272,7 @@ and span id:
 
 ## Exporting traces
 
-Beside the trace list, **Download** and **Open as text** export the traces the list shows, as
+Beside the trace list, **Download**, **Copy** and **Open as text** export the traces the list shows, as
 it stands: its range, stack, filters, sort and page, not the selected trace. The export is
 plain text written to be pasted into, or piped to, a model session:
 
@@ -290,8 +290,11 @@ plain text written to be pasted into, or piped to, a model session:
   `-- cut:` line, or for a value `…(+N chars)`, saying what was left out.
 
 **Open as text** shows the export in the browser; **Download** saves it as
-`traces-<stack or all>-<start>-<end>.txt`. Both are links to
-`/telemetry/traces/export` with the list's options (`download=1` for the file), so a script
+`traces-<stack or all>-<start>-<end>.txt`; **Copy** puts the same text on the clipboard and says
+"Copied" beside the links (it needs JavaScript and a browser that lets the page write to the
+clipboard, which most allow only over HTTPS; without them it is not shown, and Open as text
+still works). All three use `/telemetry/traces/export` with the list's options (`download=1`
+for the file), so a script
 signed in to the admin UI can fetch the same text.
 
 # Limits, and what a drop looks like

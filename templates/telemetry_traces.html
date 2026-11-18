@@ -2,6 +2,9 @@
 {#- The Telemetry page's Traces tab (src/web/telemetry/traces.rs): the toolbar of GET options,
     the duration scatter, the trace list, and below it the selected trace. -#}
 {% block title %}Traces · Telemetry{% endblock %}
+{% block scripts %}
+  <script type="module" src="{{ layout.copy() }}"></script>
+{%- endblock %}
 {% block head %}
 {% include "telemetry_head.html" %}
 {% endblock %}
@@ -57,13 +60,16 @@
 <section class="card trace-list" aria-labelledby="traces-title">
   <header class="card-head">
     <h2 id="traces-title">Traces{% if view.total.is_some() %} <span class="card-count">· {{ view.counted() }} · {{ view.order() }}</span>{% endif %}</h2>
-    {#- The export of the list as it is (src/web/telemetry/traces/export.rs): plain links, the
-        inline one also the no-script fallback of a copy button (`data-export`). -#}
+    {#- The export of the list as it is (src/web/telemetry/traces/export.rs): plain links.
+        assets/copy.js puts a Copy button in front of the `data-export` one, which stays the
+        way to open the text without it, and says the outcome in the `data-export-status`
+        live region. -#}
     {%- if view.unreadable.is_none() && !view.rows.is_empty() %}
     <nav class="log-choices trace-export" aria-label="Export">
       <span class="log-label">export</span>
       <a class="log-chip" href="{{ view.download() }}" download>Download</a>
       <a class="log-chip trace-export-text" href="{{ view.open_as_text() }}" data-export>Open as text</a>
+      <span class="trace-copy-status" aria-live="polite" data-export-status></span>
     </nav>
     {%- endif %}
     <form class="trace-sort" method="get" action="{{ crate::web::telemetry::Telemetry::TRACES }}">

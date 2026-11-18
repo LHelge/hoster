@@ -1,6 +1,6 @@
 # ADR-0060: The stack editor is hoster's own dependency-free script over a plain textarea; validation stays on the server
 
-- Status: Accepted (amends ADR-0021 and ADR-0054)
+- Status: Accepted (amends ADR-0021 and ADR-0054); amended 2026-11-18: own scripts may be added under the same rules, and `copy.js` is the second
 - Date: 2026-11-10
 
 ## Context
@@ -87,3 +87,19 @@ The owner made these choices on 2026-11-10 (epic emu):
 - Live diagnostics cost one small request per pause in typing. The check takes no lock longer
   than a read and never starts a deployment.
 - If the WASM spike says yes, a new ADR supersedes decisions 4 and 5 and changes the CSP.
+
+## Amendment (2026-11-18)
+
+The owner decided this for the traces export (epic byh): hoster may add further own scripts
+under the rules of decisions 1, 2, 6 and 7, each one self-contained, embedded, served under a
+content-hashed name and loaded only on the pages that use it. Each script states in its header
+what it enhances and is checked by the same CSP test in `src/web/assets.rs`.
+
+`assets/copy.js` is the second. On the Telemetry page's Traces tab it puts a **Copy** button in
+front of the export's **Open as text** link (`a[data-export]`), which stays and opens the text
+without the script or without `navigator.clipboard`. The button is put in again after every
+HTMX swap, and one delegated click listener serves it. Copy writes a `ClipboardItem` holding the
+promise of the fetched export, so Safari keeps the click's user activation across the fetch,
+and falls back to fetching and then `writeText`. It says "Copied" or "Copy failed" in an
+`aria-live` region for a moment, by text and class. Its pure part is tested by
+`assets/copy.test.mjs` in the same `node --test` step. The CSP is unchanged.

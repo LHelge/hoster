@@ -2,10 +2,10 @@
 id: byh
 title: "Traces export: the displayed trace list as text for a model session"
 type: epic
-status: open
+status: done
 priority: P3
 created: "2026-11-18T09:41:18.581243417Z"
-updated: "2026-11-18T09:41:18.581243417Z"
+updated: "2026-11-18T10:10:04.808134485Z"
 tags:
   - observability
   - web

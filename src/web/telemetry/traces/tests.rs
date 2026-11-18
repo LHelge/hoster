@@ -1770,8 +1770,25 @@ async fn the_list_links_its_export_with_its_options_while_it_has_traces() {
         ),
         "{html}"
     );
+    // ADR-0060: assets/copy.js puts a Copy button in front of the `data-export` link, which
+    // opens the text without it, and says the outcome in the live region.
+    assert!(
+        html.contains(&format!(
+            r#"<script type="module" src="{}"></script>"#,
+            crate::web::assets::Assets::get().copy.url()
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"<span class="trace-copy-status" aria-live="polite" data-export-status></span>"#
+        ),
+        "{html}"
+    );
+    assert!(!html.contains("style="), "{html}");
     let html = session.get("/telemetry/traces?q=nothing-matches").await;
     assert!(!html.contains("trace-export"), "{html}");
+    assert!(!html.contains("data-export"), "{html}");
 }
 
 #[test]
