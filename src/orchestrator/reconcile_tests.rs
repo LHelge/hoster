@@ -1390,3 +1390,81 @@ async fn after_a_restart_every_container_is_followed_on_from_its_cursor() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(tap.drain().is_empty());
 }
+
+#[tokio::test]
+async fn failed_retirement_holds_the_committed_service_until_the_next_successful_pass() {
+    let h = bootstrapped().await;
+    let committed = h.container("hoster-notes-storage-g1");
+    h.runtime
+        .set_state(&committed.id, ContainerState::Exited(Some(0)));
+    let id = h.store.deployments("notes", 1).await.unwrap()[0].id;
+    let conflicting = container(&h, "notes", "storage", 42, id).await;
+    for operation in [Operation::Stop, Operation::Remove] {
+        h.runtime.fail_always(
+            operation,
+            RuntimeError::Api {
+                operation,
+                message: "runtime unavailable".into(),
+            },
+        );
+    }
+    let orchestrator = restarted(&h, RestartPolicy::default());
+    let report = orchestrator.recover().await.unwrap();
+    assert!(report.waiting.contains(&committed.name));
+    assert_eq!(report.problems.len(), 2);
+    assert!(
+        h.runtime
+            .inspect(&conflicting)
+            .await
+            .unwrap()
+            .state
+            .is_running()
+    );
+    assert!(
+        !h.runtime
+            .inspect(&committed.id)
+            .await
+            .unwrap()
+            .state
+            .is_running()
+    );
+    let report = orchestrator.reconcile().await.unwrap();
+    assert!(report.waiting.contains(&committed.name));
+    h.runtime.clear_failures();
+    let report = orchestrator.reconcile().await.unwrap();
+    assert!(report.started.contains(&committed.name), "{report:?}");
+    assert!(
+        report
+            .removed
+            .contains(&"hoster-notes-storage-g42".to_owned())
+    );
+    assert!(
+        h.runtime
+            .inspect(&committed.id)
+            .await
+            .unwrap()
+            .state
+            .is_running()
+    );
+}
+
+#[tokio::test]
+async fn redeploy_of_a_missing_stop_first_service_waits_for_obsolete_cleanup() {
+    let h = bootstrapped().await;
+    let committed = h.container("hoster-notes-storage-g1");
+    h.runtime.remove(&committed.id).await.unwrap();
+    let live = h.store.deployments("notes", 1).await.unwrap()[0].id;
+    container(&h, "notes", "storage", 42, live).await;
+    let deploy = h.orchestrator.rollback("notes", live).await.unwrap();
+    let result = h.finish(&deploy).await;
+    assert_eq!(result.state, S::Failed, "{result:?}");
+    assert!(
+        result
+            .error
+            .unwrap()
+            .contains("hoster-notes-storage-g42 is still running")
+    );
+    h.orchestrator.reconcile().await.unwrap();
+    let retry = h.orchestrator.rollback("notes", live).await.unwrap();
+    assert_eq!(h.finish(&retry).await.state, S::Live);
+}
