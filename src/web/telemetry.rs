@@ -4,7 +4,8 @@
 //! and stack in view. `/telemetry` redirects to the first, the Traces tab.
 //!
 //! - **Traces** (`/telemetry/traces`, `telemetry/traces.rs`): the trace list over a range with
-//!   its sort and filters, and the trace selected by `?trace=` below it.
+//!   its sort and filters, and the trace selected by `?trace=` below it. Its export
+//!   (`/telemetry/traces/export`) is the list as model-readable text, inline or as a file.
 //! - **Logs** (`/telemetry/logs`) mounts the stored logs view of `web/logs.rs` across stacks
 //!   ([`LogScope::All`]): every filter the stack logs tab has, with the same parameters, a
 //!   stack column and a stack selector (`stack`: every stack, one, or hoster's own records that
@@ -26,7 +27,7 @@ use axum::extract::Query;
 use axum::response::{IntoResponse, Redirect, Response};
 
 pub(super) use self::traces::TraceParams;
-use self::traces::{Selection, TracesView};
+use self::traces::{ExportParam, Selection, TraceExport, TracesView};
 use super::logs::{LogMount, LogParams, LogReader, LogScope, LogsView};
 use super::pages::{Flash, FlashKind, Layout, Page, Section, Shell};
 use super::stacks::Stacks;
@@ -43,6 +44,8 @@ impl Telemetry {
     pub const PATH: &str = "/telemetry";
     /// The Traces tab.
     pub const TRACES: &str = TraceParams::PATH;
+    /// The Traces tab's export.
+    pub const TRACES_EXPORT: &str = TraceExport::PATH;
     /// The Logs tab.
     pub const LOGS: &str = "/telemetry/logs";
 
@@ -93,6 +96,19 @@ impl Telemetry {
             view,
         })
         .into_response()
+    }
+
+    /// `GET /telemetry/traces/export[?<the tab's list options>&download=1]`: the traces the
+    /// tab lists for the same options as plain text, inline or, with `download=1`, as a file.
+    /// Options the tab would not take fall back as there, noted in the text's header; an
+    /// unreadable store is a 503.
+    pub async fn traces_export(
+        Extension(reader): Extension<LogReader>,
+        Query(params): Query<TraceParams>,
+        Query(export): Query<ExportParam>,
+    ) -> Response {
+        let loaded = TraceExport::load(&reader, &params, SystemTime::now()).await;
+        TraceExport::respond(loaded, export.download())
     }
 
     /// `GET /telemetry/logs[?stack=…&service=…&since=…&level=…&q=…&field=…&before=…|after=…]`:

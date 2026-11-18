@@ -326,6 +326,7 @@ impl WebApp {
             .route("/stacks/{name}/logs/download", get(Stacks::logs_download))
             .route(Telemetry::PATH, get(Telemetry::index))
             .route(Telemetry::TRACES, get(Telemetry::traces))
+            .route(Telemetry::TRACES_EXPORT, get(Telemetry::traces_export))
             .route(Telemetry::LOGS, get(Telemetry::logs))
             .route("/containers", get(Containers::list))
             .route("/containers/{name}/logs", get(Containers::log_page))
