@@ -1600,6 +1600,180 @@ async fn the_list_pages_through_the_matching_traces() {
     assert!(html.contains("No traces on this page."), "{html}");
 }
 
+/// The root span names of an export's traces, in its order.
+fn exported_names(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| line.starts_with("trace "))
+        .map(|line| {
+            // `trace <id> at <time>: <name> stack=…`, the name quoted when it has a space.
+            let name = line.split_once("Z: ").unwrap().1;
+            match name.strip_prefix('"') {
+                Some(quoted) => quoted.split('"').next().unwrap(),
+                None => name.split(' ').next().unwrap(),
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_export_lists_what_the_tab_lists_for_the_same_options() {
+    let session = Session::new().await;
+    for query in [
+        "",
+        "?sort=slowest",
+        "?status=error&sort=slowest",
+        "?stack=notes&q=GET",
+        "?slower=100ms",
+        "?sort=errors",
+    ] {
+        let html = session.get(&format!("/telemetry/traces{query}")).await;
+        let text = session
+            .get(&format!("/telemetry/traces/export{query}"))
+            .await;
+        assert!(!names(&html).is_empty(), "{query}: {html}");
+        assert_eq!(names(&html), exported_names(&text), "{query}: {text}");
+    }
+    // The selection is not the export's: the same list with or without it.
+    let plain = session.get("/telemetry/traces/export?sort=slowest").await;
+    let selected = session
+        .get(&format!(
+            "/telemetry/traces/export?sort=slowest&trace={}&span=none&collapsed=x&crit=on",
+            trace(1)
+        ))
+        .await;
+    assert_eq!(exported_names(&plain), exported_names(&selected));
+    // The newest first, the first trace's spans as a tree until the (test) span budget is
+    // spent, and the summary lines of those after it.
+    let text = session.get("/telemetry/traces/export").await;
+    assert_eq!(
+        exported_names(&text),
+        ["GET /a", "GET /b", "GET /c", "nightly"]
+    );
+    assert!(
+        text.contains("traces:  1–4 of 4 matching (4 in range)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n        api: lookup [internal, 20.0 ms, +10.0 ms, error]\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(", 2 spans, 0 log records, app not instrumented\n"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("this trace's are left out\n").count(),
+        3,
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn the_export_is_text_inline_or_a_file_and_notes_the_options_it_did_not_take() {
+    let session = Session::new().await;
+    let response = session
+        .app
+        .get(
+            "/telemetry/traces/export?stack=notes&since=7d&status=bad&download=1",
+            Some(&session.cookie),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    let disposition = headers[header::CONTENT_DISPOSITION].to_str().unwrap();
+    assert!(
+        disposition.starts_with("attachment; filename=\"traces-notes-20")
+            && disposition.ends_with("Z.txt\""),
+        "{disposition}"
+    );
+    let text = body(response).await;
+    assert!(text.starts_with("hoster trace export: "), "{text}");
+    assert!(text.contains("(UTC, the last 15m)\n"), "{text}");
+    assert!(text.contains("\nstack:   notes\n"), "{text}");
+    assert!(
+        text.contains("\nnote:    `7d` is not a range of the trace list"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nnote:    `bad` is not a status (ok or error); showing every trace.\n"),
+        "{text}"
+    );
+    assert!(text.contains("\nfilters: none\n"), "{text}");
+    assert_eq!(exported_names(&text), ["GET /a", "GET /b", "nightly"]);
+
+    let response = session
+        .app
+        .get("/telemetry/traces/export", Some(&session.cookie))
+        .await;
+    let disposition = response.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        disposition.starts_with("inline; filename=\"traces-all-"),
+        "{disposition}"
+    );
+    // Signed out: to the sign-in page, like every other page.
+    let response = session.app.get("/telemetry/traces/export", None).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn the_export_of_an_unreadable_store_is_a_503() {
+    let mut app = TestApp::new().await;
+    let browser = app.sign_in().await;
+    app.app.logs = LogReader::default();
+    let response = app
+        .get("/telemetry/traces/export", Some(&browser.cookie))
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let text = body(response).await;
+    assert!(text.starts_with("The log store is unavailable"), "{text}");
+}
+
+#[tokio::test]
+async fn the_export_of_a_trace_list_that_cannot_be_read_is_a_503() {
+    let session = Session::new().await;
+    // The store is open, but its reads fail.
+    session.app.logs.close().await;
+    let response = session
+        .app
+        .get("/telemetry/traces/export", Some(&session.cookie))
+        .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body(response).await,
+        "The trace list cannot be read right now.\n"
+    );
+}
+
+#[tokio::test]
+async fn the_list_links_its_export_with_its_options_while_it_has_traces() {
+    let session = Session::new().await;
+    let html = session
+        .get(&format!(
+            "/telemetry/traces?sort=slowest&page=0&trace={}&span=none&crit=on",
+            trace(1)
+        ))
+        .await;
+    assert!(
+        html.contains(
+            r#"<a class="log-chip" href="/telemetry/traces/export?sort=slowest&#38;page=0&#38;download=1" download>Download</a>"#
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"<a class="log-chip trace-export-text" href="/telemetry/traces/export?sort=slowest&#38;page=0" data-export>Open as text</a>"#
+        ),
+        "{html}"
+    );
+    let html = session.get("/telemetry/traces?q=nothing-matches").await;
+    assert!(!html.contains("trace-export"), "{html}");
+}
+
 #[test]
 fn parameters_keep_their_first_value_in_one_order() {
     let params = TraceParams::from(

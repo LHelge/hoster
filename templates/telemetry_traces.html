@@ -57,6 +57,15 @@
 <section class="card trace-list" aria-labelledby="traces-title">
   <header class="card-head">
     <h2 id="traces-title">Traces{% if view.total.is_some() %} <span class="card-count">· {{ view.counted() }} · {{ view.order() }}</span>{% endif %}</h2>
+    {#- The export of the list as it is (src/web/telemetry/traces/export.rs): plain links, the
+        inline one also the no-script fallback of a copy button (`data-export`). -#}
+    {%- if view.unreadable.is_none() && !view.rows.is_empty() %}
+    <nav class="log-choices trace-export" aria-label="Export">
+      <span class="log-label">export</span>
+      <a class="log-chip" href="{{ view.download() }}" download>Download</a>
+      <a class="log-chip trace-export-text" href="{{ view.open_as_text() }}" data-export>Open as text</a>
+    </nav>
+    {%- endif %}
     <form class="trace-sort" method="get" action="{{ crate::web::telemetry::Telemetry::TRACES }}">
       {%- for (name, value) in view.sort_keep() %}
       <input type="hidden" name="{{ name }}" value="{{ value }}">

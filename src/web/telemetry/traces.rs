@@ -30,7 +30,12 @@
 //! a log record opens it on any range; one that no longer exists says that spans are kept
 //! [`Retention::SPAN_MAX_AGE`]. A found one is laid out as a [`Waterfall`], with the details of
 //! its selected span under that span's row, whose log records are read once the span is known.
+//!
+//! Beside the list, while it has rows, **Download** and **Open as text** link the export of the
+//! list as it is ([`TraceExport`], `traces/export.rs`; built by [`TraceParams::export`] from
+//! the list's options alone), as a file or inline.
 
+mod export;
 mod waterfall;
 
 use std::collections::HashSet;
@@ -46,6 +51,7 @@ use crate::store::{
     TracePoints, TraceQuery, TraceSort, TraceStatus, TraceSummary,
 };
 
+pub use self::export::{ExportParam, TraceExport};
 use self::waterfall::Waterfall;
 
 /// The Traces tab's options, as GET parameters: each given one, in [`TraceParams::KEYS`]
@@ -93,6 +99,8 @@ impl TraceParams {
         "collapsed",
         "crit",
     ];
+    /// The options of the list itself: what the export takes ([`TraceParams::export`]).
+    pub const LIST: [&str; 7] = ["stack", "since", "q", "status", "slower", "sort", "page"];
     /// What is selected below the list; selecting another trace drops them all. The collapsed
     /// spans are the last trace's span ids, which mean nothing in another.
     pub const SELECTION: [&str; 3] = ["trace", "span", "collapsed"];
@@ -141,13 +149,33 @@ impl TraceParams {
             .collect();
         pairs.extend(set.iter().filter_map(|(k, v)| Some((*k, (*v)?))));
         pairs.sort_by_key(|(key, _)| Self::rank(key));
+        Self::url(Self::PATH, pairs)
+    }
+
+    /// `path` with `pairs` as its query.
+    fn url(path: &str, pairs: Vec<(&str, &str)>) -> String {
         if pairs.is_empty() {
-            return Self::PATH.to_owned();
+            return path.to_owned();
         }
         let query = form_urlencoded::Serializer::new(String::new())
             .extend_pairs(pairs)
             .finish();
-        format!("{}?{query}", Self::PATH)
+        format!("{path}?{query}")
+    }
+
+    /// The export of the list as it is ([`TraceExport`]): the options of [`TraceParams::LIST`],
+    /// the page included, and nothing of the selection; as a file when `download`.
+    pub fn export(&self, download: bool) -> String {
+        let mut pairs: Vec<(&str, &str)> = self
+            .given
+            .iter()
+            .filter(|(key, _)| Self::LIST.contains(key))
+            .map(|(k, v)| (*k, v.as_str()))
+            .collect();
+        if download {
+            pairs.push(("download", ExportParam::DOWNLOAD));
+        }
+        Self::url(TraceExport::PATH, pairs)
     }
 
     /// The tab with trace `id` selected: the list as it is, page included, and nothing else
@@ -819,7 +847,12 @@ impl TracesView {
 
     /// `newest first`, as the list's heading says it.
     pub fn order(&self) -> &'static str {
-        match self.sort {
+        Self::order_of(self.sort)
+    }
+
+    /// `newest first`, as the list's heading and the export's header say `sort`.
+    fn order_of(sort: TraceSort) -> &'static str {
+        match sort {
             TraceSort::Newest => "newest first",
             TraceSort::Slowest => "slowest first",
             TraceSort::ErrorsFirst => "errors first",
@@ -859,6 +892,16 @@ impl TracesView {
     /// The first page of the list as it is.
     pub fn first_page(&self) -> String {
         self.params.href(&[])
+    }
+
+    /// The export of the list as it is, as a file: the **Download** link.
+    pub fn download(&self) -> String {
+        self.params.export(true)
+    }
+
+    /// The export of the list as it is, inline: the **Open as text** link.
+    pub fn open_as_text(&self) -> String {
+        self.params.export(false)
     }
 }
 

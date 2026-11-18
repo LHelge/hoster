@@ -1,14 +1,15 @@
 ---
 id: "2ty"
 title: "Traces export: GET /telemetry/traces/export as model-readable text, inline or as a download"
-status: open
+status: done
 priority: P3
 created: "2026-11-18T09:41:34.107633778Z"
-updated: "2026-11-18T09:41:34.107633778Z"
+updated: "2026-11-18T09:59:04.656953309Z"
 tags:
   - observability
   - web
 parent: byh
+attempts: 1
 ---
 
 ## Summary
@@ -21,12 +22,12 @@ A route next to the Traces tab that renders the traces the tab displays for the 
 - Nothing is an HTML escape. Strings that hold line breaks are written with `\n`, as the log download does.
 
 ## Acceptance Criteria
-- [ ] `GET /telemetry/traces/export?<the tab's params>` behind the admin session returns the format above for exactly the traces the tab lists for those params (same `TraceQuery`, built in one place, not duplicated)
-- [ ] `download=1` adds `Content-Disposition: attachment` with a file name built from the stack and the resolved range only (never a parameter as given), e.g. `traces-<stack|all>-<start>-<end>.txt`; without it the text is served inline
-- [ ] Bad parameters fall back as the tab does, and the fallback is noted in the header rather than failing the request
-- [ ] The tab shows **Download** and **Open as text** links beside the list, carrying the current list params (`TraceParams` builds them), only when the list has traces
-- [ ] Tests: the format on a small fixed trace (snapshot-style string compare), each cap's cut line, params mapping to the same query as the page, the file name, a missing or unreadable store
-- [ ] `docs/architecture.md` §2's **Traces** bullet mentions the export; `site/content/wiki/tracing.md` gets a short "Exporting traces" section
+- [x] `GET /telemetry/traces/export?<the tab's params>` behind the admin session returns the format above for exactly the traces the tab lists for those params (same `TraceQuery`, built in one place, not duplicated)
+- [x] `download=1` adds `Content-Disposition: attachment` with a file name built from the stack and the resolved range only (never a parameter as given), e.g. `traces-<stack|all>-<start>-<end>.txt`; without it the text is served inline
+- [x] Bad parameters fall back as the tab does, and the fallback is noted in the header rather than failing the request
+- [x] The tab shows **Download** and **Open as text** links beside the list, carrying the current list params (`TraceParams` builds them), only when the list has traces
+- [x] Tests: the format on a small fixed trace (snapshot-style string compare), each cap's cut line, params mapping to the same query as the page, the file name, a missing or unreadable store
+- [x] `docs/architecture.md` §2's **Traces** bullet mentions the export; `site/content/wiki/tracing.md` gets a short "Exporting traces" section
 
 ## Implementation Notes
 - Build the export on a type (e.g. `TraceExport`) in a module under `web/telemetry/traces/`, with `Display` for the text, and keep its public surface to the handler

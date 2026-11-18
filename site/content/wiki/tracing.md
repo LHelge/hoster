@@ -270,6 +270,30 @@ and span id:
   it on the proxy's server span. An opened request names it as `trace`. Requests stored before
   hoster sent trace context (before version 0.9.0) have no trace and show `—`.
 
+## Exporting traces
+
+Beside the trace list, **Download** and **Open as text** export the traces the list shows, as
+it stands: its range, stack, filters, sort and page, not the selected trace. The export is
+plain text written to be pasted into, or piped to, a model session:
+
+- **A header** saying what it is, the range in UTC, the stack (or every stack), the filters and
+  sort in effect, and which traces of how many (`1–50 of 312 matching (18,204 in range)`). An
+  option the tab would not take falls back as the tab does, and the header says so in a
+  `note:` line.
+- **Each trace** as a summary line (trace id, start, root span, stack, duration, status, span
+  and log record counts, "app not instrumented"), then its resource attributes once per
+  service, then its spans as a tree indented two spaces a level. A span line is its service,
+  name, kind, duration, start after the trace's, status and message, and its attributes as
+  `key=value`; its events and log records follow on `·` lines under it.
+- **Caps.** An export writes at most 2,000 spans in all (traces past that keep their summary
+  line), 200 characters of a value, and 20 log records per span. Each cut ends with a
+  `-- cut:` line, or for a value `…(+N chars)`, saying what was left out.
+
+**Open as text** shows the export in the browser; **Download** saves it as
+`traces-<stack or all>-<start>-<end>.txt`. Both are links to
+`/telemetry/traces/export` with the list's options (`download=1` for the file), so a script
+signed in to the admin UI can fetch the same text.
+
 # Limits, and what a drop looks like
 
 Each service may send, sustained, **1000 log records and 1000 spans a second**, with bursts of
