@@ -596,12 +596,24 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             .partition(|(generation, _)| is_current(&pointers, generation));
         // Old generations go first, so a stop-first service never runs twice at once, e.g.
         // when a crash left its aborted new generation running and the old one stopped.
+        let mut conflicts = BTreeSet::new();
         for (generation, container) in old {
-            self.retire(generation, container, "not a current generation", report)
-                .await;
+            if !self
+                .retire(generation, container, "not a current generation", report)
+                .await
+            {
+                conflicts.insert(&generation.service);
+            }
         }
         for (generation, container) in keep {
             current.insert(generation.clone());
+            if !container.state.is_running() && conflicts.contains(&generation.service) {
+                if pass == Pass::Startup {
+                    self.reconciler().deferred.insert(generation.clone());
+                }
+                report.waiting.push(container.name.clone());
+                continue;
+            }
             let gate = if container.state.is_running() {
                 Gate::Ready
             } else {
@@ -898,41 +910,55 @@ impl<R: ContainerRuntime> Orchestrator<R> {
         }
     }
 
-    /// Stops and removes a container that should not exist.
+    /// Stops and removes an obsolete container. Returns whether another generation can safely start.
     async fn retire(
         &self,
         generation: &ServiceGeneration,
         container: &ContainerInfo,
         why: &str,
         report: &mut ReconcileReport,
-    ) {
+    ) -> bool {
         let (stack, service, gen_no) = fields(generation);
         tracing::info!(stack, service, generation = gen_no, container = %container.name, why, "removing container");
-        if container.state.is_running()
-            && let Err(err) = self.runtime.stop(&container.id, DEFAULT_STOP_TIMEOUT).await
-            && !is_not_found(&err, ObjectKind::Container)
-        {
-            self.problem(
-                generation,
-                format!("cannot stop {}: {err}", container.name),
-                report,
-            );
-        }
+        let stopped = if container.state.is_running() {
+            match self.runtime.stop(&container.id, DEFAULT_STOP_TIMEOUT).await {
+                Ok(()) => true,
+                Err(err) if is_not_found(&err, ObjectKind::Container) => true,
+                Err(err) => {
+                    self.problem(
+                        generation,
+                        format!("cannot stop {}: {err}", container.name),
+                        report,
+                    );
+                    false
+                }
+            }
+        } else {
+            matches!(
+                container.state,
+                ContainerState::Created | ContainerState::Exited(Some(_)) | ContainerState::Dead
+            )
+        };
         self.drain_logs(&container.id).await;
         match self.runtime.remove(&container.id).await {
             Ok(()) => {
                 self.forget_logs(&container.id);
                 report.removed.push(container.name.clone());
+                true
             }
             // Removed meanwhile, e.g. by a deployment's clean-up.
             Err(err) if is_not_found(&err, ObjectKind::Container) => {
                 self.forget_logs(&container.id);
+                true
             }
-            Err(err) => self.problem(
-                generation,
-                format!("cannot remove {}: {err}", container.name),
-                report,
-            ),
+            Err(err) => {
+                self.problem(
+                    generation,
+                    format!("cannot remove {}: {err}", container.name),
+                    report,
+                );
+                stopped
+            }
         }
     }
 

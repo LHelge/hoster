@@ -1,10 +1,11 @@
 ---
 id: mu3
 title: Preserve stop-first exclusivity when recovery cleanup fails
-status: open
+status: done
 priority: P1
 created: "2026-11-17T23:46:05.396069518Z"
-updated: "2026-11-17T23:46:05.396069518Z"
+updated: "2026-11-18T00:00:10.978964602Z"
+attempts: 1
 ---
 
 ## Summary

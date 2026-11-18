@@ -799,6 +799,21 @@ impl<R: ContainerRuntime> Orchestrator<R> {
             }
             match (&change.phase, &change.previous) {
                 (Phase::Replace, Some(previous)) => {
+                    // A failed recovery pass may still be retiring an aborted generation.
+                    // Stopping the committed pointer alone would leave that writer running.
+                    if let Some(conflict) = containers.iter().find(|container| {
+                        container.state.is_running()
+                            && ServiceGeneration::try_from(*container).is_ok_and(|key| {
+                                key.stack == *run.target.stack()
+                                    && key.service == change.service
+                                    && key.generation != previous.generation
+                            })
+                    }) {
+                        return run.failed(
+                            &change.service,
+                            format!("obsolete container {} is still running", conflict.name),
+                        );
+                    }
                     self.note_run(run, &Note::Replacing(&change.service).to_string())
                         .await;
                     // The service's routes answer 503 + Retry-After until the commit or the
