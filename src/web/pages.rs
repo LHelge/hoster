@@ -418,6 +418,11 @@ impl Layout {
         Assets::get().editor.url()
     }
 
+    /// hoster's copy button for the trace export (ADR-0060), loaded only on the Traces tab.
+    pub fn copy(&self) -> String {
+        Assets::get().copy.url()
+    }
+
     pub fn stylesheet(&self) -> String {
         Assets::get().stylesheet.url()
     }

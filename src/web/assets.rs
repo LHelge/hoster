@@ -1,6 +1,6 @@
 //! Static assets embedded in the binary (ADR-0021): the vendored HTMX build, its SSE extension,
-//! the JetBrains Mono subset (ADR-0054), hoster's stylesheet, its stack editor script (ADR-0060)
-//! and the icon sprite (ADR-0053). Each
+//! the JetBrains Mono subset (ADR-0054), hoster's stylesheet, its own scripts (ADR-0060: the
+//! stack editor and the trace export's copy button) and the icon sprite (ADR-0053). Each
 //! is served under a content-hashed name such as `/assets/htmx.min.a0abb04f2f45.js`, so it can be
 //! cached for a year; a changed file gets a new URL.
 //!
@@ -126,6 +126,8 @@ pub struct Assets {
     pub stylesheet: Asset,
     /// hoster's own stack editor script (ADR-0060), an ES module.
     pub editor: Asset,
+    /// hoster's own copy button for the trace export (ADR-0060), an ES module.
+    pub copy: Asset,
     /// Every [`Icon`] as one SVG sprite, generated at startup.
     pub icons: Asset,
     /// JetBrains Mono, Latin subset, at the weights the stylesheet uses (400, 500, 600).
@@ -171,6 +173,11 @@ impl Assets {
                     "text/javascript; charset=utf-8",
                     include_bytes!("../../assets/editor.js"),
                 ),
+                copy: Asset::new(
+                    "copy.js",
+                    "text/javascript; charset=utf-8",
+                    include_bytes!("../../assets/copy.js"),
+                ),
                 icons: Asset::new(
                     "icons.svg",
                     "image/svg+xml; charset=utf-8",
@@ -189,6 +196,7 @@ impl Assets {
             &self.htmx_sse,
             &self.stylesheet,
             &self.editor,
+            &self.copy,
             &self.icons,
         ]
         .into_iter()
@@ -356,30 +364,38 @@ mod tests {
         }
     }
 
-    /// ADR-0060: the editor script keeps to the CSP and the rules for hoster's own scripts. It
-    /// never parses markup from text, evaluates code or writes `style=` attributes.
+    /// ADR-0060: hoster's own scripts keep to the CSP and the rules for them. They never parse
+    /// markup from text, evaluate code or write `style=` attributes, and are served only under
+    /// their hashed names.
     #[test]
-    fn the_editor_script_keeps_to_the_csp() {
+    fn own_scripts_keep_to_the_csp() {
         let assets = Assets::get();
-        let js = std::str::from_utf8(&assets.editor.bytes).unwrap();
-        assert!(assets.editor.hashed_name.starts_with("editor."));
-        assert!(assets.find(&assets.editor.hashed_name).is_some());
-        assert!(assets.find("editor.js").is_none());
-        for banned in [
-            "innerHTML",
-            "outerHTML",
-            "insertAdjacentHTML",
-            "document.write",
-            "eval(",
-            "new Function",
-            "setAttribute(\"style\"",
-            "hx-on",
-            "import(",
-            "http",
+        for (asset, stem, hook) in [
+            (&assets.editor, "editor.", r#"textarea[data-editor="toml"]"#),
+            (&assets.copy, "copy.", "a[data-export]"),
         ] {
-            assert!(!js.contains(banned), "editor.js uses {banned}");
+            let js = std::str::from_utf8(&asset.bytes).unwrap();
+            let name = asset.name();
+            assert!(asset.hashed_name.starts_with(stem));
+            assert_eq!(asset.content_type, "text/javascript; charset=utf-8");
+            assert!(assets.find(&asset.hashed_name).is_some());
+            assert!(assets.find(&name).is_none());
+            for banned in [
+                "innerHTML",
+                "outerHTML",
+                "insertAdjacentHTML",
+                "document.write",
+                "eval(",
+                "new Function",
+                "setAttribute(\"style\"",
+                "hx-on",
+                "import(",
+                "http",
+            ] {
+                assert!(!js.contains(banned), "{name} uses {banned}");
+            }
+            assert!(js.contains(hook), "{name} enhances {hook}");
         }
-        assert!(js.contains(r#"textarea[data-editor="toml"]"#));
     }
 
     /// The editor's syntax colours are aliases of the text and status colours the contrast test

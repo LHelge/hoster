@@ -83,6 +83,8 @@ async fn the_logs_tab_lists_every_stack_with_a_stack_column() {
     let response = app.get("/telemetry/logs", Some(&browser.cookie)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
+    // The copy button's script is the Traces tab's alone (ADR-0060).
+    assert!(!html.contains("/assets/copy."), "{html}");
     // The last 15 minutes by default.
     assert_eq!(
         messages(&html),

@@ -1443,6 +1443,10 @@ p.stack-stats { font-size: 12px; }
 .trace-sort button { min-height: 30px; padding: 0 12px; font: 500 12px/1.2 var(--mono); }
 /* The export links beside the sort, pushed to the right with it. */
 .trace-export { margin-left: auto; }
+/* The Copy button assets/copy.js adds: a chip like the links beside it, and its outcome. */
+.trace-copy { font: inherit; }
+.trace-copy-status.is-copied { color: var(--ok); }
+.trace-copy-status.is-failed { color: var(--fail); }
 .trace-table { min-width: 920px; }
 .trace-table td { vertical-align: middle; }
 .trace-time, .trace-stack, .trace-took { color: var(--text-2); font: 12px/1.4 var(--mono); white-space: nowrap; }
