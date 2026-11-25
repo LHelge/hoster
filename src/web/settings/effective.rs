@@ -440,6 +440,13 @@ impl EffectiveConfig {
                 .noted(Span(timeouts.write).to_string(), "write")
                 .noted(Span(timeouts.idle).to_string(), "idle"),
                 Field::new(
+                    "Connections per address",
+                    "The most open connections one client IPv4 address or IPv6 /64 may have; \
+                     the next one is refused at accept (ADR-0065).",
+                )
+                .key(source, "proxy.connections_per_address")
+                .value(proxy.connections_per_address.to_string()),
+                Field::new(
                     "Drain timeout",
                     "How long old upstreams may finish in-flight requests after a swap. Set per \
                      stack with drain_timeout in its stack file, not in hoster.toml.",

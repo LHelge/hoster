@@ -583,6 +583,7 @@ impl Harness {
                 grace_period: Duration::from_secs(1),
                 graceful_shutdown_timeout: Duration::from_secs(1),
                 timeouts: defaults,
+                ..ProxyConfig::default()
             };
             attempts += 1;
             match Proxy::with_limits(&config, proxy_state.clone(), limits).spawn(rx.clone()) {

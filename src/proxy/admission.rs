@@ -13,8 +13,9 @@
 //! never falls below the real count by more than the descriptors the rest of the process opened
 //! within one refresh, and a closed connection frees its slot at the next refresh.
 //!
-//! The per-address cap does count connections: at most [`Admission::PER_ADDRESS`] per IPv4
-//! address or IPv6 /64 ([`Key`]). Each accepted connection takes a [`Slot`], attached to its
+//! The per-address cap does count connections: at most [`Admission::per_address`] per IPv4
+//! address or IPv6 /64 ([`Key`]), `proxy.connections_per_address` in `hoster.toml`
+//! ([`Admission::DEFAULT_PER_ADDRESS`] unless set). Each accepted connection takes a [`Slot`], attached to its
 //! L4 stream as Pingora's `tracer`, whose `on_disconnected` runs when Pingora drops the stream
 //! however the connection ended (`docs/spikes/per-address-connections.md`). Pingora never sets
 //! that field on accepted streams. The slot is attached before the TLS handshake on `:443`
@@ -32,6 +33,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -151,7 +153,7 @@ pub struct FileUse {
 
 /// The `ConnectionFilter` of the proxy's listeners: refuses a new client connection while the
 /// process has [`Admission::cap`] descriptors open, counting the new connection's own, or its
-/// address has [`Admission::PER_ADDRESS`] connections open. A cheap handle: clones share the
+/// address has [`Admission::per_address`] connections open. A cheap handle: clones share the
 /// counts.
 #[derive(Clone)]
 pub struct Admission(Arc<Inner>);
@@ -159,6 +161,8 @@ pub struct Admission(Arc<Inner>);
 struct Inner {
     /// Fixed but in tests, which set it once they know what their harness has open.
     cap: AtomicUsize,
+    /// Set once at startup, before the listeners take a clone.
+    per_address: AtomicUsize,
     files: OpenFiles,
     count: Mutex<Count>,
     refused: AtomicU64,
@@ -210,8 +214,9 @@ impl Admission {
     pub const REFRESH: Duration = Duration::from_millis(100);
     /// How often refusing is logged while it lasts.
     pub const LOG_EVERY: Duration = Duration::from_secs(10);
-    /// The open connections one client address (an IPv4 address, an IPv6 /64) may have.
-    pub const PER_ADDRESS: usize = 256;
+    /// The open connections one client address (an IPv4 address, an IPv6 /64) may have,
+    /// unless `proxy.connections_per_address` says otherwise.
+    pub const DEFAULT_PER_ADDRESS: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
     /// Refusing new clients at `cap` open descriptors.
     pub fn new(cap: usize) -> Self {
@@ -221,6 +226,7 @@ impl Admission {
     fn counting(cap: usize, files: OpenFiles) -> Self {
         Self(Arc::new(Inner {
             cap: AtomicUsize::new(cap),
+            per_address: AtomicUsize::new(Self::DEFAULT_PER_ADDRESS.get()),
             files,
             count: Mutex::default(),
             refused: AtomicU64::new(0),
@@ -231,6 +237,17 @@ impl Admission {
     /// The open descriptors at which new client connections are refused.
     pub fn cap(&self) -> usize {
         self.0.cap.load(Ordering::Relaxed)
+    }
+
+    /// Letting each client address have at most `limit` connections open.
+    pub fn per_address_limit(self, limit: NonZeroUsize) -> Self {
+        self.0.per_address.store(limit.get(), Ordering::Relaxed);
+        self
+    }
+
+    /// The open connections one client address may have.
+    pub fn per_address(&self) -> usize {
+        self.0.per_address.load(Ordering::Relaxed)
     }
 
     /// Moves the cap to `cap`.
@@ -274,13 +291,17 @@ impl Admission {
 
     /// Whether a connection from `peer` accepted at `now` may stay.
     fn admit(&self, now: Instant, peer: Option<IpAddr>) -> bool {
+        let per_address = self.per_address();
         let crowded = peer
             .map(Key::from)
-            .filter(|&key| self.open_from(key) >= Self::PER_ADDRESS);
+            .filter(|&key| self.open_from(key) >= per_address);
         let inner = &self.0;
         let mut count = inner.count.lock().unwrap_or_else(PoisonError::into_inner);
         let refusal = match crowded {
-            Some(key) => Refusal::Address(key),
+            Some(key) => Refusal::Address {
+                key,
+                cap: per_address,
+            },
             None => {
                 let stale = count
                     .measured
@@ -394,7 +415,7 @@ impl Admission {
 /// Why a connection was refused, as the log says it.
 enum Refusal {
     Total { open: usize, cap: usize },
-    Address(Key),
+    Address { key: Key, cap: usize },
 }
 
 impl fmt::Display for Refusal {
@@ -403,8 +424,8 @@ impl fmt::Display for Refusal {
             Refusal::Total { open, cap } => {
                 write!(f, "too many open files ({open}, cap {cap})")
             }
-            Refusal::Address(key) => {
-                write!(f, "{} connections open from {key}", Admission::PER_ADDRESS)
+            Refusal::Address { key, cap } => {
+                write!(f, "{cap} connections open from {key}")
             }
         }
     }
@@ -668,7 +689,7 @@ mod tests {
         let now = Instant::now();
         let ip = |ip: &str| Some(ip.parse::<IpAddr>().unwrap());
         // Two addresses of one /64 share the budget.
-        let mut slots: Vec<Slot> = (0..Admission::PER_ADDRESS)
+        let mut slots: Vec<Slot> = (0..admission.per_address())
             .map(|i| {
                 let peer = if i % 2 == 0 {
                     "2001:db8::1"
@@ -704,6 +725,22 @@ mod tests {
             1
         );
         assert_eq!(admission.0.addresses.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_raised_per_address_limit_lets_more_in() {
+        let (admission, _) = fixed(0);
+        admission.set_cap(usize::MAX);
+        let admission = admission.per_address_limit(NonZeroUsize::new(300).unwrap());
+        let now = Instant::now();
+        let peer = "192.0.2.1".parse::<IpAddr>().unwrap();
+        let _slots: Vec<Slot> = (0..300)
+            .map(|_| {
+                assert!(admission.admit(now, Some(peer)));
+                admission.take(Key::from(peer))
+            })
+            .collect();
+        assert!(!admission.admit(now, Some(peer)));
     }
 
     #[test]

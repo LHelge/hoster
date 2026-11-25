@@ -122,6 +122,7 @@ impl Receiving {
                 grace_period: Duration::from_secs(1),
                 graceful_shutdown_timeout: Duration::from_secs(1),
                 timeouts: Timeouts::default(),
+                ..ProxyConfig::default()
             };
             attempts += 1;
             match Proxy::new(&config, state.clone()).spawn(rx.clone()) {
