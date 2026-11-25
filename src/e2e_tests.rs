@@ -237,9 +237,12 @@ impl Hoster {
     }
 
     /// Twenty upstream ports picked by process id, away from hoster's default range, so a
-    /// hoster running on this machine or a parallel run is unlikely to hold them.
+    /// hoster running on this machine or a parallel run is unlikely to hold them. They stay
+    /// within 30000-32759, below Linux's default ephemeral range (32768-60999): a port in it
+    /// can be taken as the local port of any outgoing connection, and podman then fails to
+    /// bind it.
     fn port_range() -> PortRange {
-        let start = 40000 + (std::process::id() % 1000) as u16 * 20;
+        let start = 30000 + (std::process::id() % 138) as u16 * 20;
         PortRange::try_from(start..=start + 19).unwrap()
     }
 
