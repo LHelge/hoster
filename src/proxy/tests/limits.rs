@@ -481,7 +481,7 @@ async fn new_clients_are_refused_at_the_descriptor_cap() {
     assert_eq!(h.get("app.example.com", "/after").await.status, 200);
 }
 
-/// One address may hold [`Admission::PER_ADDRESS`] connections (ADR-0065): the next one is
+/// One address may hold [`Admission::DEFAULT_PER_ADDRESS`] connections (ADR-0065): the next one is
 /// refused on both listeners, while another address still connects and what is open keeps
 /// working; closing one lets the address in again.
 #[tokio::test]
@@ -499,10 +499,10 @@ async fn the_connection_beyond_the_per_address_cap_is_refused() {
     assert_eq!(app.reply().await.status, 200);
 
     let mut held = Vec::new();
-    for _ in 1..Admission::PER_ADDRESS {
+    for _ in 1..h.admission.per_address() {
         held.push(plain_accepted(&h).await.expect("under the cap"));
     }
-    slots_settle(&h, LOCALHOST, Admission::PER_ADDRESS).await;
+    slots_settle(&h, LOCALHOST, h.admission.per_address()).await;
     assert!(
         plain_accepted(&h).await.is_none(),
         "the connection beyond the cap"
@@ -520,7 +520,7 @@ async fn the_connection_beyond_the_per_address_cap_is_refused() {
     assert_eq!(app.reply().await.status, 200);
 
     held.pop();
-    slots_settle(&h, LOCALHOST, Admission::PER_ADDRESS - 1).await;
+    slots_settle(&h, LOCALHOST, h.admission.per_address() - 1).await;
     assert!(
         plain_accepted(&h).await.is_some(),
         "a freed slot is taken again"
@@ -694,7 +694,7 @@ async fn a_burst_from_one_address_overshoots_its_cap_by_little() {
     let open = h.admission.open_from_ip(LOCALHOST);
     const SLACK_CONNECTIONS: usize = 64;
     assert!(
-        (Admission::PER_ADDRESS..=Admission::PER_ADDRESS + SLACK_CONNECTIONS).contains(&open),
+        (h.admission.per_address()..=h.admission.per_address() + SLACK_CONNECTIONS).contains(&open),
         "{open} connections counted"
     );
     drop(held);

@@ -35,7 +35,8 @@ every accept, before TLS. It has no callback when a connection closes.
   loop (count on entry, release on exit). A spike confirms that design, or an equivalent, before
   it is built. 256 leaves room for many users behind one carrier NAT.
 - **Constants first.** The three numbers are constants. They become `hoster.toml` keys only if an
-  operator needs to change them.
+  operator needs to change them. The per-address cap became `proxy.connections_per_address`
+  (default 256) when one needed to raise it for an event where many people share one address.
 - A refused connection is counted, and the count is reported (log line at most once per
   interval, and on the System page), so a flood is visible.
 - **Upstream report.** The missing HTTP/2 handshake timeout is reported to Pingora. Until it is

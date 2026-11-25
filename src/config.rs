@@ -31,6 +31,7 @@ use figment::{Figment, Metadata, Profile, Provider};
 use serde::Deserialize;
 
 use crate::logging::LogFormat;
+use crate::proxy::Admission;
 
 /// Prefix of every environment override.
 const ENV_PREFIX: &str = "HOSTER_";
@@ -196,6 +197,9 @@ pub struct ProxyConfig {
     pub graceful_shutdown_timeout: Duration,
     /// Upstream timeouts for routes that set none of their own.
     pub timeouts: Timeouts,
+    /// The open connections one client address (an IPv4 address, an IPv6 /64) may have
+    /// (ADR-0065); the connection beyond it is refused at accept.
+    pub connections_per_address: NonZeroUsize,
 }
 
 impl Default for ProxyConfig {
@@ -207,6 +211,7 @@ impl Default for ProxyConfig {
             grace_period: Duration::from_secs(10),
             graceful_shutdown_timeout: Duration::from_secs(5),
             timeouts: Timeouts::default(),
+            connections_per_address: Admission::DEFAULT_PER_ADDRESS,
         }
     }
 }

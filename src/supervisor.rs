@@ -747,10 +747,12 @@ impl Startup for Supervisor {
                         limit
                     }
                 };
-                self.admission = Admission::from(limit);
+                self.admission = Admission::from(limit)
+                    .per_address_limit(self.config.proxy.connections_per_address);
                 tracing::info!(
                     %limit,
                     connection_cap = self.admission.cap(),
+                    connections_per_address = self.admission.per_address(),
                     "open file limit; new client connections are refused at the cap"
                 );
                 Ok(())

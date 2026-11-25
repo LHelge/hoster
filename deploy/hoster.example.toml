@@ -81,6 +81,10 @@ https_listen = "[::]:443"
 grace_period = "10s"
 # Then, how long Pingora waits for its runtimes to stop (graceful_shutdown_timeout_seconds).
 graceful_shutdown_timeout = "5s"
+# The most open connections one client IPv4 address or IPv6 /64 may have (ADR-0065); the
+# next one is refused at accept. Raise it for events where many people share one address.
+# Connections stay limited in total too, at 4096 open descriptors.
+connections_per_address = 256
 
 # Upstream timeouts for routes that don't set their own `timeouts` (ADR-0011).
 [proxy.timeouts]
